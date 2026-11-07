@@ -202,6 +202,35 @@ func main() {
 		}
 		fmt.Println(status)
 
+	case "spawn":
+		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
+		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
+		taskName := fs.String("task", "", "Short task slug for worktree and conversation title")
+		prompt := fs.String("prompt", "", "Task instructions for the new conversation")
+		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
+		_ = fs.Parse(os.Args[2:])
+		if *prompt == "" || *taskName == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--repo=<path-or-github-slug>] --prompt=\"...\"")
+			os.Exit(1)
+		}
+		fullPrompt := *prompt
+		if *repoSpec != "" {
+			wtDir, err := worktree.Add(vaultDir, *repoSpec, *taskName, "")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq spawn worktree error: %v\n", err)
+				os.Exit(1)
+			}
+			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
+		}
+		title := "Task: " + *taskName
+		out, err := kernel.SpawnFlashTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, *dryRun)
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
+
 	case "daemon":
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		defaultAddr := "127.0.0.1:4747"
