@@ -232,8 +232,8 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 		}
 		if step.Type == "PLANNER_RESPONSE" && strings.TrimSpace(step.Content) != "" {
 			lastResponse = strings.TrimSpace(step.Content)
-			if len(lastResponse) > 500 {
-				lastResponse = lastResponse[:500] + "..."
+			if runes := []rune(lastResponse); len(runes) > 500 {
+				lastResponse = string(runes[:500]) + "..."
 			}
 		}
 		for _, tc := range step.ToolCalls {
