@@ -33,8 +33,8 @@ type SpawnEvent struct {
 }
 
 var (
-	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax|报税|税表|税务)`)
-	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings|财报|年报|季报)`)
+	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
+	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
 )
 
 // ClassifyInboxFile routes a filename in local/inbox/ to the matching skill name.

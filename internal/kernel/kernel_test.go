@@ -14,14 +14,8 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	if got := ClassifyInboxFile("2026-W2-employer.pdf"); got != "tax-prep" {
 		t.Fatalf("expected tax-prep, got %s", got)
 	}
-	if got := ClassifyInboxFile("2026报税资料.pdf"); got != "tax-prep" {
-		t.Fatalf("expected tax-prep for Chinese filename, got %s", got)
-	}
 	if got := ClassifyInboxFile("NVDA-10-Q-Q3.pdf"); got != "thesis-check" {
 		t.Fatalf("expected thesis-check, got %s", got)
-	}
-	if got := ClassifyInboxFile("NVDA-Q3财报.pdf"); got != "thesis-check" {
-		t.Fatalf("expected thesis-check for Chinese filename, got %s", got)
 	}
 	if got := ClassifyInboxFile("random-article-notes.md"); got != "inbox-triage" {
 		t.Fatalf("expected inbox-triage fallback, got %s", got)
