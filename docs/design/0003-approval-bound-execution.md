@@ -37,7 +37,7 @@ sequenceDiagram
    - Intercepts `run_command` and write-capable tools.
    - Immediately returns `{"decision": "deny"}` if an agent attempts to directly run outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `git push`, payment CLIs), instructing it to call `hq propose` instead.
 2. **Staging a Proposal (`hq propose`):**
-   - Writes `local/memory/pending/<uuid>.json` containing the action type, exact arguments, requesting pack/conversation ID, timestamp, and `sha256` checksum.
+   - Writes `local/memory/pending/<uuid>.json` containing the action type, exact arguments, requesting conversation ID, timestamp, and `sha256` checksum.
 3. **Zero-LLM Execution on User Approval:**
    - When the user approves the item in Remote Control or the `HQ Console` side pane, `hq daemon` verifies the `sha256` checksum and executes the deterministic CLI command itself in Go—**with zero LLM in the loop after approval**.
    - Logs the outcome to `local/memory/interventions.jsonl`.

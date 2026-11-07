@@ -18,7 +18,7 @@
 
 ### Phase A: Scoped Context Injection (`hq hook session-start`)
 - Triggered on `SessionStart` via `.agents/hooks.json`.
-- Reads `local/USER.md`, `local/MEMORY.md`, the active pack's `local/packs/<id>/MEMORY.md`, and matching active facts from `local/memory/facts.jsonl` (`valid_to == null`).
+- Reads `local/USER.md`, `local/MEMORY.md`, and matching active facts from `local/memory/facts.jsonl` (`valid_to == null`).
 - Returns an `injectSteps` `systemMessage` payload on stdout in `<10ms`.
 
 ### Phase B: Zero-Token Turn Journaling (`hq hook stop`)
@@ -29,10 +29,9 @@
   {
     "timestamp": "2026-11-07T14:20:00-08:00",
     "conversationId": "ec33ebf9-...",
-    "pack": "invest",
     "userPrompt": "Check NVDA 8-K impact",
     "toolsUsed": ["read_file", "search_web"],
-    "filesModified": ["local/packs/invest/tickers/NVDA/notes.md"],
+    "filesModified": ["local/workspace/investing/tickers/NVDA/notes.md"],
     "responseSummary": "First/last paragraph extracted from assistant response..."
   }
   ```
@@ -40,7 +39,7 @@
 ### Phase C: Nightly Sleep-Time Consolidation (`sleep-consolidate` Skill at 23:30)
 - Runs once per night as a scheduled Flash automation:
   1. Reads all `local/memory/journal/YYYY-MM-DD/*.json` and `local/memory/interventions.jsonl` files.
-  2. Applies incremental delta patches to `local/MEMORY.md` and `local/packs/<id>/MEMORY.md`.
+  2. Applies incremental delta patches to `local/MEMORY.md`.
   3. Appends/supersedes bi-temporal entries in `local/memory/facts.jsonl` (`valid_from`, `valid_to`).
-  4. Stages any proposed `SKILL.md` patches in `local/memory/proposals/` for user approval the next morning.
+  4. Stages any proposed `SKILL.md` patches (or new draft skills for recurring tasks) in `local/memory/proposals/` for user approval the next morning.
   5. Commits `local/` Vault changes to the private git repository.

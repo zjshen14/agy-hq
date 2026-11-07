@@ -1,7 +1,7 @@
 # PRD-0001: Core Product Vision & Day-in-the-Life UX
 
 - **Status:** Approved
-- **Related Docs:** [architecture.md](../architecture.md), [RFC-0001](../design/0001-vault-and-pack-isolation.md), [ADR-0004](../decisions/0004-remote-control-first-pluggable-channels.md)
+- **Related Docs:** [architecture.md](../architecture.md), [RFC-0001](../design/0001-vault-and-task-isolation.md), [ADR-0004](../decisions/0004-remote-control-first-pluggable-channels.md), [ADR-0006](../decisions/0006-general-agent-and-skills-over-packs.md)
 
 ---
 
@@ -33,17 +33,17 @@ By piggybacking on Antigravity's built-in **Remote Control (`antigravity.google`
 
 ### Touchpoint 2: At Your Desk (`Antigravity App` + Right-Hand `HQ Console`)
 - **Left Conversation Sidebar:** Every scheduled and event-triggered run appears in your normal Antigravity history.
-- **Center Chat Canvas:** `hq hook session-start` automatically injects your `local/USER.md` profile and active pack memory; `hq hook stop` captures a 0-token turn log when you finish.
+- **Center Chat Canvas:** `hq hook session-start` automatically injects your `local/USER.md` profile and `local/MEMORY.md`; `hq hook stop` captures a 0-token turn log when you finish.
 - **Right Auxiliary Side Pane (`[Open HQ Console](sidecar://hq/dashboard)`):** A single-page local web panel inside Antigravity's side pane showing:
   - **Pending Approvals Queue** (exact diffs/payloads with 1-click `[Approve]` / `[Reject]`).
-  - **Active Watchers & Daily Quota Meter** (per-pack spawn counts and circuit-breaker status).
+  - **Active Watchers & Daily Quota Meter** (daily spawn counts and circuit-breaker status).
 
 ### Touchpoint 3: Zero-Prompt Drop Folder (`local/inbox/`)
-Drag any bank CSV, PDF receipt, W-2, or 10-K into `local/inbox/`:
-- `hq daemon` detects the file via `fsnotify`, matches it against each pack's `inbox_match` rules in `pack.yaml`, and automatically dispatches the corresponding skill.
+Drag any bank CSV, PDF receipt, W-2, 10-K, or notes file into `local/inbox/`:
+- `hq daemon` detects the file via `fsnotify`, matches it against `local/triggers.yaml` (or passes it to a general triage prompt if unmatched), and automatically dispatches the task.
 
 ### Touchpoint 4: Nightly "Sleep-Time" Consolidation (11:30 PM)
 While you sleep, the `sleep-consolidate` automation reviews the day's turn logs (`local/memory/journal/YYYY-MM-DD/*.json`):
-- Applies incremental delta updates to `local/MEMORY.md` and per-pack memories.
+- Applies incremental delta updates to `local/MEMORY.md` and `local/memory/facts.jsonl`.
 - Stages any proposed `SKILL.md` refinements in `local/memory/proposals/` for your approval the next morning.
 - Commits the private `local/` Vault to git.
