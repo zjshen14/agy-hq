@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
 // CommonPayload contains the camelCase fields passed by Antigravity on hook stdin.
@@ -84,6 +86,24 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			lines = append(lines, fmt.Sprintf("- [%s] %s", f.Topic, f.Statement))
 		}
 		sections = append(sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
+	}
+	if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
+		var lines []string
+		for _, p := range pending {
+			short := p.SHA256
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			lines = append(lines, fmt.Sprintf("- `%s` (%s · sha256:%s): %s — `%s`", p.ID, p.ActionType, short, p.Summary, p.Command))
+		}
+		sections = append(sections, "## Pending Approvals in Queue\n"+strings.Join(lines, "\n"))
+	}
+	if wts, err := worktree.List(vaultDir); err == nil && len(wts) > 0 {
+		var lines []string
+		for _, wt := range wts {
+			lines = append(lines, fmt.Sprintf("- `%s` (%s)", filepath.Base(wt), wt))
+		}
+		sections = append(sections, "## Active Git Worktrees\n"+strings.Join(lines, "\n"))
 	}
 
 	if len(sections) == 0 {
