@@ -11,9 +11,9 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ## 🎯 Up Next (Immediate Action Queue)
 
-1. **[M0.1]** Verify Antigravity `hooks.json` round-trip (`SessionStart`, `PreToolUse`, `Stop`) with a minimal Go binary (`bin/hq`).
-2. **[M0.2]** Verify `agentapi` CLI background spawn flags (`--model=flash`) and sidecar manifest (`sidecar.json`) behavior on this Mac.
-3. **[M1.1]** Initialize the Go module (`go.mod`) and build the `bin/hq init` command to bootstrap the git-ignored `local/` Vault (`USER.md`, `MEMORY.md`, `config.yaml`, `triggers.yaml`, `workspace/`, `private/`, `memory/`).
+1. **[M1.5]** Build `hq daemon` and the right-hand **HQ Console** web server (`internal/webui`, `.agents/sidecar.json` → `sidecar://hq/dashboard`) for 1-click `[Approve]` / `[Reject]` and quota monitoring.
+2. **[M1.6]** Create the public-safe starter skills in `.agents/skills/*/SKILL.md` (`morning-brief`, `sleep-consolidate`, `inbox-triage`, `ledger-ingest`, `tax-prep`, `thesis-check`, `filing-diff`, `swe-pulse`).
+3. **[M0.3]** Smoke-test `agentapi` CLI background task invocation (`--model=flash`) from `hq daemon`.
 
 ---
 
@@ -24,10 +24,10 @@ This file is the **single source of truth** for tracking what is done, what is i
 - **Specs:** [RFC-0001](design/0001-vault-and-task-isolation.md), [RFC-0003](design/0003-approval-bound-execution.md), [ADR-0001](decisions/0001-architecture-option-1-5-antigravity-plus-go-kernel.md)
 
 - [x] **M0.0:** Initialize `agy-hq` git repository, `.gitignore` Vault protections, `.git/hooks/pre-commit` PII guard, and modular `docs/` hierarchy (`PRD` / `RFC` / `ADR`).
-- [ ] **M0.1:** Scaffold `go.mod` (`github.com/zjshen14/agy-hq`) and `cmd/hq/main.go` skeleton with subcommands (`init`, `hook`, `propose`, `notify`, `daemon`, `status`).
-- [ ] **M0.2:** Smoke-test `.agents/hooks.json` (`SessionStart`, `PreToolUse`, `Stop`) to confirm stdin JSON payload parsing (`conversationId`, `transcriptPath`, `workspacePaths`) and stdout JSON responses.
+- [x] **M0.1:** Scaffold `go.mod` (`github.com/zjshen14/agy-hq`) and `cmd/hq/main.go` with subcommands (`init`, `hook`, `propose`, `approve`, `reject`, `worktree`, `status`, `doctor`).
+- [x] **M0.2:** Smoke-test `.agents/hooks.json` (`SessionStart`, `PreToolUse`, `Stop`) to confirm stdin JSON payload parsing (`conversationId`, `transcriptPath`, `workspacePaths`) and stdout JSON responses.
 - [ ] **M0.3:** Smoke-test `agentapi` CLI invocation from Go (`--model=flash`) to confirm non-interactive task spawning and error/quota detection.
-- [ ] **M0.4:** Add `hq doctor` check that inspects `~/.gemini/config/config.json` and warns if `Turbo` mode is active (recommending `Default` or `Auto` so macOS Seatbelt `sandbox-exec` is enforced) and confirms macOS sleep/wake settings.
+- [x] **M0.4:** Add `hq doctor` check that inspects `~/.gemini/config/config.json` and warns if `Turbo` mode is active (recommending `Default` or `Auto` so macOS Seatbelt `sandbox-exec` is enforced) and confirms Remote Control status.
 
 ---
 
@@ -35,13 +35,12 @@ This file is the **single source of truth** for tracking what is done, what is i
 *Goal: Deliver a working daily-driver assistant in Antigravity with persistent memory injection, 0-token turn journaling, approval-bound execution, the right-hand HQ Console, and starter skills.*
 - **Specs:** [RFC-0001](design/0001-vault-and-task-isolation.md), [RFC-0002](design/0002-memory-and-consolidation.md), [RFC-0003](design/0003-approval-bound-execution.md), [PRD-0002](product/0002-open-workflows-and-skills.md)
 
-- [ ] **M1.1 (`hq init` & Templates):** Build `internal/vault` and `templates/` so `bin/hq init` creates the `local/` directory tree (`USER.md`, `MEMORY.md`, `config.yaml`, `triggers.yaml`, `inbox/`, `workspace/`, `private/`, `memory/{journal,pending,outbox,proposals}`) and initializes `local/.git`.
-- [ ] **M1.2 (`hq hook session-start`):** Inject `local/USER.md`, `local/MEMORY.md`, and active facts from `local/memory/facts.jsonl` (`valid_to == null`) as a `systemMessage` in `<10ms`.
-- [ ] **M1.3 (`hq hook stop`):** Read `transcriptPath` directly in Go (0 LLM tokens) when a turn ends and write an immutable turn summary to `local/memory/journal/YYYY-MM-DD/<convId>-<stepIdx>.json`.
-- [ ] **M1.4 (`hq hook pre-tool` & `hq propose`):**
-  - Block any agent attempt to write to root engine directories (`cmd/`, `internal/`, `.agents/`).
-  - Hard-deny direct outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `git push`) in `PreToolUse`, prompting the agent to stage them via `bin/hq propose`.
-  - Implement `bin/hq propose` to write `local/memory/pending/<uuid>.json` with a `sha256` payload hash.
+- [x] **M1.1 (`hq init`, `hq worktree` & Templates):** Build `internal/vault`, `internal/worktree`, and `templates/` so `bin/hq init` creates the `local/` directory tree (`USER.md`, `MEMORY.md`, `config.yaml`, `triggers.yaml`, `inbox/`, `notes/`, `worktrees/`, `repos/`, `private/`, `memory/{journal,pending,outbox,proposals}`) and initializes `local/.git`.
+- [x] **M1.2 (`hq hook session-start`):** Inject `local/USER.md`, `local/MEMORY.md`, and active facts from `local/memory/facts.jsonl` (`valid_to == null`) as a `systemMessage` in `<10ms`.
+- [x] **M1.3 (`hq hook stop`):** Read `transcriptPath` directly in Go (0 LLM tokens) when a turn ends and write an immutable turn summary to `local/memory/journal/YYYY-MM-DD/<convId>-<stepIdx>.json`.
+- [x] **M1.4 (`hq hook pre-tool` & `hq propose` / `approve` / `reject`):**
+  - Hard-deny direct outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `gh release create`, `vercel --prod`) in `PreToolUse`, prompting the agent to stage them via `./bin/hq propose`.
+  - Implement `./bin/hq propose`, `./bin/hq approve --sha256=<prefix>`, and `./bin/hq reject` with SHA-256 verification and `local/memory/interventions.jsonl` audit logging.
 - [ ] **M1.5 (`hq daemon` & Right-Hand `HQ Console`):**
   - Implement `internal/console` HTTP server (`127.0.0.1:<port>`) and `.agents/sidecar.json` (`sidecar://hq/dashboard`).
   - Render the **Pending Approvals Queue** (`[Approve (sha256)]` / `[Reject]`) and execute approved commands deterministically in Go with zero LLM in the loop.

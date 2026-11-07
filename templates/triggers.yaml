@@ -1,0 +1,28 @@
+# Declarative Proactive Triggers & Inbox Routing Rules
+schedules:
+  - id: morning-brief
+    cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
+    model: flash
+    skill: morning-brief
+  - id: edgar-close-watch
+    cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
+    model: flash
+    precheck_cmd: ["./bin/hq", "status", "--quiet"]
+    skill: thesis-check
+  - id: sleep-consolidate
+    cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
+    model: flash
+    skill: sleep-consolidate
+
+inbox_rules:
+  - name: bank-statements
+    extensions: [".csv", ".ofx", ".qfx"]
+    skill: ledger-ingest
+  - name: tax-forms
+    extensions: [".pdf"]
+    filename_regex: "(?i)(w-?2|1099|1098|k-?1|tax)"
+    skill: tax-prep
+  - name: sec-filings
+    extensions: [".pdf", ".htm", ".html"]
+    filename_regex: "(?i)(10-[kq]|8-k|earnings)"
+    skill: thesis-check

@@ -77,12 +77,15 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
 │
 └── local/                             # LAYER 2: Private User Vault (Independent Private Git Repo)
     ├── .git/                          # Backed up to private remote (never public)
+    ├── .gitignore                     # Ignores worktrees/ and repos/ inside the Vault git repo
     ├── config.yaml                    # Channel settings, concurrency & daily quota budgets
     ├── triggers.yaml                  # Declarative cron schedules, 0-token pre-checks & inbox rules
     ├── USER.md                        # Personal profile, preferences, writing voice & goals
     ├── MEMORY.md                      # Consolidated long-term memory (<2,500 tokens)
     ├── inbox/                         # Drag-and-drop folder (CSVs, PDFs, notes, receipts)
-    ├── workspace/                     # Open workspace for any task (posts, research, notes, projects)
+    ├── notes/                         # Open-ended non-repo work (posts, research, theses, plans)
+    ├── worktrees/                     # Parallel git worktrees (<repo>-<task>/) across any GitHub repo
+    ├── repos/                         # Optional bare git clones for external GitHub repos
     ├── private/                       # High-PII records (ledger/, taxes/) with stricter context guard
     └── memory/                        # facts.jsonl, topics/*.md, journal/YYYY-MM-DD/<convId>.json, pending/, outbox/
 ```

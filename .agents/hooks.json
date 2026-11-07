@@ -1,0 +1,30 @@
+{
+  "hq-kernel": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "(\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start)",
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(\"./bin/hq\" hook pre-tool 2>/dev/null || \"../bin/hq\" hook pre-tool)",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "(\"./bin/hq\" hook stop 2>/dev/null || \"../bin/hq\" hook stop)",
+        "timeout": 5
+      }
+    ]
+  }
+}

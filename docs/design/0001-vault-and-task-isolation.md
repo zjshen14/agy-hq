@@ -16,11 +16,12 @@
 ## 2. Two-Layer Filesystem Contract
 
 - **Layer 1 (`agy-hq` Root Repo — Public-Safe):** Contains `cmd/hq/`, `internal/`, `.agents/hooks.json`, `.agents/skills/*/SKILL.md`, and `templates/`.
-- **Layer 2 (`local/` or `$HQ_VAULT_DIR` — Private Git Repo):** Ignored by the root `.gitignore` and guarded by `.git/hooks/pre-commit`. Initialized via `bin/hq init` with its own private `.git` repository:
+- **Layer 2 (`local/` or `$HQ_VAULT_DIR` — Private Git Repo):** Ignored by the root `.gitignore` and guarded by `.git/hooks/pre-commit`. Initialized via `bin/hq init` with its own private `.git` repository (whose own `local/.gitignore` excludes `worktrees/` and `repos/`):
   - `local/USER.md` & `local/MEMORY.md` — Core user profile and consolidated memory.
-  - `local/triggers.yaml` — Declarative cron schedules, 0-token Go pre-checks, and `local/inbox/` file-drop routing rules.
+  - `local/config.yaml` & `local/triggers.yaml` — Channel settings, quota budgets, declarative cron schedules, 0-token Go pre-checks, and `local/inbox/` file-drop routing rules.
   - `local/inbox/` — Drag-and-drop folder watched via `fsnotify`.
-  - `local/workspace/` — Open workspace for any task (blog posts, research notes, theses, scratch projects).
+  - `local/notes/` — Open-ended folder for non-repo work (blog posts, research memos, investment theses, trip plans, scratch scripts).
+  - `local/worktrees/<repo>-<task>/` & `local/repos/` — Isolated `git worktree` checkouts of any local or remote GitHub repository so `headquarter` serves as your single entry point on Antigravity Desktop and Remote Control while running parallel engineering tasks inside its workspace sandbox.
   - `local/private/` — High-PII files (`ledger/`, `taxes/`) protected by stricter context guardrails in `hq hook pre-tool`.
   - `local/memory/` — `facts.jsonl`, `topics/*.md`, `journal/`, `pending/`, `outbox/`, `proposals/`.
 
@@ -77,7 +78,9 @@ Because you may run two coding tasks, an investment research task, and a blog po
      - `hq propose` writes staged approvals to `local/memory/pending/<uuid>.json`.
      - `hq notify` writes outbound cards to `local/memory/outbox/<uuid>.json`.
    - Only the single-writer **Nightly Consolidation** job merges the day's immutable journal files into `local/MEMORY.md` and `local/memory/topics/*.md`.
-3. **Git Worktree Isolation for Code Repositories:**
-   - Whenever an agent modifies a git repository, it operates in an isolated `git worktree` (`Workspace: "share"` or `"branch"`), ensuring parallel coding sessions never dirty the same working tree.
+3. **Single-Entry-Point Git Worktree Isolation (`local/worktrees/<repo>-<task>/`):**
+   - `headquarter` acts as your **single main entry point** in Antigravity Desktop and Remote Control across all your engineering projects.
+   - Whenever an agent or subagent modifies a git repository (whether already cloned in `~/Workspace/<repo>` or newly cloned into `local/repos/<repo>.git`), `hq worktree add <repo> <task>` checks out an isolated `git worktree` at `local/worktrees/<repo>-<task>/`.
+   - Because each worktree sits inside `headquarter/local/worktrees/`, it stays inside Antigravity's active workspace sandbox boundary, while Git and `gh` automatically bind to the worktree's own `.git` and GitHub `origin` remote—allowing multiple subagents to work on the same or completely different GitHub repositories in parallel without switching Antigravity projects.
 4. **High-PII Vault Protection (`local/private/`):**
-   - While `local/workspace/` is open to any task, `hq hook pre-tool` blocks access to `local/private/` (tax returns, raw ledger files) unless the task was explicitly invoked for accounting/tax work, preventing accidental PII leakage during general browsing or writing tasks.
+   - While `local/notes/` and `local/worktrees/` are open to any task, `hq hook pre-tool` blocks access to `local/private/` (tax returns, raw ledger files) unless the task was explicitly invoked for accounting/tax work, preventing accidental PII leakage during general browsing or writing tasks.

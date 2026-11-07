@@ -1,0 +1,21 @@
+# agy-hq Private Vault Configuration
+vault_version: 1
+
+channels:
+  default: remote_control
+  remote_control:
+    enabled: true
+  google_chat:
+    enabled: false
+    owner_space_id: ""
+  telegram:
+    enabled: false
+    owner_chat_id: ""
+
+quota:
+  max_parallel_runs: 4
+  max_daily_spawns: 15
+  background_model: flash
+
+console:
+  listen_addr: "127.0.0.1:4747"
