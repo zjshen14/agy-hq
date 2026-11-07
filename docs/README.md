@@ -26,7 +26,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 | ID | Title | Summary | Status |
 |---|---|---|---|
 | [PRD-0001](product/0001-vision-and-ux.md) | **Core Product Vision & Day-in-the-Life UX** | The four user touchpoints: Mobile/Web Remote Control, Desktop + Aux Console, Drop Folder, and Sleep-Time Consolidation | Approved |
-| [PRD-0002](product/0002-pack-swe.md) | **Starter Pack: Side-Project SWE (`packs/swe`)** | Multi-repo pulse, CI/PR triage, and isolated worktree feature builder | Approved |
+| [PRD-0002](product/0002-pack-swe.md) | **Starter Pack: Software Engineering (`packs/swe`)** | Multi-repo CI/PR pulse, issue triage, and isolated worktree builder for any codebase | Approved |
 | [PRD-0003](product/0003-pack-invest.md) | **Starter Pack: Investment Research (`packs/invest`)** | Per-ticker `thesis.md` memory, SEC EDGAR watchers, and citation-verified bull/bear checks | Approved |
 | [PRD-0004](product/0004-pack-admin.md) | **Starter Pack: Life Admin, Ledger & Taxes (`packs/admin`)** | Quarantined inbox triage, plain-text `beancount` bookkeeping, and year-round tax prep | Approved |
 

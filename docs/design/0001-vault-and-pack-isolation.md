@@ -20,7 +20,20 @@
 
 ---
 
-## 3. Extension Pack Manifest (`packs/<id>/pack.yaml`)
+## 3. What Makes Each Pack Different (The 6-Dimension Pack Contract)
+
+While the `hq` microkernel treats every pack uniformly through `pack.yaml`, packs are not merely topic folders—each pack encapsulates a distinct **operating archetype** across six dimensions:
+
+| Dimension (`pack.yaml` Schema) | `packs/swe`<br>(Software Engineering) | `packs/invest`<br>(Investment & Deep Research) | `packs/admin`<br>(Personal Ops, Ledger & Tax) |
+|---|---|---|---|
+| **1. Core State Artifact**<br>(`local/packs/<id>/`) | **Codebases & Specs**<br>`projects.yaml`, `specs/*.md`, isolated `git worktree` checkouts | **Living Theses & Evidence**<br>`watchlist.yaml`, `tickers/<ID>/thesis.md` (Bull/Bear & Falsification criteria) | **Structured Ledgers & Checklists**<br>`ledger/*.beancount`, `taxes/YYYY/checklist.md`, `inbox_digest.md` |
+| **2. Event Triggers**<br>(What wakes it up) | **Git & CI Signals**<br>Failing CI runs, PR review events, Dependabot alerts, spec file drops | **Market & Filing Feeds**<br>SEC EDGAR 10-K/10-Q/8-K RSS drops, earnings releases, filing PDF drops | **Personal Streams & Deadlines**<br>Unread emails/calendar changes, bank CSV drops in `local/inbox/`, tax deadlines |
+| **3. Agent Execution Pattern**<br>(How it works) | **Single-Writer Worktree Loop**<br>Read-only explorers → 1 writer in an isolated `git worktree` → test loop | **Adversarial Multi-Agent Fan-Out**<br>Parallel **Bull vs. Bear** subagents + XBRL/script check → cited brief | **Quarantined Reader → Deterministic Engine**<br>Read-only extractor → deterministic validator (`bean-check` / tax script) |
+| **4. Verification Oracle**<br>(How truth is checked) | **Compiler, Linter & Test Suite**<br>(`go test`, `pytest`, `npm test`) | **Source Citation & Math Check**<br>Every figure must cite `[Filing, Page]` and pass script verification | **Accounting & Schema Invariants**<br>`bean-check` double-entry balance (\$0 residual) & form completeness |
+| **5. Security & Trust Profile**<br>(Lethal Trifecta boundary) | **Repo-Scoped Code Sandbox**<br>Can run local build/test tools; zero access to email or financial/tax PII | **Read-Only Data & Web APIs**<br>Can query SEC EDGAR / OpenBB / web; **zero** brokerage trading tools | **High-PII Quarantine**<br>Triage has **zero outbound send/network** grants; SSN/bank data never leave this pack |
+| **6. Approval Gate (`hq propose`)** | `git push`, `gh pr create`, `gh pr merge` | Staging a thesis status/conviction change | `gws gmail send`, committing ledger diffs, holding a reservation |
+
+### Example Manifest (`packs/invest/pack.yaml`)
 
 ```yaml
 id: invest

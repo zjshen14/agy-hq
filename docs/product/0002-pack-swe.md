@@ -1,4 +1,4 @@
-# PRD-0002: Starter Pack — Side-Project SWE (`packs/swe`)
+# PRD-0002: Starter Pack — Software Engineering (`packs/swe`)
 
 - **Status:** Approved
 - **Pack Path:** `packs/swe/` (Open-Source Spec) · `local/packs/swe/` (Private Vault State)
@@ -6,25 +6,26 @@
 
 ---
 
-## 1. Problem Statement
+## 1. Purpose
 
-Side projects stall because context evaporates between weekends, CI failures go unnoticed, dependencies drift, and small feature ideas sit in scattered notes instead of becoming tested PRs.
-
----
-
-## 2. Capabilities & Workflows
-
-1. **Multi-Repo Registry (`local/packs/swe/projects.yaml`):**
-   - Tracks your active repositories, local filesystem paths, default branches, and test commands.
-2. **Proactive Repo Pulse (`swe-project-pulse` Skill):**
-   - Runs a lightweight 0-token pre-check (`gh pr list`, `gh run list`) to spot failing CI checks, stale branches, or Dependabot alerts across registered repos.
-   - Summarizes actionable items into the Morning Brief.
-3. **Spec-to-Branch Builder (`swe-dispatch` Skill):**
-   - Given a short feature note or bug report (from chat or dropped into `local/inbox/`), spawns an agent in an **isolated git worktree** (`Workspace: "share"` or `"branch"`), implements the change, runs the test suite, and stages a PR proposal via `hq propose`.
+Provide a general-purpose **Software Engineering (`swe`)** pack that works across any codebase you maintain or contribute to—whether open-source libraries, production services, or new prototypes—automating repository health monitoring, CI failure diagnosis, and spec-to-PR implementation.
 
 ---
 
-## 3. Guardrails & Isolation Rules
+## 2. Core Primitives
 
-- **Single Writer per Worktree:** Following empirical multi-agent coding findings, parallel subagents are **read-only researchers**; at most one writer operates in an isolated git worktree so two tasks never collide on the same working tree.
-- **Approval-Gated Push & Merge:** Direct `git push` to default branches and `gh pr merge` are blocked by `hq hook pre-tool` and require explicit approval via `hq propose`.
+| Dimension | `packs/swe` Implementation |
+|---|---|
+| **State Artifacts (`local/packs/swe/`)** | `projects.yaml` (registered repos, branches, test commands), `specs/*.md`, and isolated `git worktree` checkouts |
+| **Event Triggers** | Failing CI runs (`gh run list`), open PR review activity (`gh pr list`), Dependabot alerts, or spec/bug files dropped in `local/inbox/` |
+| **Execution Pattern** | **Single-Writer Worktree Loop:** Read-only explorer subagents gather context; a single writer operates inside an isolated `git worktree` (`Workspace: "share"` or `"branch"`) |
+| **Verification Oracle** | Deterministic build, linter, and test suite execution (`go test`, `pytest`, `npm test`) before any diff is surfaced |
+| **Security Boundary** | Scoped to registered repository paths and `local/packs/swe/`; zero access to personal email, financial ledgers, or tax records in `packs/admin` |
+| **Approval Gates (`hq propose`)** | Opening/merging PRs (`gh pr create`, `gh pr merge`) and pushing branches (`git push`) |
+
+---
+
+## 3. Included Skills
+
+1. **`swe-project-pulse`:** Runs a 0-token pre-check across all repos in `local/packs/swe/projects.yaml` to detect broken builds, stalled PRs, or review requests, summarizing only actionable items into the Morning Brief.
+2. **`swe-dispatch`:** Takes a feature spec or bug description, creates an isolated git worktree, implements and tests the change until the repo's test suite passes, and stages the branch/PR via `hq propose`.
