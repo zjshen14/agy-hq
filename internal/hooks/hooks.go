@@ -62,6 +62,10 @@ type JournalEntry struct {
 func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
+	if payload.ArtifactDirectoryPath != "" {
+		_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
+	}
 
 	var sections []string
 	if userBytes, err := os.ReadFile(filepath.Join(vaultDir, "USER.md")); err == nil {
@@ -144,6 +148,10 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
 		_, wErr := w.Write([]byte(`{"decision":"stop"}` + "\n"))
 		return wErr
+	}
+	if payload.ArtifactDirectoryPath != "" {
+		_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
 	}
 
 	if payload.ConversationID != "" {

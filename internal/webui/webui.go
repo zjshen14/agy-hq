@@ -326,3 +326,85 @@ func renderHTML(w http.ResponseWriter, state DashboardState) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTmpl.Execute(w, state)
 }
+
+// RecordArtifactDir stores the active conversation's artifactDirectoryPath so CLI commands
+// (`hq propose`, `hq approve`, `hq reject`, `hq worktree`, `hq heartbeat`) can deterministically
+// keep `hq_console_mobile.md` in sync on every state mutation.
+func RecordArtifactDir(vaultDir, artifactDir string) {
+	if artifactDir == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(artifactDir)), 0o644)
+}
+
+// SyncMarkdownConsole deterministically regenerates `local/CONSOLE.md` and (if present)
+// `<artifactDirectoryPath>/hq_console_mobile.md` from live Vault state in 0 LLM tokens.
+func SyncMarkdownConsole(vaultDir string) error {
+	state := loadState(vaultDir, "")
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "# 🏛️ agy-hq Mobile Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	if len(state.Pending) > 0 {
+		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **Pending Approvals (`%d` item(s) waiting):**\n", len(state.Pending))
+		for _, p := range state.Pending {
+			short := p.SHA256
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			fmt.Fprintf(&b, "> - **`%s`** (`%s` · `sha256:%s`): %s — `%s`\n", p.ID, p.ActionType, short, p.Summary, p.Command)
+		}
+		b.WriteString("\n---\n\n")
+	} else {
+		b.WriteString("> [!NOTE]\n> **Pending Approvals (`0` items):** All staged actions have been resolved.\n\n---\n\n")
+	}
+
+	b.WriteString("## 📊 1. Proactive Gatekeeper & Daily Quota\n")
+	circuitBadge := "BUDGET OK"
+	if state.Quota.CircuitOpen {
+		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
+	}
+	fmt.Fprintf(&b, "- **Background Flash Spawns Today:** `%d / %d` (`%s`)\n", state.Quota.SpawnsToday, state.Quota.MaxDailySpawns, circuitBadge)
+	lastHB := state.Quota.LastStatus
+	if lastHB == "" {
+		lastHB = "Not run yet today"
+	}
+	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
+
+	fmt.Fprintf(&b, "## 🌿 2. Active Parallel Git Worktrees (`%d` Active)\n", len(state.Worktrees))
+	if len(state.Worktrees) == 0 {
+		b.WriteString("- None active in `local/worktrees/`.\n\n---\n\n")
+	} else {
+		for _, wt := range state.Worktrees {
+			fmt.Fprintf(&b, "- `%s` (`%s`)\n", filepath.Base(wt), wt)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	b.WriteString("## 🩺 3. System Health (`hq doctor`)\n")
+	b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
+	for _, h := range state.Health {
+		icon := "✅"
+		if h.Status != "PASS" {
+			icon = "⚠️"
+		}
+		fmt.Fprintf(&b, "| **%s** | %s `%s` | %s |\n", h.Name, icon, h.Status, h.Detail)
+	}
+
+	content := []byte(b.String())
+	if err := os.WriteFile(filepath.Join(vaultDir, "CONSOLE.md"), content, 0o644); err != nil {
+		return err
+	}
+
+	if artBytes, err := os.ReadFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt")); err == nil {
+		artDir := strings.TrimSpace(string(artBytes))
+		if artDir != "" {
+			artFile := filepath.Join(artDir, "hq_console_mobile.md")
+			if _, err := os.Stat(artDir); err == nil {
+				_ = os.WriteFile(artFile, content, 0o644)
+			}
+		}
+	}
+	return nil
+}

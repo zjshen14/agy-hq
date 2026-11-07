@@ -57,6 +57,7 @@ func main() {
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		quiet := fs.Bool("quiet", false, "Suppress normal status output")
 		_ = fs.Parse(os.Args[2:])
+		_ = webui.SyncMarkdownConsole(vaultDir)
 		pending, _ := approvals.List(vaultDir)
 		wts, _ := worktree.List(vaultDir)
 		if !*quiet {
@@ -89,6 +90,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq hook stop: %v\n", err)
 				os.Exit(1)
 			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown hook subcommand: %s\n", os.Args[2])
 			os.Exit(1)
@@ -111,6 +113,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", err)
 			os.Exit(1)
 		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
 		fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
 
@@ -124,6 +127,7 @@ func main() {
 		shaPrefix := fs.String("sha256", "", "SHA-256 prefix verification")
 		_ = fs.Parse(os.Args[3:])
 		out, err := approvals.Approve(vaultDir, id, *shaPrefix)
+		_ = webui.SyncMarkdownConsole(vaultDir)
 		if out != "" {
 			fmt.Print(out)
 		}
@@ -146,6 +150,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq reject error: %v\n", err)
 			os.Exit(1)
 		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Rejected proposal %s\n", id)
 
 	case "worktree":
@@ -169,6 +174,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq worktree add failed: %v\n", err)
 				os.Exit(1)
 			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Created isolated worktree at %s\n", dir)
 		case "list":
 			list, err := worktree.List(vaultDir)
@@ -189,6 +195,7 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns without calling LLM")
 		_ = fs.Parse(os.Args[2:])
 		status, err := kernel.RunHeartbeat(vaultDir, *dryRun)
+		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq heartbeat error: %v\n", err)
 			os.Exit(1)
