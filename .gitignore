@@ -6,7 +6,7 @@
 
 # Compiled binaries
 /bin/
-hq
+/hq
 
 # Secrets, credentials, and environment files
 .env

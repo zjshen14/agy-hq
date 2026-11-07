@@ -1,0 +1,201 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/hooks"
+	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/worktree"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	rootDir, err := vault.ResolveRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hq: resolve root: %v\n", err)
+		os.Exit(1)
+	}
+	vaultDir, err := vault.ResolveVaultDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hq: resolve vault: %v\n", err)
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "init":
+		templateDir := filepath.Join(rootDir, "templates")
+		created, err := vault.Init(vaultDir, templateDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
+		for _, item := range created {
+			fmt.Printf("  + %s\n", item)
+		}
+
+	case "doctor":
+		results := doctor.Run(vaultDir)
+		for _, r := range results {
+			fmt.Printf("[%s] %-30s %s\n", r.Status, r.Name, r.Detail)
+		}
+
+	case "status":
+		fs := flag.NewFlagSet("status", flag.ExitOnError)
+		quiet := fs.Bool("quiet", false, "Suppress normal status output")
+		_ = fs.Parse(os.Args[2:])
+		pending, _ := approvals.List(vaultDir)
+		wts, _ := worktree.List(vaultDir)
+		if !*quiet {
+			fmt.Printf("Vault:            %s\n", vaultDir)
+			fmt.Printf("Pending Actions:  %d\n", len(pending))
+			fmt.Printf("Active Worktrees: %d\n", len(wts))
+			for _, p := range pending {
+				fmt.Printf("  - [%s] %s (%s) sha256:%s\n", p.ID, p.Summary, p.ActionType, p.SHA256[:12])
+			}
+		}
+
+	case "hook":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq hook <session-start|pre-tool|stop>")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "session-start":
+			if err := hooks.HandleSessionStart(os.Stdin, os.Stdout, vaultDir); err != nil {
+				fmt.Fprintf(os.Stderr, "hq hook session-start: %v\n", err)
+				os.Exit(1)
+			}
+		case "pre-tool":
+			if err := hooks.HandlePreToolUse(os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
+				os.Exit(1)
+			}
+		case "stop":
+			if err := hooks.HandleStop(os.Stdin, os.Stdout, vaultDir); err != nil {
+				fmt.Fprintf(os.Stderr, "hq hook stop: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "unknown hook subcommand: %s\n", os.Args[2])
+			os.Exit(1)
+		}
+
+	case "propose":
+		fs := flag.NewFlagSet("propose", flag.ExitOnError)
+		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, pr_merge, git_push)")
+		summary := fs.String("summary", "", "Human-readable summary of the proposed action")
+		cmdStr := fs.String("cmd", "", "Exact deterministic shell command to execute upon approval")
+		workDir := fs.String("workdir", "", "Optional working directory for command execution")
+		convID := fs.String("conv", "", "Optional conversation ID")
+		_ = fs.Parse(os.Args[2:])
+		if *cmdStr == "" || *summary == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" --cmd=\"...\"")
+			os.Exit(1)
+		}
+		prop, err := approvals.Create(vaultDir, *actionType, *summary, *cmdStr, *workDir, *convID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+
+	case "approve":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq approve <proposal-id> [--sha256=<prefix>]")
+			os.Exit(1)
+		}
+		id := os.Args[2]
+		fs := flag.NewFlagSet("approve", flag.ExitOnError)
+		shaPrefix := fs.String("sha256", "", "SHA-256 prefix verification")
+		_ = fs.Parse(os.Args[3:])
+		out, err := approvals.Approve(vaultDir, id, *shaPrefix)
+		if out != "" {
+			fmt.Print(out)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq approve execution error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Approved and executed proposal %s\n", id)
+
+	case "reject":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq reject <proposal-id> [--reason=\"...\"]")
+			os.Exit(1)
+		}
+		id := os.Args[2]
+		fs := flag.NewFlagSet("reject", flag.ExitOnError)
+		reason := fs.String("reason", "Rejected by user", "Reason for rejection")
+		_ = fs.Parse(os.Args[3:])
+		if err := approvals.Reject(vaultDir, id, *reason); err != nil {
+			fmt.Fprintf(os.Stderr, "hq reject error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Rejected proposal %s\n", id)
+
+	case "worktree":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq worktree <add|list> ...")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "add":
+			if len(os.Args) < 5 {
+				fmt.Fprintln(os.Stderr, "usage: hq worktree add <repo-path-or-github-slug> <task-name> [--branch=<branch>]")
+				os.Exit(1)
+			}
+			repoSpec := os.Args[3]
+			taskName := os.Args[4]
+			fs := flag.NewFlagSet("worktree add", flag.ExitOnError)
+			branch := fs.String("branch", "", "Branch name (defaults to hq/<task-name>)")
+			_ = fs.Parse(os.Args[5:])
+			dir, err := worktree.Add(vaultDir, repoSpec, taskName, *branch)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq worktree add failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Created isolated worktree at %s\n", dir)
+		case "list":
+			list, err := worktree.List(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq worktree list failed: %v\n", err)
+				os.Exit(1)
+			}
+			for _, d := range list {
+				fmt.Println(d)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "unknown worktree subcommand: %s\n", os.Args[2])
+			os.Exit(1)
+		}
+
+	default:
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println(`Usage: hq <command> [args]
+
+Commands:
+  init                                Initialize local/ private Vault and git repository
+  doctor                              Check Antigravity sandbox, CLI, and Vault health
+  status [--quiet]                    Show pending approvals and active worktrees
+  hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
+  propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
+  approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
+  reject <id> [--reason=...]          Reject a pending proposal
+  worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/`)
+}
