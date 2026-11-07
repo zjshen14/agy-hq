@@ -26,3 +26,8 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      ./bin/hq propose --type=<category> --summary="<description>" --cmd="<exact command>"
      ```
    - To let the user approve or reject from **Mobile Remote Control** (or Desktop) with a single tap, immediately present each pending proposal using the **`ask_question`** tool (showing the proposal ID, summary, exact command, and `sha256` prefix in the options), then run `./bin/hq approve <id> --sha256=<prefix>` or `./bin/hq reject <id>` based on their selection. Never rely on `localhost` URLs for mobile users.
+5. **Continuous Harness Self-Improvement:**
+   - Treat every user question, correction, or UX friction point as a signal to improve the `agy-hq` harness:
+     - **Personal preferences / project facts:** Update `local/USER.md`, `local/MEMORY.md`, or `local/memory/facts.jsonl`.
+     - **General routing, safety, or workflow improvements:** Update `AGENTS.md`, `.agents/skills/*/SKILL.md`, or `cmd/hq/` (keeping zero PII in the root repo).
+     - **Nightly consolidation (`/sleep-consolidate`):** Review daily turn journals (`local/memory/journal/`) and user interventions (`local/memory/interventions.jsonl`) to stage skill/rule refinements in `local/memory/proposals/` for 1-tap user approval.
