@@ -11,9 +11,9 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ## 🎯 Up Next (Immediate Action Queue)
 
-1. **[M1.5]** Build `hq daemon` and the right-hand **HQ Console** web server (`internal/webui`, `.agents/sidecar.json` → `sidecar://hq/dashboard`) for 1-click `[Approve]` / `[Reject]` and quota monitoring.
-2. **[M1.6]** Create the public-safe starter skills in `.agents/skills/*/SKILL.md` (`morning-brief`, `sleep-consolidate`, `inbox-triage`, `ledger-ingest`, `tax-prep`, `thesis-check`, `filing-diff`, `swe-pulse`).
-3. **[M0.3]** Smoke-test `agentapi` CLI background task invocation (`--model=flash`) from `hq daemon`.
+1. **[M2.1 & M2.2]** Add the `local/inbox/` drop watcher and 30-minute zero-token heartbeat gatekeeper loop (`internal/kernel`) into `hq daemon`, with daily spawn circuit-breaker tracking (`max_daily_spawns: 15`).
+2. **[M2.3]** Configure the three scheduled automations (`morning-brief` at 07:30, `edgar-close-watch` at 13:30, `sleep-consolidate` at 23:30) pinned to `--model=flash`.
+3. **[M2.4]** End-to-end verification of Morning Brief generation and 1-tap approval execution.
 
 ---
 
@@ -41,19 +41,19 @@ This file is the **single source of truth** for tracking what is done, what is i
 - [x] **M1.4 (`hq hook pre-tool` & `hq propose` / `approve` / `reject`):**
   - Hard-deny direct outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `gh release create`, `vercel --prod`) in `PreToolUse`, prompting the agent to stage them via `./bin/hq propose`.
   - Implement `./bin/hq propose`, `./bin/hq approve --sha256=<prefix>`, and `./bin/hq reject` with SHA-256 verification and `local/memory/interventions.jsonl` audit logging.
-- [ ] **M1.5 (`hq daemon` & Right-Hand `HQ Console`):**
-  - Implement `internal/console` HTTP server (`127.0.0.1:<port>`) and `.agents/sidecar.json` (`sidecar://hq/dashboard`).
+- [x] **M1.5 (`hq daemon` & Right-Hand `HQ Console`):**
+  - Implement `internal/webui` HTTP server (`127.0.0.1:4747`) and `hq daemon`.
   - Render the **Pending Approvals Queue** (`[Approve (sha256)]` / `[Reject]`) and execute approved commands deterministically in Go with zero LLM in the loop.
-  - Render the **Active Watchers & Daily Quota Meter** view.
-- [ ] **M1.6 (Starter `.agents/skills/`):** Author the public-safe starter skills in `.agents/skills/*/SKILL.md`:
-  - [ ] `morning-brief/SKILL.md`
-  - [ ] `sleep-consolidate/SKILL.md`
-  - [ ] `inbox-triage/SKILL.md`
-  - [ ] `ledger-ingest/SKILL.md`
-  - [ ] `tax-prep/SKILL.md`
-  - [ ] `thesis-check/SKILL.md`
-  - [ ] `filing-diff/SKILL.md`
-  - [ ] `swe-pulse/SKILL.md`
+  - Render the **Active Worktrees**, **Today's Turn Journal**, and **System Health** views.
+- [x] **M1.6 (Starter `.agents/skills/`):** Author the public-safe starter skills in `.agents/skills/*/SKILL.md`:
+  - [x] `morning-brief/SKILL.md`
+  - [x] `sleep-consolidate/SKILL.md`
+  - [x] `inbox-triage/SKILL.md`
+  - [x] `ledger-ingest/SKILL.md`
+  - [x] `tax-prep/SKILL.md`
+  - [x] `thesis-check/SKILL.md`
+  - [x] `filing-diff/SKILL.md`
+  - [x] `swe-pulse/SKILL.md`
 
 ---
 

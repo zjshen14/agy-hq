@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/webui"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -180,6 +182,20 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "daemon":
+		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+		defaultAddr := "127.0.0.1:4747"
+		if p := os.Getenv("PORT"); p != "" {
+			defaultAddr = "127.0.0.1:" + p
+		}
+		addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server")
+		_ = fs.Parse(os.Args[2:])
+		fmt.Printf("Starting agy-hq Console & Daemon on http://%s (Vault: %s)\n", *addr, vaultDir)
+		if err := http.ListenAndServe(*addr, webui.NewHandler(vaultDir)); err != nil {
+			fmt.Fprintf(os.Stderr, "hq daemon server error: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		printUsage()
 		os.Exit(1)
@@ -193,6 +209,7 @@ Commands:
   init                                Initialize local/ private Vault and git repository
   doctor                              Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
+  daemon [--addr=127.0.0.1:4747]      Run the HQ Console web UI & background gatekeeper
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal

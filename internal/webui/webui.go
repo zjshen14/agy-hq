@@ -1,0 +1,311 @@
+package webui
+
+import (
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/hooks"
+	"github.com/zjshen14/agy-hq/internal/worktree"
+)
+
+// DashboardState aggregates live Vault, approval, worktree, journal, and doctor state.
+type DashboardState struct {
+	VaultDir    string               `json:"vaultDir"`
+	UpdatedAt   string               `json:"updatedAt"`
+	Pending     []approvals.Proposal `json:"pending"`
+	Worktrees   []string             `json:"worktrees"`
+	TodayTurns  []hooks.JournalEntry `json:"todayTurns"`
+	Health      []doctor.CheckResult `json:"health"`
+	FlashResult string               `json:"flashResult,omitempty"`
+}
+
+// NewHandler creates the HTTP mux for the HQ Console side pane and API.
+func NewHandler(vaultDir string) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		state := loadState(vaultDir, "")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(state)
+	})
+
+	mux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = r.ParseForm()
+		id := strings.TrimSpace(r.FormValue("id"))
+		sha := strings.TrimSpace(r.FormValue("sha256"))
+		out, err := approvals.Approve(vaultDir, id, sha)
+		msg := fmt.Sprintf("Approved %s", id)
+		if out != "" {
+			msg += ": " + strings.TrimSpace(out)
+		}
+		if err != nil {
+			msg = fmt.Sprintf("Error approving %s: %v (%s)", id, err, strings.TrimSpace(out))
+		}
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok":      err == nil,
+				"message": msg,
+			})
+			return
+		}
+		state := loadState(vaultDir, msg)
+		renderHTML(w, state)
+	})
+
+	mux.HandleFunc("/api/reject", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = r.ParseForm()
+		id := strings.TrimSpace(r.FormValue("id"))
+		reason := strings.TrimSpace(r.FormValue("reason"))
+		if reason == "" {
+			reason = "Rejected via HQ Console"
+		}
+		err := approvals.Reject(vaultDir, id, reason)
+		msg := fmt.Sprintf("Rejected %s", id)
+		if err != nil {
+			msg = fmt.Sprintf("Error rejecting %s: %v", id, err)
+		}
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok":      err == nil,
+				"message": msg,
+			})
+			return
+		}
+		state := loadState(vaultDir, msg)
+		renderHTML(w, state)
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		state := loadState(vaultDir, "")
+		renderHTML(w, state)
+	})
+
+	return mux
+}
+
+func loadState(vaultDir, flashMsg string) DashboardState {
+	pending, _ := approvals.List(vaultDir)
+	wts, _ := worktree.List(vaultDir)
+	turns := loadTodayJournals(vaultDir)
+	health := doctor.Run(vaultDir)
+	return DashboardState{
+		VaultDir:    vaultDir,
+		UpdatedAt:   time.Now().Format("15:04:05"),
+		Pending:     pending,
+		Worktrees:   wts,
+		TodayTurns:  turns,
+		Health:      health,
+		FlashResult: flashMsg,
+	}
+}
+
+func loadTodayJournals(vaultDir string) []hooks.JournalEntry {
+	dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
+	entries, err := os.ReadDir(dateDir)
+	if err != nil {
+		return nil
+	}
+	var out []hooks.JournalEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dateDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var j hooks.JournalEntry
+		if json.Unmarshal(data, &j) == nil {
+			out = append(out, j)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Timestamp > out[j].Timestamp
+	})
+	return out
+}
+
+var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
+	"shortSHA": func(s string) string {
+		if len(s) > 12 {
+			return s[:12]
+		}
+		return s
+	},
+	"base": filepath.Base,
+}).Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agy-hq Console</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #181b24;
+    --border: #2a2f3d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #2ea043;
+    --warn: #d29922;
+    --danger: #f85149;
+  }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+    margin-bottom: 14px;
+  }
+  h1 { font-size: 15px; margin: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 16px 0 8px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .flash {
+    background: #1f2d1f;
+    border: 1px solid var(--ok);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .PASS { background: rgba(46,160,67,0.2); color: #56d364; }
+  .WARN { background: rgba(210,153,34,0.2); color: #e3b341; }
+  pre {
+    background: #090b0f;
+    padding: 6px 8px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 6px 0;
+    font-size: 12px;
+  }
+  .actions { display: flex; gap: 8px; margin-top: 8px; }
+  button {
+    cursor: pointer;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .btn-approve { background: var(--ok); color: #fff; }
+  .btn-reject { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+  .muted { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏛️ agy-hq Console</h1>
+  <span class="muted">Updated {{.UpdatedAt}} · <a href="/" style="color:var(--accent)">Refresh</a></span>
+</header>
+
+{{if .FlashResult}}
+<div class="flash">{{.FlashResult}}</div>
+{{end}}
+
+<h2>Pending Approvals ({{len .Pending}})</h2>
+{{if .Pending}}
+  {{range .Pending}}
+  <div class="card">
+    <div><strong>{{.Summary}}</strong> <span class="badge WARN">{{.ActionType}}</span></div>
+    <div class="muted">ID: {{.ID}} · SHA-256: {{shortSHA .SHA256}}</div>
+    <pre>{{.Command}}</pre>
+    <div class="actions">
+      <form method="POST" action="/api/approve">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <input type="hidden" name="sha256" value="{{shortSHA .SHA256}}">
+        <button type="submit" class="btn-approve">Approve ({{shortSHA .SHA256}})</button>
+      </form>
+      <form method="POST" action="/api/reject">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit" class="btn-reject">Reject</button>
+      </form>
+    </div>
+  </div>
+  {{end}}
+{{else}}
+  <div class="card muted">No pending outbound actions.</div>
+{{end}}
+
+<h2>Active Worktrees ({{len .Worktrees}})</h2>
+{{if .Worktrees}}
+  {{range .Worktrees}}
+  <div class="card"><code>{{base .}}</code> <span class="muted">({{.}})</span></div>
+  {{end}}
+{{else}}
+  <div class="card muted">No active git worktrees in local/worktrees/.</div>
+{{end}}
+
+<h2>Today's Turn Journal ({{len .TodayTurns}})</h2>
+{{if .TodayTurns}}
+  {{range .TodayTurns}}
+  <div class="card">
+    <div><strong>{{.UserPrompt}}</strong></div>
+    <div class="muted">{{.Timestamp}} · conv: {{.ConversationID}}</div>
+  </div>
+  {{end}}
+{{else}}
+  <div class="card muted">No turns logged today yet.</div>
+{{end}}
+
+<h2>System Health</h2>
+{{range .Health}}
+<div class="card">
+  <span class="badge {{.Status}}">{{.Status}}</span>
+  <strong>{{.Name}}</strong>
+  <div class="muted">{{.Detail}}</div>
+</div>
+{{end}}
+</body>
+</html>`))
+
+func renderHTML(w http.ResponseWriter, state DashboardState) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = pageTmpl.Execute(w, state)
+}
