@@ -14,13 +14,15 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/hooks"
+	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
-// DashboardState aggregates live Vault, approval, worktree, journal, and doctor state.
+// DashboardState aggregates live Vault, approval, worktree, journal, quota, and doctor state.
 type DashboardState struct {
 	VaultDir    string               `json:"vaultDir"`
 	UpdatedAt   string               `json:"updatedAt"`
+	Quota       kernel.QuotaState    `json:"quota"`
 	Pending     []approvals.Proposal `json:"pending"`
 	Worktrees   []string             `json:"worktrees"`
 	TodayTurns  []hooks.JournalEntry `json:"todayTurns"`
@@ -112,9 +114,11 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	wts, _ := worktree.List(vaultDir)
 	turns := loadTodayJournals(vaultDir)
 	health := doctor.Run(vaultDir)
+	quota := kernel.LoadQuota(vaultDir)
 	return DashboardState{
 		VaultDir:    vaultDir,
 		UpdatedAt:   time.Now().Format("15:04:05"),
+		Quota:       quota,
 		Pending:     pending,
 		Worktrees:   wts,
 		TodayTurns:  turns,
@@ -248,6 +252,19 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 {{if .FlashResult}}
 <div class="flash">{{.FlashResult}}</div>
 {{end}}
+
+<h2>Proactive Gatekeeper & Daily Quota</h2>
+<div class="card">
+  <div>
+    <strong>Background Flash Spawns Today:</strong> {{.Quota.SpawnsToday}} / {{.Quota.MaxDailySpawns}}
+    {{if .Quota.CircuitOpen}}
+      <span class="badge WARN">CIRCUIT OPEN ({{.Quota.CircuitReason}})</span>
+    {{else}}
+      <span class="badge PASS">BUDGET OK</span>
+    {{end}}
+  </div>
+  <div class="muted">Last Heartbeat: {{if .Quota.LastStatus}}{{.Quota.LastStatus}}{{else}}Not run yet today{{end}}</div>
+</div>
 
 <h2>Pending Approvals ({{len .Pending}})</h2>
 {{if .Pending}}

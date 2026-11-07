@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/hooks"
+	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -182,6 +184,17 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "heartbeat":
+		fs := flag.NewFlagSet("heartbeat", flag.ExitOnError)
+		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns without calling LLM")
+		_ = fs.Parse(os.Args[2:])
+		status, err := kernel.RunHeartbeat(vaultDir, *dryRun)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq heartbeat error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(status)
+
 	case "daemon":
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		defaultAddr := "127.0.0.1:4747"
@@ -189,7 +202,26 @@ func main() {
 			defaultAddr = "127.0.0.1:" + p
 		}
 		addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server")
+		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns in background watcher")
 		_ = fs.Parse(os.Args[2:])
+
+		// Background 15s inbox watcher & 30m 0-token heartbeat gatekeeper loop
+		go func() {
+			_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+			inboxTicker := time.NewTicker(15 * time.Second)
+			hbTicker := time.NewTicker(30 * time.Minute)
+			defer inboxTicker.Stop()
+			defer hbTicker.Stop()
+			for {
+				select {
+				case <-inboxTicker.C:
+					_, _ = kernel.ProcessInbox(vaultDir, *dryRun)
+				case <-hbTicker.C:
+					_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+				}
+			}
+		}()
+
 		fmt.Printf("Starting agy-hq Console & Daemon on http://%s (Vault: %s)\n", *addr, vaultDir)
 		if err := http.ListenAndServe(*addr, webui.NewHandler(vaultDir)); err != nil {
 			fmt.Fprintf(os.Stderr, "hq daemon server error: %v\n", err)
@@ -209,6 +241,7 @@ Commands:
   init                                Initialize local/ private Vault and git repository
   doctor                              Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
+  heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [--addr=127.0.0.1:4747]      Run the HQ Console web UI & background gatekeeper
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval

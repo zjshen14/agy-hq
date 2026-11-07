@@ -1,0 +1,15 @@
+{
+  "builtin": "schedule",
+  "args": [
+    "CRON_TZ=America/Los_Angeles 30 7 * * *",
+    "agentapi",
+    "new-conversation",
+    "--model=flash",
+    "--title=Morning Brief",
+    "--",
+    "Activate the morning-brief skill: check ./bin/hq status, today's calendar, local/inbox/, active worktrees, and investment watchlist, then save today's Morning Brief to local/notes/general/brief-YYYY-MM-DD.md."
+  ],
+  "restart_policy": "always",
+  "display_name": "HQ Morning Brief (07:30)",
+  "description": "Every morning at 7:30 AM (America/Los_Angeles), generates the daily Morning Brief across calendar, inbox, engineering worktrees, and investment watchlist."
+}

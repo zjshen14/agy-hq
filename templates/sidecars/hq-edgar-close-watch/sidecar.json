@@ -1,0 +1,15 @@
+{
+  "builtin": "schedule",
+  "args": [
+    "CRON_TZ=America/Los_Angeles 30 13 * * 1-5",
+    "agentapi",
+    "new-conversation",
+    "--model=flash",
+    "--title=Post-Close Filing Watch",
+    "--",
+    "Activate the thesis-check skill: check tracked tickers in local/notes/investing/ for any new after-close 8-K, 10-Q, or 10-K filings and evaluate them against written falsification criteria."
+  ],
+  "restart_policy": "always",
+  "display_name": "HQ Post-Close Filing Watch (13:30)",
+  "description": "Weekdays at 1:30 PM (America/Los_Angeles) after US market close, checks tracked tickers for new SEC filings and thesis impacts."
+}

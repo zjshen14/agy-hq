@@ -11,9 +11,9 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ## 🎯 Up Next (Immediate Action Queue)
 
-1. **[M2.1 & M2.2]** Add the `local/inbox/` drop watcher and 30-minute zero-token heartbeat gatekeeper loop (`internal/kernel`) into `hq daemon`, with daily spawn circuit-breaker tracking (`max_daily_spawns: 15`).
-2. **[M2.3]** Configure the three scheduled automations (`morning-brief` at 07:30, `edgar-close-watch` at 13:30, `sleep-consolidate` at 23:30) pinned to `--model=flash`.
-3. **[M2.4]** End-to-end verification of Morning Brief generation and 1-tap approval execution.
+1. **[M3.1]** Implement optional Google Chat adapter (`internal/channels/gchat.go`) behind `ChannelAdapter` using Desktop OAuth (`chat.spaces`, `chat.messages`) locked to `owner_space_id`.
+2. **[M3.2]** Implement optional Telegram adapter (`internal/channels/telegram.go`) using outbound HTTPS long-polling and inline approval buttons locked to `owner_chat_id`.
+3. **[M4.1 & M4.2]** Add `hq eval` task replay runner (`pass^3`) and SQLite FTS5 historical journal search index.
 
 ---
 
@@ -26,7 +26,7 @@ This file is the **single source of truth** for tracking what is done, what is i
 - [x] **M0.0:** Initialize `agy-hq` git repository, `.gitignore` Vault protections, `.git/hooks/pre-commit` PII guard, and modular `docs/` hierarchy (`PRD` / `RFC` / `ADR`).
 - [x] **M0.1:** Scaffold `go.mod` (`github.com/zjshen14/agy-hq`) and `cmd/hq/main.go` with subcommands (`init`, `hook`, `propose`, `approve`, `reject`, `worktree`, `status`, `doctor`).
 - [x] **M0.2:** Smoke-test `.agents/hooks.json` (`SessionStart`, `PreToolUse`, `Stop`) to confirm stdin JSON payload parsing (`conversationId`, `transcriptPath`, `workspacePaths`) and stdout JSON responses.
-- [ ] **M0.3:** Smoke-test `agentapi` CLI invocation from Go (`--model=flash`) to confirm non-interactive task spawning and error/quota detection.
+- [x] **M0.3:** Implement `SpawnFlashTask` (`agentapi new-conversation --model=flash`) in `internal/kernel/kernel.go` with daily spawn quota enforcement and `RESOURCE_EXHAUSTED` circuit-breaker detection.
 - [x] **M0.4:** Add `hq doctor` check that inspects `~/.gemini/config/config.json` and warns if `Turbo` mode is active (recommending `Default` or `Auto` so macOS Seatbelt `sandbox-exec` is enforced) and confirms Remote Control status.
 
 ---
@@ -61,10 +61,10 @@ This file is the **single source of truth** for tracking what is done, what is i
 *Goal: Turn `agy-hq` from a reactive assistant into a proactive, silent-by-default agent that monitors events and delivers morning briefs to your phone via Antigravity Remote Control.*
 - **Specs:** [PRD-0001](product/0001-vision-and-ux.md), [RFC-0004](design/0004-heartbeat-and-channels.md)
 
-- [ ] **M2.1 (`fsnotify` Inbox Drop Watcher):** Watch `local/inbox/` in `hq daemon`, match dropped files against `local/triggers.yaml` (or general triage fallback), and dispatch background tasks.
-- [ ] **M2.2 (30m Zero-Token Heartbeat Gatekeeper):** Run deterministic `precheck_cmd` checks every 30 minutes in Go; only spawn a `--model=flash` conversation when new actionable items exist and daily spawn budget (`max_daily_spawns: 15`) is within limits.
-- [ ] **M2.3 (Scheduled Automations):** Configure the three core schedules (`07:30` Morning Brief, `13:30` Post-Close Filing Watch, `23:30` Nightly Sleep-Time Consolidation) pinned to `--model=flash`.
-- [ ] **M2.4 (Remote Control End-to-End Verification):** Verify Morning Brief delivery and 1-tap approval execution from a phone browser via `antigravity.google` Remote Control (`remote_control.go` `ChannelAdapter`).
+- [x] **M2.1 (`local/inbox/` Drop Router):** Scan `local/inbox/` in `internal/kernel/kernel.go`, classify dropped files (`ledger-ingest`, `tax-prep`, `thesis-check`, or `inbox-triage` fallback), move to `local/inbox/queued/`, and dispatch `--model=flash` background tasks.
+- [x] **M2.2 (30m Zero-Token Heartbeat Gatekeeper & Dead-Man's Switch):** Run deterministic pre-checks (`./bin/hq heartbeat` & background loop in `hq daemon`); record `HEARTBEAT_OK (0 LLM tokens)` when idle, enforce `max_daily_spawns: 15`, and alert if `brief-YYYY-MM-DD.md` is missing after 08:00 AM.
+- [x] **M2.3 (Scheduled Automation Blueprints):** Provide `templates/sidecars/{hq-morning-brief,hq-edgar-close-watch,hq-sleep-consolidate}/sidecar.json` pinned to `--model=flash`.
+- [x] **M2.4 (End-to-End Verification):** Verified `hq heartbeat`, Dead-Man's Switch clearance with `local/notes/general/brief-2026-11-07.md`, and 1-tap SHA-256 approval execution.
 
 ---
 

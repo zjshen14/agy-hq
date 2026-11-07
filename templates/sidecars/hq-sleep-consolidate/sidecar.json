@@ -1,0 +1,15 @@
+{
+  "builtin": "schedule",
+  "args": [
+    "CRON_TZ=America/Los_Angeles 30 23 * * *",
+    "agentapi",
+    "new-conversation",
+    "--model=flash",
+    "--title=Sleep-Time Memory Consolidation",
+    "--",
+    "Activate the sleep-consolidate skill: review today's turn journals in local/memory/journal/, apply incremental delta updates to local/MEMORY.md and local/memory/facts.jsonl, stage any skill proposals in local/memory/proposals/, and commit the private local/ Vault git repo."
+  ],
+  "restart_policy": "always",
+  "display_name": "HQ Nightly Sleep Consolidation (23:30)",
+  "description": "Every night at 11:30 PM (America/Los_Angeles), consolidates the day's turn journals into long-term memory and commits the private Vault."
+}
