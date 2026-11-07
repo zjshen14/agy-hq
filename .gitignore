@@ -1,0 +1,23 @@
+# =============================================================================
+# PRIVATE USER VAULT (NEVER COMMIT TO THIS REPOSITORY)
+# =============================================================================
+/local/
+/vault/
+
+# Compiled binaries
+/bin/
+hq
+
+# Secrets, credentials, and environment files
+.env
+.env.*
+*.secret*
+*.key
+*.pem
+client_secret*.json
+token*.json
+
+# OS & editor artifacts
+.DS_Store
+*.swp
+*~
