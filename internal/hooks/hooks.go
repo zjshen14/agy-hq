@@ -108,6 +108,8 @@ var outboundCommandPatterns = []*regexp.Regexp{
 }
 
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution.
+// Direct outbound commands are hard-denied (`"decision": "deny"`) so tasks stage them via `hq propose`
+// and present 1-tap approval via `ask_question` (or chat inline buttons).
 func HandlePreToolUse(r io.Reader, w io.Writer) error {
 	var payload ToolCallPayload
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
@@ -122,7 +124,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer) error {
 				resp := map[string]interface{}{
 					"decision": "deny",
 					"reason": fmt.Sprintf(
-						"Blocked by agy-hq approval policy: irreversible outbound command %q must not be executed directly. Stage it for 1-tap user approval using `./bin/hq propose --type=external_action --summary=\"...\" --cmd=%q`.",
+						"Blocked by agy-hq approval policy: irreversible outbound command %q must not be executed directly. Stage it using `./bin/hq propose --type=external_action --summary=\"...\" --cmd=%q` and ask the user via `ask_question`.",
 						cmdLine, cmdLine,
 					),
 				}

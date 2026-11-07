@@ -16,9 +16,10 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      ```sh
      ./bin/hq worktree add <repo-path-or-github-slug> <task-name>
      ```
-4. **Approval-Bound Outbound Execution (`./bin/hq propose`):**
+4. **Approval-Bound Outbound Execution (`./bin/hq propose` + `ask_question`):**
    - Never directly execute irreversible outbound commands (`gws gmail send`, `gh pr merge`, `gh release create`, `vercel --prod`).
-   - Always stage them for 1-tap user approval:
+   - Always stage them first:
      ```sh
      ./bin/hq propose --type=<category> --summary="<description>" --cmd="<exact command>"
      ```
+   - To let the user approve or reject from **Mobile Remote Control** (or Desktop) with a single tap, immediately present each pending proposal using the **`ask_question`** tool (showing the proposal ID, summary, exact command, and `sha256` prefix in the options), then run `./bin/hq approve <id> --sha256=<prefix>` or `./bin/hq reject <id>` based on their selection. Never rely on `localhost` URLs for mobile users.

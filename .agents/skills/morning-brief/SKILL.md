@@ -21,5 +21,6 @@ Produce a concise, actionable daily brief covering life admin, engineering proje
    - For each active worktree in `local/worktrees/` (or tracked repos in `local/notes/`), summarize open PR status or failing CI checks via `gh pr status`.
 4. **Investments (`thesis-check`):**
    - Check `local/notes/investing/` for tracked tickers and highlight any material overnight 8-K/10-Q/10-K filings or thesis triggers.
-5. **Write Brief:**
-   - Save a dated copy to `local/notes/general/brief-YYYY-MM-DD.md` and present an executive summary with links to any staged approvals (`./bin/hq status`).
+5. **Write Brief & Present 1-Tap Mobile Approvals:**
+   - Save a dated copy to `local/notes/general/brief-YYYY-MM-DD.md` and output the executive summary directly in chat (so it reads cleanly on Mobile Remote Control without needing to open local files or `localhost` links).
+   - If `./bin/hq status` shows any pending proposals, call `ask_question` with `Approve (<id> · sha256:<prefix>)`, `Reject (<id>)`, and `Keep pending` options so the user can approve or reject them with 1 tap on their phone.
