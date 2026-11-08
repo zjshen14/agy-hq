@@ -13,13 +13,23 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
    - Store high-PII financial and tax records in `local/private/`.
 3. **Single Front-Desk Coordinator + Scoped Task Conversations & Subagents:**
    - **1 Front Desk Thread (`local/memory/front_desk.json`):** Acts as the main intake desk and global coordinator.
+   - **Clean Front Desk & Silent Ledger Discipline:**
+     - The Front Desk chat is strictly for direct human conversation, fast answers, and synthesized executive takeaways.
+     - Never pollute or dilute the conversation with verbose background task dump logs, mechanical checklists, worktree listings, or unprompted task status banners.
+     - All background tracking, task board tables, worktrees, and quota counters stay strictly inside the live `hq_console.md` ledger artifact in 0 LLM tokens (kept up to date by `./bin/hq` and `hq hook stop`).
+     - When a background subagent or task completes, deliver a concise conversational takeaway: what was accomplished, what it means/implies for the user, and any recommended next decisions.
    - **Mechanical Non-Blocking Front Desk Guardrails (Hook Enforced):**
      - The Front Desk thread is mechanically enforced by `PreToolUse` hooks: direct source/worktree file edits (`edit_file`/`write_file`) and build/test suites (`run_command` with `go test`, `npm test`, etc.) are hard-blocked on this thread, and inline lookup tools (`read_file`, `grep_search`, `find_by_name`, shell lookups) are capped at **3 tool calls per turn**.
-     - Never block the Front Desk thread with inline coding, debugging, or test runs.
-   - **3 Execution Modes Chosen Automatically by Task Shape:**
-     - **Inline (at the Front Desk):** Quick lookups, status checks, short memory/note edits (`local/USER.md`, `local/MEMORY.md`, `local/notes/`), or interactive Q&A (`<= 3` tool calls; mechanically capped).
-     - **Background Subagent (`invoke_subagent`, `standard` / `flash`):** Any multi-file feature implementation, bug fix, or test suite addition (> 3 tool calls) for well-scoped, already-designed tasks MUST be delegated to a **Background Subagent (`invoke_subagent`)** working in an isolated `local/worktrees/<repo>-<task>/` worktree rather than executed inline on the Front Desk thread. The subagent works autonomously and reports the final result back into the Front Desk thread.
-     - **Separate Dedicated Task Conversation (`./bin/hq spawn`):** Complex projects or multi-round engineering/design workstreams where the user wants a dedicated thread in the sidebar for deep multi-turn engagement. Each spawned conversation is registered in `local/memory/tasks.json` and scoped to its own worktree (`local/worktrees/<repo>-<task>/`) so it never collides with the Front Desk, while `hq hook stop` logs every turn to `local/memory/journal/` so the Front Desk always has visibility into its progress.
+     - Never block the Front Desk thread with inline coding, debugging, test runs, or open-ended research.
+   - **3 Execution Modes Chosen Automatically by Task Shape & Interactivity:**
+     - **Inline (at the Front Desk):** Strictly for ultra-fast, 5-second factoids (weather, store hours, calendar checks, immediate status) or brief conversational Q&A (`<= 3` tool calls; mechanically capped). Never perform open-ended research, blog post/paper investigations, or multi-step analysis inline.
+     - **Background Subagent (`invoke_subagent`, `standard` / `flash`):** For bounded, autonomous tasks with a clear deliverable where the user expects an executive takeaway delivered back to the Front Desk (unidirectional "fire & report"). Includes: bounded research investigations (reading an external article/paper to extract lessons), bug fixes, unit tests, or single-file feature tweaks in `local/worktrees/<repo>-<task>/`. The subagent works autonomously and reports the final result back into the Front Desk thread.
+     - **Separate Dedicated Task Conversation (`./bin/hq spawn`):** For broad, open-ended, multi-turn initiatives requiring deep interactive collaboration with the user in the sidebar (multidirectional "co-pilot"). Includes: architectural redesigns, major external integrations (e.g., Gmail), multi-phase RFCs, complex financial modeling, or multi-chapter writing. Keeps the Front Desk completely clean over 15–30 turns of exploratory back-and-forth. Each spawned conversation is registered in `local/memory/tasks.json` and scoped to its own worktree (`local/worktrees/<repo>-<task>/`) so it never collides with the Front Desk, while `hq hook stop` logs every turn to `local/memory/journal/` so the Front Desk always has visibility into its progress.
+   - **The Escalation Path When Ambiguous:**
+     - If an investigation is bounded initially (e.g., "Review Anthropic's memory post and think about improvements"), start with a **Background Subagent** for an initial executive briefing.
+     - If the briefing reveals that a major architectural overhaul is warranted, escalate that into a **Dedicated Task Conversation (`./bin/hq spawn`)** for the multi-turn collaborative design and implementation.
+     - If the *execution mode* is ambiguous, default to **Background Subagent (`invoke_subagent`)** for heavy/coding work and **Inline** for quick work—do not ask the user which mode to use. Any task requiring code edits or test runs must be delegated to a subagent immediately on Turn 1.
+     - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.
    - **Mandatory "Research -> RFC -> Approval -> Code" Gate for Large Projects:**
      - When the user asks for a major new capability, external integration (e.g., Gmail integration, database layer), or architectural subsystem, **NEVER jump straight into coding** (even in a subagent).
      - Always start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/`)** using `deep` tier (`pro` / `gemini-4-argon-high`):
@@ -37,9 +47,6 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - **Task Slug & Worktree Folder (`local/worktrees/`):** `<scope>-<kebab-goal>` (e.g., `opencli-fix-pr279`, `webapp-redesign`).
      - **In-Session Subagent `Role` (`invoke_subagent`):** `[<Tier>] <Scope>: <2-4 Word Role>` (e.g., `[standard] opencli: PR #279 Fixer`, `[deep] NVDA: 10-Q Auditor`).
      - **Scheduled Automation Runs:** `[Auto] <Job Name>` (e.g., `[Auto] Morning Brief`).
-   - **Handling Ambiguous Prompts:**
-     - If the *execution mode* is ambiguous, default to **Background Subagent (`invoke_subagent`)** for heavy/coding work and **Inline** for quick work—do not ask the user which mode to use. Any task requiring code edits or test runs must be delegated to a subagent immediately on Turn 1.
-     - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.
    - **Smart Model & Thinking-Depth Routing (With User Override):**
      - **User Override First:** If the user specifies a model or depth (e.g., *"use Opus high"*, *"use Flash"*, *"deep thinking"*), always honor it (`invoke_subagent(Model=...)` or `./bin/hq spawn --model=... --depth=low|medium|high`).
      - **Automatic Complexity Tiering (When Unspecified):**
