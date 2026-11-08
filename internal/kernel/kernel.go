@@ -163,9 +163,22 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
 		return err
 	}
+	artifactDir = strings.TrimSpace(artifactDir)
+	if artifactDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			candidate := filepath.Join(home, ".gemini", "antigravity", "brain", convID)
+			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+				artifactDir = candidate
+			}
+		}
+	}
+	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ConversationID != convID && prev.ArtifactDir != "" {
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
+	}
 	lease := FrontDeskLease{
 		ConversationID: convID,
-		ArtifactDir:    strings.TrimSpace(artifactDir),
+		ArtifactDir:    artifactDir,
 		UpdatedAt:      time.Now().Format(time.RFC3339),
 	}
 	data, err := json.MarshalIndent(lease, "", "  ")
@@ -173,7 +186,7 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		return err
 	}
 	if artifactDir != "" {
-		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(artifactDir)), 0o644)
+		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(artifactDir), 0o644)
 	}
 	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
 }
@@ -181,6 +194,10 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 // ReleaseFrontDesk clears local/memory/front_desk.json so the next new conversation
 // automatically claims the Front Desk intake lease on SessionStart.
 func ReleaseFrontDesk(vaultDir string) error {
+	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ArtifactDir != "" {
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
+	}
 	err := os.Remove(frontDeskPath(vaultDir))
 	if os.IsNotExist(err) {
 		return nil

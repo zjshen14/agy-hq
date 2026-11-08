@@ -380,16 +380,22 @@ func SyncMarkdownConsole(vaultDir string) error {
 	}
 	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 
-	fmt.Fprintf(&b, "## 💬 2. Tracked Task Conversations (`%d` Active)\n", len(state.Tasks))
+	fmt.Fprintf(&b, "## 📋 2. Task Board (`%d` Tracked Conversations)\n", len(state.Tasks))
 	if len(state.Tasks) == 0 {
 		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
 	} else {
+		b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
 		for _, t := range state.Tasks {
 			oneLine := strings.Join(strings.Fields(t.LastSummary), " ")
-			if runes := []rune(oneLine); len(runes) > 160 {
-				oneLine = string(runes[:160]) + "..."
+			oneLine = strings.ReplaceAll(oneLine, "|", "\\|")
+			if runes := []rune(oneLine); len(runes) > 130 {
+				oneLine = string(runes[:130]) + "..."
 			}
-			fmt.Fprintf(&b, "- **[%s](conversation://%s)** (`%s` · `%s`): %s\n", t.Title, t.ConversationID, t.TaskSlug, t.Status, oneLine)
+			badge := "🟢 `active`"
+			if strings.EqualFold(t.Status, "completed") {
+				badge = "✅ `completed`"
+			}
+			fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | `%s` | %s |\n", badge, t.Title, t.ConversationID, t.TaskSlug, oneLine)
 		}
 		b.WriteString("\n---\n\n")
 	}
@@ -404,7 +410,29 @@ func SyncMarkdownConsole(vaultDir string) error {
 		b.WriteString("\n---\n\n")
 	}
 
-	b.WriteString("## 🩺 4. System Health (`hq doctor`)\n")
+	b.WriteString("## 🕒 4. Recent Turn Activity (Today's Journal)\n")
+	if len(state.TodayTurns) == 0 {
+		b.WriteString("- No turns logged yet today.\n\n---\n\n")
+	} else {
+		limit := len(state.TodayTurns)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, j := range state.TodayTurns[:limit] {
+			prompt := strings.Join(strings.Fields(j.UserPrompt), " ")
+			if runes := []rune(prompt); len(runes) > 90 {
+				prompt = string(runes[:90]) + "..."
+			}
+			shortConv := j.ConversationID
+			if len(shortConv) > 8 {
+				shortConv = shortConv[:8]
+			}
+			fmt.Fprintf(&b, "- `%s` · [`%s`](conversation://%s) (`%s`): %s\n", j.Timestamp, shortConv, j.ConversationID, j.ModelName, prompt)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	b.WriteString("## 🩺 5. System Health (`hq doctor`)\n")
 	b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
 	for _, h := range state.Health {
 		icon := "✅"
@@ -422,15 +450,22 @@ func SyncMarkdownConsole(vaultDir string) error {
 	targetDirs := make(map[string]bool)
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ArtifactDir) != "" {
 		targetDirs[strings.TrimSpace(fd.ArtifactDir)] = true
-	}
-	if artBytes, err := os.ReadFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt")); err == nil {
+	} else if artBytes, err := os.ReadFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt")); err == nil {
 		if d := strings.TrimSpace(string(artBytes)); d != "" {
 			targetDirs[d] = true
 		}
 	}
+	meta := map[string]interface{}{
+		"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees, Recent Turn Activity, and System Health.",
+		"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
+		"requestFeedback": false,
+		"userFacing":      true,
+	}
+	metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 	for artDir := range targetDirs {
 		if _, err := os.Stat(artDir); err == nil {
 			_ = os.WriteFile(filepath.Join(artDir, "hq_console_mobile.md"), content, 0o644)
+			_ = os.WriteFile(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"), metaBytes, 0o644)
 		}
 	}
 	return nil
