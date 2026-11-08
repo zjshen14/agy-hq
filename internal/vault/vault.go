@@ -152,6 +152,33 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		created = append(created, ".git (initialized private Vault repository)")
 	}
 
+	// Ensure root repository .git/hooks/pre-commit PII guard is installed
+	rootHooksDir := filepath.Join(filepath.Dir(templateDir), ".git", "hooks")
+	if info, err := os.Stat(rootHooksDir); err == nil && info.IsDir() {
+		preCommitPath := filepath.Join(rootHooksDir, "pre-commit")
+		if _, err := os.Stat(preCommitPath); os.IsNotExist(err) {
+			hookScript := "#!/bin/sh\n" +
+				"# Block any staged files inside local/ or containing the local user's home path / git email\n" +
+				"if git diff --cached --name-only | grep -qE '^(local|vault)/'; then\n" +
+				"  echo \"ERROR: Refusing to commit files inside private local/ Vault.\"\n" +
+				"  exit 1\n" +
+				"fi\n" +
+				"USER_EMAIL=\"$(git config user.email 2>/dev/null || true)\"\n" +
+				"HOME_DIR=\"$HOME\"\n" +
+				"if [ -n \"$HOME_DIR\" ] && git diff --cached -U0 | grep -E '^\\+' | grep -qF \"$HOME_DIR\"; then\n" +
+				"  echo \"ERROR: Staged diff contains your local HOME path ($HOME_DIR). Keep personal paths in local/.\"\n" +
+				"  exit 1\n" +
+				"fi\n" +
+				"if [ -n \"$USER_EMAIL\" ] && git diff --cached -U0 | grep -E '^\\+' | grep -qFi \"$USER_EMAIL\"; then\n" +
+				"  echo \"ERROR: Staged diff contains your personal email ($USER_EMAIL). Keep personal state in local/.\"\n" +
+				"  exit 1\n" +
+				"fi\n"
+			if err := os.WriteFile(preCommitPath, []byte(hookScript), 0o755); err == nil {
+				created = append(created, "../.git/hooks/pre-commit (PII guard)")
+			}
+		}
+	}
+
 	return created, nil
 }
 
