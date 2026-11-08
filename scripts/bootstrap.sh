@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
-echo "==> [1/4] Checking Go toolchain..."
+echo "==> [1/5] Checking Go toolchain..."
 if ! command -v go >/dev/null 2>&1; then
   if command -v brew >/dev/null 2>&1; then
     echo "    Go not found; installing via Homebrew..."
@@ -17,11 +17,11 @@ if ! command -v go >/dev/null 2>&1; then
   fi
 fi
 
-echo "==> [2/4] Building ./bin/hq microkernel..."
+echo "==> [2/5] Building ./bin/hq microkernel..."
 mkdir -p bin
 go build -o ./bin/hq ./cmd/hq
 
-echo "==> [3/4] Initializing private Vault (./local/) & PII pre-commit guard..."
+echo "==> [3/5] Initializing private Vault (./local/) & PII pre-commit guard..."
 ./bin/hq init
 
 if [ -d ".git/hooks" ]; then
@@ -46,7 +46,10 @@ EOF
   chmod +x .git/hooks/pre-commit
 fi
 
-echo "==> [4/4] Running ./bin/hq doctor..."
+echo "==> [4/5] Auto-arming background daemon & scheduled triggers..."
+./bin/hq daemon install 2>/dev/null || true
+
+echo "==> [5/5] Running ./bin/hq doctor..."
 ./bin/hq doctor
 
 echo ""

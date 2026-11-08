@@ -135,5 +135,21 @@ func Run(vaultDir string) []CheckResult {
 		})
 	}
 
+	// 5. Check Scheduled Triggers & Daemon Heartbeat
+	dInfo := kernel.GetDaemonInfo(vaultDir)
+	if dInfo.Running {
+		results = append(results, CheckResult{
+			Name:   "Scheduled Triggers & Heartbeat",
+			Status: "PASS",
+			Detail: fmt.Sprintf("Running (daemon PID %d, %d schedules declared)", dInfo.PID, dInfo.SchedulesCount),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Scheduled Triggers & Heartbeat",
+			Status: "WARN",
+			Detail: fmt.Sprintf("%d schedules declared in triggers.yaml, but background daemon is inactive; run './bin/hq daemon install' or './bin/hq daemon'", dInfo.SchedulesCount),
+		})
+	}
+
 	return results
 }

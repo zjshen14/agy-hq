@@ -990,3 +990,145 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 		t.Fatalf("expected cancelled subagent in hq_console.md, got:\n%s", consoleStr)
 	}
 }
+
+// CUJ-12: Automated Trigger Scheduling & Background Daemon Lifecycle
+func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
+	env := setupHQEnv(t)
+
+	// 1. Initialize private Vault
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v", err)
+	}
+
+	// 2. Initial doctor check: daemon is inactive, 3 schedules declared
+	docOut, err := env.run("", "doctor")
+	if err != nil {
+		t.Fatalf("hq doctor failed: %v (%s)", err, docOut)
+	}
+	if !strings.Contains(docOut, "[WARN] Scheduled Triggers & Heartbeat") {
+		t.Fatalf("expected WARN Scheduled Triggers & Heartbeat in hq doctor, got:\n%s", docOut)
+	}
+	if !strings.Contains(docOut, "3 schedules declared in triggers.yaml, but background daemon is inactive") {
+		t.Fatalf("expected inactive warning in hq doctor, got:\n%s", docOut)
+	}
+
+	// 3. Check daemon status: INACTIVE with declared triggers
+	statOut, err := env.run("", "daemon", "status")
+	if err != nil {
+		t.Fatalf("hq daemon status failed: %v (%s)", err, statOut)
+	}
+	if !strings.Contains(statOut, "agy-hq Daemon Status: INACTIVE") {
+		t.Fatalf("expected INACTIVE status, got:\n%s", statOut)
+	}
+	if !strings.Contains(statOut, "Declared Triggers: 3 schedules, 3 inbox rules") {
+		t.Fatalf("expected declared triggers summary, got:\n%s", statOut)
+	}
+	if !strings.Contains(statOut, "morning-brief") || !strings.Contains(statOut, "edgar-close-watch") || !strings.Contains(statOut, "sleep-consolidate") {
+		t.Fatalf("expected schedules listed in daemon status, got:\n%s", statOut)
+	}
+
+	// 4. Test daemon install with mock systemd directory
+	mockSysDir := filepath.Join(t.TempDir(), "systemd", "user")
+	mockEnv := []string{
+		"HQ_SYSTEMD_DIR=" + mockSysDir,
+		"HQ_SKIP_SYSTEMCTL=1",
+	}
+	installOut, err := env.runWithEnv("", mockEnv, "daemon", "install")
+	if err != nil {
+		t.Fatalf("hq daemon install failed: %v (%s)", err, installOut)
+	}
+	servicePath := filepath.Join(mockSysDir, "agy-hq.service")
+	svcData, err := os.ReadFile(servicePath)
+	if err != nil {
+		t.Fatalf("expected systemd service file to exist at %s: %v", servicePath, err)
+	}
+	if !strings.Contains(string(svcData), "ExecStart=") || !strings.Contains(string(svcData), "daemon") {
+		t.Fatalf("invalid service file content:\n%s", string(svcData))
+	}
+
+	// 5. Test daemon running state by starting a real background daemon process
+	daemonCmd := exec.Command(env.binPath, "daemon", "--addr=127.0.0.1:4799")
+	daemonCmd.Dir = env.rootDir
+	daemonCmd.Env = append(os.Environ(),
+		"HQ_ROOT_DIR="+env.rootDir,
+		"HQ_VAULT_DIR="+env.vaultDir,
+	)
+	if err := daemonCmd.Start(); err != nil {
+		t.Fatalf("failed to start daemon process: %v", err)
+	}
+	defer func() {
+		if daemonCmd.Process != nil {
+			_ = daemonCmd.Process.Kill()
+		}
+	}()
+
+	// Wait up to 3 seconds for daemon to record its startup
+	var infoRunning kernel.DaemonInfo
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		infoRunning = kernel.GetDaemonInfo(env.vaultDir)
+		if infoRunning.Running {
+			break
+		}
+	}
+	if !infoRunning.Running {
+		t.Fatalf("expected daemon to report running after startup")
+	}
+
+	// Verify hq doctor reports PASS with daemon PID and 3 schedules declared
+	docRunning, err := env.run("", "doctor")
+	if err != nil {
+		t.Fatalf("hq doctor running failed: %v (%s)", err, docRunning)
+	}
+	if !strings.Contains(docRunning, "[PASS] Scheduled Triggers & Heartbeat") {
+		t.Fatalf("expected PASS Scheduled Triggers & Heartbeat, got:\n%s", docRunning)
+	}
+	if !strings.Contains(docRunning, "3 schedules declared") || !strings.Contains(docRunning, "Running (daemon PID") {
+		t.Fatalf("expected Running (daemon PID ..., 3 schedules declared) in doctor, got:\n%s", docRunning)
+	}
+
+	// Verify hq daemon status reports RUNNING
+	statRunning, err := env.run("", "daemon", "status")
+	if err != nil {
+		t.Fatalf("hq daemon status running failed: %v (%s)", err, statRunning)
+	}
+	if !strings.Contains(statRunning, "agy-hq Daemon Status: RUNNING") || !strings.Contains(statRunning, "PID:") {
+		t.Fatalf("expected RUNNING and PID in daemon status, got:\n%s", statRunning)
+	}
+
+	// Verify JSON output
+	statJSON, err := env.run("", "daemon", "status", "--json")
+	if err != nil {
+		t.Fatalf("hq daemon status --json failed: %v (%s)", err, statJSON)
+	}
+	var jsonInfo kernel.DaemonInfo
+	if err := json.Unmarshal([]byte(statJSON), &jsonInfo); err != nil {
+		t.Fatalf("failed to parse daemon status JSON: %v\n%s", err, statJSON)
+	}
+	if !jsonInfo.Running || jsonInfo.SchedulesCount != 3 || jsonInfo.InboxRulesCount != 3 {
+		t.Fatalf("unexpected daemon status JSON struct: %+v", jsonInfo)
+	}
+
+	// 6. Test daemon uninstall stops running process and removes unit file
+	uninstallOut, err := env.runWithEnv("", mockEnv, "daemon", "uninstall")
+	if err != nil {
+		t.Fatalf("hq daemon uninstall failed: %v (%s)", err, uninstallOut)
+	}
+	if _, err := os.Stat(servicePath); !os.IsNotExist(err) {
+		t.Fatalf("expected service file %s to be removed after uninstall", servicePath)
+	}
+
+	// Wait up to 2 seconds for process to exit
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if !kernel.GetDaemonInfo(env.vaultDir).Running {
+			break
+		}
+	}
+
+	// After stop, doctor returns to WARN
+	docAfter, _ := env.run("", "doctor")
+	if !strings.Contains(docAfter, "[WARN] Scheduled Triggers & Heartbeat") {
+		t.Fatalf("expected doctor to revert to WARN after uninstall, got:\n%s", docAfter)
+	}
+}

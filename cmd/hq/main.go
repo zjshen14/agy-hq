@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
@@ -447,6 +450,48 @@ func main() {
 		fmt.Println(out)
 
 	case "daemon":
+		if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
+			switch os.Args[2] {
+			case "install":
+				fs := flag.NewFlagSet("daemon install", flag.ExitOnError)
+				_ = fs.Parse(os.Args[3:])
+				msg, err := kernel.InstallDaemon(rootDir, vaultDir)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq daemon install failed: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println(msg)
+				return
+			case "uninstall":
+				fs := flag.NewFlagSet("daemon uninstall", flag.ExitOnError)
+				_ = fs.Parse(os.Args[3:])
+				msg, err := kernel.UninstallDaemon(vaultDir)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq daemon uninstall failed: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println(msg)
+				return
+			case "status":
+				fs := flag.NewFlagSet("daemon status", flag.ExitOnError)
+				asJSON := fs.Bool("json", false, "Output status as JSON")
+				_ = fs.Parse(os.Args[3:])
+				info := kernel.GetDaemonInfo(vaultDir)
+				if *asJSON {
+					b, _ := json.MarshalIndent(info, "", "  ")
+					fmt.Println(string(b))
+				} else {
+					fmt.Print(kernel.FormatDaemonStatus(info))
+				}
+				return
+			case "start", "run":
+				// continue to daemon server startup below
+			default:
+				fmt.Fprintf(os.Stderr, "unknown daemon subcommand: %s (expected install, uninstall, status, or run)\n", os.Args[2])
+				os.Exit(1)
+			}
+		}
+
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		defaultAddr := "127.0.0.1:4747"
 		if p := os.Getenv("PORT"); p != "" {
@@ -454,7 +499,25 @@ func main() {
 		}
 		addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns in background watcher")
-		_ = fs.Parse(os.Args[2:])
+		daemonArgs := os.Args[2:]
+		if len(daemonArgs) > 0 && (daemonArgs[0] == "start" || daemonArgs[0] == "run") {
+			daemonArgs = daemonArgs[1:]
+		}
+		_ = fs.Parse(daemonArgs)
+
+		if err := kernel.RecordDaemonStart(vaultDir, *addr); err != nil {
+			fmt.Fprintf(os.Stderr, "hq daemon error: %v\n", err)
+			os.Exit(1)
+		}
+		defer kernel.RecordDaemonStop(vaultDir)
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			_ = kernel.RecordDaemonStop(vaultDir)
+			os.Exit(0)
+		}()
 
 		// Background 15s inbox watcher & 30m 0-token heartbeat gatekeeper loop
 		go func() {
@@ -495,7 +558,7 @@ Commands:
   doctor                              Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
-  daemon [--addr=127.0.0.1:4747]      Run the HQ Console web UI & background gatekeeper
+  daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
