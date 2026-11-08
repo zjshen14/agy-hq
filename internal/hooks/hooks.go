@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -279,10 +280,14 @@ var (
 
 	outboundCommandPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post)\b`),
+		regexp.MustCompile(`(?i)\bgmail(?:-[0-9]+)?\b.*\b(send-message|send-draft)\b`),
+		regexp.MustCompile(`(?i)\bhq\s+gmail\s+send-draft\b`),
 		regexp.MustCompile(`(?i)\bgh\s+pr\s+merge\b`),
 		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
 		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
 	}
+
+	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|propose|status)\b`)
 
 	reHeavyBuildTest = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 )
@@ -312,6 +317,85 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					),
 				}
 				return json.NewEncoder(w).Encode(resp)
+			}
+		}
+	}
+
+	// Enforce Quarantined Reader profile on sessions that have ingested untrusted external email
+	if taintReason, tainted := gmail.IsSessionTainted(vaultDir, payload.ConversationID); tainted {
+		switch payload.ToolCall.Name {
+		case "search_web":
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): web search egress is disabled after reading untrusted email.", taintReason),
+			})
+		case "read_file", "grep_search", "find_by_name":
+			for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
+				if p, ok := payload.ToolCall.Args[key].(string); ok && p != "" {
+					cleanP := filepath.Clean(p)
+					cleanPrivate := filepath.Clean(filepath.Join(vaultDir, "private"))
+					cleanMem := filepath.Clean(filepath.Join(vaultDir, "MEMORY.md"))
+					if cleanP == cleanPrivate || strings.HasPrefix(cleanP, cleanPrivate+string(filepath.Separator)) || cleanP == cleanMem {
+						return json.NewEncoder(w).Encode(map[string]interface{}{
+							"decision": "deny",
+							"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): access to local/private/ and local/MEMORY.md is forbidden in quarantined sessions.", taintReason),
+						})
+					}
+				}
+			}
+		case "run_command":
+			cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+			if !reAllowedQuarantineHQCmd.MatchString(cmdLine) || strings.ContainsAny(cmdLine, ";|&`$") {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): only `./bin/hq gmail <search|read-quarantined|draft|triage-result|attachment-quarantine>` and `./bin/hq propose` are permitted in quarantined sessions.", taintReason),
+				})
+			}
+		}
+	}
+
+	// Canonical Gmail Draft Preview overwrite on ask_question for pending gmail_send proposals
+	if payload.ToolCall.Name == "ask_question" {
+		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
+			rawArgs, _ := json.Marshal(payload.ToolCall.Args)
+			rawStr := string(rawArgs)
+			for _, prop := range pending {
+				if prop.ActionType == "gmail_send" && prop.Metadata != nil && strings.Contains(rawStr, prop.ID) {
+					hashShort := prop.Metadata["contentHash"]
+					if len(hashShort) > 12 {
+						hashShort = hashShort[:12]
+					}
+					shaShort := prop.SHA256
+					if len(shaShort) > 12 {
+						shaShort = shaShort[:12]
+					}
+					canonicalQ := fmt.Sprintf(
+						"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
+						prop.Metadata["draftId"],
+						prop.Metadata["from"],
+						prop.Metadata["to"],
+						prop.Metadata["subject"],
+						prop.Metadata["bodyPreview"],
+						hashShort,
+					)
+					overwriteArgs := map[string]interface{}{
+						"questions": []map[string]interface{}{
+							{
+								"question":        canonicalQ,
+								"is_multi_select": false,
+								"options": []string{
+									fmt.Sprintf("(Recommended) Approve (%s · sha256:%s)", prop.ID, shaShort),
+									fmt.Sprintf("Reject (%s)", prop.ID),
+									"Keep pending",
+								},
+							},
+						},
+					}
+					return json.NewEncoder(w).Encode(map[string]interface{}{
+						"decision":  "allow",
+						"overwrite": overwriteArgs,
+					})
+				}
 			}
 		}
 	}

@@ -16,15 +16,16 @@ import (
 
 // Proposal represents an approval-bound action staged in local/memory/pending/<id>.json.
 type Proposal struct {
-	ID             string `json:"id"`
-	CreatedAt      string `json:"createdAt"`
-	ConversationID string `json:"conversationId,omitempty"`
-	ActionType     string `json:"actionType"`
-	Summary        string `json:"summary"`
-	Command        string `json:"command"`
-	WorkDir        string `json:"workDir,omitempty"`
-	SHA256         string `json:"sha256"`
-	Status         string `json:"status"`
+	ID             string            `json:"id"`
+	CreatedAt      string            `json:"createdAt"`
+	ConversationID string            `json:"conversationId,omitempty"`
+	ActionType     string            `json:"actionType"`
+	Summary        string            `json:"summary"`
+	Command        string            `json:"command"`
+	WorkDir        string            `json:"workDir,omitempty"`
+	SHA256         string            `json:"sha256"`
+	Status         string            `json:"status"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
 }
 
 // InterventionRecord logs an approved or rejected proposal in local/memory/interventions.jsonl.
@@ -50,6 +51,11 @@ func ComputeHash(actionType, command string) string {
 
 // Create stages a new pending proposal in local/memory/pending/<id>.json.
 func Create(vaultDir, actionType, summary, command, workDir, convID string) (Proposal, error) {
+	return CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID, nil)
+}
+
+// CreateWithMetadata stages a new pending proposal with optional structured metadata (e.g., Gmail draft fields).
+func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID string, meta map[string]string) (Proposal, error) {
 	pendingDir := filepath.Join(vaultDir, "memory", "pending")
 	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
 		return Proposal{}, err
@@ -65,6 +71,7 @@ func Create(vaultDir, actionType, summary, command, workDir, convID string) (Pro
 		WorkDir:        workDir,
 		SHA256:         ComputeHash(actionType, command),
 		Status:         "pending",
+		Metadata:       meta,
 	}
 	data, err := json.MarshalIndent(prop, "", "  ")
 	if err != nil {

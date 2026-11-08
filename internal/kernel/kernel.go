@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/gmail"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
@@ -965,13 +967,33 @@ func ProcessInbox(vaultDir string, dryRun bool) ([]string, error) {
 	return processed, nil
 }
 
-// RunHeartbeat executes the 30-minute zero-token Go pre-check loop.
-// If no inbox files or dead-man's switch alerts are detected, zero LLM tokens are used.
+// RunHeartbeat executes the zero-token Go sidecar pre-check loop (inbox drop router + Gmail precheck).
+// If no inbox files, new unread Primary emails, or dead-man's switch alerts are detected, zero LLM tokens are used.
 func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	now := time.Now()
 	inboxActions, err := ProcessInbox(vaultDir, dryRun)
 	if err != nil {
 		return "", err
+	}
+
+	if batches, _, gErr := gmail.RunPrecheck(vaultDir, ""); gErr == nil && len(batches) > 0 {
+		for _, batch := range batches {
+			title := fmt.Sprintf("[Auto] Gmail Triage (%s · %s)", batch.Account, batch.BatchID)
+			prompt := fmt.Sprintf(
+				"Activate the inbox-triage skill to process Gmail triage batch %s (account=%s, threads=%s). "+
+					"Read each thread via `./bin/hq gmail read-quarantined --account=%s --thread=<threadId>`, "+
+					"create a plain-text draft reply via `./bin/hq gmail draft` if a reply is needed, "+
+					"stage a send proposal via `./bin/hq propose --type=gmail_send --draft=<draftId>`, "+
+					"and save your structured summary via `./bin/hq gmail triage-result --batch=%s`.",
+				batch.BatchID, batch.Account, strings.Join(batch.ThreadIDs, ","), batch.Account, batch.BatchID,
+			)
+			out, spawnErr := SpawnFlashTask(vaultDir, "gmail-precheck:"+batch.BatchID, "inbox-triage", title, prompt, dryRun)
+			if spawnErr != nil {
+				inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (deferred: %v)", batch.BatchID, spawnErr))
+			} else {
+				inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (%s)", batch.BatchID, out))
+			}
+		}
 	}
 
 	state := LoadQuota(vaultDir)

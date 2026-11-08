@@ -38,6 +38,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 | [RFC-0002](design/0002-memory-and-consolidation.md) | **Zero-Token Journaling & Sleep-Time Memory Consolidation** | `SessionStart` injection, `Stop` hook JSONL transcript extraction, and nightly delta patching + skill proposals | Approved |
 | [RFC-0003](design/0003-approval-bound-execution.md) | **Action-Based Safety, Quarantined Readers & Approval-Bound Execution** | Breaking the Lethal Trifecta, `PreToolUse` hard blocklist, and `hq propose` SHA-256 deterministic execution | Approved |
 | [RFC-0004](design/0004-heartbeat-and-channels.md) | **Silent Gatekeeper, Quota Circuit Breaker & Channel Adapters** | 0-token Go pre-checks (`local/triggers.yaml`), Flash-only spawn budgets, Remote Control default UX, and pluggable chat drivers | Approved |
+| [RFC-0005](design/0005-gmail-integration.md) | **Decoupled Gmail Infrastructure (Layer 1) & Product Workflows (Layer 2)** | Layer 1: extensible $N$-account registry, pluggable transport, pure Go `hq daemon` sidecar watcher, and safe CRUD primitives (`search`, `read-quarantined`, `draft`, `approve`). Layer 2: Daily Brief, Auto-Draft Triage, and Verified Attachment Routing | Approved |
 
 ---
 

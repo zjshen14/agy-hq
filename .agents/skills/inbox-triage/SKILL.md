@@ -18,7 +18,12 @@ Process untrusted inbound files (`local/inbox/`) or messages safely under the qu
 
 ## Steps
 
-1. **Scan `local/inbox/`:**
+1. **Quarantined Gmail Triage & Auto-Drafting (when invoked on unread mail or a sidecar batch):**
+   - Use `./bin/hq gmail search` to list unread `Primary` messages (or read the assigned `--batch=<batchId>` threads).
+   - Read each thread one at a time via `./bin/hq gmail read-quarantined --thread=<threadId>` (which strips HTML/tracking pixels and enforces the Quarantined Reader boundary).
+   - **Auto-Drafting:** Whenever an email clearly needs a reply, automatically create a plain-text Gmail draft via `./bin/hq gmail draft --thread=<threadId> --to="..." --subject="Re: ..." --body="..."` and stage a 1-tap send proposal via `./bin/hq propose --type=gmail_send --draft=<draftId>`.
+   - Record the structured triage summary via `./bin/hq gmail triage-result --batch=<batchId> --json='[...]'`.
+2. **Scan `local/inbox/` (Drop-Folder Routing):**
    - List files in `local/inbox/` and match against `inbox_rules` in `local/triggers.yaml`:
      - Bank CSV/OFX files → route to `ledger-ingest`.
      - Tax PDFs (`W-2`, `1099`, `K-1`) → route to `tax-prep`.

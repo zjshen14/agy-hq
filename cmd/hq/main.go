@@ -15,6 +15,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
@@ -214,14 +215,58 @@ func main() {
 		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, pr_merge, git_push)")
 		summary := fs.String("summary", "", "Human-readable summary of the proposed action")
 		cmdStr := fs.String("cmd", "", "Exact deterministic shell command to execute upon approval")
+		draftID := fs.String("draft", "", "Optional Gmail draft ID when --type=gmail_send")
+		account := fs.String("account", "", "Optional Gmail account alias when --type=gmail_send")
 		workDir := fs.String("workdir", "", "Optional working directory for command execution")
 		convID := fs.String("conv", "", "Optional conversation ID")
 		_ = fs.Parse(os.Args[2:])
+		var meta map[string]string
+		if *draftID != "" {
+			if *actionType == "external_action" {
+				*actionType = "gmail_send"
+			}
+			spec, err := gmail.GetDraft(vaultDir, *account, *draftID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq propose: load draft %s failed: %v\n", *draftID, err)
+				os.Exit(1)
+			}
+			hashShort := spec.ContentHash
+			if len(hashShort) > 12 {
+				hashShort = hashShort[:12]
+			}
+			if *summary == "" {
+				*summary = fmt.Sprintf("Send Gmail Draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", spec.DraftID, spec.From, spec.To, spec.Subject, hashShort)
+			}
+			if *cmdStr == "" {
+				hqBin := "./bin/hq"
+				if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+					hqBin = exe
+				}
+				*cmdStr = fmt.Sprintf("%s gmail send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
+			}
+			if *workDir == "" {
+				*workDir = rootDir
+			}
+			preview := spec.Body
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			meta = map[string]string{
+				"draftId":     spec.DraftID,
+				"account":     spec.Account,
+				"from":        spec.From,
+				"to":          spec.To,
+				"cc":          spec.Cc,
+				"subject":     spec.Subject,
+				"bodyPreview": preview,
+				"contentHash": spec.ContentHash,
+			}
+		}
 		if *cmdStr == "" || *summary == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" --cmd=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" --cmd=\"...\" (or --type=gmail_send --draft=<draftId>)")
 			os.Exit(1)
 		}
-		prop, err := approvals.Create(vaultDir, *actionType, *summary, *cmdStr, *workDir, *convID)
+		prop, err := approvals.CreateWithMetadata(vaultDir, *actionType, *summary, *cmdStr, *workDir, *convID, meta)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", err)
 			os.Exit(1)
@@ -583,6 +628,151 @@ func main() {
 		}
 		fmt.Println(out)
 
+	case "gmail":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq gmail <init|add-account|accounts|search|read-quarantined|draft|send-draft|precheck|triage-result|attachment-quarantine> [args]")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "init", "add-account":
+			fs := flag.NewFlagSet("gmail "+os.Args[2], flag.ExitOnError)
+			alias := fs.String("alias", "primary", "Account alias (e.g. primary, personal-2, shopping)")
+			email := fs.String("email", "", "Gmail address (e.g. you@gmail.com)")
+			agyAcct := fs.String("agy-account", "", "Optional AGY_ACCOUNT name if signed in via Antigravity plugin")
+			tokenFile := fs.String("token-file", "", "Optional path to read-only OAuth2 token JSON for hq daemon sidecar")
+			query := fs.String("query", gmail.DefaultPrimaryQuery, "Default unread search query for sidecar precheck")
+			setDefault := fs.Bool("default", os.Args[2] == "init", "Set this account as the default Gmail account")
+			_ = fs.Parse(os.Args[3:])
+			cfg, err := gmail.InitOrAddAccount(vaultDir, *alias, *email, *agyAcct, *tokenFile, *query, *setDefault)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail %s failed: %v\n", os.Args[2], err)
+				os.Exit(1)
+			}
+			fmt.Printf("Configured Gmail account %q (%s) [token=%s]\n", cfg.Alias, cfg.Email, cfg.TokenFile)
+
+		case "accounts":
+			reg, err := gmail.LoadRegistry(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail accounts failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(reg, "", "  ")
+			fmt.Println(string(b))
+
+		case "search":
+			fs := flag.NewFlagSet("gmail search", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			query := fs.String("query", "", "Gmail search query (defaults to account's Primary unread query)")
+			maxRes := fs.Int("max", 20, "Maximum messages to return")
+			_ = fs.Parse(os.Args[3:])
+			msgs, err := gmail.SearchMessages(vaultDir, *account, *query, *maxRes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail search failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(msgs, "", "  ")
+			fmt.Println(string(b))
+
+		case "read-quarantined":
+			fs := flag.NewFlagSet("gmail read-quarantined", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			threadID := fs.String("thread", "", "Thread ID to read in quarantined mode")
+			convID := fs.String("conv", "", "Optional conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
+			_ = fs.Parse(os.Args[3:])
+			_, formatted, err := gmail.ReadQuarantinedThread(vaultDir, *account, *threadID, *convID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail read-quarantined failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Print(formatted)
+
+		case "draft":
+			fs := flag.NewFlagSet("gmail draft", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			draftID := fs.String("draft", "", "Optional existing draft ID to update")
+			threadID := fs.String("thread", "", "Optional thread ID being replied to")
+			to := fs.String("to", "", "Recipient email address(es)")
+			cc := fs.String("cc", "", "Optional CC email address(es)")
+			subject := fs.String("subject", "", "Email subject line")
+			body := fs.String("body", "", "Plain-text email body")
+			convID := fs.String("conv", "", "Optional conversation ID")
+			_ = fs.Parse(os.Args[3:])
+			spec, err := gmail.CreateOrUpdateDraft(vaultDir, *account, *draftID, *threadID, *to, *cc, *subject, *body, *convID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail draft failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(spec, "", "  ")
+			fmt.Println(string(b))
+
+		case "send-draft":
+			fs := flag.NewFlagSet("gmail send-draft", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email")
+			draftID := fs.String("draft", "", "Draft ID to verify and send")
+			hashPrefix := fs.String("hash", "", "Expected contentHash prefix from approved proposal")
+			_ = fs.Parse(os.Args[3:])
+			out, err := gmail.VerifyAndSendDraft(vaultDir, *account, *draftID, *hashPrefix)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail send-draft failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(out)
+
+		case "precheck":
+			fs := flag.NewFlagSet("gmail precheck", flag.ExitOnError)
+			account := fs.String("account", "", "Optional account alias filter")
+			_ = fs.Parse(os.Args[3:])
+			batches, status, err := gmail.RunPrecheck(vaultDir, *account)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail precheck failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(status)
+			if len(batches) > 0 {
+				b, _ := json.MarshalIndent(batches, "", "  ")
+				fmt.Println(string(b))
+			}
+
+		case "triage-result":
+			fs := flag.NewFlagSet("gmail triage-result", flag.ExitOnError)
+			batchID := fs.String("batch", "", "Batch ID being summarized")
+			rawJSON := fs.String("json", "", "JSON array of TriageItem objects")
+			_ = fs.Parse(os.Args[3:])
+			var items []gmail.TriageItem
+			if err := json.Unmarshal([]byte(*rawJSON), &items); err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail triage-result invalid JSON: %v\n", err)
+				os.Exit(1)
+			}
+			if err := gmail.RecordTriageResults(vaultDir, *batchID, items); err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail triage-result validation failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Recorded %d triaged Gmail thread(s) for batch %s\n", len(items), *batchID)
+
+		case "attachment-quarantine":
+			fs := flag.NewFlagSet("gmail attachment-quarantine", flag.ExitOnError)
+			filePath := fs.String("file", "", "Path to downloaded attachment file")
+			fromHdr := fs.String("from", "", "Sender From header")
+			authRes := fs.String("auth-results", "", "Authentication-Results header (e.g. dkim=pass)")
+			_ = fs.Parse(os.Args[3:])
+			content, err := os.ReadFile(*filePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail attachment-quarantine read error: %v\n", err)
+				os.Exit(1)
+			}
+			dest, autoRouted, err := gmail.QuarantineAttachment(vaultDir, filepath.Base(*filePath), content, *fromHdr, *authRes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail attachment-quarantine error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Attachment saved to %s (autoRoutedToInbox=%v)\n", dest, autoRouted)
+
+		default:
+			fmt.Fprintf(os.Stderr, "unknown gmail subcommand: %s\n", os.Args[2])
+			os.Exit(1)
+		}
+
 	case "daemon":
 		if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
 			switch os.Args[2] {
@@ -698,6 +888,7 @@ Commands:
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
   worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/
+  gmail <init|search|read-quarantined|draft|precheck>  Layer 1 Gmail primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
   subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation
   adopt --conv=<id> --task=<slug>     Adopt an existing conversation (or demote Front Desk to a Task)

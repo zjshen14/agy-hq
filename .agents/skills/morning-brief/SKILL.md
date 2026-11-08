@@ -14,8 +14,9 @@ Produce a concise, actionable daily brief covering life admin, engineering proje
 
 1. **Check Pending Approvals & Active Worktrees:**
    - Run `./bin/hq status` to inspect any pending approval proposals in `local/memory/pending/` and active git worktrees in `local/worktrees/`.
-2. **Calendar & Life Admin:**
+2. **Calendar, Gmail & Life Admin:**
    - If the `gcalendar` skill/plugin is available, check today's schedule and highlight time-sensitive meetings or conflicts.
+   - Check Gmail via `./bin/hq gmail search` (and any overnight digests in `local/notes/inbox/`) to summarize high-priority unread threads and any auto-drafted replies awaiting approval.
    - Check `local/inbox/` for any unprocessed files dropped overnight.
 3. **Engineering Projects (`swe-pulse`):**
    - For each active worktree in `local/worktrees/` (or tracked repos in `local/notes/`), summarize open PR status or failing CI checks via `gh pr status`.
