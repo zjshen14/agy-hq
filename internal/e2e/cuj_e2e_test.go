@@ -121,6 +121,22 @@ func TestCUJ1_VaultBootstrapAndIdempotency(t *testing.T) {
 	if err != nil || !strings.Contains(statOut, "Pending Actions:  0") {
 		t.Fatalf("hq status unexpected: err=%v out=%s", err, statOut)
 	}
+
+	// 4. Verify zero-touch auto-bootstrap on a completely uninitialized Vault via SessionStart hook
+	cleanEnv := setupHQEnv(t)
+	cleanArtDir := filepath.Join(t.TempDir(), "brain-clean")
+	_ = os.MkdirAll(cleanArtDir, 0o755)
+	stdin := fmt.Sprintf(`{"conversationId":"conv-clean","artifactDirectoryPath":%q}`, cleanArtDir)
+	ssOut, err := cleanEnv.run(stdin, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("zero-touch SessionStart auto-bootstrap failed: %v (%s)", err, ssOut)
+	}
+	if _, err := os.Stat(filepath.Join(cleanEnv.vaultDir, "USER.md")); err != nil {
+		t.Fatalf("expected SessionStart to auto-initialize local/USER.md on clean clone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cleanArtDir, "hq_console.md")); err != nil {
+		t.Fatalf("expected SessionStart to sync hq_console.md on clean clone: %v", err)
+	}
 }
 
 // CUJ-2: Front Desk Lease, Turn-1 Initialization, Handover & Demotion

@@ -66,6 +66,17 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
 
+	// Zero-touch auto-bootstrap: if local/USER.md does not exist yet on a fresh clone,
+	// automatically initialize the private Vault from templates/.
+	if _, err := os.Stat(filepath.Join(vaultDir, "USER.md")); os.IsNotExist(err) {
+		if rootDir, err := vault.ResolveRoot(); err == nil {
+			templateDir := filepath.Join(rootDir, "templates")
+			if _, statErr := os.Stat(templateDir); statErr == nil {
+				_, _ = vault.Init(vaultDir, templateDir)
+			}
+		}
+	}
+
 	var sections []string
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)

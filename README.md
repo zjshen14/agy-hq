@@ -16,6 +16,24 @@ Frontier personal agents (Meta Muse, OpenAI `dots`, Claude Duet/Cowork, OpenClaw
 
 ---
 
+## Quickstart (1-Line Setup)
+
+On a clean machine with **Google Antigravity** installed, run:
+
+```sh
+git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh
+```
+
+What this single line does:
+1. Checks for Go (installing via Homebrew on macOS if missing) and compiles `./bin/hq`.
+2. Runs `./bin/hq init` to scaffold your git-ignored private Vault (`./local/USER.md`, `./local/MEMORY.md`, `./local/CONSOLE.md`, `./local/.git`, and isolated directories).
+3. Installs a `.git/hooks/pre-commit` PII guard so personal paths or emails can never be committed to the root repo.
+4. Runs `./bin/hq doctor` to verify all health checks pass.
+
+> **Zero-Touch GUI Option:** Even if you only `git clone` and open `headquarter` directly in Antigravity without running `./scripts/bootstrap.sh`, the `SessionStart` hook in [`.agents/hooks.json`](.agents/hooks.json) automatically compiles `./bin/hq`, initializes `./local/`, claims your `[HQ] Front Desk` conversation, and pins the live `hq_console.md` artifact on Turn 1.
+
+---
+
 ## Two-Layer Architecture: Open-Source Engine vs. Private Vault
 
 ```text
@@ -50,6 +68,7 @@ All product specs, technical RFCs, Architecture Decision Records (ADRs), and fro
 - **Product Designs (`docs/product/`):**
   - [PRD-0001: Vision & Day-in-the-Life UX](docs/product/0001-vision-and-ux.md)
   - [PRD-0002: Open-Ended Workflows & Additive Skills](docs/product/0002-open-workflows-and-skills.md)
+  - [PRD-0003: Critical User Journeys & E2E Acceptance Criteria](docs/product/0003-critical-user-journeys.md)
 - **Technical Designs (`docs/design/`):**
   - [RFC-0001: Two-Layer Vault Split & Per-Task Parallel Isolation](docs/design/0001-vault-and-task-isolation.md)
   - [RFC-0002: Zero-Token Journaling & Sleep-Time Memory Consolidation](docs/design/0002-memory-and-consolidation.md)

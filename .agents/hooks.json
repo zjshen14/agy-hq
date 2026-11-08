@@ -3,8 +3,8 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "(\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start)",
-        "timeout": 5
+        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$PATH\"; ([ -x \"./bin/hq\" ] || [ -x \"../bin/hq\" ] || go build -o ./bin/hq ./cmd/hq 2>/dev/null); (\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start)",
+        "timeout": 15
       }
     ],
     "PreToolUse": [
