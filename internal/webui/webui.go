@@ -394,6 +394,8 @@ func SyncMarkdownConsole(vaultDir string) error {
 			badge := "🟢 `active`"
 			if strings.EqualFold(t.Status, "completed") {
 				badge = "✅ `completed`"
+			} else if strings.EqualFold(t.Status, "cancelled") {
+				badge = "🛑 `cancelled`"
 			}
 			fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | `%s` | %s |\n", badge, t.Title, t.ConversationID, t.TaskSlug, oneLine)
 		}

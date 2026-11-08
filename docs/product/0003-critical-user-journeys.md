@@ -17,6 +17,9 @@
 | **CUJ-6** | Parallel Multi-Repo Git Worktree Lifecycle | `hq worktree add`, `hq worktree list`, `hq worktree remove` | `TestCUJ6_ParallelWorktreeLifecycle` |
 | **CUJ-7** | Quarantined Inbox Drop & 0-Token Heartbeat Gatekeeper | `hq heartbeat`, `local/inbox/` | `TestCUJ7_InboxRoutingAndHeartbeatGatekeeper` |
 | **CUJ-8** | Zero-Token Per-Turn Journaling & Live Console Sync | `hq hook stop`, `local/CONSOLE.md`, `hq_console.md` | `TestCUJ8_TurnJournalingAndLiveConsoleSync` |
+| **CUJ-9** | Engine Upgrade & Non-Destructive Vault Migration | `hq upgrade`, `hq migrate` | `TestCUJ9_EngineUpgradeAndVaultMigration` |
+| **CUJ-10** | Front Desk Non-Blocking Guardrails | `hq hook pre-tool`, `internal/hooks` | `TestCUJ10_FrontDeskNonBlockingEnforcement` |
+| **CUJ-11** | Subagent Lifecycle & Task Board Tracking | `hq hook pre-tool`, `invoke_subagent`, `manage_subagents` | `TestCUJ11_SubagentLifecycleAndTaskboardTracking` |
 
 ---
 
@@ -98,3 +101,17 @@
    - Additively merges new ignore rules from `templates/gitignore.tmpl` into `local/.gitignore`.
    - Additively appends any new top-level YAML sections from `templates/config.yaml` and `templates/triggers.yaml` into `local/config.yaml` and `local/triggers.yaml`.
    - Runs versioned data migrations (e.g., normalizing legacy `tasks.json` titles to `[Task:<scope>] <Title>` and cleaning up deprecated `hq_console_mobile.md`) and updates `local/memory/schema_version.json`.
+
+---
+
+## CUJ-10: Front Desk Non-Blocking Guardrails
+1. **Mechanical Enforcement:** The Front Desk thread is mechanically guarded by `PreToolUse` hooks against inline source/worktree edits (`edit_file`/`write_file`) and heavy build/test suites (`go test`, `npm test`, etc.).
+2. **Inline Investigation Cap:** Capped at 3 lookup/research tool calls per turn. Subagent invocations (`invoke_subagent`, `manage_subagents`) are exempt from this cap.
+
+---
+
+## CUJ-11: Native Subagent Invocation Lifecycle & Task Board Tracking
+1. **Quota Increment:** When `invoke_subagent` is called, `kernel.RecordSubagentSpawn` increments `SpawnsToday` in `local/memory/quota_state.json` (and `quota-YYYY-MM-DD.json`), updating `hq_console.md` to reflect live background spawn counts.
+2. **Task Registration (`SessionStart`):** Subagents launched via `invoke_subagent` are matched from `pending_subagents.json` and registered in `local/memory/tasks.json` with normalized `[Subagent:<scope>] <Role> [<tier>]` titles and `subagent-<scope>-<role>` slugs, marked `🟢 active`.
+3. **Turn Completion (`Stop`):** When the subagent's turn completes, `HandleStop` marks the task `✅ completed` in `local/memory/tasks.json` and records the subagent's response summary.
+4. **Lifecycle Cancellation (`manage_subagents`):** Subagents killed via `manage_subagents` (`Action: "kill"` or `"kill_all"`) are immediately transitioned to `🛑 cancelled` on the Task Board.

@@ -113,6 +113,28 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		} else if existing.ConversationID == payload.ConversationID {
 			sections = append(sections, roleBanner)
 		} else {
+			// Subagent or secondary conversation: check if already tracked or waiting in pending queue
+			_, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID)
+			if !alreadyTracked {
+				if sub, found := kernel.PopPendingSubagent(vaultDir, 5*time.Minute); found {
+					modelName := sub.Model
+					if modelName == "" {
+						modelName = payload.ModelName
+					}
+					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+						TaskSlug:       sub.TaskSlug,
+						Title:          sub.Title,
+						Tier:           sub.Tier,
+						Model:          modelName,
+						ConversationID: payload.ConversationID,
+						Status:         "active",
+						LastSummary:    "Running in background...",
+						CreatedAt:      time.Now().Format(time.RFC3339),
+						LastUpdatedAt:  time.Now().Format(time.RFC3339),
+					})
+				}
+			}
+
 			sections = append(sections, fmt.Sprintf(
 				"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.",
 				existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
@@ -228,6 +250,37 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				return json.NewEncoder(w).Encode(resp)
 			}
 		}
+	}
+
+	if payload.ToolCall.Name == "invoke_subagent" {
+		role, _ := payload.ToolCall.Args["Role"].(string)
+		model, _ := payload.ToolCall.Args["Model"].(string)
+		prompt, _ := payload.ToolCall.Args["Prompt"].(string)
+		_ = kernel.RecordSubagentSpawn(vaultDir, role, model, prompt)
+		_, _ = kernel.QueuePendingSubagent(vaultDir, role, model, prompt)
+		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+		return err
+	}
+
+	if payload.ToolCall.Name == "manage_subagents" {
+		action, _ := payload.ToolCall.Args["Action"].(string)
+		if action == "kill" {
+			var convIDs []string
+			if rawIDs, ok := payload.ToolCall.Args["ConversationIds"].([]interface{}); ok {
+				for _, v := range rawIDs {
+					if s, ok := v.(string); ok && s != "" {
+						convIDs = append(convIDs, s)
+					}
+				}
+			} else if strIDs, ok := payload.ToolCall.Args["ConversationIds"].([]string); ok {
+				convIDs = strIDs
+			}
+			_ = kernel.CancelTasks(vaultDir, convIDs, "Terminated by Front Desk")
+		} else if action == "kill_all" {
+			_ = kernel.CancelAllSubagentTasks(vaultDir, "Terminated by Front Desk")
+		}
+		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+		return err
 	}
 
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
@@ -388,12 +441,14 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
 			if fd, ok := kernel.GetFrontDesk(vaultDir); !ok || fd.ConversationID != payload.ConversationID {
 				alreadyTracked := false
+				var matchedTask *kernel.ActiveTask
 				var existingTasks []kernel.ActiveTask
 				if tasks, err := kernel.ListTasks(vaultDir); err == nil {
 					existingTasks = tasks
-					for _, et := range existingTasks {
-						if et.ConversationID == payload.ConversationID {
+					for i := range existingTasks {
+						if existingTasks[i].ConversationID == payload.ConversationID {
 							alreadyTracked = true
+							matchedTask = &existingTasks[i]
 							break
 						}
 					}
@@ -407,17 +462,72 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					// and no explicit release-desk marker exists. Claim Front Desk instead of registering [Task:general]!
 					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
 				} else {
-					title := ""
-					if !alreadyTracked && strings.TrimSpace(payload.LastUserInput) != "" {
-						title = "[Task:general] " + strings.TrimSpace(payload.LastUserInput)
+					if !alreadyTracked {
+						// Subagent fallback: match against pending queue if not yet registered
+						if sub, found := kernel.PopPendingSubagent(vaultDir, 10*time.Minute); found {
+							modelName := sub.Model
+							if modelName == "" {
+								modelName = payload.ModelName
+							}
+							task := kernel.ActiveTask{
+								TaskSlug:       sub.TaskSlug,
+								Title:          sub.Title,
+								Tier:           sub.Tier,
+								Model:          modelName,
+								ConversationID: payload.ConversationID,
+								Status:         "completed",
+								CreatedAt:      time.Now().Format(time.RFC3339),
+								LastUpdatedAt:  time.Now().Format(time.RFC3339),
+								LastSummary:    summary,
+							}
+							if strings.TrimSpace(task.LastSummary) == "" {
+								task.LastSummary = "Task completed."
+							}
+							_ = kernel.RegisterTask(vaultDir, task)
+							alreadyTracked = true
+							matchedTask = &task
+						}
 					}
-					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-						Title:          title,
-						Model:          payload.ModelName,
-						ConversationID: payload.ConversationID,
-						LastUpdatedAt:  time.Now().Format(time.RFC3339),
-						LastSummary:    summary,
-					})
+
+					if alreadyTracked && matchedTask != nil {
+						// Subagent lifecycle transition: mark completed if it was a subagent task
+						isSubagent := strings.HasPrefix(matchedTask.TaskSlug, "subagent-") || strings.HasPrefix(matchedTask.Title, "[Subagent:")
+						newStatus := matchedTask.Status
+						if isSubagent && matchedTask.Status == "active" {
+							newStatus = "completed"
+						}
+						newSummary := summary
+						if strings.TrimSpace(newSummary) == "" {
+							newSummary = matchedTask.LastSummary
+						}
+						if strings.TrimSpace(newSummary) == "" {
+							newSummary = "Task completed."
+						}
+						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+							TaskSlug:       matchedTask.TaskSlug,
+							Title:          matchedTask.Title,
+							Tier:           matchedTask.Tier,
+							Model:          matchedTask.Model,
+							WorktreeDir:    matchedTask.WorktreeDir,
+							ConversationID: payload.ConversationID,
+							Status:         newStatus,
+							CreatedAt:      matchedTask.CreatedAt,
+							LastUpdatedAt:  time.Now().Format(time.RFC3339),
+							LastSummary:    newSummary,
+						})
+					} else if !alreadyTracked {
+						title := ""
+						if strings.TrimSpace(payload.LastUserInput) != "" {
+							title = "[Task:general] " + strings.TrimSpace(payload.LastUserInput)
+						}
+						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+							Title:          title,
+							Model:          payload.ModelName,
+							ConversationID: payload.ConversationID,
+							LastUpdatedAt:  time.Now().Format(time.RFC3339),
+							LastSummary:    summary,
+						})
+					}
 				}
 			}
 		}
@@ -469,6 +579,16 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 			if tc.Name == "write_file" || tc.Name == "edit_file" {
 				if p, ok := tc.Args["Path"].(string); ok && p != "" {
 					fileSet[p] = true
+				}
+			}
+			if tc.Name == "send_message" {
+				if msg, ok := tc.Args["Message"].(string); ok && strings.TrimSpace(msg) != "" {
+					if strings.TrimSpace(lastResponse) == "" || len(lastResponse) < 20 {
+						lastResponse = strings.TrimSpace(msg)
+						if runes := []rune(lastResponse); len(runes) > 500 {
+							lastResponse = string(runes[:500]) + "..."
+						}
+					}
 				}
 			}
 		}

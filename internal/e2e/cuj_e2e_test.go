@@ -837,4 +837,156 @@ func TestCUJ10_FrontDeskNonBlockingEnforcement(t *testing.T) {
 	if !strings.Contains(out, `"decision":"allow"`) {
 		t.Fatalf("expected 1st call of new turn to be allowed after stop reset, got:\n%s", out)
 	}
+
+	// Front Desk calls invoke_subagent -> ALLOW and does NOT count toward 3-call lookup cap
+	invokeCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"invoke_subagent","args":{"Role":"[standard] agy-hq: Worker","Model":"flash","Prompt":"Fix it"}}}`, deskConv)
+	out, _ = env.run(invokeCmd, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected invoke_subagent to be allowed on Front Desk, got:\n%s", out)
+	}
+}
+
+// CUJ-11: Native Subagent Invocation Lifecycle & Task Board Tracking
+func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
+	env := setupHQEnv(t)
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	artDesk := filepath.Join(t.TempDir(), "brain-desk")
+	_ = os.MkdirAll(artDesk, 0o755)
+	deskConv := "conv-desk-1111"
+	subConv := "conv-sub-123"
+
+	// 1. Claim Front Desk and run SessionStart
+	if _, err := env.run("", "claim-desk", "--conv="+deskConv, "--artifact-dir="+artDesk); err != nil {
+		t.Fatalf("claim-desk: %v", err)
+	}
+	ssDesk := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q}`, deskConv, artDesk)
+	if _, err := env.run(ssDesk, "hook", "session-start"); err != nil {
+		t.Fatalf("session-start desk: %v", err)
+	}
+
+	// 2. Front Desk invokes a background subagent via Antigravity's native invoke_subagent tool
+	invokePayload := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"invoke_subagent","args":{"Role":"[standard] agy-hq: Test Fixer","Model":"flash","Prompt":"Fix flaky race condition in taskboard test"}}}`, deskConv, artDesk)
+	out, err := env.run(invokePayload, "hook", "pre-tool")
+	if err != nil {
+		t.Fatalf("invoke_subagent pre-tool: %v (%s)", err, out)
+	}
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected invoke_subagent to be allowed, got: %s", out)
+	}
+
+	// Verify quota_state.json (and dated file) incremented SpawnsToday
+	q := kernel.LoadQuota(env.vaultDir)
+	if q.SpawnsToday != 1 {
+		t.Fatalf("expected SpawnsToday == 1, got %d", q.SpawnsToday)
+	}
+	// Verify hq_console.md in Front Desk artifact dir reflects "1 / 15"
+	consoleBytes, err := os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
+	if err != nil {
+		t.Fatalf("read hq_console.md: %v", err)
+	}
+	consoleStr := string(consoleBytes)
+	if !strings.Contains(consoleStr, "1 / 15") {
+		t.Fatalf("expected '1 / 15' spawns in hq_console.md, got:\n%s", consoleStr)
+	}
+
+	// 3. Subagent starts up in its own conversation (conv-sub-123) and runs session-start
+	subArtDir := filepath.Join(t.TempDir(), "brain-sub-123")
+	_ = os.MkdirAll(subArtDir, 0o755)
+	ssSub := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-high"}`, subConv, subArtDir)
+	subSSOut, err := env.run(ssSub, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start subagent: %v (%s)", err, subSSOut)
+	}
+
+	// Verify tasks.json has conv-sub-123 registered with clean role & active status
+	tasks, err := kernel.ListTasks(env.vaultDir)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("expected 1 task in tasks.json, got %d (%v)", len(tasks), err)
+	}
+	subTask := tasks[0]
+	if subTask.ConversationID != subConv {
+		t.Fatalf("expected ConversationID == %s, got %s", subConv, subTask.ConversationID)
+	}
+	if subTask.Title != "[Subagent:agy-hq] Test Fixer [standard]" {
+		t.Fatalf("expected title '[Subagent:agy-hq] Test Fixer [standard]', got: %s", subTask.Title)
+	}
+	if subTask.TaskSlug != "subagent-agy-hq-test-fixer" {
+		t.Fatalf("expected taskSlug 'subagent-agy-hq-test-fixer', got: %s", subTask.TaskSlug)
+	}
+	if subTask.Status != "active" {
+		t.Fatalf("expected status 'active', got: %s", subTask.Status)
+	}
+
+	// Verify Front Desk's hq_console.md shows 🟢 active
+	consoleBytes, _ = os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
+	consoleStr = string(consoleBytes)
+	if !strings.Contains(consoleStr, "🟢 `active`") || !strings.Contains(consoleStr, "[Subagent:agy-hq] Test Fixer [standard]") {
+		t.Fatalf("expected active subagent in hq_console.md, got:\n%s", consoleStr)
+	}
+
+	// 4. Subagent finishes its work and runs hook stop with a transcript summary
+	subArtDirTranscript := filepath.Join(subArtDir, "transcript.jsonl")
+	_ = os.WriteFile(subArtDirTranscript, []byte(`{"type":"PLANNER_RESPONSE","content":"Fixed race condition and all unit tests pass (100%)."}`+"\n"), 0o644)
+	subStopWithTranscript := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-high","terminationReason":"NO_TOOL_CALL"}`, subConv, subArtDirTranscript, subArtDir)
+
+	if _, err := env.run(subStopWithTranscript, "hook", "stop"); err != nil {
+		t.Fatalf("subagent stop failed: %v", err)
+	}
+
+	// Verify tasks.json transitioned to completed
+	tasksAfter, _ := kernel.ListTasks(env.vaultDir)
+	if len(tasksAfter) != 1 {
+		t.Fatalf("expected 1 task in tasks.json, got %d", len(tasksAfter))
+	}
+	if tasksAfter[0].Status != "completed" {
+		t.Fatalf("expected status 'completed', got: %s", tasksAfter[0].Status)
+	}
+	if !strings.Contains(tasksAfter[0].LastSummary, "Fixed race condition") {
+		t.Fatalf("expected response summary in task, got: %s", tasksAfter[0].LastSummary)
+	}
+
+	// Verify Front Desk hq_console.md shows ✅ completed
+	consoleBytes, _ = os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
+	consoleStr = string(consoleBytes)
+	if !strings.Contains(consoleStr, "✅ `completed`") || !strings.Contains(consoleStr, "Fixed race condition") {
+		t.Fatalf("expected completed subagent in hq_console.md, got:\n%s", consoleStr)
+	}
+
+	// 5. Test manage_subagents cancellation
+	subConv2 := "conv-sub-456"
+	invokePayload2 := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"invoke_subagent","args":{"Role":"[deep] agy-hq: Worker To Cancel","Model":"pro","Prompt":"Long running investigation"}}}`, deskConv, artDesk)
+	_, _ = env.run(invokePayload2, "hook", "pre-tool")
+
+	subArtDir2 := filepath.Join(t.TempDir(), "brain-sub-456")
+	_ = os.MkdirAll(subArtDir2, 0o755)
+	ssSub2 := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-argon-high"}`, subConv2, subArtDir2)
+	_, _ = env.run(ssSub2, "hook", "session-start")
+
+	// Front Desk calls manage_subagents Action="kill"
+	killPayload := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"manage_subagents","args":{"Action":"kill","ConversationIds":[%q]}}}`, deskConv, artDesk, subConv2)
+	killOut, err := env.run(killPayload, "hook", "pre-tool")
+	if err != nil {
+		t.Fatalf("manage_subagents pre-tool: %v", err)
+	}
+	if !strings.Contains(killOut, `"decision":"allow"`) {
+		t.Fatalf("expected manage_subagents allow, got: %s", killOut)
+	}
+
+	// Verify conv-sub-456 is cancelled in tasks.json and hq_console.md shows 🛑 cancelled
+	task456, found := kernel.FindTaskByConversationID(env.vaultDir, subConv2)
+	if !found {
+		t.Fatalf("expected to find conv-sub-456 in tasks.json")
+	}
+	if task456.Status != "cancelled" {
+		t.Fatalf("expected conv-sub-456 status 'cancelled', got: %s", task456.Status)
+	}
+
+	consoleBytes, _ = os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
+	consoleStr = string(consoleBytes)
+	if !strings.Contains(consoleStr, "🛑 `cancelled`") || !strings.Contains(consoleStr, "Worker To Cancel") {
+		t.Fatalf("expected cancelled subagent in hq_console.md, got:\n%s", consoleStr)
+	}
 }

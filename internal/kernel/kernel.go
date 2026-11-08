@@ -74,6 +74,23 @@ func ListTasks(vaultDir string) ([]ActiveTask, error) {
 	return tasks, nil
 }
 
+// FindTaskByConversationID finds an ActiveTask by its ConversationID in local/memory/tasks.json.
+func FindTaskByConversationID(vaultDir, convID string) (ActiveTask, bool) {
+	if convID == "" {
+		return ActiveTask{}, false
+	}
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return ActiveTask{}, false
+	}
+	for _, t := range tasks {
+		if t.ConversationID == convID {
+			return t, true
+		}
+	}
+	return ActiveTask{}, false
+}
+
 // RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
 func RegisterTask(vaultDir string, task ActiveTask) error {
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
@@ -177,6 +194,67 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 	}
 	if !found {
 		return fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
+	}
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// CancelTasks marks tasks matching conversationIDs (or taskSlugs) as cancelled.
+func CancelTasks(vaultDir string, conversationIDs []string, reason string) error {
+	if len(conversationIDs) == 0 {
+		return nil
+	}
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return err
+	}
+	targetSet := make(map[string]bool)
+	for _, id := range conversationIDs {
+		targetSet[id] = true
+	}
+	changed := false
+	for i := range tasks {
+		if targetSet[tasks[i].ConversationID] || targetSet[tasks[i].TaskSlug] {
+			tasks[i].Status = "cancelled"
+			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+			if strings.TrimSpace(reason) != "" {
+				tasks[i].LastSummary = strings.TrimSpace(reason)
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// CancelAllSubagentTasks marks all active subagent tasks as cancelled.
+func CancelAllSubagentTasks(vaultDir string, reason string) error {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i := range tasks {
+		if tasks[i].Status == "active" && (strings.HasPrefix(tasks[i].TaskSlug, "subagent-") || strings.HasPrefix(tasks[i].Title, "[Subagent:")) {
+			tasks[i].Status = "cancelled"
+			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+			if strings.TrimSpace(reason) != "" {
+				tasks[i].LastSummary = strings.TrimSpace(reason)
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
 	}
 	data, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
@@ -391,24 +469,49 @@ func quotaFilePath(vaultDir string, now time.Time) string {
 	return filepath.Join(vaultDir, "memory", fmt.Sprintf("quota-%s.json", now.Format("2006-01-02")))
 }
 
-// LoadQuota reads today's QuotaState from local/memory/quota-YYYY-MM-DD.json.
+// LoadQuota reads today's QuotaState from local/memory/quota-YYYY-MM-DD.json or quota_state.json.
 func LoadQuota(vaultDir string) QuotaState {
 	now := time.Now()
+	today := now.Format("2006-01-02")
 	p := quotaFilePath(vaultDir, now)
 	state := QuotaState{
-		Date:           now.Format("2006-01-02"),
+		Date:           today,
 		MaxDailySpawns: 15,
 	}
-	if data, err := os.ReadFile(p); err == nil {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		fallbackPath := filepath.Join(vaultDir, "memory", "quota_state.json")
+		if fbData, fbErr := os.ReadFile(fallbackPath); fbErr == nil {
+			var fbState QuotaState
+			if unErr := json.Unmarshal(fbData, &fbState); unErr == nil {
+				if fbState.Date == today {
+					state = fbState
+				} else {
+					state.MaxDailySpawns = fbState.MaxDailySpawns
+				}
+			}
+		}
+	} else {
 		_ = json.Unmarshal(data, &state)
 	}
 	if state.MaxDailySpawns <= 0 {
 		state.MaxDailySpawns = 15
 	}
+	if state.Date != today {
+		state.Date = today
+		state.SpawnsToday = 0
+		state.CircuitOpen = false
+		state.CircuitReason = ""
+	}
 	return state
 }
 
-// SaveQuota persists today's QuotaState.
+// LoadQuotaState is an alias for LoadQuota.
+func LoadQuotaState(vaultDir string) QuotaState {
+	return LoadQuota(vaultDir)
+}
+
+// SaveQuota persists today's QuotaState to quota-YYYY-MM-DD.json and quota_state.json.
 func SaveQuota(vaultDir string, state QuotaState) error {
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
 		return err
@@ -417,7 +520,31 @@ func SaveQuota(vaultDir string, state QuotaState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(quotaFilePath(vaultDir, time.Now()), data, 0o644)
+	datedPath := quotaFilePath(vaultDir, time.Now())
+	if err := os.WriteFile(datedPath, data, 0o644); err != nil {
+		return err
+	}
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "quota_state.json"), data, 0o644)
+	return nil
+}
+
+// RecordSubagentSpawn increments the daily background spawn quota when a subagent is invoked.
+func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
+	state := LoadQuota(vaultDir)
+	state.SpawnsToday++
+	state.LastStatus = fmt.Sprintf("Subagent spawned: %s (%s)", role, time.Now().Format("15:04:05"))
+	summary := prompt
+	if runes := []rune(summary); len(runes) > 200 {
+		summary = string(runes[:200]) + "..."
+	}
+	state.Events = append(state.Events, SpawnEvent{
+		Timestamp: time.Now().Format(time.RFC3339),
+		Trigger:   "invoke_subagent",
+		Skill:     role,
+		Model:     model,
+		Outcome:   summary,
+	})
+	return SaveQuota(vaultDir, state)
 }
 
 // SpawnTask invokes `agentapi new-conversation --model=<modelID>` (or simulates it if dryRun is true),
@@ -567,4 +694,170 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	state.LastStatus = summary
 	_ = SaveQuota(vaultDir, state)
 	return summary, nil
+}
+
+var (
+	reRoleWithTierScope = regexp.MustCompile(`^\[([^\]]+)\]\s*([^:]+):\s*(.*)$`)
+	reRoleAlreadyNorm   = regexp.MustCompile(`^\[Subagent:([^\]]+)\]\s*([^\[]+?)(?:\s*\[([^\]]+)\])?$`)
+	reRoleScopeOnly     = regexp.MustCompile(`^([^:]+):\s*(.*)$`)
+)
+
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	reg := regexp.MustCompile(`[^a-z0-9]+`)
+	s = reg.ReplaceAllString(s, "-")
+	return strings.Trim(s, "-")
+}
+
+func inferTierFromModel(model string) string {
+	m := strings.ToLower(model)
+	if strings.Contains(m, "pro") || strings.Contains(m, "argon") || strings.Contains(m, "opus") {
+		return "deep"
+	}
+	if strings.Contains(m, "flash_lite") || strings.Contains(m, "flash-lite") || strings.Contains(m, "low") {
+		return "quick"
+	}
+	return "standard"
+}
+
+// ParseSubagentRole extracts tier, scope, role title, normalized Title and TaskSlug from Role string.
+func ParseSubagentRole(role, model string) (tier, scope, roleName, title, slug string) {
+	trimmed := strings.TrimSpace(role)
+	if m := reRoleAlreadyNorm.FindStringSubmatch(trimmed); m != nil {
+		scope = strings.TrimSpace(m[1])
+		roleName = strings.TrimSpace(m[2])
+		tier = strings.TrimSpace(m[3])
+		if tier == "" {
+			tier = inferTierFromModel(model)
+		}
+		title = fmt.Sprintf("[Subagent:%s] %s [%s]", scope, roleName, tier)
+		slug = fmt.Sprintf("subagent-%s-%s", slugify(scope), slugify(roleName))
+		return tier, scope, roleName, title, slug
+	}
+
+	if m := reRoleWithTierScope.FindStringSubmatch(trimmed); m != nil {
+		tier = strings.TrimSpace(m[1])
+		scope = strings.TrimSpace(m[2])
+		roleName = strings.TrimSpace(m[3])
+		title = fmt.Sprintf("[Subagent:%s] %s [%s]", scope, roleName, tier)
+		slug = fmt.Sprintf("subagent-%s-%s", slugify(scope), slugify(roleName))
+		return tier, scope, roleName, title, slug
+	}
+
+	if m := reRoleScopeOnly.FindStringSubmatch(trimmed); m != nil {
+		scope = strings.TrimSpace(m[1])
+		roleName = strings.TrimSpace(m[2])
+		tier = inferTierFromModel(model)
+		title = fmt.Sprintf("[Subagent:%s] %s [%s]", scope, roleName, tier)
+		slug = fmt.Sprintf("subagent-%s-%s", slugify(scope), slugify(roleName))
+		return tier, scope, roleName, title, slug
+	}
+
+	roleName = trimmed
+	if roleName == "" {
+		roleName = "Task Worker"
+	}
+	scope = "general"
+	tier = inferTierFromModel(model)
+	title = fmt.Sprintf("[Subagent:%s] %s [%s]", scope, roleName, tier)
+	slug = fmt.Sprintf("subagent-%s", slugify(roleName))
+	return tier, scope, roleName, title, slug
+}
+
+// PendingSubagent stores metadata of a subagent invoked via invoke_subagent.
+type PendingSubagent struct {
+	Role         string    `json:"role"`
+	Model        string    `json:"model"`
+	Tier         string    `json:"tier,omitempty"`
+	TaskSlug     string    `json:"taskSlug"`
+	Title        string    `json:"title"`
+	PromptPrefix string    `json:"promptPrefix,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+func pendingSubagentsFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "pending_subagents.json")
+}
+
+func loadPendingSubagents(vaultDir string) ([]PendingSubagent, error) {
+	data, err := os.ReadFile(pendingSubagentsFilePath(vaultDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var items []PendingSubagent
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func savePendingSubagents(vaultDir string, items []PendingSubagent) error {
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(items, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pendingSubagentsFilePath(vaultDir), data, 0o644)
+}
+
+// QueuePendingSubagent enqueues metadata for an invoked subagent.
+func QueuePendingSubagent(vaultDir, role, model, prompt string) (PendingSubagent, error) {
+	tier, _, _, title, slug := ParseSubagentRole(role, model)
+	promptPrefix := prompt
+	if runes := []rune(promptPrefix); len(runes) > 200 {
+		promptPrefix = string(runes[:200]) + "..."
+	}
+	item := PendingSubagent{
+		Role:         role,
+		Model:        model,
+		Tier:         tier,
+		TaskSlug:     slug,
+		Title:        title,
+		PromptPrefix: promptPrefix,
+		CreatedAt:    time.Now(),
+	}
+
+	queue, _ := loadPendingSubagents(vaultDir)
+	cutoff := time.Now().Add(-10 * time.Minute)
+	var active []PendingSubagent
+	for _, q := range queue {
+		if q.CreatedAt.After(cutoff) {
+			active = append(active, q)
+		}
+	}
+	active = append(active, item)
+	err := savePendingSubagents(vaultDir, active)
+	return item, err
+}
+
+// PopPendingSubagent pops the oldest unclaimed pending subagent created within maxAge.
+func PopPendingSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent, bool) {
+	queue, err := loadPendingSubagents(vaultDir)
+	if err != nil || len(queue) == 0 {
+		return PendingSubagent{}, false
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var remaining []PendingSubagent
+	var matched PendingSubagent
+	found := false
+	for _, item := range queue {
+		if !found && item.CreatedAt.After(cutoff) {
+			matched = item
+			found = true
+			continue
+		}
+		if item.CreatedAt.After(cutoff) {
+			remaining = append(remaining, item)
+		}
+	}
+	if found {
+		_ = savePendingSubagents(vaultDir, remaining)
+		return matched, true
+	}
+	return PendingSubagent{}, false
 }

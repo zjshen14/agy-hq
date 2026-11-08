@@ -184,6 +184,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
 				os.Exit(1)
 			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
 		case "stop":
 			if err := hooks.HandleStop(os.Stdin, os.Stdout, vaultDir); err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook stop: %v\n", err)

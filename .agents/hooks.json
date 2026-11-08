@@ -9,7 +9,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name",
+        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents",
         "hooks": [
           {
             "type": "command",
