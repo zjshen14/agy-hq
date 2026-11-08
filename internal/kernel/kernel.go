@@ -173,6 +173,8 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		}
 	}
 	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ConversationID != convID && prev.ArtifactDir != "" {
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md"))
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md.metadata.json"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
 	}
@@ -195,6 +197,8 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 // automatically claims the Front Desk intake lease on SessionStart.
 func ReleaseFrontDesk(vaultDir string) error {
 	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ArtifactDir != "" {
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md"))
+		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md.metadata.json"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
 	}

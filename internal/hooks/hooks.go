@@ -71,14 +71,14 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
 		if !ok {
 			_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
-			artPath := filepath.Join(strings.TrimSpace(payload.ArtifactDirectoryPath), "hq_console_mobile.md")
+			artPath := filepath.Join(strings.TrimSpace(payload.ArtifactDirectoryPath), "hq_console.md")
 			consolePath := filepath.Join(vaultDir, "CONSOLE.md")
 			sections = append(sections, fmt.Sprintf(
 				"## 🚀 New [HQ] Front Desk Initialization Required\n"+
 					"- Active Front Desk Conversation ID: `%s` (claimed just now).\n"+
 					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, and tracked Task Conversations are already loaded below. Do **NOT** run shell commands or `read_file` to re-fetch them.\n"+
 					"- **Step 2 (Pin Live Console Artifact):** Read `%s` and call `write_file` (`Overwrite=true`, `ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live [HQ] Front Desk Console & Task Board\"}`) to `%s` so Antigravity pins the live status artifact in this conversation's UI.\n"+
-					"- **Step 3 (Concise Welcome):** Present a short status summary with clickable links to `[hq_console_mobile.md](file://%s)` and all active `[Task:<scope>]` conversations.",
+					"- **Step 3 (Concise Welcome):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations.",
 				payload.ConversationID, consolePath, artPath, artPath,
 			))
 		} else if existing.ConversationID != payload.ConversationID {

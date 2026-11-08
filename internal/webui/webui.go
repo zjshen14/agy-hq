@@ -332,7 +332,7 @@ func renderHTML(w http.ResponseWriter, state DashboardState) {
 
 // RecordArtifactDir stores the active conversation's artifactDirectoryPath so CLI commands
 // (`hq propose`, `hq approve`, `hq reject`, `hq worktree`, `hq heartbeat`) can deterministically
-// keep `hq_console_mobile.md` in sync on every state mutation.
+// keep `hq_console.md` in sync on every state mutation.
 func RecordArtifactDir(vaultDir, artifactDir string) {
 	if artifactDir == "" {
 		return
@@ -342,12 +342,12 @@ func RecordArtifactDir(vaultDir, artifactDir string) {
 }
 
 // SyncMarkdownConsole deterministically regenerates `local/CONSOLE.md` and (if present)
-// `<artifactDirectoryPath>/hq_console_mobile.md` from live Vault state in 0 LLM tokens.
+// `<artifactDirectoryPath>/hq_console.md` from live Vault state in 0 LLM tokens.
 func SyncMarkdownConsole(vaultDir string) error {
 	state := loadState(vaultDir, "")
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "# 🏛️ agy-hq Mobile Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(&b, "# 🏛️ agy-hq Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
 	if len(state.Pending) > 0 {
 		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **Pending Approvals (`%d` item(s) waiting):**\n", len(state.Pending))
@@ -464,8 +464,10 @@ func SyncMarkdownConsole(vaultDir string) error {
 	metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 	for artDir := range targetDirs {
 		if _, err := os.Stat(artDir); err == nil {
-			_ = os.WriteFile(filepath.Join(artDir, "hq_console_mobile.md"), content, 0o644)
-			_ = os.WriteFile(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"), metaBytes, 0o644)
+			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md"))
+			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"))
+			_ = os.WriteFile(filepath.Join(artDir, "hq_console.md"), content, 0o644)
+			_ = os.WriteFile(filepath.Join(artDir, "hq_console.md.metadata.json"), metaBytes, 0o644)
 		}
 	}
 	return nil
