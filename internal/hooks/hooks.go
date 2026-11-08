@@ -84,7 +84,6 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
 	}
 
-	var sections []string
 	if userBytes, err := os.ReadFile(filepath.Join(vaultDir, "USER.md")); err == nil {
 		if s := strings.TrimSpace(string(userBytes)); s != "" {
 			sections = append(sections, "## HQ Vault: USER.md\n"+s)
