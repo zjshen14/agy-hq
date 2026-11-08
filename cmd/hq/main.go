@@ -701,7 +701,7 @@ func main() {
 			}
 			fmt.Printf("Configured Gmail account %q (%s) [token=%s]\n", cfg.Alias, cfg.Email, cfg.TokenFile)
 
-		case "accounts":
+		case "accounts", "status":
 			reg, err := gmail.LoadRegistry(vaultDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gmail accounts failed: %v\n", err)
@@ -710,7 +710,7 @@ func main() {
 			b, _ := json.MarshalIndent(reg, "", "  ")
 			fmt.Println(string(b))
 
-		case "search":
+		case "search", "list":
 			fs := flag.NewFlagSet("gmail search", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			query := fs.String("query", "", "Gmail search query (defaults to account's Primary unread query)")
@@ -724,7 +724,7 @@ func main() {
 			b, _ := json.MarshalIndent(msgs, "", "  ")
 			fmt.Println(string(b))
 
-		case "read-quarantined":
+		case "read-quarantined", "read":
 			fs := flag.NewFlagSet("gmail read-quarantined", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			threadID := fs.String("thread", "", "Thread ID to read in quarantined mode")
@@ -756,7 +756,7 @@ func main() {
 			b, _ := json.MarshalIndent(spec, "", "  ")
 			fmt.Println(string(b))
 
-		case "send-draft":
+		case "send-draft", "send":
 			fs := flag.NewFlagSet("gmail send-draft", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email")
 			draftID := fs.String("draft", "", "Draft ID to verify and send")
@@ -769,7 +769,7 @@ func main() {
 			}
 			fmt.Println(out)
 
-		case "precheck":
+		case "precheck", "triage":
 			fs := flag.NewFlagSet("gmail precheck", flag.ExitOnError)
 			account := fs.String("account", "", "Optional account alias filter")
 			_ = fs.Parse(os.Args[3:])
@@ -1046,9 +1046,12 @@ Commands:
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
   worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/
-  gmail <init|search|read-quarantined|draft|precheck>  Layer 1 Gmail primitives & sidecar precheck
+  gmail <init|status|list|read|draft|triage>  Layer 1 Gmail primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
   subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation
+  complete <task-slug-or-conv-id>     Mark an active task as completed
+  archive <task-slug-or-conv-id>      Archive a completed task conversation
+  reopen <task-slug-or-conv-id>       Reopen an archived task conversation
   adopt --conv=<id> --task=<slug>     Adopt an existing conversation (or demote Front Desk to a Task)
   claim-desk --conv=<id>              Claim the single active [HQ] Front Desk intake lease
   release-desk                        Release Front Desk lease so next new conversation claims it`)

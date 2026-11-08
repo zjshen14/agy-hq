@@ -20,6 +20,10 @@
 | **CUJ-9** | Engine Upgrade & Non-Destructive Vault Migration | `hq upgrade`, `hq migrate` | `TestCUJ9_EngineUpgradeAndVaultMigration` |
 | **CUJ-10** | Front Desk Non-Blocking Guardrails | `hq hook pre-tool`, `internal/hooks` | `TestCUJ10_FrontDeskNonBlockingEnforcement` |
 | **CUJ-11** | Subagent Lifecycle & Task Board Tracking | `hq hook pre-tool`, `invoke_subagent`, `manage_subagents` | `TestCUJ11_SubagentLifecycleAndTaskboardTracking` |
+| **CUJ-12** | Automated Trigger Scheduling & Background Daemon | `hq daemon`, `hq heartbeat`, `local/triggers.yaml` | `TestCUJ12_AutomatedTriggerSchedulingAndDaemon` |
+| **CUJ-13** | Front Desk Init Hardening & Trigger Arming | `hq init`, `hq hook session-start`, `hq hook pre-tool` | `TestCUJ13_FrontDeskInitHardeningAndTriggerArming` |
+| **CUJ-14** | Decoupled Native Gmail Infrastructure & Workflows | `hq gmail`, `local/memory/gmail/` | `TestCUJ14_GmailLayer1AndLayer2Lifecycle` |
+| **CUJ-15** | 4-Layer Memory Engine & Dreaming Verification | `hq memory`, `local/memory/topics/`, `local/memory/facts.jsonl` | `TestCUJ15_MemoryEngineUpgradeAndDreamingVerification` |
 
 ---
 
@@ -115,3 +119,33 @@
 2. **Task Registration (`SessionStart`):** Subagents launched via `invoke_subagent` are matched from `pending_subagents.json` and registered in `local/memory/tasks.json` with normalized `[Subagent:<scope>] <Role> [<tier>]` titles and `subagent-<scope>-<role>` slugs, marked `🟢 active`.
 3. **Turn Completion (`Stop`):** When the subagent's turn completes, `HandleStop` marks the task `✅ completed` in `local/memory/tasks.json` and records the subagent's response summary.
 4. **Lifecycle Cancellation (`manage_subagents`):** Subagents killed via `manage_subagents` (`Action: "kill"` or `"kill_all"`) are immediately transitioned to `🛑 cancelled` on the Task Board.
+
+---
+
+## CUJ-12: Automated Trigger Scheduling & Background Daemon
+1. **Background Daemon Lifecycle (`hq daemon`):** `hq daemon install` registers a user-level service (`systemd` user service on Linux or `launchd` LaunchAgent on macOS) running `hq daemon run` in the background; `hq daemon status` checks service status; `hq daemon uninstall` unregisters and removes the service.
+2. **Heartbeat Diagnostics & Alerting (`hq doctor`):** Warns if schedules are declared in `local/triggers.yaml` but the background daemon service is inactive.
+3. **0-Token Periodic Execution:** The background daemon runs the 15-second `local/inbox/` router and 30-minute `RunHeartbeat` gatekeeper without waking the LLM unless actionable items require dispatch.
+
+---
+
+## CUJ-13: Front Desk Init Hardening & Trigger Arming
+1. **Persistent Turn-1 Init Banner:** Even if `hq init` or `hq claim-desk` creates `front_desk.json` ahead of time, `SessionStart` persistently injects the Turn-1 initialization directive on every turn until `ConsolePinned` is true and all `triggers.yaml` schedules are armed.
+2. **Console Pinning State Tracking:** Detects `write_file` targeting `hq_console.md` in `PreToolUse` and marks `consolePinned: true` in `front_desk.json`.
+3. **Trigger Reconciliation:** Tracks `schedule` and `manage_task` calls in `PreToolUse` and reconciles against `local/triggers.yaml` so declared jobs (`morning-brief`, `edgar-close-watch`, `sleep-consolidate`) are never left dormant.
+4. **Subagent Pointer Isolation:** Subagent and task conversation turns never overwrite the Front Desk's `front_desk_turn.json` lookup counter or `active_artifact_dir.txt`.
+
+---
+
+## CUJ-14: Decoupled Native Gmail Infrastructure & Workflows
+1. **Multi-Account Registry (`hq gmail init` / `add-account` / `accounts`):** Stores account configurations and OAuth token references securely in `local/config.yaml` / `local/memory/gmail/`.
+2. **Safe Inspection & Quarantined Reader:** `hq gmail search` lists messages in raw JSON without LLM exposure; `hq gmail read-quarantined` extracts headers and strips HTML/scripts into safe plain text.
+3. **Staged Sending via Approval Proposals:** `hq gmail draft` creates or updates draft messages; sending live emails requires staging via `hq propose --type=gmail_send` with SHA-256 confirmation before `hq gmail send-draft` can execute.
+4. **Batch Triage & Attachment Quarantine:** Supports pure-Go sidecar unread prechecks (`hq gmail precheck`), batch triage result recording (`hq gmail triage-result`), and quarantined attachment sandboxing with auto-routing (`hq gmail attachment-quarantine`).
+
+---
+
+## CUJ-15: 4-Layer Memory Engine & Dreaming Verification
+1. **Four-Layer Hierarchy:** Separates memory into (1) Injected Context / Roadmap Index (`local/MEMORY.md`), (2) Knowledge Wiki / Topic Pages (`local/memory/topics/*.md`), (3) Bi-temporal Facts (`local/memory/facts.jsonl`), and (4) Immutable Raw Transcripts (`transcript.jsonl`).
+2. **CLI Fact Management:** `hq memory add-fact` adds atomic facts with provenance; `hq memory prune-fact` soft-prunes or supersedes facts with timestamps; `hq memory topics` indexes topic wiki pages.
+3. **Ground-Truth Dreaming Verification:** `hq memory verify-transcript` audits claims against session transcripts, preventing hallucinated milestones or false bug-fix memories from polluting long-term memory.

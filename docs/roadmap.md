@@ -21,7 +21,7 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ### M0: Foundation Spikes & Safety Prerequisites
 *Goal: Prove the Antigravity hook/sidecar/CLI integration points in isolation and lock down sandbox settings before running any autonomous tasks.*
-- **Specs:** [RFC-0001](design/0001-vault-and-task-isolation.md), [RFC-0003](design/0003-approval-bound-execution.md), [ADR-0001](decisions/0001-architecture-option-1-5-antigravity-plus-go-kernel.md)
+- **Specs:** [RFC-0001](design/0001-vault-and-task-isolation.md), [RFC-0003](design/0003-approval-bound-execution.md), [ADR-0001](decisions/0001-option-1.5-hybrid-on-antigravity.md)
 
 - [x] **M0.0:** Initialize `agy-hq` git repository, `.gitignore` Vault protections, `.git/hooks/pre-commit` PII guard, and modular `docs/` hierarchy (`PRD` / `RFC` / `ADR`).
 - [x] **M0.1:** Scaffold `go.mod` (`github.com/zjshen14/agy-hq`) and `cmd/hq/main.go` with subcommands (`init`, `hook`, `propose`, `approve`, `reject`, `worktree`, `status`, `doctor`).
@@ -57,14 +57,32 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ---
 
-### M2: Proactive Loop, 0-Token Gatekeeper & Scheduled Automations
-*Goal: Turn `agy-hq` from a reactive assistant into a proactive, silent-by-default agent that monitors events and delivers morning briefs to your phone via Antigravity Remote Control.*
-- **Specs:** [PRD-0001](product/0001-vision-and-ux.md), [RFC-0004](design/0004-heartbeat-and-channels.md)
+### M2: Proactive Loop, 0-Token Gatekeeper & Production Capabilities
+*Goal: Turn `agy-hq` from a reactive assistant into an always-on proactive agent OS with automated scheduling, robust Front Desk coordination, decoupled Gmail integration, and 4-layer memory hierarchy.*
+- **Specs:** [PRD-0001](product/0001-vision-and-ux.md), [PRD-0003](product/0003-critical-user-journeys.md), [RFC-0004](design/0004-heartbeat-and-channels.md), [RFC-0005](design/0005-gmail-integration.md), [RFC-0006](design/0006-memory-engine-upgrade.md), [RFC-0007](design/0007-front-desk-initialization-hardening.md)
 
-- [x] **M2.1 (`local/inbox/` Drop Router):** Scan `local/inbox/` in `internal/kernel/kernel.go`, classify dropped files (`ledger-ingest`, `tax-prep`, `thesis-check`, or `inbox-triage` fallback), move to `local/inbox/queued/`, and dispatch `--model=flash` background tasks.
+- [x] **M2.1 (`local/inbox/` Drop Router & Quota):** Scan `local/inbox/` in `internal/kernel/kernel.go`, classify dropped files (`ledger-ingest`, `tax-prep`, `thesis-check`, or `inbox-triage` fallback), move to `local/inbox/queued/`, and dispatch background tasks with daily spawn quota circuit breaker.
 - [x] **M2.2 (30m Zero-Token Heartbeat Gatekeeper & Dead-Man's Switch):** Run deterministic pre-checks (`./bin/hq heartbeat` & background loop in `hq daemon`); record `HEARTBEAT_OK (0 LLM tokens)` when idle, enforce `max_daily_spawns: 15`, and alert if `brief-YYYY-MM-DD.md` is missing after 08:00 AM.
-- [x] **M2.3 (Scheduled Automation Blueprints):** Provide `templates/sidecars/{hq-morning-brief,hq-edgar-close-watch,hq-sleep-consolidate}/sidecar.json` pinned to `--model=flash`.
-- [x] **M2.4 (End-to-End Verification):** Verified `hq heartbeat`, Dead-Man's Switch clearance with `local/notes/general/brief-2026-11-07.md`, and 1-tap SHA-256 approval execution.
+- [x] **M2.3 (Background Daemon Service — `systemd` / `launchd`):** Implement `./bin/hq daemon install`, `status`, and `uninstall` managing LaunchAgent on macOS and systemd user services on Linux for true 24/7 autonomous monitoring.
+- [x] **M2.4 (Front Desk Initialization Hardening & Auto-Arm Daemon — RFC-0007):**
+  - Persistent Turn-1 initialization directive in `SessionStart` until live status artifact card (`hq_console.md`) is pinned.
+  - Automatically arm all declared cron schedules in `local/triggers.yaml` (`morning-brief`, `edgar-close-watch`, `sleep-consolidate`).
+  - Track `schedule` and `manage_task` calls in `PreToolUse` and reconcile armed triggers.
+  - Exempt Turn-1 initialization housekeeping reads from the Front Desk lookup cap.
+- [x] **M2.5 (Task Conversation Lifecycle & Native Subagent Tracking):**
+  - Full task state machine (`active` $\rightarrow$ `completed` $\rightarrow$ `archived` / `reopen`) managed via `tasks.json` and CLI (`hq complete`, `hq archive`, `hq reopen`).
+  - Track native `invoke_subagent` calls, quota increments, task board registration, and completion/cancellation via `PreToolUse` and `Stop` hooks.
+  - Mechanical non-blocking Front Desk guardrails blocking direct source/worktree edits and heavy test suites, with a 3-lookup per-turn cap.
+- [x] **M2.6 (Decoupled Native Gmail Integration — RFC-0005):**
+  - Layer 1 primitives: Multi-account registry (`hq gmail init` / `accounts`), search (`hq gmail list`), sandboxed text reader (`hq gmail read`), and draft management (`hq gmail draft`).
+  - Safe staged execution: Live sending strictly gated behind approval proposals (`hq propose --type=gmail_send` $\rightarrow$ `hq gmail send`).
+  - Pure-Go unread sidecar precheck (`hq gmail triage`), batch triage results recording, and quarantined attachment handling.
+- [x] **M2.7 (Four-Layer Memory Engine & Dreaming Falsification — RFC-0006):**
+  - 4-layer stack: Roadmap Index (`MEMORY.md` < 2,500 tokens), Knowledge Wiki (`local/memory/topics/*.md`), bi-temporal facts (`local/memory/facts.jsonl`), and raw transcripts.
+  - CLI fact management (`hq memory add-fact`, `prune-fact`, `compact`, `topics`).
+  - Ground-truth dreaming verification (`hq memory verify-transcript`) preventing unverified or optimistic self-reports from compounding in long-term memory.
+- [x] **M2.8 (End-to-End Black-Box Test Suite — CUJs 1–15):**
+  - Full black-box regression suite in `internal/e2e/cuj_e2e_test.go` verifying all 15 Critical User Journeys against the compiled `bin/hq` binary (100% passing).
 
 ---
 

@@ -60,26 +60,37 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (This Git
 
 ---
 
-## Documentation (`docs/`)
+## Documentation & Specifications
 
-All product specs, technical RFCs, Architecture Decision Records (ADRs), and frontier research live in **[`docs/README.md`](docs/README.md)**:
+Full product specs (PRDs), technical designs (RFCs 0001–0007), architecture decision records (ADRs 0001–0006), and frontier research live in **[`docs/`](docs/README.md)**.
 
-- **System Overview:** [Architecture (`docs/architecture.md`)](docs/architecture.md) · [Roadmap (`docs/roadmap.md`)](docs/roadmap.md)
-- **Product Designs (`docs/product/`):**
-  - [PRD-0001: Vision & Day-in-the-Life UX](docs/product/0001-vision-and-ux.md)
-  - [PRD-0002: Open-Ended Workflows & Additive Skills](docs/product/0002-open-workflows-and-skills.md)
-  - [PRD-0003: Critical User Journeys & E2E Acceptance Criteria](docs/product/0003-critical-user-journeys.md)
-- **Technical Designs (`docs/design/`):**
-  - [RFC-0001: Two-Layer Vault Split & Per-Task Parallel Isolation](docs/design/0001-vault-and-task-isolation.md)
-  - [RFC-0002: Zero-Token Journaling & Sleep-Time Memory Consolidation](docs/design/0002-memory-and-consolidation.md)
-  - [RFC-0003: Action-Based Safety, Quarantined Readers & Approval-Bound Execution](docs/design/0003-approval-bound-execution.md)
-  - [RFC-0004: Silent Gatekeeper, Quota Circuit Breaker & Channel Adapters](docs/design/0004-heartbeat-and-channels.md)
-- **Key Decisions (`docs/decisions/`):**
-  - [ADR-0001: Option 1.5 Hybrid on Antigravity](docs/decisions/0001-option-1.5-hybrid-on-antigravity.md)
-  - [ADR-0002: Go Microkernel Binary (`bin/hq`)](docs/decisions/0002-go-microkernel-binary.md)
-  - [ADR-0003: Two-Layer OSS vs. Private Vault Split](docs/decisions/0003-two-layer-oss-and-private-vault.md)
-  - [ADR-0004: Remote Control First + Pluggable Channels](docs/decisions/0004-remote-control-first-pluggable-channels.md)
-  - [ADR-0005: Zero-Token Stop Hook vs. Blocking Gate](docs/decisions/0005-zero-token-stop-hook-vs-blocking-gate.md)
-  - [ADR-0006: General-Purpose Agent + Additive Skills Over Rigid Domain Packs](docs/decisions/0006-general-agent-and-skills-over-packs.md)
-- **Research Archive (`docs/research/`):**
-  - [01 — Product Landscape](docs/research/01_products.md) · [02 — Academic Frontier](docs/research/02_academic.md) · [03 — Technical Options](docs/research/03_technical.md) · [04 — Antigravity Audit](docs/research/04_antigravity_audit.md)
+---
+
+## CLI Quick Reference (`./bin/hq`)
+
+| Category | Command | Description |
+|---|---|---|
+| **Core** | `./bin/hq init` | Initialize git-ignored private `local/` Vault and local git repo |
+| | `./bin/hq doctor` | Verify Antigravity sandbox, Remote Control, CLI tools, and Vault health |
+| | `./bin/hq status` | Display pending approvals queue, active worktrees, and health |
+| **Daemon & Triggers** | `./bin/hq daemon install` | Install `systemd` or `launchd` background HQ daemon service |
+| | `./bin/hq daemon status` | Check background daemon status, PID, and uptime |
+| | `./bin/hq daemon uninstall` | Cleanly stop and uninstall background daemon service |
+| | `./bin/hq heartbeat` | Run 0-token idle pre-checks, Dead-Man's Switch, and drop router |
+| **Task Lifecycle** | `./bin/hq spawn --task=<slug> --prompt="..."` | Spawn dedicated Task Conversation in isolated worktree |
+| | `./bin/hq subagent --role="..." --prompt="..."` | Launch nested child subagent under current conversation |
+| | `./bin/hq complete <task-slug-or-conv-id>` | Mark an active task conversation as completed |
+| | `./bin/hq archive <task-slug-or-conv-id>` | Archive a completed task conversation |
+| | `./bin/hq reopen <task-slug-or-conv-id>` | Reopen an archived task conversation |
+| | `./bin/hq worktree add <repo> <task>` | Create isolated git worktree in `local/worktrees/<repo>-<task>/` |
+| **Updates & Migration** | `./bin/hq upgrade` | Snapshot Vault, pull latest commits, recompile CLI, and migrate |
+| | `./bin/hq migrate` | Run non-destructive Vault schema and template migrations |
+| **Safety & Approvals** | `./bin/hq propose --type=... --cmd="..."` | Stage irreversible outbound action for 1-tap approval |
+| | `./bin/hq approve <id> [--sha256=<hash>]` | Verify SHA-256 and deterministically execute staged action |
+| | `./bin/hq reject <id>` | Reject and remove pending outbound proposal |
+| **Gmail Primitives** | `./bin/hq gmail init --email=<email>` | Configure primary or secondary Gmail account |
+| | `./bin/hq gmail status` | Inspect configured Gmail accounts and sidecar auth status |
+| | `./bin/hq gmail list [--query="..."]` | Search and list Gmail messages without LLM exposure |
+| | `./bin/hq gmail read --thread=<id>` | Read email thread quarantined in sandboxed text format |
+| | `./bin/hq gmail draft --to=... --body=...` | Create or update draft email for staged review |
+| | `./bin/hq gmail triage` | Run pure-Go unread sidecar precheck and batch triage items |
