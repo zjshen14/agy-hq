@@ -565,15 +565,19 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 		for _, tc := range step.ToolCalls {
 			switch tc.Name {
 			case "write_file", "edit_file":
-				if p, _ := tc.Args["Path"].(string); strings.HasSuffix(filepath.ToSlash(p), "/hq_console.md") || p == "hq_console.md" {
+				rawPath, _ := tc.Args["Path"].(string)
+				p := strings.Trim(strings.TrimSpace(rawPath), "\"")
+				if strings.HasSuffix(filepath.ToSlash(p), "/hq_console.md") || p == "hq_console.md" {
 					if !fd.ConsolePinned {
 						fd.ConsolePinned = true
 						changed = true
 					}
 				}
 			case "schedule":
-				cronExpr, _ := tc.Args["CronExpression"].(string)
-				prompt, _ := tc.Args["Prompt"].(string)
+				rawCron, _ := tc.Args["CronExpression"].(string)
+				rawPrompt, _ := tc.Args["Prompt"].(string)
+				cronExpr := strings.Trim(strings.TrimSpace(rawCron), "\"")
+				prompt := strings.Trim(strings.TrimSpace(rawPrompt), "\"")
 				if cronExpr == "" && prompt == "" {
 					continue
 				}

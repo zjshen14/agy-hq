@@ -710,16 +710,22 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 				toolSet[tc.Name] = true
 			}
 			if tc.Name == "write_file" || tc.Name == "edit_file" {
-				if p, ok := tc.Args["Path"].(string); ok && p != "" {
-					fileSet[p] = true
+				if rawP, ok := tc.Args["Path"].(string); ok {
+					p := strings.Trim(strings.TrimSpace(rawP), "\"")
+					if p != "" {
+						fileSet[p] = true
+					}
 				}
 			}
 			if tc.Name == "send_message" {
-				if msg, ok := tc.Args["Message"].(string); ok && strings.TrimSpace(msg) != "" {
-					if strings.TrimSpace(lastResponse) == "" || len(lastResponse) < 20 {
-						lastResponse = strings.TrimSpace(msg)
-						if runes := []rune(lastResponse); len(runes) > 500 {
-							lastResponse = string(runes[:500]) + "..."
+				if rawMsg, ok := tc.Args["Message"].(string); ok {
+					msg := strings.Trim(strings.TrimSpace(rawMsg), "\"")
+					if msg != "" {
+						if strings.TrimSpace(lastResponse) == "" || len(lastResponse) < 20 {
+							lastResponse = msg
+							if runes := []rune(lastResponse); len(runes) > 500 {
+								lastResponse = string(runes[:500]) + "..."
+							}
 						}
 					}
 				}
