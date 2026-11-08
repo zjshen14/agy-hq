@@ -11,7 +11,7 @@ import (
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -113,6 +113,14 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	removedLegacy := removeLegacyMobileConsole(vaultDir)
 	if prev.Version < 3 || normalized > 0 || removedLegacy {
 		recordStep("v3_task_titles_and_console", fmt.Sprintf("Normalized %d task title(s) to [Task:<scope>] convention; cleaned legacy mobile console=%v", normalized, removedLegacy))
+	}
+
+	// Migration v3 -> v4: Seed Knowledge Wiki topic page, append Knowledge Map section to MEMORY.md, and deduplicate facts.jsonl
+	if prev.Version < 4 {
+		seededTopic := ensureStarterTopicPage(vaultDir)
+		addedMap := ensureMemoryKnowledgeMapSection(vaultDir)
+		beforeFacts, afterFacts, _ := CompactFacts(vaultDir)
+		recordStep("v4_memory_wiki_and_fact_dedup", fmt.Sprintf("Upgraded 4-layer Memory Engine (seededTopic=%v, addedKnowledgeMap=%v, compactedFacts=%d->%d)", seededTopic, addedMap, beforeFacts, afterFacts))
 	}
 
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml
@@ -263,6 +271,49 @@ func removeLegacyMobileConsole(vaultDir string) bool {
 		}
 	}
 	return removed
+}
+
+func ensureStarterTopicPage(vaultDir string) bool {
+	topicsDir := filepath.Join(vaultDir, "memory", "topics")
+	_ = os.MkdirAll(topicsDir, 0o755)
+	entries, err := os.ReadDir(topicsDir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+				return false // user already has topic pages
+			}
+		}
+	}
+	starterPath := filepath.Join(topicsDir, "agy-hq-architecture.md")
+	content := "# agy-hq Architecture & Harness Invariants\n" +
+		"> **Summary:** Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory hierarchy.\n\n" +
+		"## Core Invariants\n" +
+		"- **Two-Layer Vault Split:** Never commit PII or `local/` files to the public root repository; store personal notes in `local/notes/` and financial/tax records in `local/private/`.\n" +
+		"- **Non-Blocking Front Desk:** The single Front Desk thread is strictly for coordination and quick answers (<= 3 lookup tool calls). Delegate coding, debugging, and open-ended research to background subagents (`invoke_subagent`) or dedicated task conversations (`./bin/hq spawn`).\n" +
+		"- **Four-Layer Memory Stack (RFC-0006):** Keep `local/MEMORY.md` under 80 lines as a Roadmap Index; distill deep technical or domain lessons into `local/memory/topics/<slug>.md` and verify turn claims against `transcript.jsonl` during `/sleep-consolidate`.\n"
+	if err := os.WriteFile(starterPath, []byte(content), 0o644); err != nil {
+		return false
+	}
+	return true
+}
+
+func ensureMemoryKnowledgeMapSection(vaultDir string) bool {
+	memPath := filepath.Join(vaultDir, "MEMORY.md")
+	b, err := os.ReadFile(memPath)
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	if strings.Contains(s, "## Knowledge Map") {
+		return false
+	}
+	addition := "\n\n## Knowledge Map (Topic Wiki)\n" +
+		"- `agy-hq-architecture` (`local/memory/topics/agy-hq-architecture.md`): Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory architecture.\n"
+	updated := strings.TrimRight(s, "\n") + addition
+	if err := os.WriteFile(memPath, []byte(updated), 0o644); err != nil {
+		return false
+	}
+	return true
 }
 
 // mergeMissingTopLevelYAMLBlocks checks if template YAML has top-level keys ("key:")

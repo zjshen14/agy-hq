@@ -681,8 +681,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v3") {
-		t.Fatalf("expected v0 -> v3 migration output, got:\n%s", upOut)
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v4") {
+		t.Fatalf("expected v0 -> v4 migration output, got:\n%s", upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -708,13 +708,13 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 		t.Fatalf("expected deprecated hq_console_mobile.md to be removed during migration")
 	}
 
-	// 5. Verify schema_version.json is now at version 3 and re-running `hq migrate` is a clean idempotent no-op
+	// 5. Verify schema_version.json is now at version 4 and re-running `hq migrate` is a clean idempotent no-op
 	migOut2, err := env.run("", "migrate")
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v3 -> v3") {
-		t.Fatalf("expected idempotent v3 -> v3 on second run, got:\n%s", migOut2)
+	if !strings.Contains(migOut2, "Vault Schema Migration: v4 -> v4") {
+		t.Fatalf("expected idempotent v4 -> v4 on second run, got:\n%s", migOut2)
 	}
 }
 
@@ -991,6 +991,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 // CUJ-12: Automated Trigger Scheduling & Background Daemon Lifecycle
 func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	env := setupHQEnv(t)
@@ -1397,5 +1398,118 @@ func TestCUJ14_GmailLayer1AndLayer2Lifecycle(t *testing.T) {
 	appOut, err := env.run("", "approve", prop.ID, "--sha256="+prop.SHA256[:12])
 	if err != nil || !strings.Contains(appOut, "Sent draft "+draftObj.DraftID) {
 		t.Fatalf("hq approve gmail_send failed: %v (%s)", err, appOut)
+	}
+}
+
+// CUJ-15: Four-Layer Memory Engine (Topic Wiki Discovery, Fact Pruning & Ground-Truth Transcript Verification)
+func TestCUJ15_MemoryEngineUpgradeAndDreamingVerification(t *testing.T) {
+	env := setupHQEnv(t)
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// 1. Add a custom Topic Wiki page in local/memory/topics/gmail-integration.md
+	gmailTopicPath := filepath.Join(env.vaultDir, "memory", "topics", "gmail-integration.md")
+	gmailTopicContent := "# Gmail Integration Architecture\n" +
+		"> **Summary:** Quarantined email reader, OAuth token handling, and proposal-bound outbound sending.\n\n" +
+		"## Details\n- Never send emails directly; stage via `hq propose`.\n"
+	if err := os.WriteFile(gmailTopicPath, []byte(gmailTopicContent), 0o644); err != nil {
+		t.Fatalf("write topic page: %v", err)
+	}
+
+	// 2. Add two bi-temporal facts via `hq memory add-fact`, then soft-prune the first one
+	out1, err := env.run("", "memory", "add-fact",
+		"--id=fact-legacy-001",
+		"--topic=memory",
+		"--statement=Store all notes in a flat MEMORY.md file",
+	)
+	if err != nil {
+		t.Fatalf("add-fact 1 failed: %v (%s)", err, out1)
+	}
+	out2, err := env.run("", "memory", "add-fact",
+		"--id=fact-rfc0006-002",
+		"--topic=memory",
+		"--statement=Keep MEMORY.md <= 80 lines as a Roadmap Index and distill details into local/memory/topics/",
+		"--source=conv-dream-01",
+		"--verified",
+	)
+	if err != nil {
+		t.Fatalf("add-fact 2 failed: %v (%s)", err, out2)
+	}
+
+	pruneOut, err := env.run("", "memory", "prune-fact", "fact-legacy-001", "--superseded-by=fact-rfc0006-002")
+	if err != nil {
+		t.Fatalf("prune-fact failed: %v (%s)", err, pruneOut)
+	}
+	if !strings.Contains(pruneOut, "Pruned fact fact-legacy-001") {
+		t.Fatalf("unexpected prune-fact output: %s", pruneOut)
+	}
+
+	// 3. Run SessionStart and verify:
+	//    - Auto-discovered Topic Wiki Index includes gmail-integration and agy-hq-architecture with retrieval directive
+	//    - Active Vault Facts includes fact-rfc0006-002 (verified) and EXCLUDES pruned fact-legacy-001
+	artDir := filepath.Join(t.TempDir(), "brain-mem")
+	_ = os.MkdirAll(artDir, 0o755)
+	ssOut, err := env.run(fmt.Sprintf(`{"conversationId":"conv-mem-test","artifactDirectoryPath":%q}`, artDir), "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start failed: %v (%s)", err, ssOut)
+	}
+	if !strings.Contains(ssOut, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)") ||
+		!strings.Contains(ssOut, "Gmail Integration Architecture") ||
+		!strings.Contains(ssOut, "Quarantined email reader") {
+		t.Fatalf("expected auto-discovered Topic Wiki Index in SessionStart, got:\n%s", ssOut)
+	}
+	if !strings.Contains(ssOut, "(fact-rfc0006-002 · verified)") {
+		t.Fatalf("expected verified fact-rfc0006-002 in SessionStart, got:\n%s", ssOut)
+	}
+	if strings.Contains(ssOut, "fact-legacy-001") || strings.Contains(ssOut, "Store all notes in a flat MEMORY.md file") {
+		t.Fatalf("regression: pruned fact-legacy-001 leaked into SessionStart!\n%s", ssOut)
+	}
+
+	// 4. Verify `hq memory status` reports accurate counts and orphan detection
+	statOut, err := env.run("", "memory", "status")
+	if err != nil {
+		t.Fatalf("hq memory status failed: %v (%s)", err, statOut)
+	}
+	if !strings.Contains(statOut, "[OK]") || !strings.Contains(statOut, "1 active, 1 expired") {
+		t.Fatalf("unexpected hq memory status output:\n%s", statOut)
+	}
+
+	// 5. Simulate a conversation turn with a failed command and a reverted file, then run `hq hook stop` + `hq memory verify-transcript`
+	transcriptFile := filepath.Join(t.TempDir(), "dream-transcript.jsonl")
+	missingFilePath := filepath.Join(t.TempDir(), "nonexistent-reverted.go")
+	tLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nFix the memory bug and run tests\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-08T10:00:00-08:00.\n</ADDITIONAL_METADATA>"}`,
+		fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"Writing fix...","tool_calls":[{"name":"write_file","args":{"Path":%q}},{"name":"run_command","args":{"CommandLine":"go test ./..."}}]}`, missingFilePath),
+		`{"step_index":2,"type":"GENERIC","status":"DONE","content":"Created At: 2026-11-08T10:00:05-08:00\nCommand exited with code 1.\nFAIL\tgithub.com/zjshen14/agy-hq/internal/vault"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","content":"Everything built and passed cleanly!"}`,
+	}
+	_ = os.WriteFile(transcriptFile, []byte(strings.Join(tLines, "\n")+"\n"), 0o644)
+
+	stopIn := fmt.Sprintf(`{"conversationId":"conv-dream-verify","executionNum":1,"transcriptPath":%q,"lastUserInput":"Fix the memory bug and run tests","terminationReason":"NO_TOOL_CALL"}`, transcriptFile)
+	if _, err := env.run(stopIn, "hook", "stop"); err != nil {
+		t.Fatalf("hook stop failed: %v", err)
+	}
+
+	// Verify journal entry persisted transcriptPath, stepCount: 4, toolErrorCount: 1
+	today := time.Now().Format("2006-01-02")
+	journalPath := filepath.Join(env.vaultDir, "memory", "journal", today, "conv-dream-verify-1.json")
+	jData, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal file: %v", err)
+	}
+	if !strings.Contains(string(jData), `"toolErrorCount": 1`) || !strings.Contains(string(jData), `"stepCount": 4`) || !strings.Contains(string(jData), transcriptFile) {
+		t.Fatalf("expected toolErrorCount=1, stepCount=4, and transcriptPath in journal JSON, got:\n%s", string(jData))
+	}
+
+	// Run `hq memory verify-transcript conv-dream-verify` (resolving via the journal's recorded transcriptPath!)
+	verOut, err := env.run("", "memory", "verify-transcript", "conv-dream-verify")
+	if err != nil {
+		t.Fatalf("verify-transcript failed: %v (%s)", err, verOut)
+	}
+	if !strings.Contains(verOut, `"toolErrorCount": 1`) ||
+		!strings.Contains(verOut, "Command exited with code 1") ||
+		!strings.Contains(verOut, "no longer exists on disk") {
+		t.Fatalf("expected ground-truth error and missing-file discrepancy warning in verify-transcript digest, got:\n%s", verOut)
 	}
 }

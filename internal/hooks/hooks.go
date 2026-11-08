@@ -53,13 +53,38 @@ type JournalEntry struct {
 	Timestamp         string   `json:"timestamp"`
 	ConversationID    string   `json:"conversationId"`
 	ExecutionNum      int      `json:"executionNum"`
+	TranscriptPath    string   `json:"transcriptPath,omitempty"`
 	WorkspacePaths    []string `json:"workspacePaths,omitempty"`
 	ModelName         string   `json:"modelName,omitempty"`
+	StepCount         int      `json:"stepCount,omitempty"`
+	ToolErrorCount    int      `json:"toolErrorCount,omitempty"`
 	UserPrompt        string   `json:"userPrompt,omitempty"`
 	ToolsUsed         []string `json:"toolsUsed,omitempty"`
 	FilesModified     []string `json:"filesModified,omitempty"`
 	TerminationReason string   `json:"terminationReason"`
 	ResponseSummary   string   `json:"responseSummary,omitempty"`
+}
+
+// TranscriptStepError captures a single failed tool or command execution step from transcript.jsonl.
+type TranscriptStepError struct {
+	StepIndex int    `json:"stepIndex"`
+	Type      string `json:"type,omitempty"`
+	Summary   string `json:"summary"`
+}
+
+// TranscriptVerificationDigest is the 0-token ground-truth digest of a conversation's raw transcript.jsonl.
+type TranscriptVerificationDigest struct {
+	ConversationID      string                `json:"conversationId,omitempty"`
+	TranscriptPath      string                `json:"transcriptPath"`
+	TotalSteps          int                   `json:"totalSteps"`
+	UserInputs          []string              `json:"userInputs,omitempty"`
+	ToolsUsed           []string              `json:"toolsUsed,omitempty"`
+	FilesModified       []string              `json:"filesModified,omitempty"`
+	CommandsExecuted    []string              `json:"commandsExecuted,omitempty"`
+	ToolErrorCount      int                   `json:"toolErrorCount"`
+	Errors              []TranscriptStepError `json:"errors,omitempty"`
+	FinalResponse       string                `json:"finalResponse,omitempty"`
+	DiscrepancyWarnings []string              `json:"discrepancyWarnings,omitempty"`
 }
 
 // HandleSessionStart reads local/USER.md, local/MEMORY.md, and active facts,
@@ -203,13 +228,38 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	}
 	if memBytes, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
 		if s := strings.TrimSpace(string(memBytes)); s != "" {
+			lines := strings.Split(s, "\n")
+			if len(lines) > vault.MaxMemoryIndexLines {
+				s = strings.Join(lines[:vault.MaxMemoryIndexLines], "\n") +
+					fmt.Sprintf("\n\n> ⚠️ **[Roadmap Index Budget Warning]:** `local/MEMORY.md` exceeds %d lines (%d lines). Run `/sleep-consolidate` or `./bin/hq memory status` to distill detailed notes into `local/memory/topics/<slug>.md`.", vault.MaxMemoryIndexLines, len(lines))
+			}
 			sections = append(sections, "## HQ Vault: MEMORY.md\n"+s)
 		}
+	}
+	if topics, err := vault.LoadTopicIndex(vaultDir); err == nil && len(topics) > 0 {
+		var topicLines []string
+		topicLines = append(topicLines, "> **Retrieval Directive:** When your task touches any topic listed below, call `read_file` on its topic page first to load verified architectural context.")
+		for _, tp := range topics {
+			if tp.Summary != "" {
+				topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`): %s", tp.Title, tp.Path, tp.Slug, tp.Summary))
+			} else {
+				topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`)", tp.Title, tp.Path, tp.Slug))
+			}
+		}
+		sections = append(sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
 	}
 	if facts, err := vault.LoadActiveFacts(vaultDir, 25); err == nil && len(facts) > 0 {
 		var lines []string
 		for _, f := range facts {
-			lines = append(lines, fmt.Sprintf("- [%s] %s", f.Topic, f.Statement))
+			meta := ""
+			if f.ID != "" {
+				if f.Verified {
+					meta = fmt.Sprintf(" (%s · verified)", f.ID)
+				} else {
+					meta = fmt.Sprintf(" (%s)", f.ID)
+				}
+			}
+			lines = append(lines, fmt.Sprintf("- [%s]%s %s", f.Topic, meta, f.Statement))
 		}
 		sections = append(sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
 	}
@@ -595,7 +645,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 		}
 
-		toolsUsed, filesModified, summary, transcriptUserPrompt := parseTranscriptSummary(payload.TranscriptPath)
+		toolsUsed, filesModified, summary, transcriptUserPrompt, stepCount, toolErrorCount := parseTranscriptSummaryWithMetrics(payload.TranscriptPath)
 		userPrompt := strings.TrimSpace(payload.LastUserInput)
 		if userPrompt == "" {
 			userPrompt = transcriptUserPrompt
@@ -611,8 +661,11 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				Timestamp:         time.Now().Format(time.RFC3339),
 				ConversationID:    payload.ConversationID,
 				ExecutionNum:      execNum,
+				TranscriptPath:    payload.TranscriptPath,
 				WorkspacePaths:    payload.WorkspacePaths,
 				ModelName:         payload.ModelName,
+				StepCount:         stepCount,
+				ToolErrorCount:    toolErrorCount,
 				UserPrompt:        userPrompt,
 				ToolsUsed:         toolsUsed,
 				FilesModified:     filesModified,
@@ -747,12 +800,33 @@ func nextExecutionNum(dateDir, convID string) int {
 }
 
 func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string) {
+	toolsUsed, filesModified, lastResponse, lastUserPrompt, _, _ = parseTranscriptSummaryWithMetrics(transcriptPath)
+	return toolsUsed, filesModified, lastResponse, lastUserPrompt
+}
+
+func isTranscriptStepError(status, content string) bool {
+	if strings.EqualFold(strings.TrimSpace(status), "ERROR") {
+		return true
+	}
+	if strings.Contains(content, "Encountered error in tool execution:") {
+		return true
+	}
+	if idx := strings.Index(content, "Command exited with code "); idx >= 0 {
+		rest := strings.TrimSpace(content[idx+len("Command exited with code "):])
+		if !strings.HasPrefix(rest, "0") {
+			return true
+		}
+	}
+	return false
+}
+
+func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string, stepCount int, toolErrorCount int) {
 	if transcriptPath == "" {
-		return nil, nil, "", ""
+		return nil, nil, "", "", 0, 0
 	}
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return nil, nil, "", ""
+		return nil, nil, "", "", 0, 0
 	}
 	defer f.Close()
 
@@ -766,6 +840,7 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 	for scanner.Scan() {
 		var step struct {
 			Type      string `json:"type"`
+			Status    string `json:"status"`
 			Content   string `json:"content"`
 			ToolCalls []struct {
 				Name string                 `json:"name"`
@@ -774,6 +849,10 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &step); err != nil {
 			continue
+		}
+		stepCount++
+		if isTranscriptStepError(step.Status, step.Content) {
+			toolErrorCount++
 		}
 		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
 			cleaned := strings.ReplaceAll(step.Content, "<USER_REQUEST>", "")
@@ -823,5 +902,205 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 	for k := range fileSet {
 		filesModified = append(filesModified, k)
 	}
-	return toolsUsed, filesModified, lastResponse, lastUserPrompt
+	return toolsUsed, filesModified, lastResponse, lastUserPrompt, stepCount, toolErrorCount
+}
+
+func cleanUserPrompt(raw string) string {
+	s := strings.TrimSpace(raw)
+	if idx := strings.Index(s, "<ADDITIONAL_METADATA>"); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	s = strings.TrimPrefix(s, "<USER_REQUEST>")
+	s = strings.TrimSuffix(s, "</USER_REQUEST>")
+	return strings.TrimSpace(s)
+}
+
+// VerifyTranscript resolves a conversation ID, journal JSON file path, or raw transcript.jsonl path
+// and produces a 0-token ground-truth verification digest for nightly dreaming consolidation.
+func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDigest, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, fmt.Errorf("conversation ID or transcript/journal path is required")
+	}
+
+	var convID string
+	var transcriptPath string
+
+	if info, err := os.Stat(target); err == nil && !info.IsDir() {
+		if strings.HasSuffix(strings.ToLower(target), ".json") {
+			data, err := os.ReadFile(target)
+			if err != nil {
+				return nil, err
+			}
+			var je JournalEntry
+			if err := json.Unmarshal(data, &je); err == nil && (je.ConversationID != "" || je.TranscriptPath != "") {
+				convID = je.ConversationID
+				transcriptPath = je.TranscriptPath
+			}
+		}
+		if transcriptPath == "" && !strings.HasSuffix(strings.ToLower(target), ".json") {
+			transcriptPath = target
+		}
+	}
+
+	if transcriptPath == "" {
+		if convID == "" {
+			convID = target
+		}
+		// 1. Check journal files in local/memory/journal/*/<convID>-*.json for a recorded transcriptPath
+		journalRoot := filepath.Join(vaultDir, "memory", "journal")
+		if dateDirs, err := os.ReadDir(journalRoot); err == nil {
+			for i := len(dateDirs) - 1; i >= 0; i-- {
+				d := dateDirs[i]
+				if !d.IsDir() {
+					continue
+				}
+				files, _ := os.ReadDir(filepath.Join(journalRoot, d.Name()))
+				for _, f := range files {
+					if strings.HasPrefix(f.Name(), convID+"-") && strings.HasSuffix(f.Name(), ".json") {
+						if b, err := os.ReadFile(filepath.Join(journalRoot, d.Name(), f.Name())); err == nil {
+							var je JournalEntry
+							if json.Unmarshal(b, &je) == nil && je.TranscriptPath != "" {
+								transcriptPath = je.TranscriptPath
+								break
+							}
+						}
+					}
+				}
+				if transcriptPath != "" {
+					break
+				}
+			}
+		}
+		// 2. Fallback to standard Antigravity brain directory
+		if transcriptPath == "" {
+			artDir := vault.ResolveArtifactDir(convID)
+			if artDir != "" {
+				candidate1 := filepath.Join(artDir, ".system_generated", "logs", "transcript.jsonl")
+				candidate2 := filepath.Join(artDir, "transcript.jsonl")
+				if _, err := os.Stat(candidate1); err == nil {
+					transcriptPath = candidate1
+				} else if _, err := os.Stat(candidate2); err == nil {
+					transcriptPath = candidate2
+				} else {
+					transcriptPath = candidate1
+				}
+			}
+		}
+	}
+
+	if transcriptPath == "" {
+		return nil, fmt.Errorf("could not resolve transcriptPath for %q", target)
+	}
+
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("open transcript %s: %w", transcriptPath, err)
+	}
+	defer f.Close()
+
+	digest := &TranscriptVerificationDigest{
+		ConversationID: convID,
+		TranscriptPath: transcriptPath,
+	}
+
+	var toolOrder []string
+	toolSeen := make(map[string]bool)
+	var fileOrder []string
+	fileSeen := make(map[string]bool)
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+
+	for scanner.Scan() {
+		var step struct {
+			StepIndex int    `json:"step_index"`
+			Type      string `json:"type"`
+			Status    string `json:"status"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Name string                 `json:"name"`
+				Args map[string]interface{} `json:"args"`
+			} `json:"tool_calls"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &step); err != nil {
+			continue
+		}
+		digest.TotalSteps++
+
+		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
+			cleaned := cleanUserPrompt(step.Content)
+			if runes := []rune(cleaned); len(runes) > 300 {
+				cleaned = string(runes[:300]) + "..."
+			}
+			if cleaned != "" {
+				digest.UserInputs = append(digest.UserInputs, cleaned)
+			}
+		}
+
+		if isTranscriptStepError(step.Status, step.Content) {
+			digest.ToolErrorCount++
+			errSummary := strings.TrimSpace(step.Content)
+			if idx := strings.Index(errSummary, "Command exited with code "); idx >= 0 {
+				errSummary = strings.TrimSpace(errSummary[idx:])
+			}
+			errSummary = strings.ReplaceAll(errSummary, "\n", " ")
+			if runes := []rune(errSummary); len(runes) > 240 {
+				errSummary = string(runes[:240]) + "..."
+			}
+			digest.Errors = append(digest.Errors, TranscriptStepError{
+				StepIndex: step.StepIndex,
+				Type:      step.Type,
+				Summary:   errSummary,
+			})
+		}
+
+		if step.Type == "PLANNER_RESPONSE" && strings.TrimSpace(step.Content) != "" {
+			resp := strings.TrimSpace(step.Content)
+			if runes := []rune(resp); len(runes) > 600 {
+				resp = string(runes[:600]) + "..."
+			}
+			digest.FinalResponse = resp
+		}
+
+		for _, tc := range step.ToolCalls {
+			if tc.Name != "" && !toolSeen[tc.Name] {
+				toolSeen[tc.Name] = true
+				toolOrder = append(toolOrder, tc.Name)
+			}
+			if tc.Name == "write_file" || tc.Name == "edit_file" {
+				if p, ok := tc.Args["Path"].(string); ok && p != "" && !fileSeen[p] {
+					fileSeen[p] = true
+					fileOrder = append(fileOrder, p)
+				}
+			}
+			if tc.Name == "run_command" {
+				if cmdStr, ok := tc.Args["CommandLine"].(string); ok && strings.TrimSpace(cmdStr) != "" {
+					c := strings.TrimSpace(cmdStr)
+					if runes := []rune(c); len(runes) > 160 {
+						c = string(runes[:160]) + "..."
+					}
+					digest.CommandsExecuted = append(digest.CommandsExecuted, c)
+				}
+			}
+		}
+	}
+
+	digest.ToolsUsed = toolOrder
+	digest.FilesModified = fileOrder
+
+	if digest.ToolErrorCount > 0 {
+		digest.DiscrepancyWarnings = append(digest.DiscrepancyWarnings,
+			fmt.Sprintf("Ground-truth transcript recorded %d tool/command error step(s); verify that the final claim resolved these errors.", digest.ToolErrorCount))
+	}
+	for _, fp := range digest.FilesModified {
+		if _, err := os.Stat(fp); os.IsNotExist(err) {
+			digest.DiscrepancyWarnings = append(digest.DiscrepancyWarnings,
+				fmt.Sprintf("File %s was written/edited during the session but no longer exists on disk.", fp))
+		}
+	}
+
+	return digest, nil
+>>>>>>> 5fd1f8f (feat(memory): implement RFC-0006 4-layer memory hierarchy, ground-truth dreaming & fact pruning)
 }

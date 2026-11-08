@@ -204,5 +204,22 @@ func Run(vaultDir string) []CheckResult {
 		})
 	}
 
+	// 7. Check Memory Roadmap Index Budget & Knowledge Wiki
+	if rep, err := vault.AuditMemory(vaultDir, nil); err == nil && rep.MemoryLines > 0 {
+		if rep.OverBudget {
+			results = append(results, CheckResult{
+				Name:   "Memory Roadmap Budget",
+				Status: "WARN",
+				Detail: fmt.Sprintf("MEMORY.md is %d/%d lines (~%d tokens); distill details into local/memory/topics/", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens),
+			})
+		} else {
+			results = append(results, CheckResult{
+				Name:   "Memory Roadmap Budget",
+				Status: "PASS",
+				Detail: fmt.Sprintf("MEMORY.md %d/%d lines (~%d tokens), %d topic page(s), %d active fact(s)", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens, len(rep.Topics), rep.ActiveFactCount),
+			})
+		}
+	}
+
 	return results
 }

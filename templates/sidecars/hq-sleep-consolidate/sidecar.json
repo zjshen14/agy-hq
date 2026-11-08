@@ -7,9 +7,9 @@
     "--model=flash",
     "--title=[Auto] Sleep-Time Consolidation",
     "--",
-    "Activate the sleep-consolidate skill: review today's turn journals in local/memory/journal/, apply incremental delta updates to local/MEMORY.md and local/memory/facts.jsonl, stage any skill proposals in local/memory/proposals/, and commit the private local/ Vault git repo."
+    "Activate the sleep-consolidate skill (RFC-0006 Nightly Dreaming): run ./bin/hq memory status, review today's turn journals in local/memory/journal/ and verify non-trivial or error turns with ./bin/hq memory verify-transcript <convId>, prune stale facts via ./bin/hq memory prune-fact, distill deep domain lessons into local/memory/topics/<slug>.md while keeping local/MEMORY.md <= 80 lines as a Roadmap Index, stage any skill proposals in local/memory/proposals/, and commit the private local/ Vault git repo."
   ],
   "restart_policy": "always",
-  "display_name": "HQ Nightly Sleep Consolidation (23:30)",
-  "description": "Every night at 11:30 PM (America/Los_Angeles), consolidates the day's turn journals into long-term memory and commits the private Vault."
+  "display_name": "HQ Nightly Sleep Consolidation & Dreaming (23:30)",
+  "description": "Every night at 11:30 PM (America/Los_Angeles), verifies the day's turn journals against ground-truth transcripts, updates the Knowledge Wiki & Roadmap Index, prunes stale facts, and commits the private Vault."
 }

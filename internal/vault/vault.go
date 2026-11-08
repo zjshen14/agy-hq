@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,11 +11,14 @@ import (
 
 // Fact represents a bi-temporal fact entry in local/memory/facts.jsonl.
 type Fact struct {
-	ID        string  `json:"id"`
-	Topic     string  `json:"topic"`
-	Statement string  `json:"statement"`
-	ValidFrom string  `json:"valid_from"`
-	ValidTo   *string `json:"valid_to"`
+	ID           string  `json:"id"`
+	Topic        string  `json:"topic"`
+	Statement    string  `json:"statement"`
+	SourceConv   string  `json:"source_conv,omitempty"`
+	Verified     bool    `json:"verified,omitempty"`
+	ValidFrom    string  `json:"valid_from"`
+	ValidTo      *string `json:"valid_to"`
+	SupersededBy string  `json:"superseded_by,omitempty"`
 }
 
 // ResolveRoot finds the agy-hq repository root directory.
@@ -168,6 +170,10 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		}
 	}
 
+	if ensureStarterTopicPage(vaultDir) {
+		created = append(created, filepath.Join("memory", "topics", "agy-hq-architecture.md"))
+	}
+
 	// Initialize independent git repository inside local/ if not already present
 	gitDir := filepath.Join(vaultDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
@@ -220,31 +226,13 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 	return created, nil
 }
 
-// LoadActiveFacts reads active facts (valid_to == null) from local/memory/facts.jsonl.
+// LoadActiveFacts reads active facts (valid_to == null) from local/memory/facts.jsonl,
+// deduplicating records by Fact.ID in chronological order so superseded or expired facts
+// are never returned as active.
 func LoadActiveFacts(vaultDir string, limit int) ([]Fact, error) {
-	factsPath := filepath.Join(vaultDir, "memory", "facts.jsonl")
-	f, err := os.Open(factsPath)
+	active, _, _, err := LoadFactsState(vaultDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
-	}
-	defer f.Close()
-
-	var active []Fact
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var fact Fact
-		if err := json.Unmarshal([]byte(line), &fact); err == nil {
-			if fact.ValidTo == nil {
-				active = append(active, fact)
-			}
-		}
 	}
 	if limit > 0 && len(active) > limit {
 		active = active[len(active)-limit:]

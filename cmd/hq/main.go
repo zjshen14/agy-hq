@@ -866,6 +866,112 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "memory":
+		sub := "status"
+		if len(os.Args) >= 3 {
+			sub = os.Args[2]
+		}
+		switch sub {
+		case "status", "audit":
+			var completedSlugs []string
+			if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+				for _, t := range tasks {
+					if t.Status == "completed" || t.Status == "cancelled" {
+						completedSlugs = append(completedSlugs, t.TaskSlug)
+					}
+				}
+			}
+			rep, err := vault.AuditMemory(vaultDir, completedSlugs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory status failed: %v\n", err)
+				os.Exit(1)
+			}
+			budgetBadge := "OK"
+			if rep.OverBudget {
+				budgetBadge = "OVER_BUDGET"
+			}
+			fmt.Printf("Memory Roadmap Index (MEMORY.md): %d / %d lines (~%d tokens) [%s]\n", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens, budgetBadge)
+			fmt.Printf("Knowledge Wiki Topics (topics/):  %d page(s) (unlinked in MEMORY.md: %d)\n", len(rep.Topics), len(rep.OrphanTopicSlugs))
+			for _, tp := range rep.Topics {
+				fmt.Printf("  - [%s] %s (%d lines): %s\n", tp.Slug, tp.Title, tp.LineCount, tp.Summary)
+			}
+			fmt.Printf("Bi-Temporal Facts (facts.jsonl):  %d active, %d expired (%d raw lines)\n", rep.ActiveFactCount, rep.ExpiredFactCount, rep.RawFactLines)
+			if len(rep.StaleReferences) > 0 {
+				fmt.Println("Stale References Detected:")
+				for _, sr := range rep.StaleReferences {
+					fmt.Printf("  ! %s\n", sr)
+				}
+			}
+
+		case "topics":
+			topics, err := vault.LoadTopicIndex(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory topics failed: %v\n", err)
+				os.Exit(1)
+			}
+			for _, tp := range topics {
+				fmt.Printf("- %s (%s): %s [%s]\n", tp.Slug, tp.Title, tp.Summary, tp.Path)
+			}
+
+		case "add-fact":
+			fs := flag.NewFlagSet("memory add-fact", flag.ExitOnError)
+			id := fs.String("id", "", "Optional explicit fact ID")
+			topic := fs.String("topic", "", "Fact topic category (e.g., architecture, workflow, investing)")
+			statement := fs.String("statement", "", "Concise durable fact statement")
+			sourceConv := fs.String("source", "", "Optional source conversation ID")
+			verified := fs.Bool("verified", false, "Mark fact as ground-truth transcript verified")
+			_ = fs.Parse(os.Args[3:])
+			fact, err := vault.AddFact(vaultDir, *id, *topic, *statement, *sourceConv, *verified)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory add-fact failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Added fact %s [%s]: %s\n", fact.ID, fact.Topic, fact.Statement)
+
+		case "prune-fact":
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "usage: hq memory prune-fact <fact-id> [--superseded-by=<new-id>]")
+				os.Exit(1)
+			}
+			factID := os.Args[3]
+			fs := flag.NewFlagSet("memory prune-fact", flag.ExitOnError)
+			supersededBy := fs.String("superseded-by", "", "Optional ID of the new fact that supersedes this one")
+			_ = fs.Parse(os.Args[4:])
+			pruned, err := vault.PruneFact(vaultDir, factID, *supersededBy)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory prune-fact failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Pruned fact %s (valid_to=%s)\n", pruned.ID, *pruned.ValidTo)
+
+		case "compact":
+			before, after, err := vault.CompactFacts(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory compact failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", before, after)
+
+		case "verify-transcript":
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "usage: hq memory verify-transcript <conv-id-or-path>")
+				os.Exit(1)
+			}
+			digest, err := hooks.VerifyTranscript(os.Args[3], vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory verify-transcript failed: %v\n", err)
+				os.Exit(1)
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.SetEscapeHTML(false)
+			_ = enc.Encode(digest)
+
+		default:
+			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, add-fact, prune-fact, compact, verify-transcript)\n", sub)
+			os.Exit(1)
+		}
+
 	default:
 		printUsage()
 		os.Exit(1)
@@ -881,6 +987,7 @@ Commands:
   migrate [--quiet]                   Run non-destructive Vault schema & template migrations
   doctor                              Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
+  memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
