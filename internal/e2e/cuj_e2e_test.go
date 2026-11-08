@@ -48,13 +48,25 @@ func setupHQEnv(t *testing.T) *hqEnv {
 }
 
 func (e *hqEnv) run(stdin string, args ...string) (string, error) {
+	return e.runWithEnv(stdin, nil, args...)
+}
+
+func (e *hqEnv) runWithEnv(stdin string, extraEnv []string, args ...string) (string, error) {
 	e.t.Helper()
 	cmd := exec.Command(e.binPath, args...)
 	cmd.Dir = e.rootDir
-	cmd.Env = append(os.Environ(),
+	var baseEnv []string
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "ANTIGRAVITY_") || strings.HasPrefix(env, "HQ_") {
+			continue
+		}
+		baseEnv = append(baseEnv, env)
+	}
+	cmd.Env = append(baseEnv,
 		"HQ_ROOT_DIR="+e.rootDir,
 		"HQ_VAULT_DIR="+e.vaultDir,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -136,6 +148,76 @@ func TestCUJ1_VaultBootstrapAndIdempotency(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cleanArtDir, "hq_console.md")); err != nil {
 		t.Fatalf("expected SessionStart to sync hq_console.md on clean clone: %v", err)
+	}
+
+	// 5. Verify in-session auto-claim on `hq init` when ANTIGRAVITY_CONVERSATION_ID is set
+	inSessionEnv := setupHQEnv(t)
+	appDataDir := filepath.Join(t.TempDir(), "appdata")
+	inSessionConv := "conv-in-session-bootstrap"
+	expectedArtDir := filepath.Join(appDataDir, "brain", inSessionConv)
+
+	inSessionInitOut, err := inSessionEnv.runWithEnv("", []string{
+		"ANTIGRAVITY_CONVERSATION_ID=" + inSessionConv,
+		"ANTIGRAVITY_APP_DATA_DIR=" + appDataDir,
+	}, "init")
+	if err != nil {
+		t.Fatalf("in-session hq init failed: %v (%s)", err, inSessionInitOut)
+	}
+
+	fd, ok := kernel.GetFrontDesk(inSessionEnv.vaultDir)
+	if !ok || fd.ConversationID != inSessionConv {
+		t.Fatalf("expected Front Desk to be claimed by %s, got: %+v", inSessionConv, fd)
+	}
+	if fd.ArtifactDir != expectedArtDir {
+		t.Fatalf("expected ArtifactDir %q, got %q", expectedArtDir, fd.ArtifactDir)
+	}
+	if _, err := os.Stat(filepath.Join(expectedArtDir, "hq_console.md")); err != nil {
+		t.Fatalf("expected hq_console.md to be written into in-session artifact dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(expectedArtDir, "hq_console.md.metadata.json")); err != nil {
+		t.Fatalf("expected hq_console.md.metadata.json to be written into in-session artifact dir: %v", err)
+	}
+
+	// 6. Verify `hq doctor` Front Desk Lease check
+	// 6a: Active lease PASS
+	docClaimed, err := inSessionEnv.run("", "doctor")
+	if err != nil || !strings.Contains(docClaimed, "[PASS] Front Desk Intake Lease") || !strings.Contains(docClaimed, "Claimed by "+inSessionConv) {
+		t.Fatalf("expected PASS Claimed by %s in hq doctor, got:\n%s", inSessionConv, docClaimed)
+	}
+
+	// 6b: Vacant in active conversation WARN
+	if err := kernel.ReleaseFrontDesk(inSessionEnv.vaultDir); err != nil {
+		t.Fatalf("release front desk: %v", err)
+	}
+	docWarn, _ := inSessionEnv.runWithEnv("", []string{"ANTIGRAVITY_CONVERSATION_ID=" + inSessionConv}, "doctor")
+	if !strings.Contains(docWarn, "[WARN] Front Desk Intake Lease") || !strings.Contains(docWarn, "Vacant while in active conversation "+inSessionConv) {
+		t.Fatalf("expected WARN Vacant while in active conversation in hq doctor, got:\n%s", docWarn)
+	}
+
+	// 6c: Vacant without active conversation PASS
+	docVacant, _ := inSessionEnv.run("", "doctor")
+	if !strings.Contains(docVacant, "[PASS] Front Desk Intake Lease") || !strings.Contains(docVacant, "Vacant (will auto-claim on Turn 1 of next Antigravity conversation)") {
+		t.Fatalf("expected PASS Vacant (will auto-claim...) in hq doctor, got:\n%s", docVacant)
+	}
+
+	// 7. Verify In-Session Bootstrap Vacancy Guard in `hq hook stop`
+	stopEnv := setupHQEnv(t)
+	if _, err := stopEnv.run("", "init"); err != nil {
+		t.Fatalf("init stopEnv: %v", err)
+	}
+	stopArtDir := filepath.Join(t.TempDir(), "brain-mid-stop")
+	stopPayload := fmt.Sprintf(`{"conversationId":"mid-conv-777","executionNum":1,"artifactDirectoryPath":%q,"lastUserInput":"What is the status?"}`, stopArtDir)
+	stopOut, err := stopEnv.run(stopPayload, "hook", "stop")
+	if err != nil {
+		t.Fatalf("hook stop failed: %v (%s)", err, stopOut)
+	}
+	stopFD, ok := kernel.GetFrontDesk(stopEnv.vaultDir)
+	if !ok || stopFD.ConversationID != "mid-conv-777" {
+		t.Fatalf("expected mid-conv-777 to auto-claim vacant front desk on stop, got %+v", stopFD)
+	}
+	tasksAfterStop, _ := kernel.ListTasks(stopEnv.vaultDir)
+	if len(tasksAfterStop) != 0 {
+		t.Fatalf("expected 0 tasks (should not create [Task:general]), got %d", len(tasksAfterStop))
 	}
 }
 
@@ -633,5 +715,126 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	}
 	if !strings.Contains(migOut2, "Vault Schema Migration: v3 -> v3") {
 		t.Fatalf("expected idempotent v3 -> v3 on second run, got:\n%s", migOut2)
+	}
+}
+
+// CUJ-10: Front Desk Non-Blocking Enforcement (PreToolUse Guardrails)
+func TestCUJ10_FrontDeskNonBlockingEnforcement(t *testing.T) {
+	env := setupHQEnv(t)
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	artDesk := filepath.Join(t.TempDir(), "brain-desk")
+	_ = os.MkdirAll(artDesk, 0o755)
+	deskConv := "conv-desk-1234"
+	subagentConv := "conv-subagent-999"
+
+	// Claim Front Desk
+	if _, err := env.run("", "claim-desk", "--conv="+deskConv, "--artifact-dir="+artDesk); err != nil {
+		t.Fatalf("claim-desk: %v", err)
+	}
+
+	// SessionStart on Front Desk checks role banner
+	ssOut, err := env.run(fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q}`, deskConv, artDesk), "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start: %v (%s)", err, ssOut)
+	}
+	if !strings.Contains(ssOut, "Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)") {
+		t.Fatalf("expected Non-Blocking role banner in session-start, got:\n%s", ssOut)
+	}
+
+	// Rule A: Block Direct Source/Worktree File Edits on Front Desk
+	// 1. Front Desk edits repo code -> DENY
+	editRepo := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"edit_file","args":{"Path":%q}}}`, deskConv, filepath.Join(env.rootDir, "cmd", "hq", "main.go"))
+	out, _ := env.run(editRepo, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"deny"`) || !strings.Contains(out, "Front Desk non-blocking policy") {
+		t.Fatalf("expected deny for Front Desk editing repo code, got:\n%s", out)
+	}
+
+	// 2. Front Desk edits worktree code -> DENY
+	editWorktree := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"write_file","args":{"Path":%q}}}`, deskConv, filepath.Join(env.vaultDir, "worktrees", "wt-task", "foo.go"))
+	out, _ = env.run(editWorktree, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected deny for Front Desk editing worktree, got:\n%s", out)
+	}
+
+	// 3. Front Desk writes to artifact dir -> ALLOW
+	writeArt := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q}}}`, deskConv, artDesk, filepath.Join(artDesk, "hq_console.md"))
+	out, _ = env.run(writeArt, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected allow for Front Desk writing to artifact dir, got:\n%s", out)
+	}
+
+	// 4. Front Desk writes to local/USER.md -> ALLOW
+	writeUser := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"write_file","args":{"Path":%q}}}`, deskConv, filepath.Join(env.vaultDir, "USER.md"))
+	out, _ = env.run(writeUser, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected allow for Front Desk writing to local/USER.md, got:\n%s", out)
+	}
+
+	// 5. Subagent edits repo code -> ALLOW
+	subEditRepo := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"edit_file","args":{"Path":%q}}}`, subagentConv, filepath.Join(env.rootDir, "cmd", "hq", "main.go"))
+	out, _ = env.run(subEditRepo, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected allow for Subagent editing repo code, got:\n%s", out)
+	}
+
+	// Rule B: Block Heavy Build/Test Commands on Front Desk
+	// 1. Front Desk runs `go test ./...` -> DENY
+	testCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`, deskConv)
+	out, _ = env.run(testCmd, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"deny"`) || !strings.Contains(out, "build or test suites inline") {
+		t.Fatalf("expected deny for Front Desk running go test, got:\n%s", out)
+	}
+
+	// 2. Front Desk runs `npm test` -> DENY
+	npmCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}}}`, deskConv)
+	out, _ = env.run(npmCmd, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected deny for Front Desk running npm test, got:\n%s", out)
+	}
+
+	// 3. Front Desk runs `./bin/hq status` -> ALLOW
+	hqCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":"./bin/hq status"}}}`, deskConv)
+	out, _ = env.run(hqCmd, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected allow for Front Desk running ./bin/hq status, got:\n%s", out)
+	}
+
+	// 4. Subagent runs `go test ./...` -> ALLOW
+	subTestCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`, subagentConv)
+	out, _ = env.run(subTestCmd, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected allow for Subagent running go test, got:\n%s", out)
+	}
+
+	// Rule C: Per-Turn Inline Investigation Cap (Max 3 research tool calls)
+	// Front Desk calls read_file 3 times -> all ALLOW
+	for i := 1; i <= 3; i++ {
+		readCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"read_file","args":{"Path":%q}}}`, deskConv, filepath.Join(env.vaultDir, "USER.md"))
+		out, _ = env.run(readCmd, "hook", "pre-tool")
+		if !strings.Contains(out, `"decision":"allow"`) {
+			t.Fatalf("expected call %d to be allowed, got:\n%s", i, out)
+		}
+	}
+
+	// 4th call -> DENY
+	readCmd4 := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"read_file","args":{"Path":%q}}}`, deskConv, filepath.Join(env.vaultDir, "USER.md"))
+	out, _ = env.run(readCmd4, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"deny"`) || !strings.Contains(out, "Inline investigation limit (3 tool calls per turn) reached") {
+		t.Fatalf("expected 4th call to be denied by cap, got:\n%s", out)
+	}
+
+	// End turn with `hq hook stop`
+	stopDesk := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"artifactDirectoryPath":%q,"lastUserInput":"Hello"}`, deskConv, artDesk)
+	if _, err := env.run(stopDesk, "hook", "stop"); err != nil {
+		t.Fatalf("hook stop: %v", err)
+	}
+
+	// New turn: 1st call -> ALLOW again!
+	out, _ = env.run(readCmd4, "hook", "pre-tool")
+	if !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected 1st call of new turn to be allowed after stop reset, got:\n%s", out)
 	}
 }

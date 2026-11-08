@@ -26,13 +26,13 @@ func TestHandleSessionStartAndPreToolUseAndStop(t *testing.T) {
 
 	// 2. PreToolUse (allow safe command, deny outbound command)
 	out.Reset()
-	_ = HandlePreToolUse(strings.NewReader(`{"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`), &out)
+	_ = HandlePreToolUse(strings.NewReader(`{"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`), &out, vaultDir)
 	if !strings.Contains(out.String(), `"decision":"allow"`) {
 		t.Fatalf("expected allow, got: %s", out.String())
 	}
 
 	out.Reset()
-	_ = HandlePreToolUse(strings.NewReader(`{"toolCall":{"name":"run_command","args":{"CommandLine":"gh pr merge 10"}}}`), &out)
+	_ = HandlePreToolUse(strings.NewReader(`{"toolCall":{"name":"run_command","args":{"CommandLine":"gh pr merge 10"}}}`), &out, vaultDir)
 	var denyResp map[string]interface{}
 	_ = json.Unmarshal(out.Bytes(), &denyResp)
 	if denyResp["decision"] != "deny" {

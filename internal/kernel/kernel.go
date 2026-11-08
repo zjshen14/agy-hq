@@ -212,12 +212,15 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	}
 	artifactDir = strings.TrimSpace(artifactDir)
 	if artifactDir == "" {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if appData := os.Getenv("ANTIGRAVITY_APP_DATA_DIR"); appData != "" {
+			artifactDir = filepath.Join(appData, "brain", convID)
+		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
 			candidate := filepath.Join(home, ".gemini", "antigravity", "brain", convID)
-			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
-				artifactDir = candidate
-			}
+			artifactDir = candidate
 		}
+	}
+	if artifactDir != "" {
+		_ = os.MkdirAll(artifactDir, 0o755)
 	}
 	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ConversationID != convID && prev.ArtifactDir != "" {
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md"))
@@ -237,6 +240,7 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if artifactDir != "" {
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(artifactDir), 0o644)
 	}
+	_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
 	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
 }
 
@@ -249,6 +253,8 @@ func ReleaseFrontDesk(vaultDir string) error {
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
 	}
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", ".vacated"), []byte(time.Now().Format(time.RFC3339)), 0o644)
 	err := os.Remove(frontDeskPath(vaultDir))
 	if os.IsNotExist(err) {
 		return nil

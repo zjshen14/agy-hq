@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
 echo "==> [1/4] Checking Go toolchain..."
 if ! command -v go >/dev/null 2>&1; then
@@ -51,3 +51,13 @@ echo "==> [4/4] Running ./bin/hq doctor..."
 
 echo ""
 echo "agy-hq is ready! Open this folder in Google Antigravity and start your [HQ] Front Desk thread."
+
+if [ -n "${ANTIGRAVITY_CONVERSATION_ID:-}" ]; then
+  APP_DATA="${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity}"
+  ART_DIR="$APP_DATA/brain/$ANTIGRAVITY_CONVERSATION_ID"
+  echo ""
+  echo "==> Active Antigravity Conversation Detected ($ANTIGRAVITY_CONVERSATION_ID)"
+  echo "    Auto-claimed [HQ] Front Desk intake lease!"
+  echo "    Action required: Pin $ART_DIR/hq_console.md via write_file"
+  echo "    (Overwrite=true, ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live [HQ] Front Desk Console & Task Board\"})"
+fi

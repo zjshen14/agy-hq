@@ -79,12 +79,30 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 
 	var sections []string
 	if payload.ConversationID != "" {
+		turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
+		resetState := map[string]interface{}{
+			"conversationId": payload.ConversationID,
+			"count":          0,
+			"updatedAt":      time.Now().Format(time.RFC3339),
+		}
+		if data, err := json.MarshalIndent(resetState, "", "  "); err == nil {
+			_ = os.WriteFile(turnFile, data, 0o644)
+		}
+
 		existing, ok := kernel.GetFrontDesk(vaultDir)
+		roleBanner := fmt.Sprintf(
+			"## 🎯 Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)\n"+
+				"- You are the single Front Desk intake coordinator (`%s`).\n"+
+				"- **Hard Mechanical Limit:** You have at most **3 inline lookup tool calls** per turn, and direct code/worktree edits or test runs are mechanically blocked by PreToolUse hooks on this thread.\n"+
+				"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `local/worktrees/<repo>-<task>/`) or `./bin/hq spawn` so the user can keep chatting without waiting.",
+			payload.ConversationID,
+		)
+
 		if !ok {
 			_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
 			artPath := filepath.Join(strings.TrimSpace(payload.ArtifactDirectoryPath), "hq_console.md")
 			consolePath := filepath.Join(vaultDir, "CONSOLE.md")
-			sections = append(sections, fmt.Sprintf(
+			sections = append(sections, roleBanner, fmt.Sprintf(
 				"## 🚀 New [HQ] Front Desk Initialization Required\n"+
 					"- Active Front Desk Conversation ID: `%s` (claimed just now).\n"+
 					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, and tracked Task Conversations are already loaded below. Do **NOT** run shell commands or `read_file` to re-fetch them.\n"+
@@ -92,7 +110,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					"- **Step 3 (Concise Welcome):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations.",
 				payload.ConversationID, consolePath, artPath, artPath,
 			))
-		} else if existing.ConversationID != payload.ConversationID {
+		} else if existing.ConversationID == payload.ConversationID {
+			sections = append(sections, roleBanner)
+		} else {
 			sections = append(sections, fmt.Sprintf(
 				"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.",
 				existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
@@ -177,12 +197,13 @@ var (
 		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
 		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
 	}
+
+	reHeavyBuildTest = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 )
 
-// HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution.
-// Direct outbound commands are hard-denied (`"decision": "deny"`) so tasks stage them via `hq propose`
-// and present 1-tap approval via `ask_question` (or chat inline buttons).
-func HandlePreToolUse(r io.Reader, w io.Writer) error {
+// HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
+// as well as Front Desk non-blocking policy (blocking repo/worktree edits, test runs, and capping lookups at 3).
+func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload ToolCallPayload
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
 		_, wErr := w.Write([]byte(`{"decision":"allow"}` + "\n"))
@@ -209,6 +230,113 @@ func HandlePreToolUse(r io.Reader, w io.Writer) error {
 		}
 	}
 
+	fd, hasFD := kernel.GetFrontDesk(vaultDir)
+	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
+
+	if !isFrontDesk {
+		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+		return err
+	}
+
+	// Rule A: Block Direct Source/Worktree File Edits on the Front Desk (edit_file / write_file)
+	if payload.ToolCall.Name == "edit_file" || payload.ToolCall.Name == "write_file" {
+		pathArg, _ := payload.ToolCall.Args["Path"].(string)
+		cleanPath := filepath.Clean(pathArg)
+
+		cleanArtDir := filepath.Clean(payload.ArtifactDirectoryPath)
+		fdArtDir := filepath.Clean(fd.ArtifactDir)
+
+		isArtifact := false
+		if (cleanArtDir != "." && cleanArtDir != "" && (cleanPath == cleanArtDir || strings.HasPrefix(cleanPath, cleanArtDir+string(filepath.Separator)))) ||
+			(fdArtDir != "." && fdArtDir != "" && (cleanPath == fdArtDir || strings.HasPrefix(cleanPath, fdArtDir+string(filepath.Separator)))) ||
+			strings.Contains(cleanPath, "/.gemini/antigravity/brain/") {
+			isArtifact = true
+		}
+
+		cleanVaultDir := filepath.Clean(vaultDir)
+		isLocalNonWorktree := false
+		if rel, err := filepath.Rel(cleanVaultDir, cleanPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+			relSlash := filepath.ToSlash(rel)
+			if !strings.HasPrefix(relSlash, "worktrees/") && relSlash != "worktrees" &&
+				!strings.HasPrefix(relSlash, "repos/") && relSlash != "repos" {
+				isLocalNonWorktree = true
+			}
+		}
+
+		if !isArtifact && !isLocalNonWorktree {
+			resp := map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Front Desk non-blocking policy: Do not edit source code or worktree files inline on the [HQ] Front Desk thread. Delegate coding and multi-file edits to a background subagent via invoke_subagent (in local/worktrees/<repo>-<task>/) or ./bin/hq spawn so the Front Desk stays unblocked.",
+			}
+			return json.NewEncoder(w).Encode(resp)
+		}
+
+		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+		return err
+	}
+
+	// Rule B: Block Heavy Build/Test Commands Inline on the Front Desk (run_command)
+	if payload.ToolCall.Name == "run_command" {
+		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+		trimmed := strings.TrimSpace(cmdLine)
+		isHQCmd := strings.HasPrefix(trimmed, "./bin/hq") || strings.HasPrefix(trimmed, "bin/hq") ||
+			strings.HasPrefix(trimmed, "./scripts/bootstrap.sh") || strings.HasPrefix(trimmed, "scripts/bootstrap.sh") ||
+			strings.Contains(cmdLine, "bootstrap.sh")
+
+		if !isHQCmd && reHeavyBuildTest.MatchString(cmdLine) {
+			resp := map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Front Desk non-blocking policy: Do not run build or test suites inline on the [HQ] Front Desk thread. Delegate to a background subagent via invoke_subagent or use ./bin/hq upgrade.",
+			}
+			return json.NewEncoder(w).Encode(resp)
+		}
+	}
+
+	// Rule C: Per-Turn Inline Investigation Cap (Max 3 Research Tool Calls on Front Desk)
+	isResearchTool := false
+	switch payload.ToolCall.Name {
+	case "read_file", "grep_search", "find_by_name":
+		isResearchTool = true
+	case "run_command":
+		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+		trimmed := strings.TrimSpace(cmdLine)
+		isHQCmd := strings.HasPrefix(trimmed, "./bin/hq") || strings.HasPrefix(trimmed, "bin/hq") ||
+			strings.HasPrefix(trimmed, "./scripts/bootstrap.sh") || strings.HasPrefix(trimmed, "scripts/bootstrap.sh")
+		if !isHQCmd {
+			isResearchTool = true
+		}
+	}
+
+	if isResearchTool {
+		turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
+		var turnState struct {
+			ConversationID string `json:"conversationId"`
+			Count          int    `json:"count"`
+			UpdatedAt      string `json:"updatedAt"`
+		}
+		if data, err := os.ReadFile(turnFile); err == nil {
+			_ = json.Unmarshal(data, &turnState)
+		}
+		if turnState.ConversationID != payload.ConversationID {
+			turnState.ConversationID = payload.ConversationID
+			turnState.Count = 0
+		}
+		turnState.Count++
+		turnState.UpdatedAt = time.Now().Format(time.RFC3339)
+		_ = os.MkdirAll(filepath.Dir(turnFile), 0o755)
+		if data, err := json.MarshalIndent(turnState, "", "  "); err == nil {
+			_ = os.WriteFile(turnFile, data, 0o644)
+		}
+
+		if turnState.Count > 3 {
+			resp := map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Front Desk non-blocking policy: Inline investigation limit (3 tool calls per turn) reached. Stop investigating inline and delegate the task to a background subagent via invoke_subagent so the user is never blocked.",
+			}
+			return json.NewEncoder(w).Encode(resp)
+		}
+	}
+
 	_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
 	return err
 }
@@ -227,6 +355,16 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 	}
 
 	if payload.ConversationID != "" {
+		turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
+		resetState := map[string]interface{}{
+			"conversationId": payload.ConversationID,
+			"count":          0,
+			"updatedAt":      time.Now().Format(time.RFC3339),
+		}
+		if data, err := json.MarshalIndent(resetState, "", "  "); err == nil {
+			_ = os.WriteFile(turnFile, data, 0o644)
+		}
+
 		toolsUsed, filesModified, summary := parseTranscriptSummary(payload.TranscriptPath)
 		dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
 		if err := os.MkdirAll(dateDir, 0o755); err == nil {
@@ -250,7 +388,9 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
 			if fd, ok := kernel.GetFrontDesk(vaultDir); !ok || fd.ConversationID != payload.ConversationID {
 				alreadyTracked := false
-				if existingTasks, err := kernel.ListTasks(vaultDir); err == nil {
+				var existingTasks []kernel.ActiveTask
+				if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+					existingTasks = tasks
 					for _, et := range existingTasks {
 						if et.ConversationID == payload.ConversationID {
 							alreadyTracked = true
@@ -258,17 +398,27 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 						}
 					}
 				}
-				title := ""
-				if !alreadyTracked && strings.TrimSpace(payload.LastUserInput) != "" {
-					title = "[Task:general] " + strings.TrimSpace(payload.LastUserInput)
+
+				vacatedMarker := filepath.Join(vaultDir, "memory", ".vacated")
+				_, vacatedExists := os.Stat(vacatedMarker)
+
+				if !ok && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
+					// In-session bootstrap fallback: fresh Vault with no tracked tasks, front_desk is vacant,
+					// and no explicit release-desk marker exists. Claim Front Desk instead of registering [Task:general]!
+					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
+				} else {
+					title := ""
+					if !alreadyTracked && strings.TrimSpace(payload.LastUserInput) != "" {
+						title = "[Task:general] " + strings.TrimSpace(payload.LastUserInput)
+					}
+					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+						Title:          title,
+						Model:          payload.ModelName,
+						ConversationID: payload.ConversationID,
+						LastUpdatedAt:  time.Now().Format(time.RFC3339),
+						LastSummary:    summary,
+					})
 				}
-				_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-					Title:          title,
-					Model:          payload.ModelName,
-					ConversationID: payload.ConversationID,
-					LastUpdatedAt:  time.Now().Format(time.RFC3339),
-					LastSummary:    summary,
-				})
 			}
 		}
 	}

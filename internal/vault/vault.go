@@ -63,6 +63,25 @@ func ResolveVaultDir() (string, error) {
 	return filepath.Join(root, "local"), nil
 }
 
+// ResolveArtifactDir determines the artifact directory for a conversation ID.
+// It checks ANTIGRAVITY_APP_DATA_DIR (falling back to ~/.gemini/antigravity),
+// returning <appDataDir>/brain/<convID>.
+func ResolveArtifactDir(convID string) string {
+	if convID == "" {
+		return ""
+	}
+	appDataDir := os.Getenv("ANTIGRAVITY_APP_DATA_DIR")
+	if appDataDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			appDataDir = filepath.Join(home, ".gemini", "antigravity")
+		}
+	}
+	if appDataDir == "" {
+		return ""
+	}
+	return filepath.Join(appDataDir, "brain", convID)
+}
+
 // Init scaffolds the local/ private Vault directory structure, copies starter templates
 // if files do not already exist, and initializes an independent private git repository.
 func Init(vaultDir, templateDir string) ([]string, error) {

@@ -44,6 +44,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
 			os.Exit(1)
 		}
+		if convID := os.Getenv("ANTIGRAVITY_CONVERSATION_ID"); convID != "" {
+			if _, ok := kernel.GetFrontDesk(vaultDir); !ok {
+				artDir := vault.ResolveArtifactDir(convID)
+				_ = kernel.SetFrontDesk(vaultDir, convID, artDir)
+			}
+		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
 		for _, item := range created {
@@ -174,7 +180,7 @@ func main() {
 			}
 			_ = webui.SyncMarkdownConsole(vaultDir)
 		case "pre-tool":
-			if err := hooks.HandlePreToolUse(os.Stdin, os.Stdout); err != nil {
+			if err := hooks.HandlePreToolUse(os.Stdin, os.Stdout, vaultDir); err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
 				os.Exit(1)
 			}

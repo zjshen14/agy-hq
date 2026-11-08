@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
 // CheckResult represents a single diagnostic check in `hq doctor`.
@@ -109,6 +111,27 @@ func Run(vaultDir string) []CheckResult {
 			Name:   "Private Vault (local/)",
 			Status: "WARN",
 			Detail: "Not initialized yet; run `./bin/hq init`",
+		})
+	}
+
+	// 4. Check Front Desk Intake Lease
+	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID != "" {
+		results = append(results, CheckResult{
+			Name:   "Front Desk Intake Lease",
+			Status: "PASS",
+			Detail: fmt.Sprintf("Claimed by %s", fd.ConversationID),
+		})
+	} else if convID := os.Getenv("ANTIGRAVITY_CONVERSATION_ID"); convID != "" {
+		results = append(results, CheckResult{
+			Name:   "Front Desk Intake Lease",
+			Status: "WARN",
+			Detail: fmt.Sprintf("Vacant while in active conversation %s; run './bin/hq claim-desk --conv=%s'", convID, convID),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Front Desk Intake Lease",
+			Status: "PASS",
+			Detail: "Vacant (will auto-claim on Turn 1 of next Antigravity conversation)",
 		})
 	}
 
