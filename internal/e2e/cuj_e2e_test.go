@@ -353,6 +353,13 @@ func TestCUJ5_ApprovalBoundOutboundExecution(t *testing.T) {
 		}
 	}
 
+	// 1b. PreToolUse MUST allow `hq propose --cmd="gh pr merge ..."` when staging an outbound command
+	proposeHookPayload := `{"toolCall":{"name":"run_command","args":{"CommandLine":"./bin/hq propose --type=pr_merge --summary=\"Merge PR 279\" --cmd=\"gh pr merge 279 --squash\""}}}`
+	allowOut, err := env.run(proposeHookPayload, "hook", "pre-tool")
+	if err != nil || !strings.Contains(allowOut, `"decision":"allow"`) {
+		t.Fatalf("expected PreToolUse to allow hq propose with outbound --cmd, got err=%v out=%s", err, allowOut)
+	}
+
 	// 2. Stage a proposal via `hq propose`
 	markerFile := filepath.Join(env.vaultDir, "notes", "cuj5-approved.txt")
 	cmdStr := fmt.Sprintf("echo 'CUJ5_OK' > %s", markerFile)

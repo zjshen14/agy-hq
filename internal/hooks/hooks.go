@@ -156,12 +156,17 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	return enc.Encode(resp)
 }
 
-var outboundCommandPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post)\b`),
-	regexp.MustCompile(`(?i)\bgh\s+pr\s+merge\b`),
-	regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
-	regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
-}
+var (
+	reHQPropose    = regexp.MustCompile(`(?i)(?:^|&&|;)\s*(?:\S+/)?hq\s+propose\b`)
+	reCmdFlagValue = regexp.MustCompile(`--cmd=(?:"(?:\\.|[^"\\])*"|'[^']*'|\S+)`)
+
+	outboundCommandPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post)\b`),
+		regexp.MustCompile(`(?i)\bgh\s+pr\s+merge\b`),
+		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
+		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
+	}
+)
 
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution.
 // Direct outbound commands are hard-denied (`"decision": "deny"`) so tasks stage them via `hq propose`
@@ -175,8 +180,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer) error {
 
 	if payload.ToolCall.Name == "run_command" {
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+		checkLine := cmdLine
+		if reHQPropose.MatchString(cmdLine) {
+			checkLine = reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)
+		}
 		for _, re := range outboundCommandPatterns {
-			if re.MatchString(cmdLine) {
+			if re.MatchString(checkLine) {
 				resp := map[string]interface{}{
 					"decision": "deny",
 					"reason": fmt.Sprintf(
