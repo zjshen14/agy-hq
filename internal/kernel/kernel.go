@@ -82,13 +82,25 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 	tasks, _ := ListTasks(vaultDir)
 	updated := false
 	for i := range tasks {
-		if tasks[i].TaskSlug == task.TaskSlug {
+		if (task.TaskSlug != "" && tasks[i].TaskSlug == task.TaskSlug) || (task.ConversationID != "" && tasks[i].ConversationID == task.ConversationID) {
+			if task.TaskSlug == "" {
+				task.TaskSlug = tasks[i].TaskSlug
+			}
+			if task.Title == "" {
+				task.Title = tasks[i].Title
+			}
+			if task.CreatedAt == "" {
+				task.CreatedAt = tasks[i].CreatedAt
+			}
 			tasks[i] = task
 			updated = true
 			break
 		}
 	}
 	if !updated {
+		if task.CreatedAt == "" {
+			task.CreatedAt = time.Now().Format(time.RFC3339)
+		}
 		tasks = append(tasks, task)
 	}
 	data, err := json.MarshalIndent(tasks, "", "  ")

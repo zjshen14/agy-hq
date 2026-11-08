@@ -18,13 +18,14 @@ import (
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
-// DashboardState aggregates live Vault, approval, worktree, journal, quota, and doctor state.
+// DashboardState aggregates live Vault, approval, worktree, task, journal, quota, and doctor state.
 type DashboardState struct {
 	VaultDir    string               `json:"vaultDir"`
 	UpdatedAt   string               `json:"updatedAt"`
 	Quota       kernel.QuotaState    `json:"quota"`
 	Pending     []approvals.Proposal `json:"pending"`
 	Worktrees   []string             `json:"worktrees"`
+	Tasks       []kernel.ActiveTask  `json:"tasks"`
 	TodayTurns  []hooks.JournalEntry `json:"todayTurns"`
 	Health      []doctor.CheckResult `json:"health"`
 	FlashResult string               `json:"flashResult,omitempty"`
@@ -112,6 +113,7 @@ func NewHandler(vaultDir string) http.Handler {
 func loadState(vaultDir, flashMsg string) DashboardState {
 	pending, _ := approvals.List(vaultDir)
 	wts, _ := worktree.List(vaultDir)
+	tasks, _ := kernel.ListTasks(vaultDir)
 	turns := loadTodayJournals(vaultDir)
 	health := doctor.Run(vaultDir)
 	quota := kernel.LoadQuota(vaultDir)
@@ -121,6 +123,7 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 		Quota:       quota,
 		Pending:     pending,
 		Worktrees:   wts,
+		Tasks:       tasks,
 		TodayTurns:  turns,
 		Health:      health,
 		FlashResult: flashMsg,
@@ -372,7 +375,17 @@ func SyncMarkdownConsole(vaultDir string) error {
 	}
 	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 
-	fmt.Fprintf(&b, "## 🌿 2. Active Parallel Git Worktrees (`%d` Active)\n", len(state.Worktrees))
+	fmt.Fprintf(&b, "## 💬 2. Tracked Task Conversations (`%d` Active)\n", len(state.Tasks))
+	if len(state.Tasks) == 0 {
+		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
+	} else {
+		for _, t := range state.Tasks {
+			fmt.Fprintf(&b, "- **[%s](conversation://%s)** (`%s` · `%s`): %s\n", t.Title, t.ConversationID, t.TaskSlug, t.Status, t.LastSummary)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	fmt.Fprintf(&b, "## 🌿 3. Active Parallel Git Worktrees (`%d` Active)\n", len(state.Worktrees))
 	if len(state.Worktrees) == 0 {
 		b.WriteString("- None active in `local/worktrees/`.\n\n---\n\n")
 	} else {
@@ -382,7 +395,7 @@ func SyncMarkdownConsole(vaultDir string) error {
 		b.WriteString("\n---\n\n")
 	}
 
-	b.WriteString("## 🩺 3. System Health (`hq doctor`)\n")
+	b.WriteString("## 🩺 4. System Health (`hq doctor`)\n")
 	b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
 	for _, h := range state.Health {
 		icon := "✅"

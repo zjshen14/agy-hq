@@ -208,6 +208,23 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				fileName := fmt.Sprintf("%s-%d.json", payload.ConversationID, payload.ExecutionNum)
 				_ = os.WriteFile(filepath.Join(dateDir, fileName), data, 0o644)
 			}
+
+			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
+			if fd, ok := kernel.GetFrontDesk(vaultDir); !ok || fd.ConversationID != payload.ConversationID {
+				shortID := payload.ConversationID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+					TaskSlug:       "conv-" + shortID,
+					Title:          payload.LastUserInput,
+					Model:          payload.ModelName,
+					ConversationID: payload.ConversationID,
+					LastUpdatedAt:  time.Now().Format(time.RFC3339),
+					LastSummary:    summary,
+					Status:         "active",
+				})
+			}
 		}
 	}
 

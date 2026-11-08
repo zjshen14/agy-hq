@@ -218,6 +218,35 @@ func main() {
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Claimed Front Desk intake lease for conversation %s\n", *convID)
 
+	case "adopt":
+		fs := flag.NewFlagSet("adopt", flag.ExitOnError)
+		convID := fs.String("conv", "", "Existing conversation ID to adopt into headquarter orchestration")
+		taskSlug := fs.String("task", "", "Short task slug")
+		title := fs.String("title", "", "Human-readable title for the task conversation")
+		summary := fs.String("summary", "", "Current status/summary of the conversation")
+		status := fs.String("status", "active", "Status (active or completed)")
+		_ = fs.Parse(os.Args[2:])
+		if *convID == "" || *taskSlug == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq adopt --conv=<conversation-id> --task=<slug> [--title=\"...\"] [--summary=\"...\"] [--status=active|completed]")
+			os.Exit(1)
+		}
+		if *title == "" {
+			*title = *taskSlug
+		}
+		if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+			TaskSlug:       *taskSlug,
+			Title:          *title,
+			ConversationID: *convID,
+			LastUpdatedAt:  time.Now().Format(time.RFC3339),
+			LastSummary:    *summary,
+			Status:         *status,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "hq adopt error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Printf("Adopted conversation %s as task %q (%s)\n", *convID, *taskSlug, *status)
+
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
