@@ -1019,21 +1019,36 @@ func runGmailCLI(cfg AccountConfig, args ...string) ([]byte, error) {
 }
 
 func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]MessageSummary, error) {
-	out, err := runGmailCLI(cfg, "query", "search-threads", "--query="+query, fmt.Sprintf("--max-results=%d", maxResults))
+	out, err := runGmailCLI(cfg, "readonly", "search", query, fmt.Sprintf("--max=%d", maxResults), "--json")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
-	var resp struct {
-		Threads []struct {
+	// gmail_go readonly search --json returns either an array of message objects or a wrapper struct
+	var directList []MessageSummary
+	if err := json.Unmarshal(out, &directList); err == nil && len(directList) > 0 {
+		for i := range directList {
+			directList[i].Account = cfg.Alias
+		}
+		return directList, nil
+	}
+	var wrapper struct {
+		Messages []MessageSummary `json:"messages"`
+		Threads  []struct {
 			ID      string `json:"id"`
 			Snippet string `json:"snippet"`
 		} `json:"threads"`
 	}
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal(out, &wrapper); err != nil {
 		return nil, err
 	}
+	if len(wrapper.Messages) > 0 {
+		for i := range wrapper.Messages {
+			wrapper.Messages[i].Account = cfg.Alias
+		}
+		return wrapper.Messages, nil
+	}
 	var summaries []MessageSummary
-	for _, t := range resp.Threads {
+	for _, t := range wrapper.Threads {
 		summaries = append(summaries, MessageSummary{
 			ID:       t.ID,
 			ThreadID: t.ID,
@@ -1045,12 +1060,16 @@ func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]Mess
 }
 
 func readThreadViaPluginCLI(cfg AccountConfig, threadID string) (ThreadDetail, error) {
-	out, err := runGmailCLI(cfg, "query", "get-thread", "--thread-id="+threadID)
+	out, err := runGmailCLI(cfg, "readonly", "get-thread", threadID, "--json")
 	if err != nil {
 		return ThreadDetail{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	var td ThreadDetail
-	if err := json.Unmarshal(out, &td); err == nil && td.ThreadID != "" {
+	if err := json.Unmarshal(out, &td); err == nil && (td.ThreadID != "" || len(td.Messages) > 0) {
+		if td.ThreadID == "" {
+			td.ThreadID = threadID
+		}
+		td.Account = cfg.Alias
 		return td, nil
 	}
 	return ThreadDetail{
@@ -1068,28 +1087,34 @@ func readThreadViaPluginCLI(cfg AccountConfig, threadID string) (ThreadDetail, e
 }
 
 func createDraftViaPluginCLI(cfg AccountConfig, draftID, threadID, to, cc, subject, body string) (string, error) {
-	args := []string{"mutate", "create-draft", "--to=" + to, "--subject=" + subject, "--body=" + body}
+	args := []string{"mutate", "create-draft", "--to=" + to, "--subject=" + subject, "--body=" + body, "--json"}
 	if cc != "" {
 		args = append(args, "--cc="+cc)
 	}
 	if threadID != "" {
-		args = append(args, "--thread-id="+threadID)
+		args = append(args, "--thread="+threadID)
 	}
 	out, err := runGmailCLI(cfg, args...)
 	if err != nil {
 		return "", err
 	}
 	var resp struct {
-		ID string `json:"id"`
+		ID      string `json:"id"`
+		DraftID string `json:"draft_id"`
 	}
-	if json.Unmarshal(out, &resp) == nil && resp.ID != "" {
-		return resp.ID, nil
+	if json.Unmarshal(out, &resp) == nil {
+		if resp.ID != "" {
+			return resp.ID, nil
+		}
+		if resp.DraftID != "" {
+			return resp.DraftID, nil
+		}
 	}
 	return draftID, nil
 }
 
 func sendDraftViaPluginCLI(cfg AccountConfig, draftID string) (string, error) {
-	out, err := runGmailCLI(cfg, "mutate", "send-draft", "--draft-id="+draftID)
+	out, err := runGmailCLI(cfg, "mutate", "send-draft", draftID, "--json")
 	if err != nil {
 		return "", fmt.Errorf("gmail send-draft failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
