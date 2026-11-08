@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1018,43 +1019,141 @@ func runGmailCLI(cfg AccountConfig, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+type rawGmailPart struct {
+	MimeType string `json:"mimeType"`
+	Filename string `json:"filename"`
+	Body     struct {
+		AttachmentID string `json:"attachmentId"`
+		Size         int64  `json:"size"`
+		Data         string `json:"data"`
+	} `json:"body"`
+	Headers []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"headers"`
+	Parts []rawGmailPart `json:"parts"`
+}
+
+type rawGmailMessage struct {
+	ID       string       `json:"id"`
+	ThreadID string       `json:"threadId"`
+	Snippet  string       `json:"snippet"`
+	LabelIDs []string     `json:"labelIds"`
+	Payload  rawGmailPart `json:"payload"`
+}
+
+func decodeBase64URL(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		return string(b)
+	}
+	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
+		return string(b)
+	}
+	return ""
+}
+
+func extractMIMEBodies(p rawGmailPart, plainOut, htmlOut *string, attachments *[]AttachmentMeta) {
+	mt := strings.ToLower(p.MimeType)
+	if p.Filename != "" && p.Body.AttachmentID != "" {
+		*attachments = append(*attachments, AttachmentMeta{
+			AttachmentID: p.Body.AttachmentID,
+			Filename:     p.Filename,
+			MimeType:     p.MimeType,
+			Size:         p.Body.Size,
+		})
+	}
+	if mt == "text/plain" && p.Body.Data != "" && *plainOut == "" {
+		*plainOut = decodeBase64URL(p.Body.Data)
+	} else if mt == "text/html" && p.Body.Data != "" && *htmlOut == "" {
+		*htmlOut = decodeBase64URL(p.Body.Data)
+	}
+	for _, sub := range p.Parts {
+		extractMIMEBodies(sub, plainOut, htmlOut, attachments)
+	}
+}
+
+func parseRawGmailMessage(rm rawGmailMessage, account string) (MessageSummary, MessageDetail) {
+	sum := MessageSummary{
+		ID:       rm.ID,
+		ThreadID: rm.ThreadID,
+		Account:  account,
+		Snippet:  html.UnescapeString(rm.Snippet),
+		Labels:   rm.LabelIDs,
+	}
+	if sum.ThreadID == "" {
+		sum.ThreadID = rm.ID
+	}
+	for _, h := range rm.Payload.Headers {
+		switch strings.ToLower(h.Name) {
+		case "from":
+			sum.From = h.Value
+		case "to":
+			sum.To = h.Value
+		case "cc":
+			sum.Cc = h.Value
+		case "subject":
+			sum.Subject = h.Value
+		case "date":
+			sum.Date = h.Value
+		case "authentication-results":
+			sum.AuthResults = h.Value
+		}
+	}
+	var plainBody, htmlBody string
+	var atts []AttachmentMeta
+	extractMIMEBodies(rm.Payload, &plainBody, &htmlBody, &atts)
+	sum.Attachments = atts
+	det := MessageDetail{
+		ID:          sum.ID,
+		ThreadID:    sum.ThreadID,
+		From:        sum.From,
+		To:          sum.To,
+		Cc:          sum.Cc,
+		Subject:     sum.Subject,
+		Date:        sum.Date,
+		PlainBody:   plainBody,
+		HTMLBody:    htmlBody,
+		AuthResults: sum.AuthResults,
+		Attachments: atts,
+	}
+	if det.PlainBody == "" && det.HTMLBody == "" {
+		det.PlainBody = sum.Snippet
+	}
+	return sum, det
+}
+
 func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]MessageSummary, error) {
-	out, err := runGmailCLI(cfg, "readonly", "search", query, fmt.Sprintf("--max=%d", maxResults), "--json")
+	out, err := runGmailCLI(cfg, "readonly", "read", query, fmt.Sprintf("--max=%d", maxResults), "--json")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
-	// gmail_go readonly search --json returns either an array of message objects or a wrapper struct
-	var directList []MessageSummary
-	if err := json.Unmarshal(out, &directList); err == nil && len(directList) > 0 {
-		for i := range directList {
-			directList[i].Account = cfg.Alias
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" || trimmed == "null" || trimmed == "[]" {
+		return []MessageSummary{}, nil
+	}
+	var rawMsgs []rawGmailMessage
+	if err := json.Unmarshal(out, &rawMsgs); err == nil {
+		var summaries []MessageSummary
+		for _, rm := range rawMsgs {
+			s, _ := parseRawGmailMessage(rm, cfg.Alias)
+			summaries = append(summaries, s)
 		}
-		return directList, nil
+		return summaries, nil
 	}
 	var wrapper struct {
-		Messages []MessageSummary `json:"messages"`
-		Threads  []struct {
-			ID      string `json:"id"`
-			Snippet string `json:"snippet"`
-		} `json:"threads"`
+		Messages []rawGmailMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(out, &wrapper); err != nil {
 		return nil, err
 	}
-	if len(wrapper.Messages) > 0 {
-		for i := range wrapper.Messages {
-			wrapper.Messages[i].Account = cfg.Alias
-		}
-		return wrapper.Messages, nil
-	}
 	var summaries []MessageSummary
-	for _, t := range wrapper.Threads {
-		summaries = append(summaries, MessageSummary{
-			ID:       t.ID,
-			ThreadID: t.ID,
-			Account:  cfg.Alias,
-			Snippet:  t.Snippet,
-		})
+	for _, rm := range wrapper.Messages {
+		s, _ := parseRawGmailMessage(rm, cfg.Alias)
+		summaries = append(summaries, s)
 	}
 	return summaries, nil
 }
@@ -1064,12 +1163,25 @@ func readThreadViaPluginCLI(cfg AccountConfig, threadID string) (ThreadDetail, e
 	if err != nil {
 		return ThreadDetail{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
-	var td ThreadDetail
-	if err := json.Unmarshal(out, &td); err == nil && (td.ThreadID != "" || len(td.Messages) > 0) {
+	var rawThread struct {
+		ID       string            `json:"id"`
+		Messages []rawGmailMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &rawThread); err == nil && len(rawThread.Messages) > 0 {
+		td := ThreadDetail{
+			ThreadID: rawThread.ID,
+			Account:  cfg.Alias,
+		}
 		if td.ThreadID == "" {
 			td.ThreadID = threadID
 		}
-		td.Account = cfg.Alias
+		for _, rm := range rawThread.Messages {
+			_, det := parseRawGmailMessage(rm, cfg.Alias)
+			if td.Subject == "" && det.Subject != "" {
+				td.Subject = det.Subject
+			}
+			td.Messages = append(td.Messages, det)
+		}
 		return td, nil
 	}
 	return ThreadDetail{
