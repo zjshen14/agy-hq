@@ -109,9 +109,9 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	}
 
 	// Migration v2 -> v3: Normalize tasks.json titles to [Task:<scope>] convention & remove legacy hq_console_mobile.md
-	if prev.Version < 3 {
-		normalized := normalizeLegacyTaskTitles(vaultDir)
-		removedLegacy := removeLegacyMobileConsole(vaultDir)
+	normalized := normalizeLegacyTaskTitles(vaultDir)
+	removedLegacy := removeLegacyMobileConsole(vaultDir)
+	if prev.Version < 3 || normalized > 0 || removedLegacy {
 		recordStep("v3_task_titles_and_console", fmt.Sprintf("Normalized %d task title(s) to [Task:<scope>] convention; cleaned legacy mobile console=%v", normalized, removedLegacy))
 	}
 
@@ -183,12 +183,12 @@ func normalizeLegacyTaskTitles(vaultDir string) int {
 	for _, item := range raw {
 		title, _ := item["title"].(string)
 		slug, _ := item["taskSlug"].(string)
-		if title != "" && !strings.HasPrefix(title, "[Task:") && !strings.HasPrefix(title, "[HQ]") {
-			scope := "general"
-			if parts := strings.SplitN(slug, "-", 2); len(parts) > 0 && parts[0] != "" {
-				scope = parts[0]
-			}
-			item["title"] = fmt.Sprintf("[Task:%s] %s", scope, title)
+		if title == "" {
+			continue
+		}
+		sanitized := sanitizeMigratedTitle(title, slug)
+		if sanitized != title {
+			item["title"] = sanitized
 			count++
 		}
 	}
@@ -198,6 +198,57 @@ func normalizeLegacyTaskTitles(vaultDir string) int {
 		}
 	}
 	return count
+}
+
+func sanitizeMigratedTitle(title, slug string) string {
+	s := strings.TrimSpace(title)
+	if idx := strings.Index(s, "<USER_REQUEST>"); idx >= 0 {
+		s = s[idx+len("<USER_REQUEST>"):]
+	}
+	if idx := strings.Index(s, "</USER_REQUEST>"); idx >= 0 {
+		s = s[:idx]
+	}
+	if idx := strings.Index(s, "<ADDITIONAL_METADATA>"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+
+	lines := strings.Split(s, "\n")
+	var chosen string
+	prefixOnly := ""
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if l == "" {
+			continue
+		}
+		if prefixOnly == "" && (l == "[Task:general]" || strings.HasSuffix(l, "]")) && !strings.Contains(l, " ") {
+			prefixOnly = l
+			continue
+		}
+		if prefixOnly != "" {
+			chosen = prefixOnly + " " + l
+		} else {
+			chosen = l
+		}
+		break
+	}
+	if chosen == "" {
+		chosen = prefixOnly
+	}
+	chosen = strings.Join(strings.Fields(chosen), " ")
+	chosen = strings.ReplaceAll(chosen, "|", "-")
+
+	if chosen != "" && !strings.HasPrefix(chosen, "[Task:") && !strings.HasPrefix(chosen, "[Subagent:") && !strings.HasPrefix(chosen, "[HQ]") && !strings.HasPrefix(chosen, "[Auto]") {
+		scope := "general"
+		if parts := strings.SplitN(slug, "-", 2); len(parts) > 0 && parts[0] != "" && parts[0] != "conv" {
+			scope = parts[0]
+		}
+		chosen = fmt.Sprintf("[Task:%s] %s", scope, chosen)
+	}
+	if runes := []rune(chosen); len(runes) > 88 {
+		chosen = string(runes[:85]) + "..."
+	}
+	return chosen
 }
 
 func removeLegacyMobileConsole(vaultDir string) bool {

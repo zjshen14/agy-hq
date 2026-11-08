@@ -25,6 +25,34 @@ type ScheduleTrigger struct {
 	PrecheckCmd []string `json:"precheckCmd,omitempty"`
 }
 
+// FiveFieldCron strips any leading CRON_TZ=<tz> token and returns a standard 5-field cron expression
+// compatible with Antigravity's native `schedule` tool.
+func (s ScheduleTrigger) FiveFieldCron() string {
+	fields := strings.Fields(strings.TrimSpace(s.Cron))
+	if len(fields) > 0 && strings.HasPrefix(strings.ToUpper(fields[0]), "CRON_TZ=") {
+		fields = fields[1:]
+	}
+	return strings.Join(fields, " ")
+}
+
+// DefaultPrompt returns the canonical prompt string to pass to Antigravity's `schedule` tool for this trigger.
+func (s ScheduleTrigger) DefaultPrompt() string {
+	switch s.ID {
+	case "morning-brief":
+		return "[Auto] Morning Brief: Activate the morning-brief skill to generate today's Morning Brief across calendar events, inbox triage, pending approvals, active worktrees, and investment watchlist."
+	case "edgar-close-watch":
+		return "[Auto] EDGAR Close Watch: Activate the thesis-check skill to monitor new after-close 8-K, 10-Q, or 10-K filings against investment watchlists."
+	case "sleep-consolidate":
+		return "[Auto] Nightly Sleep Consolidation: Activate the sleep-consolidate skill to review today's turn journals in local/memory/journal/, update local/MEMORY.md and local/memory/facts.jsonl, and commit private Vault changes."
+	default:
+		skill := s.Skill
+		if skill == "" {
+			skill = s.ID
+		}
+		return fmt.Sprintf("[Auto] %s: Activate the %s skill and execute the scheduled workflow.", s.ID, skill)
+	}
+}
+
 // InboxRuleTrigger represents a file drop routing rule from local/triggers.yaml.
 type InboxRuleTrigger struct {
 	Name          string   `json:"name"`

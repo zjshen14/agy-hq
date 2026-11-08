@@ -1132,3 +1132,176 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 		t.Fatalf("expected doctor to revert to WARN after uninstall, got:\n%s", docAfter)
 	}
 }
+
+// CUJ-13: Front Desk Initialization Hardening, Trigger Arming, Subagent Isolation & Clean Handover
+func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
+	env := setupHQEnv(t)
+
+	artDesk1 := filepath.Join(t.TempDir(), "brain-desk-1")
+	_ = os.MkdirAll(artDesk1, 0o755)
+	deskConv1 := "conv-desk-shift-1"
+
+	// 1. Simulate in-session `hq init` where ANTIGRAVITY_SOURCE_METADATA carries the conversation ID
+	metaEnv := []string{
+		fmt.Sprintf(`ANTIGRAVITY_SOURCE_METADATA={"conversationId":%q}`, deskConv1),
+	}
+	if out, err := env.runWithEnv("", metaEnv, "init"); err != nil {
+		t.Fatalf("hq init with metadata failed: %v (%s)", err, out)
+	}
+
+	// Even though `hq init` already created front_desk.json for deskConv1, Turn-1 SessionStart MUST
+	// still emit the initialization checklist because ConsolePinned is false and triggers are unarmed!
+	ssPayload1 := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q}`, deskConv1, artDesk1)
+	ssOut1, err := env.run(ssPayload1, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start turn 1 failed: %v (%s)", err, ssOut1)
+	}
+	if !strings.Contains(ssOut1, "New [HQ] Front Desk Initialization Required") {
+		t.Fatalf("expected initialization banner when ConsolePinned=false even if front_desk.json pre-existed, got:\n%s", ssOut1)
+	}
+	if !strings.Contains(ssOut1, "Step 3 (Arm Proactive Schedules from `local/triggers.yaml`)") ||
+		!strings.Contains(ssOut1, `30 7 * * *`) ||
+		!strings.Contains(ssOut1, `30 13 * * 1-5`) ||
+		!strings.Contains(ssOut1, `30 23 * * *`) {
+		t.Fatalf("expected Step 3 with 5-field cron expressions for all 3 triggers in session-start, got:\n%s", ssOut1)
+	}
+
+	// 2. Verify Turn-1 housekeeping reads (CONSOLE.md, hq_console.md, triggers.yaml) are EXEMPT from the 3-lookup cap
+	for _, p := range []string{
+		filepath.Join(env.vaultDir, "CONSOLE.md"),
+		filepath.Join(artDesk1, "hq_console.md"),
+		filepath.Join(env.vaultDir, "triggers.yaml"),
+	} {
+		readCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"read_file","args":{"Path":%q}}}`, deskConv1, p)
+		out, _ := env.run(readCmd, "hook", "pre-tool")
+		if !strings.Contains(out, `"decision":"allow"`) {
+			t.Fatalf("expected housekeeping read of %s to be allowed, got: %s", p, out)
+		}
+	}
+	// Now perform 2 normal research reads on Front Desk -> should succeed (count = 2)
+	for i := 1; i <= 2; i++ {
+		readCmd := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"read_file","args":{"Path":%q}}}`, deskConv1, filepath.Join(env.vaultDir, "USER.md"))
+		out, _ := env.run(readCmd, "hook", "pre-tool")
+		if !strings.Contains(out, `"decision":"allow"`) {
+			t.Fatalf("expected normal research read %d to be allowed after housekeeping reads, got: %s", i, out)
+		}
+	}
+
+	// 3. Verify subagent SessionStart and Stop do NOT clobber Front Desk's active_artifact_dir.txt or front_desk_turn.json
+	subArtDir := filepath.Join(t.TempDir(), "brain-sub-isolated")
+	_ = os.MkdirAll(subArtDir, 0o755)
+	subSS := fmt.Sprintf(`{"conversationId":"sub-conv-isolated","artifactDirectoryPath":%q}`, subArtDir)
+	_, _ = env.run(subSS, "hook", "session-start")
+	subStop := fmt.Sprintf(`{"conversationId":"sub-conv-isolated","artifactDirectoryPath":%q,"lastUserInput":"Subagent work"}`, subArtDir)
+	_, _ = env.run(subStop, "hook", "stop")
+
+	activeArtBytes, _ := os.ReadFile(filepath.Join(env.vaultDir, "memory", "active_artifact_dir.txt"))
+	if strings.TrimSpace(string(activeArtBytes)) != artDesk1 {
+		t.Fatalf("subagent clobbered active_artifact_dir.txt: got %q, want %q", string(activeArtBytes), artDesk1)
+	}
+	// Front Desk's 3rd research read should be allowed, and 4th should be denied (proving subagent didn't reset Front Desk turn counter!)
+	readCmd3 := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"read_file","args":{"Path":%q}}}`, deskConv1, filepath.Join(env.vaultDir, "USER.md"))
+	out3, _ := env.run(readCmd3, "hook", "pre-tool")
+	if !strings.Contains(out3, `"decision":"allow"`) {
+		t.Fatalf("expected 3rd Front Desk read to be allowed, got: %s", out3)
+	}
+	out4, _ := env.run(readCmd3, "hook", "pre-tool")
+	if !strings.Contains(out4, `"decision":"deny"`) {
+		t.Fatalf("expected 4th Front Desk read to be denied (subagent must not reset Front Desk counter), got: %s", out4)
+	}
+
+	// 4. Pin hq_console.md and arm all 3 triggers via PreToolUse
+	pinCall := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q}}}`, deskConv1, artDesk1, filepath.Join(artDesk1, "hq_console.md"))
+	if out, err := env.run(pinCall, "hook", "pre-tool"); err != nil || !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("write_file hq_console.md pre-tool failed: %v (%s)", err, out)
+	}
+	for _, s := range []struct {
+		cron   string
+		prompt string
+	}{
+		{"30 7 * * *", "[Auto] Morning Brief: Run the morning-brief skill and update hq_console.md."},
+		{"30 13 * * 1-5", "[Auto] EDGAR Close Watch: Check watchlist filings and run `./bin/hq heartbeat`."},
+		{"30 23 * * *", "[Auto] Sleep Consolidate: Run the sleep-consolidate nightly memory workflow."},
+	} {
+		schedCall := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"schedule","args":{"CronExpression":%q,"IsDaemon":true,"Prompt":%q}}}`, deskConv1, s.cron, s.prompt)
+		if out, err := env.run(schedCall, "hook", "pre-tool"); err != nil || !strings.Contains(out, `"decision":"allow"`) {
+			t.Fatalf("schedule pre-tool failed for %s: %v (%s)", s.cron, err, out)
+		}
+	}
+
+	fdAfterArm, ok := kernel.GetFrontDesk(env.vaultDir)
+	if !ok || !fdAfterArm.ConsolePinned || len(fdAfterArm.ArmedTriggers) != 3 {
+		t.Fatalf("expected ConsolePinned=true and 3 ArmedTriggers, got: %+v", fdAfterArm)
+	}
+
+	// Next SessionStart on deskConv1 should NO LONGER show "New [HQ] Front Desk Initialization Required"
+	ssOut2, err := env.run(ssPayload1, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start turn 2 failed: %v", err)
+	}
+	if strings.Contains(ssOut2, "New [HQ] Front Desk Initialization Required") {
+		t.Fatalf("expected initialization banner to be suppressed once ConsolePinned and all 3 triggers are armed, got:\n%s", ssOut2)
+	}
+
+	// 5. Verify multi-line prompt sanitization and monotonic ExecutionNum when executionNum=0
+	multiLinePrompt := "<USER_REQUEST>\nWork inside /path/to/worktree.\n\nTask: Audit Front Desk | Fix table pipes | Line 3\n1. Step one\n2. Step two\n</USER_REQUEST>"
+	for turn := 1; turn <= 2; turn++ {
+		stopPayload := bytes.NewBuffer(nil)
+		_ = json.NewEncoder(stopPayload).Encode(map[string]interface{}{
+			"conversationId":    "conv-multiline-task",
+			"executionNum":      0, // omitted by live Antigravity payload
+			"modelName":         "gemini-4-argon-high",
+			"lastUserInput":     multiLinePrompt,
+			"terminationReason": "NO_TOOL_CALL",
+		})
+		if out, err := env.run(stopPayload.String(), "hook", "stop"); err != nil {
+			t.Fatalf("stop turn %d failed: %v (%s)", turn, err, out)
+		}
+	}
+	today := time.Now().Format("2006-01-02")
+	for _, expectedFile := range []string{"conv-multiline-task-1.json", "conv-multiline-task-2.json"} {
+		p := filepath.Join(env.vaultDir, "memory", "journal", today, expectedFile)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected monotonic journal file %s to exist: %v", p, err)
+		}
+	}
+	mlTask, found := kernel.FindTaskByConversationID(env.vaultDir, "conv-multiline-task")
+	if !found {
+		t.Fatalf("expected conv-multiline-task in tasks.json")
+	}
+	if strings.Contains(mlTask.Title, "\n") || strings.Contains(mlTask.Title, "|") || strings.Contains(mlTask.Title, "<USER_REQUEST>") {
+		t.Fatalf("expected sanitized single-line title without pipes or tags, got: %q", mlTask.Title)
+	}
+
+	// 6. Clean Handover via `hq claim-desk` to a new Front Desk conversation
+	artDesk2 := filepath.Join(t.TempDir(), "brain-desk-2")
+	_ = os.MkdirAll(artDesk2, 0o755)
+	deskConv2 := "conv-desk-shift-2"
+	claimOut, err := env.run("", "claim-desk", "--conv="+deskConv2, "--artifact-dir="+artDesk2)
+	if err != nil {
+		t.Fatalf("claim-desk shift 2 failed: %v (%s)", err, claimOut)
+	}
+	if !strings.Contains(claimOut, "Step 1 (Pin Console Artifact)") || !strings.Contains(claimOut, "Step 2 (Arm 3 Proactive Schedule(s)") {
+		t.Fatalf("expected Turn-1 checklist in claim-desk output, got:\n%s", claimOut)
+	}
+
+	// Outgoing Front Desk (deskConv1) must be archived in tasks.json as completed
+	archivedDesk, found := kernel.FindTaskByConversationID(env.vaultDir, deskConv1)
+	if !found || archivedDesk.Status != "completed" {
+		t.Fatalf("expected outgoing Front Desk %s to be archived as completed in tasks.json, got: %+v (found=%v)", deskConv1, archivedDesk, found)
+	}
+
+	// New Front Desk must have fresh ConsolePinned=false and 0 armed triggers, and hq doctor should pass Console & Task Board checks
+	fdShift2, ok := kernel.GetFrontDesk(env.vaultDir)
+	if !ok || fdShift2.ConversationID != deskConv2 || fdShift2.ConsolePinned || len(fdShift2.ArmedTriggers) != 0 {
+		t.Fatalf("expected fresh Front Desk state for %s, got: %+v", deskConv2, fdShift2)
+	}
+
+	docShift2, err := env.run("", "doctor")
+	if err != nil {
+		t.Fatalf("hq doctor after shift 2 failed: %v (%s)", err, docShift2)
+	}
+	if !strings.Contains(docShift2, "[PASS] Front Desk Console Artifact") || !strings.Contains(docShift2, "[PASS] Task Board & Quota Integrity") {
+		t.Fatalf("expected PASS on Front Desk Console Artifact and Task Board & Quota Integrity in hq doctor, got:\n%s", docShift2)
+	}
+}

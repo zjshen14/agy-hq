@@ -344,6 +344,7 @@ func RecordArtifactDir(vaultDir, artifactDir string) {
 // SyncMarkdownConsole deterministically regenerates `local/CONSOLE.md` and (if present)
 // `<artifactDirectoryPath>/hq_console.md` from live Vault state in 0 LLM tokens.
 func SyncMarkdownConsole(vaultDir string) error {
+	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
 	state := loadState(vaultDir, "")
 	var b strings.Builder
 
@@ -366,6 +367,16 @@ func SyncMarkdownConsole(vaultDir string) error {
 	b.WriteString("## 📊 1. Front Desk Lease & Daily Quota\n")
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok {
 		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
+		pinStatus := "⚠️ Pending Turn-1 `write_file` pin"
+		if fd.ConsolePinned {
+			pinStatus = "✅ Pinned in UI"
+		}
+		fmt.Fprintf(&b, "- **Console Artifact Pin:** `%s`\n", pinStatus)
+		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
+		totalTriggers := len(armed) + len(unarmed)
+		if totalTriggers > 0 {
+			fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d armed in Front Desk`\n", len(armed), totalTriggers)
+		}
 	} else {
 		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")
 	}
@@ -386,6 +397,7 @@ func SyncMarkdownConsole(vaultDir string) error {
 	} else {
 		b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
 		for _, t := range state.Tasks {
+			cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
 			oneLine := strings.Join(strings.Fields(t.LastSummary), " ")
 			oneLine = strings.ReplaceAll(oneLine, "|", "\\|")
 			if runes := []rune(oneLine); len(runes) > 130 {
@@ -397,7 +409,7 @@ func SyncMarkdownConsole(vaultDir string) error {
 			} else if strings.EqualFold(t.Status, "cancelled") {
 				badge = "🛑 `cancelled`"
 			}
-			fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | `%s` | %s |\n", badge, t.Title, t.ConversationID, t.TaskSlug, oneLine)
+			fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | `%s` | %s |\n", badge, cleanTitle, t.ConversationID, t.TaskSlug, oneLine)
 		}
 		b.WriteString("\n---\n\n")
 	}
@@ -421,7 +433,11 @@ func SyncMarkdownConsole(vaultDir string) error {
 			limit = 5
 		}
 		for _, j := range state.TodayTurns[:limit] {
-			prompt := strings.Join(strings.Fields(j.UserPrompt), " ")
+			rawPrompt := j.UserPrompt
+			if strings.TrimSpace(rawPrompt) == "" {
+				rawPrompt = j.ResponseSummary
+			}
+			prompt := strings.Join(strings.Fields(rawPrompt), " ")
 			if runes := []rune(prompt); len(runes) > 90 {
 				prompt = string(runes[:90]) + "..."
 			}

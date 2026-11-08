@@ -3,17 +3,17 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"; if [ ! -x \"./bin/hq\" ] && [ ! -x \"../bin/hq\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null; elif [ -d \"./cmd/hq\" ] && [ -n \"$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null)\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null && ./bin/hq migrate --quiet 2>/dev/null; fi; (\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start)",
+        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"; if [ ! -x \"./bin/hq\" ] && [ ! -x \"../bin/hq\" ] && [ ! -x \"../../../bin/hq\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null; elif [ -d \"./cmd/hq\" ] && [ -n \"$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null)\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null && ./bin/hq migrate --quiet 2>/dev/null; fi; (\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start 2>/dev/null || \"../../../bin/hq\" hook session-start)",
         "timeout": 15
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents",
+        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents|schedule|manage_task",
         "hooks": [
           {
             "type": "command",
-            "command": "(\"./bin/hq\" hook pre-tool 2>/dev/null || \"../bin/hq\" hook pre-tool)",
+            "command": "(\"./bin/hq\" hook pre-tool 2>/dev/null || \"../bin/hq\" hook pre-tool 2>/dev/null || \"../../../bin/hq\" hook pre-tool)",
             "timeout": 5
           }
         ]
@@ -22,7 +22,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "(\"./bin/hq\" hook stop 2>/dev/null || \"../bin/hq\" hook stop)",
+        "command": "(\"./bin/hq\" hook stop 2>/dev/null || \"../bin/hq\" hook stop 2>/dev/null || \"../../../bin/hq\" hook stop)",
         "timeout": 5
       }
     ]

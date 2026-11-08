@@ -63,6 +63,25 @@ func ResolveVaultDir() (string, error) {
 	return filepath.Join(root, "local"), nil
 }
 
+// ResolveConversationID resolves the active Antigravity conversation ID from the environment
+// (checking ANTIGRAVITY_CONVERSATION_ID first, then ANTIGRAVITY_SOURCE_METADATA JSON).
+func ResolveConversationID() string {
+	if convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")); convID != "" {
+		return convID
+	}
+	if metaRaw := strings.TrimSpace(os.Getenv("ANTIGRAVITY_SOURCE_METADATA")); metaRaw != "" {
+		var meta struct {
+			Tool struct {
+				ConversationID string `json:"conversationId"`
+			} `json:"tool"`
+		}
+		if json.Unmarshal([]byte(metaRaw), &meta) == nil && strings.TrimSpace(meta.Tool.ConversationID) != "" {
+			return strings.TrimSpace(meta.Tool.ConversationID)
+		}
+	}
+	return ""
+}
+
 // ResolveArtifactDir determines the artifact directory for a conversation ID.
 // It checks ANTIGRAVITY_APP_DATA_DIR (falling back to ~/.gemini/antigravity),
 // returning <appDataDir>/brain/<convID>.

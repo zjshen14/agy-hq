@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,44 +80,89 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 
 	var sections []string
 	if payload.ConversationID != "" {
-		turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
-		resetState := map[string]interface{}{
-			"conversationId": payload.ConversationID,
-			"count":          0,
-			"updatedAt":      time.Now().Format(time.RFC3339),
-		}
-		if data, err := json.MarshalIndent(resetState, "", "  "); err == nil {
-			_ = os.WriteFile(turnFile, data, 0o644)
-		}
-
 		existing, ok := kernel.GetFrontDesk(vaultDir)
-		roleBanner := fmt.Sprintf(
-			"## 🎯 Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)\n"+
-				"- You are the single Front Desk intake coordinator (`%s`).\n"+
-				"- **Hard Mechanical Limit:** You have at most **3 inline lookup tool calls** per turn, and direct code/worktree edits or test runs are mechanically blocked by PreToolUse hooks on this thread.\n"+
-				"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `local/worktrees/<repo>-<task>/`) or `./bin/hq spawn` so the user can keep chatting without waiting.",
-			payload.ConversationID,
-		)
+		isFrontDesk := !ok || existing.ConversationID == payload.ConversationID
 
-		if !ok {
+		if isFrontDesk {
+			turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
+			resetState := map[string]interface{}{
+				"conversationId": payload.ConversationID,
+				"count":          0,
+				"updatedAt":      time.Now().Format(time.RFC3339),
+			}
+			_ = os.MkdirAll(filepath.Dir(turnFile), 0o755)
+			if data, err := json.MarshalIndent(resetState, "", "  "); err == nil {
+				_ = os.WriteFile(turnFile, data, 0o644)
+			}
+			if payload.ArtifactDirectoryPath != "" {
+				_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
+			}
+
 			_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
-			artPath := filepath.Join(strings.TrimSpace(payload.ArtifactDirectoryPath), "hq_console.md")
-			consolePath := filepath.Join(vaultDir, "CONSOLE.md")
-			sections = append(sections, roleBanner, fmt.Sprintf(
-				"## 🚀 New [HQ] Front Desk Initialization Required\n"+
-					"- Active Front Desk Conversation ID: `%s` (claimed just now).\n"+
-					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, and tracked Task Conversations are already loaded below. Do **NOT** run shell commands or `read_file` to re-fetch them.\n"+
-					"- **Step 2 (Pin Live Console Artifact):** Read `%s` and call `write_file` (`Overwrite=true`, `ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live [HQ] Front Desk Console & Task Board\"}`) to `%s` so Antigravity pins the live status artifact in this conversation's UI.\n"+
-					"- **Step 3 (Concise Welcome):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations.",
-				payload.ConversationID, consolePath, artPath, artPath,
-			))
-		} else if existing.ConversationID == payload.ConversationID {
+			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
+			fd, _ := kernel.GetFrontDesk(vaultDir)
+			_, unarmedTriggers := kernel.GetUnarmedTriggers(vaultDir)
+
+			roleBanner := fmt.Sprintf(
+				"## 🎯 Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)\n"+
+					"- You are the single Front Desk intake coordinator (`%s`).\n"+
+					"- **Hard Mechanical Limit:** You have at most **3 inline lookup tool calls** per turn, and direct code/worktree edits or test runs are mechanically blocked by PreToolUse hooks on this thread.\n"+
+					"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `local/worktrees/<repo>-<task>/`) or `./bin/hq spawn` so the user can keep chatting without waiting.",
+				payload.ConversationID,
+			)
 			sections = append(sections, roleBanner)
+
+			if !ok || !fd.ConsolePinned || len(unarmedTriggers) > 0 {
+				artDir := strings.TrimSpace(payload.ArtifactDirectoryPath)
+				if artDir == "" {
+					artDir = strings.TrimSpace(fd.ArtifactDir)
+				}
+				if artDir == "" {
+					artDir = vault.ResolveArtifactDir(payload.ConversationID)
+				}
+				artPath := filepath.Join(artDir, "hq_console.md")
+				consolePath := filepath.Join(vaultDir, "CONSOLE.md")
+
+				var initLines []string
+				initLines = append(initLines,
+					"## 🚀 New [HQ] Front Desk Initialization Required",
+					fmt.Sprintf("- Active Front Desk Conversation ID: `%s`.", payload.ConversationID),
+					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, tracked Task Conversations, and `local/triggers.yaml` schedules are already loaded below. Do **NOT** run shell commands or `read_file` to re-fetch them.",
+				)
+				if !fd.ConsolePinned {
+					initLines = append(initLines, fmt.Sprintf(
+						"- **Step 2 (Pin Live Console Artifact):** Read `%s` and call `write_file` (`Overwrite=true`, `ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live [HQ] Front Desk Console & Task Board\"}`) to `%s` so Antigravity pins the live status artifact in this conversation's UI.",
+						consolePath, artPath,
+					))
+				} else {
+					initLines = append(initLines, fmt.Sprintf(
+						"- **Step 2 (Pin Live Console Artifact):** Already pinned at `%s`.",
+						artPath,
+					))
+				}
+				if len(unarmedTriggers) > 0 {
+					initLines = append(initLines, fmt.Sprintf(
+						"- **Step 3 (Arm Proactive Schedules from `local/triggers.yaml`):** %d declared schedule(s) are currently unarmed in this Front Desk session. Call the `schedule` tool for each unarmed trigger now:",
+						len(unarmedTriggers),
+					))
+					for _, s := range unarmedTriggers {
+						initLines = append(initLines, fmt.Sprintf(
+							"  - `%s` (`%s`): `schedule(CronExpression=%q, IsDaemon=true, Prompt=%q)`",
+							s.ID, s.Cron, s.FiveFieldCron(), s.DefaultPrompt(),
+						))
+					}
+				}
+				initLines = append(initLines, fmt.Sprintf(
+					"- **Step 4 (Concise Welcome):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations.",
+					artPath,
+				))
+				sections = append(sections, strings.Join(initLines, "\n"))
+			}
 		} else {
-			// Subagent or secondary conversation: check if already tracked or waiting in pending queue
+			// Subagent or secondary conversation: check if already tracked or waiting in pending queue / spawn list
 			_, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID)
 			if !alreadyTracked {
-				if sub, found := kernel.PopPendingSubagent(vaultDir, 5*time.Minute); found {
+				if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
 					modelName := sub.Model
 					if modelName == "" {
 						modelName = payload.ModelName
@@ -132,6 +178,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 						CreatedAt:      time.Now().Format(time.RFC3339),
 						LastUpdatedAt:  time.Now().Format(time.RFC3339),
 					})
+				} else {
+					_, _ = kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName)
 				}
 			}
 
@@ -140,10 +188,11 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
 			))
 		}
-	}
-	if payload.ArtifactDirectoryPath != "" {
-		_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
-		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
+	} else if payload.ArtifactDirectoryPath != "" {
+		if _, ok := kernel.GetFrontDesk(vaultDir); !ok {
+			_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+			_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
+		}
 	}
 
 	if userBytes, err := os.ReadFile(filepath.Join(vaultDir, "USER.md")); err == nil {
@@ -184,9 +233,24 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
 		var lines []string
 		for _, t := range tasks {
-			lines = append(lines, fmt.Sprintf("- **%s** (`%s`, status: `%s`, conv: `%s`)", t.Title, t.TaskSlug, t.Status, t.ConversationID))
+			cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
+			lines = append(lines, fmt.Sprintf("- **%s** (`%s`, status: `%s`, conv: `%s`)", cleanTitle, t.TaskSlug, t.Status, t.ConversationID))
 		}
 		sections = append(sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
+	}
+	if cfg, err := kernel.LoadTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
+		fd, _ := kernel.GetFrontDesk(vaultDir)
+		var lines []string
+		for _, s := range cfg.Schedules {
+			status := "UNARMED"
+			if fd.ArmedTriggers != nil {
+				if _, ok := fd.ArmedTriggers[s.ID]; ok {
+					status = "ARMED"
+				}
+			}
+			lines = append(lines, fmt.Sprintf("- `%s` (`%s`, status: `%s`, skill: `%s`)", s.ID, s.Cron, status, s.Skill))
+		}
+		sections = append(sections, "## Proactive Triggers (`local/triggers.yaml`)\n"+strings.Join(lines, "\n"))
 	}
 
 	if len(sections) == 0 {
@@ -283,6 +347,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		return err
 	}
 
+	if payload.ToolCall.Name == "schedule" {
+		cronExpr, _ := payload.ToolCall.Args["CronExpression"].(string)
+		prompt, _ := payload.ToolCall.Args["Prompt"].(string)
+		_, _ = kernel.RecordArmedTrigger(vaultDir, payload.ConversationID, cronExpr, prompt)
+		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+		return err
+	}
+
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
 
@@ -324,6 +396,10 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			return json.NewEncoder(w).Encode(resp)
 		}
 
+		if filepath.Base(cleanPath) == "hq_console.md" || strings.HasSuffix(filepath.ToSlash(cleanPath), "/hq_console.md") {
+			_ = kernel.MarkConsolePinned(vaultDir, payload.ConversationID)
+		}
+
 		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
 		return err
 	}
@@ -348,7 +424,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	// Rule C: Per-Turn Inline Investigation Cap (Max 3 Research Tool Calls on Front Desk)
 	isResearchTool := false
 	switch payload.ToolCall.Name {
-	case "read_file", "grep_search", "find_by_name":
+	case "read_file":
+		pathArg, _ := payload.ToolCall.Args["Path"].(string)
+		base := filepath.Base(filepath.Clean(pathArg))
+		// Turn-1 housekeeping reads (CONSOLE.md, hq_console.md, triggers.yaml) are exempt from the 3-lookup cap.
+		if base != "CONSOLE.md" && base != "hq_console.md" && base != "triggers.yaml" {
+			isResearchTool = true
+		}
+	case "grep_search", "find_by_name":
 		isResearchTool = true
 	case "run_command":
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
@@ -402,44 +485,63 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 		_, wErr := w.Write([]byte(`{"decision":"stop"}` + "\n"))
 		return wErr
 	}
-	if payload.ArtifactDirectoryPath != "" {
+
+	fd, hasFD := kernel.GetFrontDesk(vaultDir)
+	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
+
+	if payload.ArtifactDirectoryPath != "" && (isFrontDesk || !hasFD) {
 		_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
 	}
 
 	if payload.ConversationID != "" {
-		turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
-		resetState := map[string]interface{}{
-			"conversationId": payload.ConversationID,
-			"count":          0,
-			"updatedAt":      time.Now().Format(time.RFC3339),
-		}
-		if data, err := json.MarshalIndent(resetState, "", "  "); err == nil {
-			_ = os.WriteFile(turnFile, data, 0o644)
+		if isFrontDesk {
+			turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
+			resetState := map[string]interface{}{
+				"conversationId": payload.ConversationID,
+				"count":          0,
+				"updatedAt":      time.Now().Format(time.RFC3339),
+			}
+			if data, err := json.MarshalIndent(resetState, "", "  "); err == nil {
+				_ = os.WriteFile(turnFile, data, 0o644)
+			}
+			if payload.ArtifactDirectoryPath != "" {
+				_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
+			}
+			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 		}
 
-		toolsUsed, filesModified, summary := parseTranscriptSummary(payload.TranscriptPath)
+		toolsUsed, filesModified, summary, transcriptUserPrompt := parseTranscriptSummary(payload.TranscriptPath)
+		userPrompt := strings.TrimSpace(payload.LastUserInput)
+		if userPrompt == "" {
+			userPrompt = transcriptUserPrompt
+		}
+
 		dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
 		if err := os.MkdirAll(dateDir, 0o755); err == nil {
+			execNum := payload.ExecutionNum
+			if execNum <= 0 {
+				execNum = nextExecutionNum(dateDir, payload.ConversationID)
+			}
 			entry := JournalEntry{
 				Timestamp:         time.Now().Format(time.RFC3339),
 				ConversationID:    payload.ConversationID,
-				ExecutionNum:      payload.ExecutionNum,
+				ExecutionNum:      execNum,
 				WorkspacePaths:    payload.WorkspacePaths,
 				ModelName:         payload.ModelName,
-				UserPrompt:        payload.LastUserInput,
+				UserPrompt:        userPrompt,
 				ToolsUsed:         toolsUsed,
 				FilesModified:     filesModified,
 				TerminationReason: payload.TerminationReason,
 				ResponseSummary:   summary,
 			}
 			if data, err := json.MarshalIndent(entry, "", "  "); err == nil {
-				fileName := fmt.Sprintf("%s-%d.json", payload.ConversationID, payload.ExecutionNum)
+				fileName := fmt.Sprintf("%s-%d.json", payload.ConversationID, execNum)
 				_ = os.WriteFile(filepath.Join(dateDir, fileName), data, 0o644)
 			}
 
 			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
-			if fd, ok := kernel.GetFrontDesk(vaultDir); !ok || fd.ConversationID != payload.ConversationID {
+			if !isFrontDesk {
 				alreadyTracked := false
 				var matchedTask *kernel.ActiveTask
 				var existingTasks []kernel.ActiveTask
@@ -457,14 +559,15 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				vacatedMarker := filepath.Join(vaultDir, "memory", ".vacated")
 				_, vacatedExists := os.Stat(vacatedMarker)
 
-				if !ok && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
+				if !hasFD && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
 					// In-session bootstrap fallback: fresh Vault with no tracked tasks, front_desk is vacant,
 					// and no explicit release-desk marker exists. Claim Front Desk instead of registering [Task:general]!
 					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
+					kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 				} else {
 					if !alreadyTracked {
 						// Subagent fallback: match against pending queue if not yet registered
-						if sub, found := kernel.PopPendingSubagent(vaultDir, 10*time.Minute); found {
+						if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
 							modelName := sub.Model
 							if modelName == "" {
 								modelName = payload.ModelName
@@ -486,6 +589,9 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							_ = kernel.RegisterTask(vaultDir, task)
 							alreadyTracked = true
 							matchedTask = &task
+						} else if linkedTask, linked := kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName); linked {
+							alreadyTracked = true
+							matchedTask = &linkedTask
 						}
 					}
 
@@ -517,8 +623,8 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 						})
 					} else if !alreadyTracked {
 						title := ""
-						if strings.TrimSpace(payload.LastUserInput) != "" {
-							title = "[Task:general] " + strings.TrimSpace(payload.LastUserInput)
+						if strings.TrimSpace(userPrompt) != "" {
+							title = kernel.SanitizeTaskTitle(userPrompt, "")
 						}
 						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 							Title:          title,
@@ -537,13 +643,32 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 	return err
 }
 
-func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string) {
+func nextExecutionNum(dateDir, convID string) int {
+	entries, err := os.ReadDir(dateDir)
+	if err != nil {
+		return 1
+	}
+	prefix := convID + "-"
+	maxNum := 0
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".json") {
+			numStr := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".json")
+			if n, err := strconv.Atoi(numStr); err == nil && n > maxNum {
+				maxNum = n
+			}
+		}
+	}
+	return maxNum + 1
+}
+
+func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string) {
 	if transcriptPath == "" {
-		return nil, nil, ""
+		return nil, nil, "", ""
 	}
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return nil, nil, ""
+		return nil, nil, "", ""
 	}
 	defer f.Close()
 
@@ -565,6 +690,14 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &step); err != nil {
 			continue
+		}
+		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
+			cleaned := strings.ReplaceAll(step.Content, "<USER_REQUEST>", "")
+			cleaned = strings.ReplaceAll(cleaned, "</USER_REQUEST>", "")
+			cleaned = strings.TrimSpace(cleaned)
+			if cleaned != "" {
+				lastUserPrompt = cleaned
+			}
 		}
 		if step.Type == "PLANNER_RESPONSE" && strings.TrimSpace(step.Content) != "" {
 			lastResponse = strings.TrimSpace(step.Content)
@@ -600,5 +733,5 @@ func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesMod
 	for k := range fileSet {
 		filesModified = append(filesModified, k)
 	}
-	return toolsUsed, filesModified, lastResponse
+	return toolsUsed, filesModified, lastResponse, lastUserPrompt
 }

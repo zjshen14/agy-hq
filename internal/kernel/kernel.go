@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -35,12 +36,79 @@ type SpawnEvent struct {
 	Outcome   string `json:"outcome"`
 }
 
+// ArmedTrigger tracks a proactive schedule from local/triggers.yaml that has been armed
+// in the active Front Desk conversation via Antigravity's native `schedule` tool.
+type ArmedTrigger struct {
+	ID      string `json:"id"`
+	Cron    string `json:"cron"`
+	Skill   string `json:"skill,omitempty"`
+	ArmedAt string `json:"armedAt"`
+}
+
 // FrontDeskLease tracks the single active "Front Desk" intake conversationId in local/memory/front_desk.json
 // to prevent split-brain race conditions across multiple top-level conversations.
 type FrontDeskLease struct {
-	ConversationID string `json:"conversationId"`
-	ArtifactDir    string `json:"artifactDir,omitempty"`
-	UpdatedAt      string `json:"updatedAt"`
+	ConversationID string                  `json:"conversationId"`
+	ArtifactDir    string                  `json:"artifactDir,omitempty"`
+	ConsolePinned  bool                    `json:"consolePinned,omitempty"`
+	ArmedTriggers  map[string]ArmedTrigger `json:"armedTriggers,omitempty"`
+	UpdatedAt      string                  `json:"updatedAt"`
+}
+
+// SanitizeTaskTitle normalizes a task or subagent title into a clean, single-line string
+// safe for Markdown tables and SessionStart context injection.
+func SanitizeTaskTitle(title, slug string) string {
+	s := strings.TrimSpace(title)
+	if idx := strings.Index(s, "<USER_REQUEST>"); idx >= 0 {
+		s = s[idx+len("<USER_REQUEST>"):]
+	}
+	if idx := strings.Index(s, "</USER_REQUEST>"); idx >= 0 {
+		s = s[:idx]
+	}
+	if idx := strings.Index(s, "<ADDITIONAL_METADATA>"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+
+	lines := strings.Split(s, "\n")
+	var chosen string
+	prefixOnly := ""
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if l == "" {
+			continue
+		}
+		if prefixOnly == "" && (l == "[Task:general]" || strings.HasSuffix(l, "]")) && !strings.Contains(l, " ") {
+			prefixOnly = l
+			continue
+		}
+		if prefixOnly != "" {
+			chosen = prefixOnly + " " + l
+		} else {
+			chosen = l
+		}
+		break
+	}
+	if chosen == "" {
+		chosen = prefixOnly
+	}
+	chosen = strings.Join(strings.Fields(chosen), " ")
+	chosen = strings.ReplaceAll(chosen, "|", "-")
+
+	if chosen == "" {
+		chosen = "[Task:general] Untitled Task"
+	} else if !strings.HasPrefix(chosen, "[Task:") && !strings.HasPrefix(chosen, "[Subagent:") && !strings.HasPrefix(chosen, "[HQ]") && !strings.HasPrefix(chosen, "[Auto]") {
+		scope := "general"
+		if parts := strings.SplitN(slug, "-", 2); len(parts) > 0 && parts[0] != "" && parts[0] != "conv" {
+			scope = parts[0]
+		}
+		chosen = fmt.Sprintf("[Task:%s] %s", scope, chosen)
+	}
+
+	if runes := []rune(chosen); len(runes) > 88 {
+		chosen = string(runes[:85]) + "..."
+	}
+	return chosen
 }
 
 // ActiveTask tracks a dedicated multi-turn Task Conversation spawned via `hq spawn` in local/memory/tasks.json.
@@ -94,6 +162,32 @@ func FindTaskByConversationID(vaultDir, convID string) (ActiveTask, bool) {
 	return ActiveTask{}, false
 }
 
+// LinkPendingSpawnTask links an active task in local/memory/tasks.json that was registered
+// with an empty ConversationID (e.g., during `hq spawn`) to convID.
+func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
+	if convID == "" {
+		return ActiveTask{}, false
+	}
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return ActiveTask{}, false
+	}
+	for i := len(tasks) - 1; i >= 0; i-- {
+		if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
+			tasks[i].ConversationID = convID
+			if model != "" && tasks[i].Model == "" {
+				tasks[i].Model = model
+			}
+			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+			if data, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
+				_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+			}
+			return tasks[i], true
+		}
+	}
+	return ActiveTask{}, false
+}
+
 // RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
 func RegisterTask(vaultDir string, task ActiveTask) error {
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
@@ -127,6 +221,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.LastSummary == "" {
 				task.LastSummary = tasks[i].LastSummary
 			}
+			task.Title = SanitizeTaskTitle(task.Title, task.TaskSlug)
 			tasks[i] = task
 			updated = true
 			break
@@ -146,6 +241,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				if task.LastSummary != "" {
 					tasks[i].LastSummary = task.LastSummary
 				}
+				tasks[i].Title = SanitizeTaskTitle(tasks[i].Title, tasks[i].TaskSlug)
 				updated = true
 				break
 			}
@@ -162,6 +258,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 		if task.Title == "" {
 			task.Title = "[Task:general] Untitled Task"
 		}
+		task.Title = SanitizeTaskTitle(task.Title, task.TaskSlug)
 		if task.Status == "" {
 			task.Status = "active"
 		}
@@ -283,7 +380,19 @@ func GetFrontDesk(vaultDir string) (FrontDeskLease, bool) {
 	return lease, true
 }
 
+func saveFrontDeskLease(vaultDir string, lease FrontDeskLease) error {
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(lease, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
+}
+
 // SetFrontDesk atomically claims the single Front Desk intake lease for convID.
+// If convID already holds the lease, ConsolePinned and ArmedTriggers are preserved.
 func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if convID == "" {
 		return nil
@@ -292,6 +401,10 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		return err
 	}
 	artifactDir = strings.TrimSpace(artifactDir)
+	prev, hasPrev := GetFrontDesk(vaultDir)
+	if artifactDir == "" && hasPrev && prev.ConversationID == convID && prev.ArtifactDir != "" {
+		artifactDir = prev.ArtifactDir
+	}
 	if artifactDir == "" {
 		if appData := os.Getenv("ANTIGRAVITY_APP_DATA_DIR"); appData != "" {
 			artifactDir = filepath.Join(appData, "brain", convID)
@@ -303,7 +416,7 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if artifactDir != "" {
 		_ = os.MkdirAll(artifactDir, 0o755)
 	}
-	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ConversationID != convID && prev.ArtifactDir != "" {
+	if hasPrev && prev.ConversationID != convID && prev.ArtifactDir != "" {
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md.metadata.json"))
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
@@ -314,15 +427,199 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		ArtifactDir:    artifactDir,
 		UpdatedAt:      time.Now().Format(time.RFC3339),
 	}
-	data, err := json.MarshalIndent(lease, "", "  ")
-	if err != nil {
-		return err
+	if hasPrev && prev.ConversationID == convID {
+		lease.ConsolePinned = prev.ConsolePinned
+		lease.ArmedTriggers = prev.ArmedTriggers
 	}
 	if artifactDir != "" {
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(artifactDir), 0o644)
 	}
 	_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
-	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
+	if err := saveFrontDeskLease(vaultDir, lease); err != nil {
+		return err
+	}
+	ReconcileFrontDeskFromTranscript(vaultDir, "")
+	return nil
+}
+
+// MarkConsolePinned records that the active Front Desk has pinned hq_console.md via write_file.
+func MarkConsolePinned(vaultDir, convID string) error {
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok {
+		return nil
+	}
+	if convID != "" && fd.ConversationID != convID {
+		return nil
+	}
+	if fd.ConsolePinned {
+		return nil
+	}
+	fd.ConsolePinned = true
+	fd.UpdatedAt = time.Now().Format(time.RFC3339)
+	return saveFrontDeskLease(vaultDir, fd)
+}
+
+func matchScheduleTrigger(schedules []ScheduleTrigger, cronExpr, prompt string) (ScheduleTrigger, bool) {
+	normCron := strings.Join(strings.Fields(strings.TrimSpace(cronExpr)), " ")
+	if strings.HasPrefix(strings.ToUpper(normCron), "CRON_TZ=") {
+		parts := strings.Fields(normCron)
+		if len(parts) > 1 {
+			normCron = strings.Join(parts[1:], " ")
+		}
+	}
+	lowerPrompt := strings.ToLower(prompt)
+	for _, s := range schedules {
+		if normCron != "" && s.FiveFieldCron() == normCron {
+			return s, true
+		}
+		if s.ID != "" && strings.Contains(lowerPrompt, strings.ToLower(s.ID)) {
+			return s, true
+		}
+		if s.Skill != "" && strings.Contains(lowerPrompt, strings.ToLower(s.Skill)) {
+			return s, true
+		}
+	}
+	return ScheduleTrigger{}, false
+}
+
+// RecordArmedTrigger records a scheduled trigger armed in the active Front Desk via Antigravity's `schedule` tool.
+func RecordArmedTrigger(vaultDir, convID, cronExpr, prompt string) (string, error) {
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok {
+		return "", nil
+	}
+	if convID != "" && fd.ConversationID != convID {
+		return "", nil
+	}
+	if fd.ArmedTriggers == nil {
+		fd.ArmedTriggers = make(map[string]ArmedTrigger)
+	}
+	cfg, _ := LoadTriggers(vaultDir)
+	var schedules []ScheduleTrigger
+	if cfg != nil {
+		schedules = cfg.Schedules
+	}
+	if matched, found := matchScheduleTrigger(schedules, cronExpr, prompt); found {
+		fd.ArmedTriggers[matched.ID] = ArmedTrigger{
+			ID:      matched.ID,
+			Cron:    matched.FiveFieldCron(),
+			Skill:   matched.Skill,
+			ArmedAt: time.Now().Format(time.RFC3339),
+		}
+		fd.UpdatedAt = time.Now().Format(time.RFC3339)
+		return matched.ID, saveFrontDeskLease(vaultDir, fd)
+	}
+	if strings.TrimSpace(cronExpr) != "" {
+		customID := "cron-" + slugify(cronExpr)
+		fd.ArmedTriggers[customID] = ArmedTrigger{
+			ID:      customID,
+			Cron:    strings.TrimSpace(cronExpr),
+			ArmedAt: time.Now().Format(time.RFC3339),
+		}
+		fd.UpdatedAt = time.Now().Format(time.RFC3339)
+		return customID, saveFrontDeskLease(vaultDir, fd)
+	}
+	return "", nil
+}
+
+// ReconcileFrontDeskFromTranscript inspects the active Front Desk conversation's transcript.jsonl
+// (if present on disk) to backfill ConsolePinned and ArmedTriggers state.
+func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok || fd.ConversationID == "" {
+		return false
+	}
+	if transcriptPath == "" && fd.ArtifactDir != "" {
+		transcriptPath = filepath.Join(fd.ArtifactDir, ".system_generated", "logs", "transcript.jsonl")
+	}
+	if transcriptPath == "" {
+		return false
+	}
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	cfg, _ := LoadTriggers(vaultDir)
+	var schedules []ScheduleTrigger
+	if cfg != nil {
+		schedules = cfg.Schedules
+	}
+
+	changed := false
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 2*1024*1024)
+
+	for scanner.Scan() {
+		var step struct {
+			ToolCalls []struct {
+				Name string                 `json:"name"`
+				Args map[string]interface{} `json:"args"`
+			} `json:"tool_calls"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &step) != nil {
+			continue
+		}
+		for _, tc := range step.ToolCalls {
+			switch tc.Name {
+			case "write_file", "edit_file":
+				if p, _ := tc.Args["Path"].(string); strings.HasSuffix(filepath.ToSlash(p), "/hq_console.md") || p == "hq_console.md" {
+					if !fd.ConsolePinned {
+						fd.ConsolePinned = true
+						changed = true
+					}
+				}
+			case "schedule":
+				cronExpr, _ := tc.Args["CronExpression"].(string)
+				prompt, _ := tc.Args["Prompt"].(string)
+				if cronExpr == "" && prompt == "" {
+					continue
+				}
+				if fd.ArmedTriggers == nil {
+					fd.ArmedTriggers = make(map[string]ArmedTrigger)
+				}
+				if matched, found := matchScheduleTrigger(schedules, cronExpr, prompt); found {
+					if _, exists := fd.ArmedTriggers[matched.ID]; !exists {
+						fd.ArmedTriggers[matched.ID] = ArmedTrigger{
+							ID:      matched.ID,
+							Cron:    matched.FiveFieldCron(),
+							Skill:   matched.Skill,
+							ArmedAt: time.Now().Format(time.RFC3339),
+						}
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	if changed {
+		fd.UpdatedAt = time.Now().Format(time.RFC3339)
+		_ = saveFrontDeskLease(vaultDir, fd)
+	}
+	return changed
+}
+
+// GetUnarmedTriggers compares local/triggers.yaml against the active Front Desk's ArmedTriggers
+// and returns the armed and unarmed ScheduleTrigger slices.
+func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []ScheduleTrigger) {
+	cfg, err := LoadTriggers(vaultDir)
+	if err != nil || cfg == nil {
+		return nil, nil
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	for _, s := range cfg.Schedules {
+		if ok && fd.ArmedTriggers != nil {
+			if _, isArmed := fd.ArmedTriggers[s.ID]; isArmed {
+				armed = append(armed, s)
+				continue
+			}
+		}
+		unarmed = append(unarmed, s)
+	}
+	return armed, unarmed
 }
 
 // ReleaseFrontDesk clears local/memory/front_desk.json so the next new conversation
@@ -335,6 +632,8 @@ func ReleaseFrontDesk(vaultDir string) error {
 		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
 	}
 	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+	_ = os.Remove(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"))
+	_ = os.Remove(filepath.Join(vaultDir, "memory", "front_desk_turn.json"))
 	_ = os.WriteFile(filepath.Join(vaultDir, "memory", ".vacated"), []byte(time.Now().Format(time.RFC3339)), 0o644)
 	err := os.Remove(frontDeskPath(vaultDir))
 	if os.IsNotExist(err) {
@@ -826,7 +1125,7 @@ func QueuePendingSubagent(vaultDir, role, model, prompt string) (PendingSubagent
 	}
 
 	queue, _ := loadPendingSubagents(vaultDir)
-	cutoff := time.Now().Add(-10 * time.Minute)
+	cutoff := time.Now().Add(-60 * time.Minute)
 	var active []PendingSubagent
 	for _, q := range queue {
 		if q.CreatedAt.After(cutoff) {

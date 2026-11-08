@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 // CheckResult represents a single diagnostic check in `hq doctor`.
@@ -114,14 +115,35 @@ func Run(vaultDir string) []CheckResult {
 		})
 	}
 
-	// 4. Check Front Desk Intake Lease
+	// 4. Check Front Desk Intake Lease & Console Artifact
+	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID != "" {
 		results = append(results, CheckResult{
 			Name:   "Front Desk Intake Lease",
 			Status: "PASS",
 			Detail: fmt.Sprintf("Claimed by %s", fd.ConversationID),
 		})
-	} else if convID := os.Getenv("ANTIGRAVITY_CONVERSATION_ID"); convID != "" {
+		artDir := strings.TrimSpace(fd.ArtifactDir)
+		if artDir != "" {
+			artPath := filepath.Join(artDir, "hq_console.md")
+			metaPath := filepath.Join(artDir, "hq_console.md.metadata.json")
+			_, errArt := os.Stat(artPath)
+			_, errMeta := os.Stat(metaPath)
+			if errArt == nil && errMeta == nil {
+				results = append(results, CheckResult{
+					Name:   "Front Desk Console Artifact",
+					Status: "PASS",
+					Detail: fmt.Sprintf("Synced at %s (UI pinned=%v)", artPath, fd.ConsolePinned),
+				})
+			} else {
+				results = append(results, CheckResult{
+					Name:   "Front Desk Console Artifact",
+					Status: "WARN",
+					Detail: fmt.Sprintf("Missing %s; run './bin/hq console --sync'", artPath),
+				})
+			}
+		}
+	} else if convID := vault.ResolveConversationID(); convID != "" {
 		results = append(results, CheckResult{
 			Name:   "Front Desk Intake Lease",
 			Status: "WARN",
@@ -137,17 +159,48 @@ func Run(vaultDir string) []CheckResult {
 
 	// 5. Check Scheduled Triggers & Daemon Heartbeat
 	dInfo := kernel.GetDaemonInfo(vaultDir)
+	armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
+	totalTriggers := len(armed) + len(unarmed)
 	if dInfo.Running {
 		results = append(results, CheckResult{
 			Name:   "Scheduled Triggers & Heartbeat",
 			Status: "PASS",
-			Detail: fmt.Sprintf("Running (daemon PID %d, %d schedules declared)", dInfo.PID, dInfo.SchedulesCount),
+			Detail: fmt.Sprintf("Running (daemon PID %d, %d schedules declared, %d/%d armed in Front Desk)", dInfo.PID, dInfo.SchedulesCount, len(armed), totalTriggers),
 		})
 	} else {
 		results = append(results, CheckResult{
 			Name:   "Scheduled Triggers & Heartbeat",
 			Status: "WARN",
-			Detail: fmt.Sprintf("%d schedules declared in triggers.yaml, but background daemon is inactive; run './bin/hq daemon install' or './bin/hq daemon'", dInfo.SchedulesCount),
+			Detail: fmt.Sprintf("%d schedules declared in triggers.yaml, but background daemon is inactive; run './bin/hq daemon install' or './bin/hq daemon' (%d/%d armed in Front Desk)", dInfo.SchedulesCount, len(armed), totalTriggers),
+		})
+	}
+
+	// 6. Check Task Board & Quota Integrity
+	tasks, _ := kernel.ListTasks(vaultDir)
+	corruptedTitles := 0
+	for _, t := range tasks {
+		if strings.Contains(t.Title, "\n") || strings.Contains(t.Title, "|") {
+			corruptedTitles++
+		}
+	}
+	quota := kernel.LoadQuota(vaultDir)
+	if corruptedTitles > 0 {
+		results = append(results, CheckResult{
+			Name:   "Task Board & Quota Integrity",
+			Status: "WARN",
+			Detail: fmt.Sprintf("%d task(s) have unsanitized multi-line titles; run './bin/hq migrate'", corruptedTitles),
+		})
+	} else if quota.CircuitOpen {
+		results = append(results, CheckResult{
+			Name:   "Task Board & Quota Integrity",
+			Status: "WARN",
+			Detail: fmt.Sprintf("%d tasks tracked; quota circuit open (%s)", len(tasks), quota.CircuitReason),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Task Board & Quota Integrity",
+			Status: "PASS",
+			Detail: fmt.Sprintf("%d tasks tracked, daily spawns %d/%d", len(tasks), quota.SpawnsToday, quota.MaxDailySpawns),
 		})
 	}
 

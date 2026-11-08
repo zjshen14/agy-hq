@@ -47,7 +47,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
 			os.Exit(1)
 		}
-		if convID := os.Getenv("ANTIGRAVITY_CONVERSATION_ID"); convID != "" {
+		if convID := vault.ResolveConversationID(); convID != "" {
 			if _, ok := kernel.GetFrontDesk(vaultDir); !ok {
 				artDir := vault.ResolveArtifactDir(convID)
 				_ = kernel.SetFrontDesk(vaultDir, convID, artDir)
@@ -58,6 +58,16 @@ func main() {
 		for _, item := range created {
 			fmt.Printf("  + %s\n", item)
 		}
+
+	case "console":
+		fs := flag.NewFlagSet("console", flag.ExitOnError)
+		_ = fs.Bool("sync", true, "Regenerate local/CONSOLE.md and <artifactDir>/hq_console.md")
+		_ = fs.Parse(os.Args[2:])
+		if err := webui.SyncMarkdownConsole(vaultDir); err != nil {
+			fmt.Fprintf(os.Stderr, "hq console sync failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Synced local/CONSOLE.md and active Front Desk hq_console.md artifact")
 
 	case "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
@@ -322,8 +332,31 @@ func main() {
 		artDir := fs.String("artifact-dir", "", "Optional artifact directory for the Front Desk")
 		_ = fs.Parse(os.Args[2:])
 		if *convID == "" {
+			*convID = vault.ResolveConversationID()
+		}
+		if *convID == "" {
 			fmt.Fprintln(os.Stderr, "usage: hq claim-desk --conv=<conversation-id> [--artifact-dir=...]")
 			os.Exit(1)
+		}
+		if *artDir == "" {
+			*artDir = vault.ResolveArtifactDir(*convID)
+		}
+		if prev, hadPrev := kernel.GetFrontDesk(vaultDir); hadPrev && prev.ConversationID != "" && prev.ConversationID != *convID {
+			if _, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, prev.ConversationID); !alreadyTracked {
+				shortPrev := prev.ConversationID
+				if len(shortPrev) > 8 {
+					shortPrev = shortPrev[:8]
+				}
+				_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+					TaskSlug:       "headquarter-front-desk-" + shortPrev,
+					Title:          fmt.Sprintf("[Task:headquarter] Archived Front Desk Shift (%s)", shortPrev),
+					ConversationID: prev.ConversationID,
+					Status:         "completed",
+					CreatedAt:      prev.UpdatedAt,
+					LastUpdatedAt:  time.Now().Format(time.RFC3339),
+					LastSummary:    fmt.Sprintf("Handed over Front Desk lease to %s", *convID),
+				})
+			}
 		}
 		if err := kernel.SetFrontDesk(vaultDir, *convID, *artDir); err != nil {
 			fmt.Fprintf(os.Stderr, "hq claim-desk error: %v\n", err)
@@ -331,14 +364,27 @@ func main() {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Claimed Front Desk intake lease for conversation %s\n", *convID)
+		_, unarmed := kernel.GetUnarmedTriggers(vaultDir)
+		artPath := filepath.Join(*artDir, "hq_console.md")
+		fmt.Printf("  - Step 1 (Pin Console Artifact): write_file to %s with ArtifactMetadata={UserFacing:true, RequestFeedback:false}\n", artPath)
+		if len(unarmed) > 0 {
+			fmt.Printf("  - Step 2 (Arm %d Proactive Schedule(s) from local/triggers.yaml):\n", len(unarmed))
+			for _, s := range unarmed {
+				fmt.Printf("      * %s: schedule(CronExpression=%q, IsDaemon=true, Prompt=%q)\n", s.ID, s.FiveFieldCron(), s.DefaultPrompt())
+			}
+		}
 
 	case "release-desk":
+		prev, hadPrev := kernel.GetFrontDesk(vaultDir)
 		if err := kernel.ReleaseFrontDesk(vaultDir); err != nil {
 			fmt.Fprintf(os.Stderr, "hq release-desk error: %v\n", err)
 			os.Exit(1)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Println("Released Front Desk intake lease (the next new conversation will automatically claim [HQ] Front Desk on Turn 1)")
+		if hadPrev && len(prev.ArmedTriggers) > 0 {
+			fmt.Printf("  Note: Outgoing Front Desk (%s) had %d armed schedule(s); call manage_task(Action=\"kill\") on active cron schedules in that thread to avoid duplicate triggers.\n", prev.ConversationID, len(prev.ArmedTriggers))
+		}
 
 	case "adopt":
 		fs := flag.NewFlagSet("adopt", flag.ExitOnError)
@@ -363,8 +409,12 @@ func main() {
 			*title = fmt.Sprintf("[Task:%s] %s", scope, *title)
 		}
 		if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID == *convID {
+			armedCount := len(fd.ArmedTriggers)
 			_ = kernel.ReleaseFrontDesk(vaultDir)
 			fmt.Printf("Released Front Desk lease from %s (next new conversation will automatically claim [HQ] Front Desk).\n", *convID)
+			if armedCount > 0 {
+				fmt.Printf("  Note: Outgoing Front Desk (%s) had %d armed schedule(s); call manage_task(Action=\"kill\") on active cron schedules in this thread.\n", *convID, armedCount)
+			}
 		}
 		if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:       *taskSlug,
@@ -454,19 +504,34 @@ func main() {
 			return
 		}
 		title := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
-		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
+		createdAt := time.Now().Format(time.RFC3339)
+		// Pre-register before SpawnTask so child SessionStart/Stop hooks can link immediately without race conditions.
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-			TaskSlug:       *taskName,
-			Title:          title,
-			Tier:           resolvedTier,
-			Model:          resolvedModel,
-			WorktreeDir:    wtDir,
-			ConversationID: kernel.ExtractUUID(out),
-			CreatedAt:      time.Now().Format(time.RFC3339),
-			LastUpdatedAt:  time.Now().Format(time.RFC3339),
-			LastSummary:    *prompt,
-			Status:         "active",
+			TaskSlug:      *taskName,
+			Title:         title,
+			Tier:          resolvedTier,
+			Model:         resolvedModel,
+			WorktreeDir:   wtDir,
+			CreatedAt:     createdAt,
+			LastUpdatedAt: createdAt,
+			LastSummary:   *prompt,
+			Status:        "active",
 		})
+		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
+		if spawnedID := kernel.ExtractUUID(out); spawnedID != "" {
+			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+				TaskSlug:       *taskName,
+				Title:          title,
+				Tier:           resolvedTier,
+				Model:          resolvedModel,
+				WorktreeDir:    wtDir,
+				ConversationID: spawnedID,
+				CreatedAt:      createdAt,
+				LastUpdatedAt:  time.Now().Format(time.RFC3339),
+				LastSummary:    *prompt,
+				Status:         "active",
+			})
+		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
