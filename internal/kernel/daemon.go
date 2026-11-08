@@ -272,16 +272,28 @@ func checkPort(addr string) bool {
 	return true
 }
 
-func checkHTTPHealth(addr string) bool {
+func checkHTTPHealth(addr, vaultDir string) bool {
 	client := http.Client{
 		Timeout: 250 * time.Millisecond,
 	}
-	resp, err := client.Get(fmt.Sprintf("http://%s/healthz", addr))
+	resp, err := client.Get(fmt.Sprintf("http://%s/api/state", addr))
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var state struct {
+		VaultDir string `json:"vaultDir"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err == nil && state.VaultDir != "" {
+		if vaultDir == "" {
+			return true
+		}
+		return filepath.Clean(state.VaultDir) == filepath.Clean(vaultDir)
+	}
+	return false
 }
 
 func findDaemonPID(addr string) int {
@@ -398,12 +410,12 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 		}
 	}
 
-	// Fallback: check if standard daemon port is listening
+	// Fallback: check if standard daemon port is listening and serving this vaultDir
 	defaultAddr := "127.0.0.1:4747"
 	if port := os.Getenv("PORT"); port != "" {
 		defaultAddr = "127.0.0.1:" + port
 	}
-	if checkHTTPHealth(defaultAddr) || checkPort(defaultAddr) {
+	if checkHTTPHealth(defaultAddr, vaultDir) {
 		info.Running = true
 		info.Addr = defaultAddr
 		pid := findDaemonPID(defaultAddr)
