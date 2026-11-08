@@ -202,6 +202,22 @@ func main() {
 		}
 		fmt.Println(status)
 
+	case "claim-desk":
+		fs := flag.NewFlagSet("claim-desk", flag.ExitOnError)
+		convID := fs.String("conv", "", "Conversation ID to set as the single active Front Desk")
+		artDir := fs.String("artifact-dir", "", "Optional artifact directory for the Front Desk")
+		_ = fs.Parse(os.Args[2:])
+		if *convID == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq claim-desk --conv=<conversation-id> [--artifact-dir=...]")
+			os.Exit(1)
+		}
+		if err := kernel.SetFrontDesk(vaultDir, *convID, *artDir); err != nil {
+			fmt.Fprintf(os.Stderr, "hq claim-desk error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Printf("Claimed Front Desk intake lease for conversation %s\n", *convID)
+
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")

@@ -32,6 +32,54 @@ type SpawnEvent struct {
 	Outcome   string `json:"outcome"`
 }
 
+// FrontDeskLease tracks the single active "Front Desk" intake conversationId in local/memory/front_desk.json
+// to prevent split-brain race conditions across multiple top-level conversations.
+type FrontDeskLease struct {
+	ConversationID string `json:"conversationId"`
+	ArtifactDir    string `json:"artifactDir,omitempty"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+func frontDeskPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "front_desk.json")
+}
+
+// GetFrontDesk reads the currently active Front Desk conversation lease.
+func GetFrontDesk(vaultDir string) (FrontDeskLease, bool) {
+	var lease FrontDeskLease
+	data, err := os.ReadFile(frontDeskPath(vaultDir))
+	if err != nil {
+		return lease, false
+	}
+	if err := json.Unmarshal(data, &lease); err != nil || lease.ConversationID == "" {
+		return lease, false
+	}
+	return lease, true
+}
+
+// SetFrontDesk atomically claims the single Front Desk intake lease for convID.
+func SetFrontDesk(vaultDir, convID, artifactDir string) error {
+	if convID == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	lease := FrontDeskLease{
+		ConversationID: convID,
+		ArtifactDir:    strings.TrimSpace(artifactDir),
+		UpdatedAt:      time.Now().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(lease, "", "  ")
+	if err != nil {
+		return err
+	}
+	if artifactDir != "" {
+		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(artifactDir)), 0o644)
+	}
+	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
+}
+
 var (
 	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
 	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
@@ -195,8 +243,29 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	}
 
 	var output string
+	lease, hasFrontDesk := GetFrontDesk(vaultDir)
 	if dryRun {
-		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
+		if hasFrontDesk {
+			output = fmt.Sprintf("[dry-run] agentapi send-message --title=%q %s (skill=%s)", title, lease.ConversationID, skill)
+		} else {
+			output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
+		}
+	} else if hasFrontDesk {
+		// Route proactive events directly into the single Front Desk intake conversation
+		cmd := exec.Command("agentapi", "send-message", "--title="+title, lease.ConversationID, prompt)
+		outBytes, err := cmd.CombinedOutput()
+		output = strings.TrimSpace(string(outBytes))
+		if err != nil {
+			state.Events = append(state.Events, SpawnEvent{
+				Timestamp: time.Now().Format(time.RFC3339),
+				Trigger:   trigger,
+				Skill:     skill,
+				Model:     "front-desk:" + lease.ConversationID,
+				Outcome:   "error: " + err.Error(),
+			})
+			_ = SaveQuota(vaultDir, state)
+			return output, fmt.Errorf("agentapi send-message error: %w (%s)", err, output)
+		}
 	} else {
 		cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
 		outBytes, err := cmd.CombinedOutput()

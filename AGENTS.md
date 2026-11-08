@@ -11,11 +11,12 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
    - **Never commit personal identity information (PII)** or personal files to the root `agy-hq` repository.
    - Store all personal notes, research, and drafts in `local/notes/`.
    - Store high-PII financial and tax records in `local/private/`.
-3. **Automatic Task Routing (Inline vs. Subagent vs. Separate Conversation):**
-   - Never make the user specify *how* to run a task. Automatically pick the execution mode based on task shape:
-     - **Do It Inline (Current Chat):** Quick lookups, status checks, short writing/edits, or interactive Q&A (`<= 3` tool calls) that finish in seconds.
-     - **Spawn Background Subagent(s) (`invoke_subagent`):** Any multi-step coding task (always paired with `./bin/hq worktree add <repo> <task>` in `local/worktrees/`), deep web/filing research, or whenever the user mentions 2+ tasks at once. This keeps the main `headquarter` chat clean and responsive on mobile while subagents work in parallel and report back here.
-     - **Spin Off a Separate Conversation (`./bin/hq spawn`):** Only when the task is an independent, multi-turn workstream that warrants its own dedicated thread in the sidebar (or when triggered by background watchers/schedules).
+3. **Single Front-Desk Intake + Background Subagent Workers (Zero Race Conditions):**
+   - **One Front Desk at a Time (`local/memory/front_desk.json`):** To prevent split-brain race conditions on Vault files (`MEMORY.md`, `notes/`, `pending/`), there is **only one active top-level intake conversation** (the "Front Desk"). All user requests and background events (`agentapi send-message <front_desk_id>`) enter through this single Front Desk thread.
+   - **How the Front Desk Routes Tasks Automatically:**
+     - **Do It Inline (at the Front Desk):** Quick lookups, status checks, short writing/edits, or interactive Q&A (`<= 3` tool calls) that finish in seconds.
+     - **Spawn Background Subagent Workers (`invoke_subagent`):** Any multi-step coding task (always paired with `./bin/hq worktree add <repo> <task>` in `local/worktrees/`), deep web/filing research, or parallel tasks. Because the Front Desk owns all active subagents (`manage_subagents`), it tracks every in-flight task centrally and prevents two subagents from touching the same worktree or note file.
+     - **Handover ("Shift Change"):** When archiving the current Front Desk thread and starting a fresh one, run `./bin/hq claim-desk --conv=<new-conv-id>` (or use `/compact` to compact the existing Front Desk thread in place).
    - **Handling Ambiguous Prompts:**
      - If the *execution mode* is ambiguous, default to **Background Subagent (`invoke_subagent`)** for heavy/coding work and **Inline** for quick work—do not ask the user which mode to use.
      - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
@@ -64,6 +65,20 @@ type JournalEntry struct {
 func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
+
+	var sections []string
+	if payload.ConversationID != "" {
+		existing, ok := kernel.GetFrontDesk(vaultDir)
+		if !ok {
+			_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
+			sections = append(sections, fmt.Sprintf("## Front Desk Lease\n- Active Front Desk Conversation ID: `%s` (claimed)", payload.ConversationID))
+		} else if existing.ConversationID != payload.ConversationID {
+			sections = append(sections, fmt.Sprintf(
+				"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.",
+				existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
+			))
+		}
+	}
 	if payload.ArtifactDirectoryPath != "" {
 		_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
