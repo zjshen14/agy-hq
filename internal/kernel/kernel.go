@@ -40,6 +40,64 @@ type FrontDeskLease struct {
 	UpdatedAt      string `json:"updatedAt"`
 }
 
+// ActiveTask tracks a dedicated multi-turn Task Conversation spawned via `hq spawn` in local/memory/tasks.json.
+type ActiveTask struct {
+	TaskSlug       string `json:"taskSlug"`
+	Title          string `json:"title"`
+	Tier           string `json:"tier"`
+	Model          string `json:"model"`
+	WorktreeDir    string `json:"worktreeDir,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	CreatedAt      string `json:"createdAt"`
+	LastUpdatedAt  string `json:"lastUpdatedAt"`
+	LastSummary    string `json:"lastSummary,omitempty"`
+	Status         string `json:"status"` // active, completed
+}
+
+func tasksFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "tasks.json")
+}
+
+// ListTasks returns all tracked Task Conversations from local/memory/tasks.json.
+func ListTasks(vaultDir string) ([]ActiveTask, error) {
+	data, err := os.ReadFile(tasksFilePath(vaultDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var tasks []ActiveTask
+	if err := json.Unmarshal(data, &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+// RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
+func RegisterTask(vaultDir string, task ActiveTask) error {
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	tasks, _ := ListTasks(vaultDir)
+	updated := false
+	for i := range tasks {
+		if tasks[i].TaskSlug == task.TaskSlug {
+			tasks[i] = task
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		tasks = append(tasks, task)
+	}
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
 func frontDeskPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "front_desk.json")
 }
@@ -243,29 +301,8 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	}
 
 	var output string
-	lease, hasFrontDesk := GetFrontDesk(vaultDir)
 	if dryRun {
-		if hasFrontDesk {
-			output = fmt.Sprintf("[dry-run] agentapi send-message --title=%q %s (skill=%s)", title, lease.ConversationID, skill)
-		} else {
-			output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
-		}
-	} else if hasFrontDesk {
-		// Route proactive events directly into the single Front Desk intake conversation
-		cmd := exec.Command("agentapi", "send-message", "--title="+title, lease.ConversationID, prompt)
-		outBytes, err := cmd.CombinedOutput()
-		output = strings.TrimSpace(string(outBytes))
-		if err != nil {
-			state.Events = append(state.Events, SpawnEvent{
-				Timestamp: time.Now().Format(time.RFC3339),
-				Trigger:   trigger,
-				Skill:     skill,
-				Model:     "front-desk:" + lease.ConversationID,
-				Outcome:   "error: " + err.Error(),
-			})
-			_ = SaveQuota(vaultDir, state)
-			return output, fmt.Errorf("agentapi send-message error: %w (%s)", err, output)
-		}
+		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
 	} else {
 		cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
 		outBytes, err := cmd.CombinedOutput()

@@ -11,12 +11,13 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
    - **Never commit personal identity information (PII)** or personal files to the root `agy-hq` repository.
    - Store all personal notes, research, and drafts in `local/notes/`.
    - Store high-PII financial and tax records in `local/private/`.
-3. **Single Front-Desk Intake + Background Subagent Workers (Zero Race Conditions):**
-   - **One Front Desk at a Time (`local/memory/front_desk.json`):** To prevent split-brain race conditions on Vault files (`MEMORY.md`, `notes/`, `pending/`), there is **only one active top-level intake conversation** (the "Front Desk"). All user requests and background events (`agentapi send-message <front_desk_id>`) enter through this single Front Desk thread.
-   - **How the Front Desk Routes Tasks Automatically:**
-     - **Do It Inline (at the Front Desk):** Quick lookups, status checks, short writing/edits, or interactive Q&A (`<= 3` tool calls) that finish in seconds.
-     - **Spawn Background Subagent Workers (`invoke_subagent`):** Any multi-step coding task (always paired with `./bin/hq worktree add <repo> <task>` in `local/worktrees/`), deep web/filing research, or parallel tasks. Because the Front Desk owns all active subagents (`manage_subagents`), it tracks every in-flight task centrally and prevents two subagents from touching the same worktree or note file.
-     - **Handover ("Shift Change"):** When archiving the current Front Desk thread and starting a fresh one, run `./bin/hq claim-desk --conv=<new-conv-id>` (or use `/compact` to compact the existing Front Desk thread in place).
+3. **Single Front-Desk Coordinator + Scoped Task Conversations & Subagents:**
+   - **1 Front Desk Thread (`local/memory/front_desk.json`):** Acts as the main intake desk and global coordinator.
+   - **3 Execution Modes Chosen Automatically by Task Shape:**
+     - **Inline (at the Front Desk):** Quick lookups, status checks, short edits, or interactive Q&A (`<= 3` tool calls).
+     - **Background Subagent (`invoke_subagent`):** Autonomous coding, bug fixes, or filing research where the subagent works in `local/worktrees/<repo>-<task>/` and reports the final result back into the Front Desk thread.
+     - **Separate Dedicated Task Conversation (`./bin/hq spawn`):** Complex projects or multi-round engineering/design workstreams where the user wants a dedicated thread in the sidebar for deep multi-turn engagement. Each spawned conversation is registered in `local/memory/tasks.json` and scoped to its own worktree (`local/worktrees/<repo>-<task>/`) so it never collides with the Front Desk, while `hq hook stop` logs every turn to `local/memory/journal/` so the Front Desk always has visibility into its progress.
+   - **Handover ("Shift Change"):** When archiving the current Front Desk thread and starting a fresh one, run `./bin/hq claim-desk --conv=<new-conv-id>` (or use `/compact` to compact the existing Front Desk thread in place).
    - **Handling Ambiguous Prompts:**
      - If the *execution mode* is ambiguous, default to **Background Subagent (`invoke_subagent`)** for heavy/coding work and **Inline** for quick work—do not ask the user which mode to use.
      - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.

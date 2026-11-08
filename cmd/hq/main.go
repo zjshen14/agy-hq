@@ -244,6 +244,17 @@ func main() {
 		}
 		title := fmt.Sprintf("Task: %s [%s/%s]", *taskName, resolvedTier, resolvedModel)
 		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
+		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+			TaskSlug:      *taskName,
+			Title:         title,
+			Tier:          resolvedTier,
+			Model:         resolvedModel,
+			WorktreeDir:   *repoSpec,
+			CreatedAt:     time.Now().Format(time.RFC3339),
+			LastUpdatedAt: time.Now().Format(time.RFC3339),
+			LastSummary:   *prompt,
+			Status:        "active",
+		})
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
