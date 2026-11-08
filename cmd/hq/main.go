@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,6 +48,95 @@ func main() {
 		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
 		for _, item := range created {
 			fmt.Printf("  + %s\n", item)
+		}
+
+	case "migrate":
+		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+		quiet := fs.Bool("quiet", false, "Suppress normal migration output")
+		_ = fs.Parse(os.Args[2:])
+		templateDir := filepath.Join(rootDir, "templates")
+		rep, err := vault.Migrate(vaultDir, templateDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq migrate failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if !*quiet {
+			fmt.Printf("Vault Schema Migration: v%d -> v%d (snapshotCommitted=%v)\n", rep.PreviousVersion, rep.CurrentVersion, rep.SnapshotCommitted)
+			for _, step := range rep.AppliedSteps {
+				fmt.Printf("  [step] %s\n", step)
+			}
+			for _, item := range rep.CreatedItems {
+				fmt.Printf("  [new]  %s\n", item)
+			}
+			for _, key := range rep.AddedConfigKeys {
+				fmt.Printf("  [cfg]  added missing top-level key %s\n", key)
+			}
+		}
+
+	case "upgrade":
+		fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+		noPull := fs.Bool("no-pull", false, "Skip git pull on root repository (offline/test mode)")
+		_ = fs.Parse(os.Args[2:])
+
+		// 1. Pre-upgrade snapshot of uncommitted private Vault changes
+		if vault.SnapshotVault(vaultDir, "hq upgrade") {
+			fmt.Println("==> [1/5] Committed pre-upgrade restore point in local/.git")
+		} else {
+			fmt.Println("==> [1/5] Private Vault working tree clean (or no uncommitted changes)")
+		}
+
+		// 2. Pull upstream Layer 1 root repo (and optional private Vault remote if configured)
+		if !*noPull {
+			fmt.Println("==> [2/5] Pulling latest agy-hq upstream commits...")
+			pullCmd := exec.Command("git", "-C", rootDir, "pull", "--ff-only")
+			if out, err := pullCmd.CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "hq upgrade: git pull --ff-only failed (%v):\n%s\n", err, strings.TrimSpace(string(out)))
+				os.Exit(1)
+			} else {
+				fmt.Printf("    %s\n", strings.TrimSpace(string(out)))
+			}
+			if err := exec.Command("git", "-C", vaultDir, "remote", "get-url", "origin").Run(); err == nil {
+				_ = exec.Command("git", "-C", vaultDir, "pull", "--rebase", "origin", "main").Run()
+			}
+		} else {
+			fmt.Println("==> [2/5] Skipping git pull (--no-pull)")
+		}
+
+		// 3. Recompile ./bin/hq from the updated Go source
+		targetBin := filepath.Join(rootDir, "bin", "hq")
+		if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+			targetBin = exe
+		}
+		fmt.Printf("==> [3/5] Rebuilding hq microkernel (%s)...\n", targetBin)
+		_ = os.MkdirAll(filepath.Dir(targetBin), 0o755)
+		buildCmd := exec.Command("go", "build", "-o", targetBin, "./cmd/hq")
+		buildCmd.Dir = rootDir
+		if out, err := buildCmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "hq upgrade: go build failed (%v):\n%s\n", err, string(out))
+			os.Exit(1)
+		}
+
+		// 4. Re-exec the newly compiled binary's `migrate` subcommand so newly pulled migrations run
+		fmt.Println("==> [4/5] Running non-destructive Vault schema & template migration...")
+		migCmd := exec.Command(targetBin, "migrate")
+		migCmd.Dir = rootDir
+		migCmd.Env = append(os.Environ(), "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
+		if out, err := migCmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "hq upgrade: migrate failed (%v):\n%s\n", err, string(out))
+			os.Exit(1)
+		} else {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line != "" {
+					fmt.Printf("    %s\n", line)
+				}
+			}
+		}
+
+		// 5. Run health check
+		fmt.Println("==> [5/5] Verifying system health (hq doctor)...")
+		for _, r := range doctor.Run(vaultDir) {
+			fmt.Printf("    [%s] %-30s %s\n", r.Status, r.Name, r.Detail)
 		}
 
 	case "doctor":
@@ -393,6 +483,8 @@ func printUsage() {
 
 Commands:
   init                                Initialize local/ private Vault and git repository
+  upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, and migrate Vault
+  migrate [--quiet]                   Run non-destructive Vault schema & template migrations
   doctor                              Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once

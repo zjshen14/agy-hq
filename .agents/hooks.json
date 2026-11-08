@@ -3,7 +3,7 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$PATH\"; ([ -x \"./bin/hq\" ] || [ -x \"../bin/hq\" ] || go build -o ./bin/hq ./cmd/hq 2>/dev/null); (\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start)",
+        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$PATH\"; if [ ! -x \"./bin/hq\" ] && [ ! -x \"../bin/hq\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null; elif [ -d \"./cmd/hq\" ] && [ -n \"$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null)\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null && ./bin/hq migrate --quiet 2>/dev/null; fi; (\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start)",
         "timeout": 15
       }
     ],

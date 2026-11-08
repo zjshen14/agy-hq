@@ -85,3 +85,16 @@
 
 ### CUJ-8: Zero-Token Per-Turn Journaling & Live Console Sync
 1. **`hq hook stop`:** Parses the JSONL transcript in 0 LLM tokens, extracts `toolsUsed`, `filesModified`, and single-line sanitized `responseSummary`, writes `local/memory/journal/YYYY-MM-DD/<convId>-<execNum>.json`, and refreshes `local/CONSOLE.md` and the Front Desk's `hq_console.md`.
+
+---
+
+## CUJ-9: Multi-Machine Engine Upgrade & Non-Destructive Vault Migration
+1. **Pre-Upgrade Vault Snapshot (`local/.git`):** Before touching anything, `./bin/hq upgrade` (or `hq migrate`) commits any uncommitted changes in `local/.git` as a restore point (`chore(vault): pre-upgrade snapshot`).
+2. **Upstream Code Pull & Binary Rebuild:** Pulls the latest commits on the root `agy-hq` repository (`git pull --ff-only`), recompiles `./bin/hq`, and re-execs the newly compiled `./bin/hq migrate` subprocess so newly pulled migration steps take effect immediately.
+3. **Auto-Rebuild on `git pull` (`SessionStart` Hook):** Even if the user runs `git pull` manually without running `./bin/hq upgrade`, the `SessionStart` hook in `.agents/hooks.json` detects when `.go` files in `cmd/` or `internal/` are newer than `./bin/hq`, automatically recompiles `./bin/hq`, and runs `./bin/hq migrate --quiet`.
+4. **Non-Destructive Schema & Template Migration (`local/memory/schema_version.json`):**
+   - Never overwrites user-customized `USER.md`, `MEMORY.md`, `config.yaml`, or `triggers.yaml`.
+   - Creates any newly added directories or template files.
+   - Additively merges new ignore rules from `templates/gitignore.tmpl` into `local/.gitignore`.
+   - Additively appends any new top-level YAML sections from `templates/config.yaml` and `templates/triggers.yaml` into `local/config.yaml` and `local/triggers.yaml`.
+   - Runs versioned data migrations (e.g., normalizing legacy `tasks.json` titles to `[Task:<scope>] <Title>` and cleaning up deprecated `hq_console_mobile.md`) and updates `local/memory/schema_version.json`.

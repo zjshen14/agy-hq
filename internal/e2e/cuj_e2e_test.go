@@ -567,3 +567,71 @@ func TestCUJ8_TurnJournalingAndLiveConsoleSync(t *testing.T) {
 		t.Fatalf("expected single-line sanitized summary in Front Desk hq_console.md, got:\n%s", consoleStr)
 	}
 }
+
+// CUJ-9: Multi-Machine Engine Upgrade & Non-Destructive Vault Migration
+func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
+	env := setupHQEnv(t)
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Simulate an older v1 Vault with user-customized USER.md, truncated config.yaml,
+	// a legacy task title in tasks.json, and a deprecated hq_console_mobile.md artifact.
+	customUser := "# My Custom Profile\n- Prefer pure English\n"
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "USER.md"), []byte(customUser), 0o644)
+
+	// Truncate config.yaml to only the first section ("version: 1") so `routing:` and `quotas:` are missing
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "config.yaml"), []byte("version: 1\n"), 0o644)
+
+	// Write a legacy tasks.json without [Task:<scope>] prefix
+	legacyTasks := `[{"conversationId":"conv-legacy","taskSlug":"opencli-fix-bug","title":"Fix CLI Bug","status":"active","updatedAt":"2026-11-07T00:00:00Z"}]`
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "memory", "tasks.json"), []byte(legacyTasks), 0o644)
+
+	// Write a deprecated hq_console_mobile.md in active_artifact_dir
+	artDir := filepath.Join(t.TempDir(), "brain-legacy")
+	_ = os.MkdirAll(artDir, 0o755)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "memory", "active_artifact_dir.txt"), []byte(artDir), 0o644)
+	legacyMobilePath := filepath.Join(artDir, "hq_console_mobile.md")
+	_ = os.WriteFile(legacyMobilePath, []byte("old mobile console"), 0o644)
+
+	// Run `hq upgrade --no-pull`
+	upOut, err := env.run("", "upgrade", "--no-pull")
+	if err != nil {
+		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
+	}
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v3") {
+		t.Fatalf("expected v0 -> v3 migration output, got:\n%s", upOut)
+	}
+
+	// 1. Verify customized USER.md was preserved intact
+	gotUser, _ := os.ReadFile(filepath.Join(env.vaultDir, "USER.md"))
+	if string(gotUser) != customUser {
+		t.Fatalf("upgrade overwrote USER.md: got %q", string(gotUser))
+	}
+
+	// 2. Verify missing top-level blocks (`routing:`, `quota:`) were additively appended to config.yaml
+	gotCfg, _ := os.ReadFile(filepath.Join(env.vaultDir, "config.yaml"))
+	if !strings.Contains(string(gotCfg), "routing:") || !strings.Contains(string(gotCfg), "quota:") {
+		t.Fatalf("expected missing top-level blocks to be appended to config.yaml, got:\n%s", string(gotCfg))
+	}
+
+	// 3. Verify legacy task title was normalized to [Task:opencli] Fix CLI Bug
+	tasks, _ := kernel.ListTasks(env.vaultDir)
+	if len(tasks) != 1 || tasks[0].Title != "[Task:opencli] Fix CLI Bug" {
+		t.Fatalf("expected legacy task title to be migrated to '[Task:opencli] Fix CLI Bug', got: %+v", tasks)
+	}
+
+	// 4. Verify deprecated hq_console_mobile.md was removed
+	if _, err := os.Stat(legacyMobilePath); !os.IsNotExist(err) {
+		t.Fatalf("expected deprecated hq_console_mobile.md to be removed during migration")
+	}
+
+	// 5. Verify schema_version.json is now at version 3 and re-running `hq migrate` is a clean idempotent no-op
+	migOut2, err := env.run("", "migrate")
+	if err != nil {
+		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
+	}
+	if !strings.Contains(migOut2, "Vault Schema Migration: v3 -> v3") {
+		t.Fatalf("expected idempotent v3 -> v3 on second run, got:\n%s", migOut2)
+	}
+}
