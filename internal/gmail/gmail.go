@@ -273,8 +273,8 @@ func ResolveAccount(vaultDir, aliasOrEmail string) (AccountConfig, error) {
 }
 
 func ensureAntigravityGmailPlugin() error {
-	const bundledZip = "/usr/share/antigravity/resources/app/extensions/antigravity/plugins/gmail.zip"
-	if _, err := os.Stat(bundledZip); err != nil {
+	if env := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); env != "" && strings.HasPrefix(env, os.TempDir()) {
+		// Skip network plugin download during isolated unit/E2E tests
 		return nil
 	}
 	home, err := os.UserHomeDir()
@@ -282,35 +282,57 @@ func ensureAntigravityGmailPlugin() error {
 		return nil
 	}
 	destDir := filepath.Join(home, ".gemini", "config", "plugins", "gmail")
-	if _, err := os.Stat(filepath.Join(destDir, "plugin.json")); err == nil {
-		return nil
+	if _, err := os.Stat(filepath.Join(destDir, "plugin.json")); os.IsNotExist(err) {
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get("https://www.gstatic.com/antigravity/plugins/gmail/gmail.zip")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			tmpZip, err := os.CreateTemp("", "agy-gmail-plugin-*.zip")
+			if err == nil {
+				_, _ = io.Copy(tmpZip, resp.Body)
+				_ = tmpZip.Close()
+				defer os.Remove(tmpZip.Name())
+				if zr, zErr := zip.OpenReader(tmpZip.Name()); zErr == nil {
+					for _, f := range zr.File {
+						rel := filepath.Clean(f.Name)
+						if strings.HasPrefix(rel, "..") {
+							continue
+						}
+						target := filepath.Join(destDir, rel)
+						if f.FileInfo().IsDir() {
+							_ = os.MkdirAll(target, 0o755)
+							continue
+						}
+						_ = os.MkdirAll(filepath.Dir(target), 0o755)
+						rc, openErr := f.Open()
+						if openErr != nil {
+							continue
+						}
+						mode := f.Mode()
+						if strings.Contains(rel, "scripts/") {
+							mode = 0o755
+						}
+						out, createErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+						if createErr == nil {
+							_, _ = io.Copy(out, rc)
+							_ = out.Close()
+						}
+						_ = rc.Close()
+					}
+					_ = zr.Close()
+				}
+			}
+		}
 	}
-	zr, err := zip.OpenReader(bundledZip)
-	if err != nil {
-		return err
-	}
-	defer zr.Close()
-	for _, f := range zr.File {
-		rel := filepath.Clean(f.Name)
-		if strings.HasPrefix(rel, "..") {
-			continue
-		}
-		target := filepath.Join(destDir, rel)
-		if f.FileInfo().IsDir() {
-			_ = os.MkdirAll(target, 0o755)
-			continue
-		}
-		_ = os.MkdirAll(filepath.Dir(target), 0o755)
-		rc, openErr := f.Open()
-		if openErr != nil {
-			continue
-		}
-		out, createErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if createErr == nil {
-			_, _ = io.Copy(out, rc)
-			_ = out.Close()
-		}
-		_ = rc.Close()
+
+	launcher := filepath.Join(destDir, "skills", "gmail", "scripts", "gmail")
+	if data, err := os.ReadFile(launcher); err == nil {
+		updated := strings.ReplaceAll(string(data), "CLI_VERSION=986250228", "CLI_VERSION=1015343799")
+		_ = os.WriteFile(launcher, []byte(updated), 0o755)
+		_ = exec.Command(launcher, "--version").Run()
 	}
 	return nil
 }
