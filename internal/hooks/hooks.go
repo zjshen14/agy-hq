@@ -119,6 +119,13 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 		sections = append(sections, "## Active Git Worktrees\n"+strings.Join(lines, "\n"))
 	}
+	if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
+		var lines []string
+		for _, t := range tasks {
+			lines = append(lines, fmt.Sprintf("- **%s** (`%s`, status: `%s`, conv: `%s`)", t.Title, t.TaskSlug, t.Status, t.ConversationID))
+		}
+		sections = append(sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
+	}
 
 	if len(sections) == 0 {
 		_, err := w.Write([]byte("{}\n"))
@@ -211,18 +218,25 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 
 			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
 			if fd, ok := kernel.GetFrontDesk(vaultDir); !ok || fd.ConversationID != payload.ConversationID {
-				shortID := payload.ConversationID
-				if len(shortID) > 8 {
-					shortID = shortID[:8]
+				alreadyTracked := false
+				if existingTasks, err := kernel.ListTasks(vaultDir); err == nil {
+					for _, et := range existingTasks {
+						if et.ConversationID == payload.ConversationID {
+							alreadyTracked = true
+							break
+						}
+					}
+				}
+				title := ""
+				if !alreadyTracked && strings.TrimSpace(payload.LastUserInput) != "" {
+					title = "[Task:general] " + strings.TrimSpace(payload.LastUserInput)
 				}
 				_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-					TaskSlug:       "conv-" + shortID,
-					Title:          payload.LastUserInput,
+					Title:          title,
 					Model:          payload.ModelName,
 					ConversationID: payload.ConversationID,
 					LastUpdatedAt:  time.Now().Format(time.RFC3339),
 					LastSummary:    summary,
-					Status:         "active",
 				})
 			}
 		}

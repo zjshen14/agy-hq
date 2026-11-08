@@ -89,8 +89,23 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.Title == "" {
 				task.Title = tasks[i].Title
 			}
+			if task.Tier == "" {
+				task.Tier = tasks[i].Tier
+			}
+			if task.Model == "" {
+				task.Model = tasks[i].Model
+			}
+			if task.WorktreeDir == "" {
+				task.WorktreeDir = tasks[i].WorktreeDir
+			}
 			if task.CreatedAt == "" {
 				task.CreatedAt = tasks[i].CreatedAt
+			}
+			if task.Status == "" {
+				task.Status = tasks[i].Status
+			}
+			if task.LastSummary == "" {
+				task.LastSummary = tasks[i].LastSummary
 			}
 			tasks[i] = task
 			updated = true
@@ -98,6 +113,19 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 		}
 	}
 	if !updated {
+		if task.TaskSlug == "" && task.ConversationID != "" {
+			shortID := task.ConversationID
+			if len(shortID) > 8 {
+				shortID = shortID[:8]
+			}
+			task.TaskSlug = "conv-" + shortID
+		}
+		if task.Title == "" {
+			task.Title = "[Task:general] Untitled Task"
+		}
+		if task.Status == "" {
+			task.Status = "active"
+		}
 		if task.CreatedAt == "" {
 			task.CreatedAt = time.Now().Format(time.RFC3339)
 		}
@@ -148,6 +176,16 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(artifactDir)), 0o644)
 	}
 	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
+}
+
+// ReleaseFrontDesk clears local/memory/front_desk.json so the next new conversation
+// automatically claims the Front Desk intake lease on SessionStart.
+func ReleaseFrontDesk(vaultDir string) error {
+	err := os.Remove(frontDeskPath(vaultDir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 var (

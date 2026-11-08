@@ -81,6 +81,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq hook session-start: %v\n", err)
 				os.Exit(1)
 			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
 		case "pre-tool":
 			if err := hooks.HandlePreToolUse(os.Stdin, os.Stdout); err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
@@ -219,6 +220,14 @@ func main() {
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Claimed Front Desk intake lease for conversation %s\n", *convID)
 
+	case "release-desk":
+		if err := kernel.ReleaseFrontDesk(vaultDir); err != nil {
+			fmt.Fprintf(os.Stderr, "hq release-desk error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Println("Released Front Desk intake lease (the next new conversation will automatically claim [HQ] Front Desk on Turn 1)")
+
 	case "adopt":
 		fs := flag.NewFlagSet("adopt", flag.ExitOnError)
 		convID := fs.String("conv", "", "Existing conversation ID to adopt into headquarter orchestration")
@@ -233,6 +242,17 @@ func main() {
 		}
 		if *title == "" {
 			*title = *taskSlug
+		}
+		if !strings.HasPrefix(*title, "[Task:") {
+			scope := "general"
+			if parts := strings.SplitN(*taskSlug, "-", 2); len(parts) > 0 && parts[0] != "" {
+				scope = parts[0]
+			}
+			*title = fmt.Sprintf("[Task:%s] %s", scope, *title)
+		}
+		if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID == *convID {
+			_ = kernel.ReleaseFrontDesk(vaultDir)
+			fmt.Printf("Released Front Desk lease from %s (next new conversation will automatically claim [HQ] Front Desk).\n", *convID)
 		}
 		if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:       *taskSlug,
@@ -348,5 +368,9 @@ Commands:
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
-  worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/`)
+  worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/
+  spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
+  adopt --conv=<id> --task=<slug>     Adopt an existing conversation (or demote Front Desk to a Task)
+  claim-desk --conv=<id>              Claim the single active [HQ] Front Desk intake lease
+  release-desk                        Release Front Desk lease so next new conversation claims it`)
 }

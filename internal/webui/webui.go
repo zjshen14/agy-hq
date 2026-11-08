@@ -363,7 +363,12 @@ func SyncMarkdownConsole(vaultDir string) error {
 		b.WriteString("> [!NOTE]\n> **Pending Approvals (`0` items):** All staged actions have been resolved.\n\n---\n\n")
 	}
 
-	b.WriteString("## 📊 1. Proactive Gatekeeper & Daily Quota\n")
+	b.WriteString("## 📊 1. Front Desk Lease & Daily Quota\n")
+	if fd, ok := kernel.GetFrontDesk(vaultDir); ok {
+		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
+	} else {
+		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")
+	}
 	circuitBadge := "BUDGET OK"
 	if state.Quota.CircuitOpen {
 		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
