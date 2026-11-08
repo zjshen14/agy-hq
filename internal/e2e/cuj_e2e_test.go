@@ -313,7 +313,7 @@ func TestCUJ2_FrontDeskLifecycleAndHandover(t *testing.T) {
 	}
 }
 
-// CUJ-3: Dedicated Task Conversation Lifecycle (Spawn, Adopt, Stop Sync, Complete)
+// CUJ-3: Dedicated Task Conversation Lifecycle (Spawn, Adopt, Stop Sync, Complete, Archive, Reopen)
 func TestCUJ3_TaskConversationLifecycle(t *testing.T) {
 	env := setupHQEnv(t)
 	if _, err := env.run("", "init"); err != nil {
@@ -325,8 +325,35 @@ func TestCUJ3_TaskConversationLifecycle(t *testing.T) {
 	_ = os.MkdirAll(artDesk, 0o755)
 	_, _ = env.run(fmt.Sprintf(`{"conversationId":"desk-0000","artifactDirectoryPath":%q}`, artDesk), "hook", "session-start")
 
-	// 1. Spawn a task via `hq spawn --dry-run`
+	// Create a dummy local git repository for isolated worktree testing
+	dummyRepo := filepath.Join(t.TempDir(), "opencli")
+	_ = os.MkdirAll(dummyRepo, 0o755)
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@agy-hq.local"},
+		{"config", "user.name", "Test"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = dummyRepo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+	_ = os.WriteFile(filepath.Join(dummyRepo, "README.md"), []byte("# OpenCLI\n"), 0o644)
+	for _, args := range [][]string{
+		{"add", "README.md"},
+		{"commit", "-m", "initial"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = dummyRepo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+
+	// 1. Spawn a task via `hq spawn --dry-run` with isolated worktree
 	spawnOut, err := env.run("", "spawn",
+		"--repo="+dummyRepo,
 		"--task=opencli-fix-pr279",
 		"--prompt=Fix failing unit test in PR #279",
 		"--dry-run",
@@ -361,7 +388,7 @@ func TestCUJ3_TaskConversationLifecycle(t *testing.T) {
 		t.Fatalf("regression: Stop hook overwrote curated TaskSlug or Title: %+v", tasks[0])
 	}
 
-	// 4. Complete the task via `hq complete`
+	// 4. Complete the task via `hq complete` -> worktree stays intact
 	compOut, err := env.run("", "complete", "opencli-fix-pr279", "--summary=Merged PR #279 after green CI")
 	if err != nil {
 		t.Fatalf("hq complete failed: %v (%s)", err, compOut)
@@ -369,6 +396,65 @@ func TestCUJ3_TaskConversationLifecycle(t *testing.T) {
 	tasks, _ = kernel.ListTasks(env.vaultDir)
 	if tasks[0].Status != "completed" || tasks[0].LastSummary != "Merged PR #279 after green CI" {
 		t.Fatalf("expected task status completed, got %+v", tasks[0])
+	}
+	if tasks[0].WorktreeDir == "" {
+		t.Fatalf("expected non-empty WorktreeDir")
+	}
+	if _, err := os.Stat(tasks[0].WorktreeDir); err != nil {
+		t.Fatalf("expected worktree to stay intact after complete: %v", err)
+	}
+
+	// 5. Uncommitted changes -> `hq archive` fails without --force
+	dirtyFile := filepath.Join(tasks[0].WorktreeDir, "dirty.txt")
+	_ = os.WriteFile(dirtyFile, []byte("uncommitted changes"), 0o644)
+
+	archFailOut, err := env.run("", "archive", "opencli-fix-pr279")
+	if err == nil {
+		t.Fatalf("expected archive to fail with uncommitted changes, got success: %s", archFailOut)
+	}
+	if !strings.Contains(archFailOut, `refusing to archive "opencli-fix-pr279": uncommitted changes in worktree (pass --force to override)`) {
+		t.Fatalf("expected uncommitted changes error message, got: %s", archFailOut)
+	}
+
+	// 6. `hq archive --force` succeeds, removes worktree directory, sets status archived
+	archOut, err := env.run("", "archive", "opencli-fix-pr279", "--force")
+	if err != nil {
+		t.Fatalf("hq archive --force failed: %v (%s)", err, archOut)
+	}
+	if !strings.Contains(archOut, `Archived task "opencli-fix-pr279" (worktree cleaned up)`) {
+		t.Fatalf("unexpected archive output: %s", archOut)
+	}
+	if _, err := os.Stat(tasks[0].WorktreeDir); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree directory to be removed on disk, stat err: %v", err)
+	}
+	tasks, _ = kernel.ListTasks(env.vaultDir)
+	if tasks[0].Status != "archived" {
+		t.Fatalf("expected task status archived, got %s", tasks[0].Status)
+	}
+
+	// Check CONSOLE.md has clean note below table
+	consoleMD, err := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
+	if err != nil {
+		t.Fatalf("read CONSOLE.md: %v", err)
+	}
+	if !strings.Contains(string(consoleMD), "*1 archived task(s) preserved in local/memory/tasks.json*") {
+		t.Fatalf("expected archived task note in CONSOLE.md, got:\n%s", string(consoleMD))
+	}
+
+	// 7. `hq reopen` restores worktree directory, sets status active
+	reopenOut, err := env.run("", "reopen", "opencli-fix-pr279")
+	if err != nil {
+		t.Fatalf("hq reopen failed: %v (%s)", err, reopenOut)
+	}
+	if !strings.Contains(reopenOut, `Reopened task "opencli-fix-pr279" (status: active, link: conversation://spawned-conv-9999)`) {
+		t.Fatalf("unexpected reopen output: %s", reopenOut)
+	}
+	if _, err := os.Stat(tasks[0].WorktreeDir); err != nil {
+		t.Fatalf("expected worktree directory restored on disk after reopen: %v", err)
+	}
+	tasks, _ = kernel.ListTasks(env.vaultDir)
+	if tasks[0].Status != "active" {
+		t.Fatalf("expected task status active after reopen, got %s", tasks[0].Status)
 	}
 }
 

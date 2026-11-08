@@ -391,12 +391,26 @@ func SyncMarkdownConsole(vaultDir string) error {
 	}
 	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 
-	fmt.Fprintf(&b, "## 📋 2. Task Board (`%d` Tracked Conversations)\n", len(state.Tasks))
-	if len(state.Tasks) == 0 {
-		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
+	var visibleTasks []kernel.ActiveTask
+	var archivedCount int
+	for _, t := range state.Tasks {
+		if strings.EqualFold(t.Status, "archived") {
+			archivedCount++
+		} else {
+			visibleTasks = append(visibleTasks, t)
+		}
+	}
+
+	fmt.Fprintf(&b, "## 📋 2. Task Board (`%d` Tracked Conversations)\n", len(visibleTasks))
+	if len(visibleTasks) == 0 {
+		b.WriteString("- None registered in `local/memory/tasks.json`.\n")
+		if archivedCount > 0 {
+			fmt.Fprintf(&b, "\n- *%d archived task(s) preserved in local/memory/tasks.json*\n", archivedCount)
+		}
+		b.WriteString("\n---\n\n")
 	} else {
 		b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
-		for _, t := range state.Tasks {
+		for _, t := range visibleTasks {
 			cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
 			oneLine := strings.Join(strings.Fields(t.LastSummary), " ")
 			oneLine = strings.ReplaceAll(oneLine, "|", "\\|")
@@ -410,6 +424,9 @@ func SyncMarkdownConsole(vaultDir string) error {
 				badge = "🛑 `cancelled`"
 			}
 			fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | `%s` | %s |\n", badge, cleanTitle, t.ConversationID, t.TaskSlug, oneLine)
+		}
+		if archivedCount > 0 {
+			fmt.Fprintf(&b, "\n- *%d archived task(s) preserved in local/memory/tasks.json*\n", archivedCount)
 		}
 		b.WriteString("\n---\n\n")
 	}

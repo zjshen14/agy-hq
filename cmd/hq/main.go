@@ -491,6 +491,49 @@ func main() {
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Marked task %q as completed\n", target)
 
+	case "archive":
+		var target string
+		force := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--force" || arg == "-force" || arg == "-f" {
+				force = true
+			} else if !strings.HasPrefix(arg, "-") && target == "" {
+				target = arg
+			}
+		}
+		if target == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq archive <task-slug-or-conv-id> [--force]")
+			os.Exit(1)
+		}
+		if err := kernel.ArchiveTask(vaultDir, target, force); err != nil {
+			fmt.Fprintf(os.Stderr, "hq archive error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Printf("Archived task %q (worktree cleaned up)\n", target)
+
+	case "reopen":
+		if len(os.Args) < 3 || strings.HasPrefix(os.Args[2], "-") {
+			fmt.Fprintln(os.Stderr, "usage: hq reopen <task-slug-or-conv-id>")
+			os.Exit(1)
+		}
+		target := os.Args[2]
+		if err := kernel.ReopenTask(vaultDir, target); err != nil {
+			fmt.Fprintf(os.Stderr, "hq reopen error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		convID := ""
+		if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+			for _, t := range tasks {
+				if t.TaskSlug == target || t.ConversationID == target {
+					convID = t.ConversationID
+					break
+				}
+			}
+		}
+		fmt.Printf("Reopened task %q (status: active, link: conversation://%s)\n", target, convID)
+
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
@@ -511,6 +554,7 @@ func main() {
 		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
 		fullPrompt := *prompt
 		var wtDir string
+		var repoRootPath string
 		if *repoSpec != "" {
 			wtTask := *taskName
 			if wtTask == "" {
@@ -521,6 +565,11 @@ func main() {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq spawn worktree error: %v\n", err)
 				os.Exit(1)
+			}
+			if info, err := os.Stat(*repoSpec); err == nil && info.IsDir() {
+				if abs, err := filepath.Abs(*repoSpec); err == nil {
+					repoRootPath = abs
+				}
 			}
 			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
 		}
@@ -557,6 +606,7 @@ func main() {
 			Tier:          resolvedTier,
 			Model:         resolvedModel,
 			WorktreeDir:   wtDir,
+			RepoRoot:      repoRootPath,
 			CreatedAt:     createdAt,
 			LastUpdatedAt: createdAt,
 			LastSummary:   *prompt,
@@ -570,6 +620,7 @@ func main() {
 				Tier:           resolvedTier,
 				Model:          resolvedModel,
 				WorktreeDir:    wtDir,
+				RepoRoot:       repoRootPath,
 				ConversationID: spawnedID,
 				CreatedAt:      createdAt,
 				LastUpdatedAt:  time.Now().Format(time.RFC3339),

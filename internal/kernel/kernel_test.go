@@ -2,9 +2,11 @@ package kernel
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -230,5 +232,89 @@ func TestResolveModelEnumAndSpawnSubagent(t *testing.T) {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil || len(tasks) != 1 || tasks[0].ConversationID != "11111111-2222-3333-4444-555555555555" {
 		t.Fatalf("expected subagent registered in tasks.json, got %+v (%v)", tasks, err)
+	}
+}
+
+func TestArchiveAndReopenTask(t *testing.T) {
+	vaultDir := t.TempDir()
+	baseRepo := filepath.Join(t.TempDir(), "repo")
+	_ = os.MkdirAll(baseRepo, 0o755)
+
+	// Init git repo
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@agy-hq.local"},
+		{"config", "user.name", "Test"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = baseRepo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+	_ = os.WriteFile(filepath.Join(baseRepo, "README.md"), []byte("# Base\n"), 0o644)
+	for _, args := range [][]string{
+		{"add", "README.md"},
+		{"commit", "-m", "initial commit"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = baseRepo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+
+	// Create worktree for task
+	wtDir := filepath.Join(vaultDir, "worktrees", "repo-my-task")
+	_ = os.MkdirAll(filepath.Dir(wtDir), 0o755)
+	c := exec.Command("git", "-C", baseRepo, "worktree", "add", "-b", "hq/my-task", wtDir)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v (%s)", err, string(out))
+	}
+
+	taskSlug := "my-task"
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:    taskSlug,
+		Title:       "[Task:repo] my-task",
+		WorktreeDir: wtDir,
+		RepoRoot:    baseRepo,
+		Status:      "completed",
+	})
+
+	// 1. Uncommitted file in worktree -> ArchiveTask without force must fail
+	dirtyFile := filepath.Join(wtDir, "dirty.txt")
+	_ = os.WriteFile(dirtyFile, []byte("dirty"), 0o644)
+
+	err := ArchiveTask(vaultDir, taskSlug, false)
+	if err == nil {
+		t.Fatalf("expected error archiving dirty worktree without force")
+	}
+	expectedErrMsg := fmt.Sprintf("refusing to archive %q: uncommitted changes in worktree (pass --force to override)", taskSlug)
+	if err.Error() != expectedErrMsg {
+		t.Fatalf("expected error %q, got %q", expectedErrMsg, err.Error())
+	}
+
+	// 2. ArchiveTask with force must succeed and remove worktree dir
+	if err := ArchiveTask(vaultDir, taskSlug, true); err != nil {
+		t.Fatalf("ArchiveTask with force failed: %v", err)
+	}
+	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree dir %q to be deleted, stat err: %v", wtDir, err)
+	}
+	tasks, _ := ListTasks(vaultDir)
+	if len(tasks) != 1 || tasks[0].Status != "archived" {
+		t.Fatalf("expected task status archived, got %+v", tasks)
+	}
+
+	// 3. ReopenTask must restore worktree dir and set status to active
+	if err := ReopenTask(vaultDir, taskSlug); err != nil {
+		t.Fatalf("ReopenTask failed: %v", err)
+	}
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Fatalf("expected worktree dir %q to be restored, stat err: %v", wtDir, err)
+	}
+	tasks, _ = ListTasks(vaultDir)
+	if len(tasks) != 1 || tasks[0].Status != "active" {
+		t.Fatalf("expected task status active, got %+v", tasks)
 	}
 }

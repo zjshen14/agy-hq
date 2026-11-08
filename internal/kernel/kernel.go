@@ -120,11 +120,12 @@ type ActiveTask struct {
 	Tier           string `json:"tier"`
 	Model          string `json:"model"`
 	WorktreeDir    string `json:"worktreeDir,omitempty"`
+	RepoRoot       string `json:"repoRoot,omitempty"`
 	ConversationID string `json:"conversationId,omitempty"`
 	CreatedAt      string `json:"createdAt"`
 	LastUpdatedAt  string `json:"lastUpdatedAt"`
 	LastSummary    string `json:"lastSummary,omitempty"`
-	Status         string `json:"status"` // active, completed
+	Status         string `json:"status"` // active, completed, archived, cancelled
 }
 
 func tasksFilePath(vaultDir string) string {
@@ -214,6 +215,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.WorktreeDir == "" {
 				task.WorktreeDir = tasks[i].WorktreeDir
 			}
+			if task.RepoRoot == "" {
+				task.RepoRoot = tasks[i].RepoRoot
+			}
 			if task.CreatedAt == "" {
 				task.CreatedAt = tasks[i].CreatedAt
 			}
@@ -302,6 +306,185 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 		return err
 	}
 	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// ArchiveTask archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID).
+// If WorktreeDir exists on disk:
+// - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !force, returns:
+//   refusing to archive %q: uncommitted changes in worktree (pass --force to override)
+// - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if force is true).
+// Sets task status to "archived", sets LastUpdatedAt to now, and saves tasks.json.
+func ArchiveTask(vaultDir, target string, force bool) error {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range tasks {
+		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
+			task := &tasks[i]
+			if task.WorktreeDir != "" {
+				if info, err := os.Stat(task.WorktreeDir); err == nil && info.IsDir() {
+					cmdStatus := exec.Command("git", "-C", task.WorktreeDir, "status", "--porcelain")
+					outStatus, err := cmdStatus.Output()
+					if err != nil {
+						return fmt.Errorf("git status check failed on %s: %w", task.WorktreeDir, err)
+					}
+					if len(strings.TrimSpace(string(outStatus))) > 0 && !force {
+						return fmt.Errorf("refusing to archive %q: uncommitted changes in worktree (pass --force to override)", target)
+					}
+
+					repoRoot := task.RepoRoot
+					if repoRoot == "" {
+						repoRoot = resolveRepoRootForWorktree(vaultDir, task.WorktreeDir)
+					}
+					task.RepoRoot = repoRoot
+
+					var removeArgs []string
+					if force {
+						removeArgs = []string{"-C", repoRoot, "worktree", "remove", "--force", task.WorktreeDir}
+					} else {
+						removeArgs = []string{"-C", repoRoot, "worktree", "remove", task.WorktreeDir}
+					}
+					cmdRemove := exec.Command("git", removeArgs...)
+					if out, err := cmdRemove.CombinedOutput(); err != nil {
+						return fmt.Errorf("git worktree remove failed: %w (%s)", err, string(out))
+					}
+					if _, err := os.Stat(task.WorktreeDir); err == nil {
+						_ = os.RemoveAll(task.WorktreeDir)
+					}
+					_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
+				}
+			}
+
+			task.Status = "archived"
+			task.LastUpdatedAt = time.Now().Format(time.RFC3339)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	}
+
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// ReopenTask restores a task in local/memory/tasks.json (matched by TaskSlug or ConversationID) back to active status.
+// If WorktreeDir is specified but does not exist on disk, it checks if branch `hq/<taskSlug>` or `<taskSlug>` exists,
+// and recreates the worktree via `git -C <repoRoot> worktree add <worktreeDir> <branch>`.
+// Sets task status to "active", sets LastUpdatedAt to now, and saves tasks.json.
+func ReopenTask(vaultDir, target string) error {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range tasks {
+		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
+			task := &tasks[i]
+			if task.WorktreeDir != "" {
+				if _, err := os.Stat(task.WorktreeDir); os.IsNotExist(err) {
+					repoRoot := task.RepoRoot
+					if repoRoot == "" {
+						repoRoot = findRepoRootForTask(vaultDir, task)
+					}
+					branch := ""
+					if gitBranchExists(repoRoot, "hq/"+task.TaskSlug) {
+						branch = "hq/" + task.TaskSlug
+					} else if gitBranchExists(repoRoot, task.TaskSlug) {
+						branch = task.TaskSlug
+					}
+					_ = os.MkdirAll(filepath.Dir(task.WorktreeDir), 0o755)
+					var cmd *exec.Cmd
+					if branch != "" {
+						cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", task.WorktreeDir, branch)
+					} else {
+						cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "hq/"+task.TaskSlug, task.WorktreeDir)
+					}
+					if out, err := cmd.CombinedOutput(); err != nil {
+						return fmt.Errorf("git worktree add failed: %w (%s)", err, string(out))
+					}
+				}
+			}
+
+			task.Status = "active"
+			task.LastUpdatedAt = time.Now().Format(time.RFC3339)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	}
+
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+func resolveRepoRootForWorktree(vaultDir, worktreeDir string) string {
+	cmdCommon := exec.Command("git", "-C", worktreeDir, "rev-parse", "--git-common-dir")
+	if out, err := cmdCommon.Output(); err == nil {
+		commonDir := strings.TrimSpace(string(out))
+		if !filepath.IsAbs(commonDir) {
+			commonDir = filepath.Clean(filepath.Join(worktreeDir, commonDir))
+		}
+		if strings.HasSuffix(commonDir, "/.git") || strings.HasSuffix(commonDir, string(filepath.Separator)+".git") {
+			return filepath.Dir(commonDir)
+		}
+		return commonDir
+	}
+	if envRoot := os.Getenv("HQ_ROOT_DIR"); envRoot != "" {
+		if abs, err := filepath.Abs(envRoot); err == nil {
+			return abs
+		}
+	}
+	return filepath.Dir(vaultDir)
+}
+
+func gitBranchExists(repoDir, branch string) bool {
+	if repoDir == "" || branch == "" {
+		return false
+	}
+	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return cmd.Run() == nil
+}
+
+func findRepoRootForTask(vaultDir string, task *ActiveTask) string {
+	rootCandidate := ""
+	if envRoot := os.Getenv("HQ_ROOT_DIR"); envRoot != "" {
+		if abs, err := filepath.Abs(envRoot); err == nil {
+			rootCandidate = abs
+		}
+	}
+	if rootCandidate == "" {
+		rootCandidate = filepath.Dir(vaultDir)
+	}
+
+	if gitBranchExists(rootCandidate, "hq/"+task.TaskSlug) || gitBranchExists(rootCandidate, task.TaskSlug) {
+		return rootCandidate
+	}
+
+	reposDir := filepath.Join(vaultDir, "repos")
+	if entries, err := os.ReadDir(reposDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && strings.HasSuffix(e.Name(), ".git") {
+				bareRepo := filepath.Join(reposDir, e.Name())
+				if gitBranchExists(bareRepo, "hq/"+task.TaskSlug) || gitBranchExists(bareRepo, task.TaskSlug) {
+					return bareRepo
+				}
+			}
+		}
+	}
+
+	return rootCandidate
 }
 
 // CancelTasks marks tasks matching conversationIDs (or taskSlugs) as cancelled.
