@@ -1,8 +1,11 @@
 package kernel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -860,4 +863,255 @@ func PopPendingSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent,
 		return matched, true
 	}
 	return PendingSubagent{}, false
+}
+
+var staticModelEnumMap = map[string]string{
+	"gemini-4-argon-high":      "MODEL_PLACEHOLDER_M417",
+	"gemini-4-argon-medium":    "MODEL_PLACEHOLDER_M418",
+	"gemini-4-argon-low":       "MODEL_PLACEHOLDER_M419",
+	"gemini-3.8-flash-high":    "MODEL_PLACEHOLDER_M318",
+	"gemini-3.8-flash-medium":  "MODEL_PLACEHOLDER_M319",
+	"gemini-3.8-flash-low":     "MODEL_PLACEHOLDER_M320",
+	"claude-opus-5-5-low":      "MODEL_PLACEHOLDER_M400",
+	"claude-opus-5-5-medium":   "MODEL_PLACEHOLDER_M401",
+	"claude-opus-5-5-high":     "MODEL_PLACEHOLDER_M402",
+	"claude-sonnet-5-5-low":    "MODEL_PLACEHOLDER_M403",
+	"claude-sonnet-5-5-medium": "MODEL_PLACEHOLDER_M404",
+	"claude-sonnet-5-5-high":   "MODEL_PLACEHOLDER_M405",
+	"gpt-oss-120b-medium":      "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+}
+
+// ResolveModelEnum maps a human-readable Antigravity model ID (e.g. "claude-opus-5-5-high")
+// to its LanguageServerService Model enum string (e.g. "MODEL_PLACEHOLDER_M402") by querying
+// GetCascadeModelConfigData on the local language server with a static fallback table.
+func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
+	trimmed := strings.TrimSpace(modelID)
+	if strings.HasPrefix(trimmed, "MODEL_") {
+		return trimmed, nil
+	}
+	normalized := strings.ToLower(trimmed)
+
+	if lsAddr != "" && csrfToken != "" {
+		url := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData", lsAddr)
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("x-codeium-csrf-token", csrfToken)
+			client := &http.Client{Timeout: 2 * time.Second}
+			if resp, err := client.Do(req); err == nil {
+				defer resp.Body.Close()
+				var payload struct {
+					ClientModelConfigs []struct {
+						ModelID      string `json:"modelId"`
+						ModelOrAlias struct {
+							Model string `json:"model"`
+						} `json:"modelOrAlias"`
+					} `json:"clientModelConfigs"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&payload) == nil {
+					for _, cfg := range payload.ClientModelConfigs {
+						if strings.EqualFold(cfg.ModelID, normalized) && cfg.ModelOrAlias.Model != "" {
+							return cfg.ModelOrAlias.Model, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if enumVal, ok := staticModelEnumMap[normalized]; ok {
+		return enumVal, nil
+	}
+	return "", fmt.Errorf("unknown Antigravity model ID %q", modelID)
+}
+
+// SpawnSubagent launches a nested child subagent conversation under parentConvID on any supported
+// Antigravity model (including cross-family models such as claude-opus-5-5-high or claude-sonnet-5-5-high)
+// via LanguageServerService/StartCascade (with parentConversationId, subagentDescriptor, and agentScriptItem)
+// followed by delivering the initial prompt from parentConvID.
+func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir string, dryRun bool) (string, error) {
+	if modelID == "" {
+		modelID, _, _ = ResolveModel(prompt, "", "", "")
+	} else if !strings.HasPrefix(strings.TrimSpace(modelID), "MODEL_") {
+		modelID, _, _ = ResolveModel(prompt, modelID, "", "")
+	}
+	parentConvID = strings.TrimSpace(parentConvID)
+	if parentConvID == "" {
+		parentConvID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "[standard] general: Subagent Worker"
+	}
+
+	state := LoadQuota(vaultDir)
+	if state.CircuitOpen {
+		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
+	}
+	if state.SpawnsToday >= state.MaxDailySpawns {
+		state.CircuitOpen = true
+		state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
+		_ = SaveQuota(vaultDir, state)
+		return "", fmt.Errorf("daily spawn budget exhausted (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
+	}
+
+	tier, _, _, title, slug := ParseSubagentRole(role, modelID)
+
+	if dryRun {
+		output := fmt.Sprintf("[dry-run] hq subagent --parent=%s --model=%s --role=%q", parentConvID, modelID, role)
+		state.SpawnsToday++
+		state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s])", role, modelID)
+		state.Events = append(state.Events, SpawnEvent{
+			Timestamp: time.Now().Format(time.RFC3339),
+			Trigger:   "hq-subagent:" + slug,
+			Skill:     role,
+			Model:     modelID,
+			Outcome:   output,
+		})
+		_ = SaveQuota(vaultDir, state)
+		return output, nil
+	}
+
+	lsAddr := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
+	csrfToken := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
+	if lsAddr == "" || csrfToken == "" {
+		return "", fmt.Errorf("ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN are required to spawn a live subagent")
+	}
+
+	modelEnum, err := ResolveModelEnum(lsAddr, csrfToken, modelID)
+	if err != nil {
+		return "", err
+	}
+
+	reqBody := map[string]interface{}{
+		"baseTrajectoryIdentifier": map[string]interface{}{
+			"lastActiveDoc": true,
+		},
+		"source":               "CORTEX_TRAJECTORY_SOURCE_AGENT_API",
+		"trajectoryType":       "CORTEX_TRAJECTORY_TYPE_CASCADE",
+		"requestedModel":       modelEnum,
+		"parentConversationId": parentConvID,
+		"subagentDescriptor": map[string]interface{}{
+			"typeName": "self",
+			"role":     role,
+		},
+		"agentScriptItem": map[string]interface{}{
+			"name": "self",
+		},
+		"customAgentSpec": map[string]interface{}{
+			"codingAgent":                 map[string]interface{}{},
+			"commandExecutionPolicy":      "eager",
+			"enforcedWorkspaceValidation": false,
+			"cascadeConfig": map[string]interface{}{
+				"plannerConfig": map[string]interface{}{
+					"planModel": modelEnum,
+					"requestedModel": map[string]interface{}{
+						"model": modelEnum,
+					},
+				},
+			},
+		},
+	}
+
+	if projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")); projID != "" {
+		reqBody["projectEnvConfig"] = map[string]interface{}{
+			"projectId":                 projID,
+			"defaultProjectEnvironment": map[string]interface{}{},
+		}
+	} else if workspaceDir != "" {
+		if absDir, absErr := filepath.Abs(workspaceDir); absErr == nil {
+			workspaceDir = absDir
+		}
+		reqBody["workspaceUris"] = []string{"file://" + filepath.ToSlash(workspaceDir)}
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	startURL := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/StartCascade", lsAddr)
+	req, err := http.NewRequest(http.MethodPost, startURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-codeium-csrf-token", csrfToken)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("StartCascade RPC failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("StartCascade HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+	}
+
+	var startResp struct {
+		CascadeID string `json:"cascadeId"`
+	}
+	if err := json.Unmarshal(respBytes, &startResp); err != nil || startResp.CascadeID == "" {
+		return "", fmt.Errorf("invalid StartCascade response: %s", strings.TrimSpace(string(respBytes)))
+	}
+	cascadeID := startResp.CascadeID
+
+	fullPrompt := prompt
+	if parentConvID != "" && !strings.Contains(fullPrompt, parentConvID) {
+		fullPrompt = fmt.Sprintf("%s\n\nWhen you finish, send your final report back to parent conversation %s using the send_message tool (Recipient=%q).", prompt, parentConvID, parentConvID)
+	}
+
+	// Register in local/memory/tasks.json before sending the initial message so SessionStart sees it immediately.
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       slug,
+		Title:          title,
+		Tier:           tier,
+		Model:          modelID,
+		WorktreeDir:    workspaceDir,
+		ConversationID: cascadeID,
+		CreatedAt:      time.Now().Format(time.RFC3339),
+		LastUpdatedAt:  time.Now().Format(time.RFC3339),
+		LastSummary:    prompt,
+		Status:         "active",
+	})
+
+	// Deliver initial message via agentapi send-message (SendAgentMessage), with Connect JSON fallback.
+	sent := false
+	if parentConvID != "" {
+		msgCmd := exec.Command("agentapi", "send-message", "--title=Message from "+parentConvID, cascadeID, fullPrompt)
+		if err := msgCmd.Run(); err == nil {
+			sent = true
+		}
+	}
+	if !sent {
+		sendURL := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage", lsAddr)
+		sendPayload, _ := json.Marshal(map[string]interface{}{
+			"cascadeId": cascadeID,
+			"items": []map[string]interface{}{
+				{"text": fullPrompt},
+			},
+		})
+		if sendReq, reqErr := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(sendPayload)); reqErr == nil {
+			sendReq.Header.Set("Content-Type", "application/json")
+			sendReq.Header.Set("x-codeium-csrf-token", csrfToken)
+			if sendResp, doErr := client.Do(sendReq); doErr == nil {
+				_, _ = io.Copy(io.Discard, sendResp.Body)
+				_ = sendResp.Body.Close()
+			}
+		}
+	}
+
+	output := fmt.Sprintf("Spawned subagent %s (parent=%s, model=%s, role=%q)", cascadeID, parentConvID, modelID, role)
+	state.SpawnsToday++
+	state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s] -> %s)", role, modelID, cascadeID)
+	state.Events = append(state.Events, SpawnEvent{
+		Timestamp: time.Now().Format(time.RFC3339),
+		Trigger:   "hq-subagent:" + slug,
+		Skill:     role,
+		Model:     modelID,
+		Outcome:   output,
+	})
+	_ = SaveQuota(vaultDir, state)
+	return output, nil
 }

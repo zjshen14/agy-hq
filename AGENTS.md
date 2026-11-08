@@ -45,10 +45,13 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - **Front Desk Thread Title:** `[HQ] Front Desk` (or `[HQ] Front Desk (YYYY-MM)` when starting a new shift).
      - **Separate Task Conversation Title (`./bin/hq spawn` / `adopt`):** `[Task:<scope>] <Short Title>` (e.g., `[Task:opencli] Fix PR #279`, `[Task:research] Live Voice Streaming`, `[Task:NVDA] Q3 Thesis Check`).
      - **Task Slug & Worktree Folder (`local/worktrees/`):** `<scope>-<kebab-goal>` (e.g., `opencli-fix-pr279`, `webapp-redesign`).
-     - **In-Session Subagent `Role` (`invoke_subagent`):** `[<Tier>] <Scope>: <2-4 Word Role>` (e.g., `[standard] opencli: PR #279 Fixer`, `[deep] NVDA: 10-Q Auditor`).
+     - **In-Session Subagent `Role` (`invoke_subagent` / `./bin/hq subagent`):** `[<Tier>] <Scope>: <2-4 Word Role>` (e.g., `[standard] opencli: PR #279 Fixer`, `[deep] NVDA: 10-Q Auditor`).
      - **Scheduled Automation Runs:** `[Auto] <Job Name>` (e.g., `[Auto] Morning Brief`).
    - **Smart Model & Thinking-Depth Routing (With User Override):**
-     - **User Override First:** If the user specifies a model or depth (e.g., *"use Opus high"*, *"use Flash"*, *"deep thinking"*), always honor it (`invoke_subagent(Model=...)` or `./bin/hq spawn --model=... --depth=low|medium|high`).
+     - **User Override First:** If the user specifies a model or depth (e.g., *"use Opus high"*, *"use Flash"*, *"deep thinking"*), always honor it:
+       - For a **nested subagent** on a Gemini tier (`inherit`, `flash_lite`, `flash`, `pro`), call `invoke_subagent(Model=...)`.
+       - For a **nested subagent on a cross-family or exact model** (e.g., `claude-opus-5-5-high`, `claude-sonnet-5-5-high`, or any explicit `--model` / `--depth`), run `./bin/hq subagent --model=<model> --depth=<low|medium|high> --role="[<tier>] <scope>: <role>" --prompt="..."` (or `./bin/hq spawn --subagent ...`). This launches a true nested child subagent under the current conversation (`parentConversationId` + `subagentDescriptor`) rather than cluttering the sidebar with a top-level conversation.
+       - For a **dedicated top-level sidebar Task Conversation**, run `./bin/hq spawn --task=<slug> --model=... --depth=low|medium|high --prompt="..."`.
      - **Automatic Complexity Tiering (When Unspecified):**
        - **`quick` (`low` depth — `flash_lite` / `gemini-3.8-flash-low`):** Log checks, inbox triage, status summaries, formatting, or simple lookups.
        - **`standard` (`high` depth on Flash — `flash` / `gemini-3.8-flash-high`):** Standard feature coding, unit tests, bug fixes, doc searches, and filing extraction (protects scarce Pro/Opus quota).

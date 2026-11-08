@@ -1,6 +1,9 @@
 package kernel
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,5 +150,85 @@ func TestSubagentRoleParsingAndLifecycle(t *testing.T) {
 		if tsk.Status != "cancelled" {
 			t.Fatalf("expected all subagent tasks cancelled, got %+v", tsk)
 		}
+	}
+}
+
+func TestResolveModelEnumAndSpawnSubagent(t *testing.T) {
+	// 1. Static fallback resolution
+	enumVal, err := ResolveModelEnum("", "", "claude-opus-5-5-high")
+	if err != nil || enumVal != "MODEL_PLACEHOLDER_M402" {
+		t.Fatalf("expected MODEL_PLACEHOLDER_M402, got %q (%v)", enumVal, err)
+	}
+
+	// 2. Mock LanguageServerService Connect JSON endpoints
+	var gotStartReq map[string]interface{}
+	var gotSendReq map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != "test-csrf" {
+			http.Error(w, "missing csrf", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"clientModelConfigs": []map[string]interface{}{
+					{
+						"modelId": "claude-opus-5-5-high",
+						"modelOrAlias": map[string]interface{}{
+							"model": "MODEL_PLACEHOLDER_M402",
+						},
+					},
+				},
+			})
+		case "/exa.language_server_pb.LanguageServerService/StartCascade":
+			_ = json.NewDecoder(r.Body).Decode(&gotStartReq)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"cascadeId": "11111111-2222-3333-4444-555555555555",
+			})
+		case "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage":
+			_ = json.NewDecoder(r.Body).Decode(&gotSendReq)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	lsAddr := strings.TrimPrefix(srv.URL, "http://")
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", lsAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "test-csrf")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-test-123")
+
+	vaultDir := t.TempDir()
+	parentID := "00000000-0000-0000-0000-000000000001"
+	role := "[deep] rfc-0005: Opus 5.5 Reviewer"
+	out, err := SpawnSubagent(vaultDir, parentID, role, "Review RFC-0005", "claude-opus-5-5-high", "", false)
+	if err != nil {
+		t.Fatalf("SpawnSubagent failed: %v", err)
+	}
+	if !strings.Contains(out, "11111111-2222-3333-4444-555555555555") {
+		t.Fatalf("unexpected SpawnSubagent output: %s", out)
+	}
+	if gotStartReq["parentConversationId"] != parentID {
+		t.Fatalf("expected parentConversationId=%s, got %v", parentID, gotStartReq["parentConversationId"])
+	}
+	if gotStartReq["requestedModel"] != "MODEL_PLACEHOLDER_M402" {
+		t.Fatalf("expected requestedModel=MODEL_PLACEHOLDER_M402, got %v", gotStartReq["requestedModel"])
+	}
+	subDesc, _ := gotStartReq["subagentDescriptor"].(map[string]interface{})
+	if subDesc["typeName"] != "self" || subDesc["role"] != role {
+		t.Fatalf("unexpected subagentDescriptor: %+v", subDesc)
+	}
+	scriptItem, _ := gotStartReq["agentScriptItem"].(map[string]interface{})
+	if scriptItem["name"] != "self" {
+		t.Fatalf("unexpected agentScriptItem: %+v", scriptItem)
+	}
+	if gotSendReq["cascadeId"] != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("expected fallback SendUserCascadeMessage for cascadeId, got %+v", gotSendReq)
+	}
+
+	tasks, err := ListTasks(vaultDir)
+	if err != nil || len(tasks) != 1 || tasks[0].ConversationID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("expected subagent registered in tasks.json, got %+v (%v)", tasks, err)
 	}
 }

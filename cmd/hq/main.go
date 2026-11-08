@@ -400,22 +400,29 @@ func main() {
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
 		taskName := fs.String("task", "", "Short task slug for worktree and conversation title")
+		role := fs.String("role", "", "Optional subagent role when --subagent is set")
+		parentConv := fs.String("parent", "", "Optional parent conversation ID when --subagent is set (defaults to ANTIGRAVITY_CONVERSATION_ID)")
+		asSubagent := fs.Bool("subagent", false, "Launch as a nested child subagent under the parent conversation instead of a top-level sidebar thread")
 		prompt := fs.String("prompt", "", "Task instructions for the new conversation")
 		model := fs.String("model", "", "Optional model override (flash, argon, sonnet, opus, or full model ID)")
 		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high)")
 		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
-		if *prompt == "" || *taskName == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--repo=<repo>] [--tier=quick|standard|deep] [--model=...] [--depth=low|medium|high] --prompt=\"...\"")
+		if *prompt == "" || (*taskName == "" && *role == "") {
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo>] [--tier=quick|standard|deep] [--model=...] [--depth=low|medium|high] --prompt=\"...\"")
 			os.Exit(1)
 		}
 		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
 		fullPrompt := *prompt
 		var wtDir string
 		if *repoSpec != "" {
+			wtTask := *taskName
+			if wtTask == "" {
+				_, _, _, _, wtTask = kernel.ParseSubagentRole(*role, resolvedModel)
+			}
 			var err error
-			wtDir, err = worktree.Add(vaultDir, *repoSpec, *taskName, "")
+			wtDir, err = worktree.Add(vaultDir, *repoSpec, wtTask, "")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq spawn worktree error: %v\n", err)
 				os.Exit(1)
@@ -427,6 +434,24 @@ func main() {
 			scope = filepath.Base(strings.TrimSuffix(*repoSpec, ".git"))
 		} else if parts := strings.SplitN(*taskName, "-", 2); len(parts) > 0 && parts[0] != "" {
 			scope = parts[0]
+		}
+		if *asSubagent {
+			subRole := *role
+			if subRole == "" {
+				subRole = fmt.Sprintf("[%s] %s: %s", resolvedTier, scope, *taskName)
+			}
+			workDir := wtDir
+			if workDir == "" {
+				workDir = rootDir
+			}
+			out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun)
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq spawn --subagent error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(out)
+			return
 		}
 		title := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
 		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
@@ -445,6 +470,50 @@ func main() {
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
+
+	case "subagent":
+		fs := flag.NewFlagSet("subagent", flag.ExitOnError)
+		role := fs.String("role", "", "Subagent role title, e.g. \"[deep] rfc-0005: Opus 5.5 Reviewer\"")
+		parentConv := fs.String("parent", "", "Parent conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
+		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
+		taskName := fs.String("task", "", "Optional worktree task slug")
+		prompt := fs.String("prompt", "", "Task instructions for the nested subagent")
+		model := fs.String("model", "", "Optional model override (flash, argon, sonnet, opus, or full model ID)")
+		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high)")
+		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
+		dryRun := fs.Bool("dry-run", false, "Simulate subagent spawn")
+		_ = fs.Parse(os.Args[2:])
+		if *prompt == "" || (*role == "" && *taskName == "") {
+			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--model=...] [--depth=low|medium|high] [--parent=<conv-id>] [--repo=<repo>] [--task=<slug>] --prompt=\"...\"")
+			os.Exit(1)
+		}
+		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
+		subRole := *role
+		if subRole == "" {
+			subRole = fmt.Sprintf("[%s] general: %s", resolvedTier, *taskName)
+		}
+		fullPrompt := *prompt
+		workDir := rootDir
+		if *repoSpec != "" {
+			wtSlug := *taskName
+			if wtSlug == "" {
+				_, _, _, _, wtSlug = kernel.ParseSubagentRole(subRole, resolvedModel)
+			}
+			wtDir, err := worktree.Add(vaultDir, *repoSpec, wtSlug, "")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq subagent worktree error: %v\n", err)
+				os.Exit(1)
+			}
+			workDir = wtDir
+			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
+		}
+		out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun)
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq subagent error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(out)
@@ -565,6 +634,7 @@ Commands:
   reject <id> [--reason=...]          Reject a pending proposal
   worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
+  subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation
   adopt --conv=<id> --task=<slug>     Adopt an existing conversation (or demote Front Desk to a Task)
   claim-desk --conv=<id>              Claim the single active [HQ] Front Desk intake lease
   release-desk                        Release Front Desk lease so next new conversation claims it`)
