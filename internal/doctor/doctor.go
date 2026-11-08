@@ -69,7 +69,20 @@ func Run(vaultDir string) []CheckResult {
 
 	// 2. Check agy and agentapi CLIs
 	for _, bin := range []string{"agy", "agentapi"} {
-		if path, err := exec.LookPath(bin); err == nil {
+		path, err := exec.LookPath(bin)
+		if err != nil {
+			for _, candidate := range []string{
+				filepath.Join(home, ".local", "bin", bin),
+				filepath.Join(home, ".gemini", "antigravity", "bin", bin),
+			} {
+				if st, sErr := os.Stat(candidate); sErr == nil && !st.IsDir() {
+					path = candidate
+					err = nil
+					break
+				}
+			}
+		}
+		if err == nil && path != "" {
 			results = append(results, CheckResult{
 				Name:   bin + " CLI",
 				Status: "PASS",

@@ -385,7 +385,11 @@ func SyncMarkdownConsole(vaultDir string) error {
 		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
 	} else {
 		for _, t := range state.Tasks {
-			fmt.Fprintf(&b, "- **[%s](conversation://%s)** (`%s` · `%s`): %s\n", t.Title, t.ConversationID, t.TaskSlug, t.Status, t.LastSummary)
+			oneLine := strings.Join(strings.Fields(t.LastSummary), " ")
+			if runes := []rune(oneLine); len(runes) > 160 {
+				oneLine = string(runes[:160]) + "..."
+			}
+			fmt.Fprintf(&b, "- **[%s](conversation://%s)** (`%s` · `%s`): %s\n", t.Title, t.ConversationID, t.TaskSlug, t.Status, oneLine)
 		}
 		b.WriteString("\n---\n\n")
 	}
@@ -415,13 +419,18 @@ func SyncMarkdownConsole(vaultDir string) error {
 		return err
 	}
 
+	targetDirs := make(map[string]bool)
+	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ArtifactDir) != "" {
+		targetDirs[strings.TrimSpace(fd.ArtifactDir)] = true
+	}
 	if artBytes, err := os.ReadFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt")); err == nil {
-		artDir := strings.TrimSpace(string(artBytes))
-		if artDir != "" {
-			artFile := filepath.Join(artDir, "hq_console_mobile.md")
-			if _, err := os.Stat(artDir); err == nil {
-				_ = os.WriteFile(artFile, content, 0o644)
-			}
+		if d := strings.TrimSpace(string(artBytes)); d != "" {
+			targetDirs[d] = true
+		}
+	}
+	for artDir := range targetDirs {
+		if _, err := os.Stat(artDir); err == nil {
+			_ = os.WriteFile(filepath.Join(artDir, "hq_console_mobile.md"), content, 0o644)
 		}
 	}
 	return nil
