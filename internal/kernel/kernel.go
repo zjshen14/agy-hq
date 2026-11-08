@@ -35,7 +35,91 @@ type SpawnEvent struct {
 var (
 	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
 	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
+	reDeepTask  = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|complex|deep|hard)\b`)
+	reQuickTask = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|brief|consolidate|list|format|lint|typo|quick)\b`)
 )
+
+// ResolveModel selects the Antigravity model ID and thinking depth (low/medium/high)
+// based on explicit user overrides or automatic task-complexity classification.
+//
+// Verified Antigravity model IDs (`agy models`):
+//   - gemini-3.8-flash-{low,medium,high}
+//   - gemini-4-argon-{low,medium,high}
+//   - claude-sonnet-5-5-{low,medium,high}
+//   - claude-opus-5-5-{low,medium,high}
+//   - gpt-oss-120b-medium
+func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (modelID, tier, subagentModel string) {
+	depth := strings.ToLower(strings.TrimSpace(explicitDepth))
+	model := strings.ToLower(strings.TrimSpace(explicitModel))
+	tier = strings.ToLower(strings.TrimSpace(explicitTier))
+
+	// 1. Infer tier from prompt if not explicitly specified
+	if tier == "" {
+		switch {
+		case reDeepTask.MatchString(prompt):
+			tier = "deep"
+		case reQuickTask.MatchString(prompt):
+			tier = "quick"
+		default:
+			tier = "standard"
+		}
+	}
+
+	// 2. Default depth + model family per tier when not overridden by user
+	switch tier {
+	case "quick":
+		if depth == "" {
+			depth = "low"
+		}
+		if model == "" {
+			model = "gemini-3.8-flash"
+		}
+		subagentModel = "flash_lite"
+	case "deep":
+		if depth == "" {
+			depth = "high"
+		}
+		if model == "" {
+			model = "gemini-4-argon"
+		}
+		subagentModel = "pro"
+	default: // "standard"
+		tier = "standard"
+		if depth == "" {
+			depth = "high"
+		}
+		if model == "" {
+			model = "gemini-3.8-flash"
+		}
+		subagentModel = "flash"
+	}
+
+	// Normalize shorthand model aliases
+	switch model {
+	case "flash":
+		model = "gemini-3.8-flash"
+		subagentModel = "flash"
+	case "flash_lite", "flash-lite":
+		model = "gemini-3.8-flash"
+		depth = "low"
+		subagentModel = "flash_lite"
+	case "argon", "pro":
+		model = "gemini-4-argon"
+		subagentModel = "pro"
+	case "sonnet", "claude-sonnet":
+		model = "claude-sonnet-5-5"
+		subagentModel = "pro"
+	case "opus", "claude-opus":
+		model = "claude-opus-5-5"
+		subagentModel = "pro"
+	}
+
+	// If model already ends with -low, -medium, or -high, keep it as-is
+	if strings.HasSuffix(model, "-low") || strings.HasSuffix(model, "-medium") || strings.HasSuffix(model, "-high") {
+		return model, tier, subagentModel
+	}
+	return fmt.Sprintf("%s-%s", model, depth), tier, subagentModel
+}
 
 // ClassifyInboxFile routes a filename in local/inbox/ to the matching skill name.
 // Unmatched files fall back to "inbox-triage" so open-ended drops are always handled.
@@ -92,9 +176,13 @@ func SaveQuota(vaultDir string, state QuotaState) error {
 	return os.WriteFile(quotaFilePath(vaultDir, time.Now()), data, 0o644)
 }
 
-// SpawnFlashTask invokes `agentapi new-conversation --model=flash` (or simulates it if dryRun is true),
-// enforcing the daily spawn budget and tripping the circuit breaker on RESOURCE_EXHAUSTED.
-func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool) (string, error) {
+// SpawnTask invokes `agentapi new-conversation --model=<modelID>` (or simulates it if dryRun is true),
+// enforcing the daily spawn budget, auto-downgrading to gemini-3.8-flash-medium if a higher-tier model
+// hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Flash is also exhausted.
+func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool) (string, error) {
+	if modelID == "" {
+		modelID, _, _ = ResolveModel(prompt, "", "", "")
+	}
 	state := LoadQuota(vaultDir)
 	if state.CircuitOpen {
 		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
@@ -108,11 +196,23 @@ func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool)
 
 	var output string
 	if dryRun {
-		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=flash --title=%q (skill=%s)", title, skill)
+		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
 	} else {
-		cmd := exec.Command("agentapi", "new-conversation", "--model=flash", "--title="+title, "--", prompt)
+		cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
 		outBytes, err := cmd.CombinedOutput()
 		output = strings.TrimSpace(string(outBytes))
+		if err != nil {
+			// Quota-aware fallback: if a non-Flash model hit 429, retry once on gemini-3.8-flash-medium
+			if (strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429")) && !strings.Contains(modelID, "flash") {
+				fallbackModel := "gemini-3.8-flash-medium"
+				fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
+				if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
+					modelID = fallbackModel + " (fallback)"
+					output = strings.TrimSpace(string(fbBytes))
+					err = nil
+				}
+			}
+		}
 		if err != nil {
 			if strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429") {
 				state.CircuitOpen = true
@@ -122,7 +222,7 @@ func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool)
 				Timestamp: time.Now().Format(time.RFC3339),
 				Trigger:   trigger,
 				Skill:     skill,
-				Model:     "flash",
+				Model:     modelID,
 				Outcome:   "error: " + err.Error(),
 			})
 			_ = SaveQuota(vaultDir, state)
@@ -131,16 +231,22 @@ func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool)
 	}
 
 	state.SpawnsToday++
-	state.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s)", trigger, skill)
+	state.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s [%s])", trigger, skill, modelID)
 	state.Events = append(state.Events, SpawnEvent{
 		Timestamp: time.Now().Format(time.RFC3339),
 		Trigger:   trigger,
 		Skill:     skill,
-		Model:     "flash",
+		Model:     modelID,
 		Outcome:   output,
 	})
 	_ = SaveQuota(vaultDir, state)
 	return output, nil
+}
+
+// SpawnFlashTask is a convenience wrapper for background watcher spawns pinned to Flash.
+func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool) (string, error) {
+	modelID, _, _ := ResolveModel(prompt, "flash", "", "")
+	return SpawnTask(vaultDir, trigger, skill, title, prompt, modelID, dryRun)
 }
 
 // ProcessInbox scans local/inbox/ for newly dropped files, moves each to local/inbox/queued/,

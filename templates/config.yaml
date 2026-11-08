@@ -17,5 +17,18 @@ quota:
   max_daily_spawns: 15
   background_model: flash
 
+routing:
+  tiers:
+    quick:
+      model: gemini-3.8-flash-low
+      subagent_model: flash_lite
+    standard:
+      model: gemini-3.8-flash-high
+      subagent_model: flash
+    deep:
+      model: gemini-4-argon-high
+      subagent_model: pro
+  fallback_on_429: gemini-3.8-flash-medium
+
 console:
   listen_addr: "127.0.0.1:4747"

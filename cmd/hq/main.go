@@ -207,12 +207,16 @@ func main() {
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
 		taskName := fs.String("task", "", "Short task slug for worktree and conversation title")
 		prompt := fs.String("prompt", "", "Task instructions for the new conversation")
+		model := fs.String("model", "", "Optional model override (flash, argon, sonnet, opus, or full model ID)")
+		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high)")
+		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || *taskName == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--repo=<path-or-github-slug>] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--repo=<repo>] [--tier=quick|standard|deep] [--model=...] [--depth=low|medium|high] --prompt=\"...\"")
 			os.Exit(1)
 		}
+		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
 		fullPrompt := *prompt
 		if *repoSpec != "" {
 			wtDir, err := worktree.Add(vaultDir, *repoSpec, *taskName, "")
@@ -222,8 +226,8 @@ func main() {
 			}
 			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
 		}
-		title := "Task: " + *taskName
-		out, err := kernel.SpawnFlashTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, *dryRun)
+		title := fmt.Sprintf("Task: %s [%s/%s]", *taskName, resolvedTier, resolvedModel)
+		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
