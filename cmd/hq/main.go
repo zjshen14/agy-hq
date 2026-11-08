@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
@@ -271,7 +272,11 @@ func main() {
 			}
 			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
 		}
-		title := fmt.Sprintf("Task: %s [%s/%s]", *taskName, resolvedTier, resolvedModel)
+		scope := "general"
+		if *repoSpec != "" {
+			scope = filepath.Base(strings.TrimSuffix(*repoSpec, ".git"))
+		}
+		title := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
 		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:      *taskName,

@@ -18,6 +18,12 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - **Background Subagent (`invoke_subagent`):** Autonomous coding, bug fixes, or filing research where the subagent works in `local/worktrees/<repo>-<task>/` and reports the final result back into the Front Desk thread.
      - **Separate Dedicated Task Conversation (`./bin/hq spawn`):** Complex projects or multi-round engineering/design workstreams where the user wants a dedicated thread in the sidebar for deep multi-turn engagement. Each spawned conversation is registered in `local/memory/tasks.json` and scoped to its own worktree (`local/worktrees/<repo>-<task>/`) so it never collides with the Front Desk, while `hq hook stop` logs every turn to `local/memory/journal/` so the Front Desk always has visibility into its progress.
    - **Handover ("Shift Change"):** When archiving the current Front Desk thread and starting a fresh one, run `./bin/hq claim-desk --conv=<new-conv-id>` (or use `/compact` to compact the existing Front Desk thread in place).
+   - **Conversation, Task & Worktree Naming Convention:**
+     - **Front Desk Thread Title:** `[HQ] Front Desk` (or `[HQ] Front Desk (YYYY-MM)` when starting a new shift).
+     - **Separate Task Conversation Title (`./bin/hq spawn` / `adopt`):** `[Task:<scope>] <Short Title>` (e.g., `[Task:opencli] Fix PR #279`, `[Task:research] Live Voice Streaming`, `[Task:NVDA] Q3 Thesis Check`).
+     - **Task Slug & Worktree Folder (`local/worktrees/`):** `<scope>-<kebab-goal>` (e.g., `opencli-fix-pr279`, `webapp-redesign`).
+     - **In-Session Subagent `Role` (`invoke_subagent`):** `[<Tier>] <Scope>: <2-4 Word Role>` (e.g., `[standard] opencli: PR #279 Fixer`, `[deep] NVDA: 10-Q Auditor`).
+     - **Scheduled Automation Runs:** `[Auto] <Job Name>` (e.g., `[Auto] Morning Brief`).
    - **Handling Ambiguous Prompts:**
      - If the *execution mode* is ambiguous, default to **Background Subagent (`invoke_subagent`)** for heavy/coding work and **Inline** for quick work—do not ask the user which mode to use.
      - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.

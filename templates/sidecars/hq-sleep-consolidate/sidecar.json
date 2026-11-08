@@ -5,7 +5,7 @@
     "agentapi",
     "new-conversation",
     "--model=flash",
-    "--title=Sleep-Time Memory Consolidation",
+    "--title=[Auto] Sleep-Time Consolidation",
     "--",
     "Activate the sleep-consolidate skill: review today's turn journals in local/memory/journal/, apply incremental delta updates to local/MEMORY.md and local/memory/facts.jsonl, stage any skill proposals in local/memory/proposals/, and commit the private local/ Vault git repo."
   ],

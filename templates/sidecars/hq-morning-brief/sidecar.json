@@ -5,7 +5,7 @@
     "agentapi",
     "new-conversation",
     "--model=flash",
-    "--title=Morning Brief",
+    "--title=[Auto] Morning Brief",
     "--",
     "Activate the morning-brief skill: check ./bin/hq status, today's calendar, local/inbox/, active worktrees, and investment watchlist, then save today's Morning Brief to local/notes/general/brief-YYYY-MM-DD.md."
   ],
