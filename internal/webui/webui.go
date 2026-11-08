@@ -447,23 +447,16 @@ func SyncMarkdownConsole(vaultDir string) error {
 		return err
 	}
 
-	targetDirs := make(map[string]bool)
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ArtifactDir) != "" {
-		targetDirs[strings.TrimSpace(fd.ArtifactDir)] = true
-	} else if artBytes, err := os.ReadFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt")); err == nil {
-		if d := strings.TrimSpace(string(artBytes)); d != "" {
-			targetDirs[d] = true
-		}
-	}
-	meta := map[string]interface{}{
-		"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees, Recent Turn Activity, and System Health.",
-		"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
-		"requestFeedback": false,
-		"userFacing":      true,
-	}
-	metaBytes, _ := json.MarshalIndent(meta, "", "  ")
-	for artDir := range targetDirs {
+		artDir := strings.TrimSpace(fd.ArtifactDir)
 		if _, err := os.Stat(artDir); err == nil {
+			meta := map[string]interface{}{
+				"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees, Recent Turn Activity, and System Health.",
+				"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
+				"requestFeedback": false,
+				"userFacing":      true,
+			}
+			metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md"))
 			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"))
 			_ = os.WriteFile(filepath.Join(artDir, "hq_console.md"), content, 0o644)

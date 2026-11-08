@@ -151,7 +151,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			},
 		},
 	}
-	return json.NewEncoder(w).Encode(resp)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(resp)
 }
 
 var outboundCommandPatterns = []*regexp.Regexp{

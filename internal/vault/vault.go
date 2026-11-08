@@ -71,6 +71,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 	dirs := []string{
 		vaultDir,
 		filepath.Join(vaultDir, "inbox"),
+		filepath.Join(vaultDir, "notes", "briefs"),
 		filepath.Join(vaultDir, "notes", "investing"),
 		filepath.Join(vaultDir, "notes", "writing"),
 		filepath.Join(vaultDir, "notes", "general"),

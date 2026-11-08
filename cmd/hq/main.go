@@ -43,6 +43,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
 			os.Exit(1)
 		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
 		for _, item := range created {
 			fmt.Printf("  + %s\n", item)
@@ -187,6 +188,17 @@ func main() {
 			for _, d := range list {
 				fmt.Println(d)
 			}
+		case "remove", "rm":
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "usage: hq worktree remove <worktree-name-or-path>")
+				os.Exit(1)
+			}
+			if err := worktree.Remove(vaultDir, os.Args[3]); err != nil {
+				fmt.Fprintf(os.Stderr, "hq worktree remove failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Removed worktree %s\n", os.Args[3])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown worktree subcommand: %s\n", os.Args[2])
 			os.Exit(1)
@@ -268,6 +280,22 @@ func main() {
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Adopted conversation %s as task %q (%s)\n", *convID, *taskSlug, *status)
 
+	case "complete":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq complete <task-slug-or-conv-id> [--summary=\"...\"]")
+			os.Exit(1)
+		}
+		target := os.Args[2]
+		fs := flag.NewFlagSet("complete", flag.ExitOnError)
+		summary := fs.String("summary", "", "Optional completion summary")
+		_ = fs.Parse(os.Args[3:])
+		if err := kernel.CompleteTask(vaultDir, target, *summary); err != nil {
+			fmt.Fprintf(os.Stderr, "hq complete error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Printf("Marked task %q as completed\n", target)
+
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
@@ -284,8 +312,10 @@ func main() {
 		}
 		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
 		fullPrompt := *prompt
+		var wtDir string
 		if *repoSpec != "" {
-			wtDir, err := worktree.Add(vaultDir, *repoSpec, *taskName, "")
+			var err error
+			wtDir, err = worktree.Add(vaultDir, *repoSpec, *taskName, "")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq spawn worktree error: %v\n", err)
 				os.Exit(1)
@@ -295,19 +325,22 @@ func main() {
 		scope := "general"
 		if *repoSpec != "" {
 			scope = filepath.Base(strings.TrimSuffix(*repoSpec, ".git"))
+		} else if parts := strings.SplitN(*taskName, "-", 2); len(parts) > 0 && parts[0] != "" {
+			scope = parts[0]
 		}
 		title := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
 		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-			TaskSlug:      *taskName,
-			Title:         title,
-			Tier:          resolvedTier,
-			Model:         resolvedModel,
-			WorktreeDir:   *repoSpec,
-			CreatedAt:     time.Now().Format(time.RFC3339),
-			LastUpdatedAt: time.Now().Format(time.RFC3339),
-			LastSummary:   *prompt,
-			Status:        "active",
+			TaskSlug:       *taskName,
+			Title:          title,
+			Tier:           resolvedTier,
+			Model:          resolvedModel,
+			WorktreeDir:    wtDir,
+			ConversationID: kernel.ExtractUUID(out),
+			CreatedAt:      time.Now().Format(time.RFC3339),
+			LastUpdatedAt:  time.Now().Format(time.RFC3339),
+			LastSummary:    *prompt,
+			Status:         "active",
 		})
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {

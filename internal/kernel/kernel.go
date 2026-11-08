@@ -112,6 +112,25 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			break
 		}
 	}
+	if !updated && task.TaskSlug == "" && task.ConversationID != "" {
+		// If a task was just spawned via `hq spawn` with ConversationID=="" and is active, link it to this first Stop hook
+		for i := len(tasks) - 1; i >= 0; i-- {
+			if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
+				tasks[i].ConversationID = task.ConversationID
+				if task.Model != "" {
+					tasks[i].Model = task.Model
+				}
+				if task.LastUpdatedAt != "" {
+					tasks[i].LastUpdatedAt = task.LastUpdatedAt
+				}
+				if task.LastSummary != "" {
+					tasks[i].LastSummary = task.LastSummary
+				}
+				updated = true
+				break
+			}
+		}
+	}
 	if !updated {
 		if task.TaskSlug == "" && task.ConversationID != "" {
 			shortID := task.ConversationID
@@ -130,6 +149,34 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			task.CreatedAt = time.Now().Format(time.RFC3339)
 		}
 		tasks = append(tasks, task)
+	}
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// CompleteTask marks an existing task in local/memory/tasks.json (matched by TaskSlug or ConversationID) as completed.
+func CompleteTask(vaultDir, slugOrConvID, summary string) error {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range tasks {
+		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
+			tasks[i].Status = "completed"
+			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+			if strings.TrimSpace(summary) != "" {
+				tasks[i].LastSummary = strings.TrimSpace(summary)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
 	}
 	data, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
@@ -210,11 +257,18 @@ func ReleaseFrontDesk(vaultDir string) error {
 }
 
 var (
-	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
-	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
-	reDeepTask  = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|complex|deep|hard)\b`)
-	reQuickTask = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|brief|consolidate|list|format|lint|typo|quick)\b`)
+	reTaxForm         = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
+	reSecFiling       = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
+	reDeepTask        = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|complex|deep|hard)\b`)
+	reQuickTask       = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|brief|consolidate|list|format|lint|typo|quick)\b`)
+	reUUID            = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	rePromptModelHint = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|argon|flash_lite|flash-lite|flash)\b`)
 )
+
+// ExtractUUID returns the first UUID v4 found in s (e.g., from agentapi stdout), or "".
+func ExtractUUID(s string) string {
+	return strings.ToLower(reUUID.FindString(s))
+}
 
 // ResolveModel selects the Antigravity model ID and thinking depth (low/medium/high)
 // based on explicit user overrides or automatic task-complexity classification.
@@ -229,6 +283,13 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 	depth := strings.ToLower(strings.TrimSpace(explicitDepth))
 	model := strings.ToLower(strings.TrimSpace(explicitModel))
 	tier = strings.ToLower(strings.TrimSpace(explicitTier))
+
+	// Check natural-language model hint in prompt if explicitModel was not provided
+	if model == "" {
+		if m := rePromptModelHint.FindStringSubmatch(prompt); len(m) == 2 {
+			model = strings.ToLower(m[1])
+		}
+	}
 
 	// 1. Infer tier from prompt if not explicitly specified
 	if tier == "" {
@@ -453,7 +514,7 @@ func ProcessInbox(vaultDir string, dryRun bool) ([]string, error) {
 			continue
 		}
 		skill := ClassifyInboxFile(e.Name())
-		title := fmt.Sprintf("Inbox Drop: %s (/%s)", e.Name(), skill)
+		title := fmt.Sprintf("[Auto] Inbox Drop: %s (/%s)", e.Name(), skill)
 		prompt := fmt.Sprintf("A new file was dropped into the inbox and moved to %s. Activate the %s skill and process this file.", dstPath, skill)
 		out, err := SpawnFlashTask(vaultDir, "inbox-drop:"+e.Name(), skill, title, prompt, dryRun)
 		if err != nil {
@@ -478,10 +539,14 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	state.LastHeartbeatAt = now.Format(time.RFC3339)
 
 	// Dead-man's switch: after 08:00 local time, check if today's morning brief file exists
-	briefPath := filepath.Join(vaultDir, "notes", "general", fmt.Sprintf("brief-%s.md", now.Format("2006-01-02")))
+	dateStr := now.Format("2006-01-02")
+	briefPath := filepath.Join(vaultDir, "notes", "general", fmt.Sprintf("brief-%s.md", dateStr))
+	altBriefPath := filepath.Join(vaultDir, "notes", "briefs", fmt.Sprintf("%s.md", dateStr))
 	deadManWarning := ""
 	if now.Hour() >= 8 {
-		if _, err := os.Stat(briefPath); os.IsNotExist(err) {
+		_, err1 := os.Stat(briefPath)
+		_, err2 := os.Stat(altBriefPath)
+		if os.IsNotExist(err1) && os.IsNotExist(err2) {
 			deadManWarning = fmt.Sprintf(" [WARN: %s not generated yet]", filepath.Base(briefPath))
 		}
 	}

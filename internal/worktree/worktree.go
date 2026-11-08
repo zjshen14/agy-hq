@@ -50,7 +50,11 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 	}
 
 	safeTask := strings.ReplaceAll(strings.TrimSpace(taskName), "/", "-")
-	targetDir := filepath.Join(worktreesRoot, fmt.Sprintf("%s-%s", repoBase, safeTask))
+	folderName := fmt.Sprintf("%s-%s", repoBase, safeTask)
+	if strings.HasPrefix(safeTask, repoBase+"-") {
+		folderName = safeTask
+	}
+	targetDir := filepath.Join(worktreesRoot, folderName)
 	if branch == "" {
 		branch = "hq/" + safeTask
 	}
@@ -64,6 +68,20 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 		}
 	}
 	return targetDir, nil
+}
+
+// Remove deletes an isolated git worktree from local/worktrees/ and prunes its git worktree entry.
+func Remove(vaultDir, nameOrPath string) error {
+	worktreesRoot := filepath.Join(vaultDir, "worktrees")
+	target := nameOrPath
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(worktreesRoot, filepath.Base(nameOrPath))
+	}
+	if _, err := os.Stat(target); err != nil {
+		return err
+	}
+	_ = exec.Command("git", "-C", target, "worktree", "remove", "--force", target).Run()
+	return os.RemoveAll(target)
 }
 
 // List returns the directories currently checked out under local/worktrees/.
