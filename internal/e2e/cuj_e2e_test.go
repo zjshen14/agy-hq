@@ -991,7 +991,6 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 // CUJ-12: Automated Trigger Scheduling & Background Daemon Lifecycle
 func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	env := setupHQEnv(t)

@@ -115,12 +115,13 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 		recordStep("v3_task_titles_and_console", fmt.Sprintf("Normalized %d task title(s) to [Task:<scope>] convention; cleaned legacy mobile console=%v", normalized, removedLegacy))
 	}
 
-	// Migration v3 -> v4: Seed Knowledge Wiki topic page, append Knowledge Map section to MEMORY.md, and deduplicate facts.jsonl
+	// Migration v3 -> v4: Seed Knowledge Wiki topic page, append Knowledge Map section to MEMORY.md, upgrade sleep-consolidate to gemini-4-argon-high, and deduplicate facts.jsonl
 	if prev.Version < 4 {
 		seededTopic := ensureStarterTopicPage(vaultDir)
 		addedMap := ensureMemoryKnowledgeMapSection(vaultDir)
+		upgradedTrigger := upgradeSleepConsolidateTriggerModel(vaultDir)
 		beforeFacts, afterFacts, _ := CompactFacts(vaultDir)
-		recordStep("v4_memory_wiki_and_fact_dedup", fmt.Sprintf("Upgraded 4-layer Memory Engine (seededTopic=%v, addedKnowledgeMap=%v, compactedFacts=%d->%d)", seededTopic, addedMap, beforeFacts, afterFacts))
+		recordStep("v4_memory_wiki_and_fact_dedup", fmt.Sprintf("Upgraded 4-layer Memory Engine (seededTopic=%v, addedKnowledgeMap=%v, sleepModelArgon=%v, compactedFacts=%d->%d)", seededTopic, addedMap, upgradedTrigger, beforeFacts, afterFacts))
 	}
 
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml
@@ -311,6 +312,25 @@ func ensureMemoryKnowledgeMapSection(vaultDir string) bool {
 		"- `agy-hq-architecture` (`local/memory/topics/agy-hq-architecture.md`): Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory architecture.\n"
 	updated := strings.TrimRight(s, "\n") + addition
 	if err := os.WriteFile(memPath, []byte(updated), 0o644); err != nil {
+		return false
+	}
+	return true
+}
+
+func upgradeSleepConsolidateTriggerModel(vaultDir string) bool {
+	trigPath := filepath.Join(vaultDir, "triggers.yaml")
+	b, err := os.ReadFile(trigPath)
+	if err != nil {
+		return false
+	}
+	oldBlock := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: flash\n    skill: sleep-consolidate"
+	newBlock := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: gemini-4-argon-high\n    skill: sleep-consolidate"
+	s := string(b)
+	if !strings.Contains(s, oldBlock) {
+		return false
+	}
+	updated := strings.Replace(s, oldBlock, newBlock, 1)
+	if err := os.WriteFile(trigPath, []byte(updated), 0o644); err != nil {
 		return false
 	}
 	return true

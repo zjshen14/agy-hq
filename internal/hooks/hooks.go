@@ -1102,5 +1102,4 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 	}
 
 	return digest, nil
->>>>>>> 5fd1f8f (feat(memory): implement RFC-0006 4-layer memory hierarchy, ground-truth dreaming & fact pruning)
 }
