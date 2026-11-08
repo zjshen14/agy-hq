@@ -11,7 +11,7 @@ Per Simon Willison's *Lethal Trifecta* and DeepMind's *CaMeL* architecture, an a
 
 1. **Step-0 Sandbox Prerequisite:** Global/workspace permission preset must be set to `Default` or `Auto` (enabling macOS Seatbelt `sandbox-exec`), never `Turbo`.
 2. **Quarantined Readers:** Any background job reading untrusted content (inbox triage, web scraping, filing ingestion) is granted **read-only + local summary write permissions only**.
-3. **Approval-Bound Execution for All Irreversible Actions:** The LLM never directly executes external sends, merges, pushes, or payments.
+3. **Approval-Bound Execution for All Irreversible External Actions:** The LLM never directly executes external sends, third-party merges, external publishes, or payments. Routine git pushes of verified code to this repository (`git push origin main`) are explicitly exempt once tests and PII checks pass.
 
 ---
 
@@ -35,7 +35,7 @@ sequenceDiagram
 
 1. **Hard Block in `PreToolUse` (`hq hook pre-tool`):**
    - Intercepts `run_command` and write-capable tools.
-   - Immediately returns `{"decision": "deny"}` if an agent attempts to directly run outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `git push`, payment CLIs), instructing it to call `hq propose` instead.
+   - Immediately returns `{"decision": "deny"}` if an agent attempts to directly run outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `gh release create`, payment CLIs), instructing it to call `hq propose` instead. (Routine pushes to this repository on clean merge are explicitly exempt once tests pass.)
 2. **Staging a Proposal (`hq propose`):**
    - Writes `local/memory/pending/<uuid>.json` containing the action type, exact arguments, requesting conversation ID, timestamp, and `sha256` checksum.
 3. **Zero-LLM Execution on User Approval:**

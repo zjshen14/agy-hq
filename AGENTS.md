@@ -58,12 +58,17 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
        - **`standard` (`high` depth on Flash — `flash` / `gemini-3.8-flash-high`):** Standard feature coding, unit tests, bug fixes, doc searches, and filing extraction (protects scarce Pro/Opus quota).
        - **`deep` (`high` depth on Pro/Argon — `pro` / `gemini-4-argon-high`):** Architecture design, root-cause debugging of race conditions, security audits, or investment thesis falsification.
 4. **Approval-Bound Outbound Execution (`./bin/hq propose` + `ask_question`):**
-   - Never directly execute irreversible outbound commands (`gws gmail send`, `gh pr merge`, `gh release create`, `vercel --prod`).
-   - Always stage them first:
-     ```sh
-     ./bin/hq propose --type=<category> --summary="<description>" --cmd="<exact command>"
-     ```
-   - To let the user approve or reject from **Mobile Remote Control** (or Desktop) with a single tap, immediately present each pending proposal using the **`ask_question`** tool (showing the proposal ID, summary, exact command, and `sha256` prefix in the options), then run `./bin/hq approve <id> --sha256=<prefix>` or `./bin/hq reject <id>` based on their selection. Never rely on `localhost` URLs for mobile users.
+   - **Boundary Definition:**
+     - **Approval-Bound:** Never directly execute irreversible external actions (sending live emails via `hq gmail send` / `gws`, posting to external chat channels, merging third-party PRs via `gh pr merge`, publishing npm/vercel releases, financial transactions). These strictly require `./bin/hq propose` + 1-tap `ask_question`:
+       ```sh
+       ./bin/hq propose --type=<category> --summary="<description>" --cmd="<exact command>"
+       ```
+       To let the user approve or reject from **Mobile Remote Control** (or Desktop) with a single tap, immediately present each pending proposal using the **`ask_question`** tool (showing the proposal ID, summary, exact command, and `sha256` prefix in the options), then run `./bin/hq approve <id> --sha256=<prefix>` or `./bin/hq reject <id>` based on their selection. Never rely on `localhost` URLs for mobile users.
+     - **Auto-Push on Clean Merge (EXEMPT):** Routine git pushes to this repository (`git push origin main` or pushing topic branches `git push -u origin hq/<task>`) are explicitly **exempt** from manual approval once:
+       1. All unit and E2E tests pass (`go test ./...` 100%).
+       2. Pre-commit PII checks pass (no unencrypted personal data in tracked tree).
+       3. The branch is cleanly rebased on `origin/main` and merged.
+   - **Subagent Auto-Push Instruction:** Subagents and task conversations must automatically run `git push origin main` immediately after merging cleanly into `main` so parallel worktrees, cloud backups, and other devices stay continuously synchronized without approval friction.
 5. **Continuous Harness Self-Improvement:**
    - Treat every user question, correction, or UX friction point as a signal to improve the `agy-hq` harness:
      - **Personal preferences / project facts:** Update `local/USER.md`, `local/MEMORY.md`, or `local/memory/facts.jsonl`.
