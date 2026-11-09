@@ -345,6 +345,9 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 		if targetObsID == "" && ev.Status != "open" {
 			continue
 		}
+		if targetObsID == "" && ev.Tainted {
+			continue
+		}
 
 		expectedSaved := ev.OccurrenceCount * ev.WastedSteps
 		highPriority := ev.Category == FrictionUserIntervention || ev.Category == FrictionDraftEdited
@@ -371,9 +374,11 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 			modelScope = "all"
 		}
 
-		guidance := ev.RecoveryAction
+		guidance := sanitizePIIForTrackedSkill(rootDir, ev.RecoveryAction)
+		cleanExcerpt := sanitizePIIForTrackedSkill(rootDir, ev.ErrorExcerpt)
+		cleanCmdPat := sanitizePIIForTrackedSkill(rootDir, ev.CommandPattern)
 		if strings.TrimSpace(guidance) == "" {
-			guidance = fmt.Sprintf("Avoid repeating `%s` error (%s); verify flags and pre-conditions before invoking `%s`.", ev.CommandPattern, ev.ErrorExcerpt, ev.ToolName)
+			guidance = fmt.Sprintf("Avoid repeating `%s` error (%s); verify flags and pre-conditions before invoking `%s`.", cleanCmdPat, cleanExcerpt, ev.ToolName)
 		}
 		if skillSlug == "thesis-check" || skillSlug == "filing-diff" {
 			if !strings.Contains(strings.ToLower(guidance), "kill criteria") && !strings.Contains(strings.ToLower(guidance), "falsif") {
@@ -392,7 +397,7 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 			skillSlug,
 			guidance,
 			ev.OccurrenceCount,
-			ev.ErrorExcerpt,
+			cleanExcerpt,
 		)
 
 		delta := &ACEDeltaOp{
@@ -453,6 +458,23 @@ var (
 	reRSIRuleComment = regexp.MustCompile(`<!--\s*rsi:rule\s+([^>]+)-->`)
 	reRuleKV         = regexp.MustCompile(`(\w+)="([^"]*)"`)
 )
+
+func sanitizePIIForTrackedSkill(rootDir, s string) string {
+	if rootDir != "" && len(rootDir) > 5 {
+		s = strings.ReplaceAll(s, rootDir, "<repo-root>")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && len(home) > 5 {
+		s = strings.ReplaceAll(s, home, "<home>")
+	}
+	s = reEmail.ReplaceAllStringFunc(s, func(m string) string {
+		lower := strings.ToLower(m)
+		if strings.HasSuffix(lower, "@example.com") || lower == "user@gmail.com" || lower == "you@gmail.com" {
+			return m
+		}
+		return "user@gmail.com"
+	})
+	return s
+}
 
 // ParsedRSIRule represents a parsed `<!-- rsi:rule ... -->` metadata block in a SKILL.md file.
 type ParsedRSIRule struct {

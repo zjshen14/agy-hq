@@ -368,8 +368,9 @@ var (
 
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|propose|status)\b`)
 
-	reHeavyBuildTest = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
-	reGChatBrowserURL = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
+	reHeavyBuildTest   = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
+	reGChatBrowserURL  = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
+	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail|gchat)\s+read-quarantined\b`)
 )
 
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
@@ -1006,7 +1007,7 @@ func hasCommandExitNonZeroLine(content string) bool {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "Command exited with code ") {
 			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "Command exited with code "))
-			if rest != "" && !strings.HasPrefix(rest, "0") {
+			if len(rest) > 0 && rest[0] >= '1' && rest[0] <= '9' {
 				return true
 			}
 		}
@@ -1018,11 +1019,30 @@ func isTranscriptStepError(status, content string) bool {
 	return isTranscriptStepErrorWithContext(status, content, false, true)
 }
 
+func isPreToolDenialStep(status, content string) bool {
+	if !strings.Contains(content, "Blocked by agy-hq") {
+		return false
+	}
+	if strings.HasPrefix(content, "Showing lines ") || strings.Contains(content, "\nShowing lines ") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(status), "ERROR") ||
+		strings.Contains(content, "Encountered error") ||
+		strings.HasPrefix(strings.TrimSpace(content), "Blocked by agy-hq") ||
+		strings.Contains(content, `"decision":"deny"`) {
+		return true
+	}
+	return false
+}
+
 func isTranscriptStepErrorWithContext(status, content string, lastPlannerHadTools bool, lastPlannerHadRunCommand bool) bool {
 	if strings.EqualFold(strings.TrimSpace(status), "ERROR") {
 		return true
 	}
-	if strings.Contains(content, "Encountered error in tool execution:") {
+	if strings.HasPrefix(content, "Showing lines ") || strings.Contains(content, "\nShowing lines ") {
+		return false
+	}
+	if strings.Contains(content, "Encountered error in tool execution:") || strings.Contains(content, "Encountered error in step execution:") {
 		return true
 	}
 	if !isReadOnlyFileViewerOutput(content, lastPlannerHadTools, lastPlannerHadRunCommand) && hasCommandExitNonZeroLine(content) {
@@ -1117,7 +1137,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 				}
 			}
 		}
-		if inCurrentTurn && strings.Contains(step.Content, "Blocked by agy-hq") {
+		if inCurrentTurn && !isReadOnlyFileViewerOutput(step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) && isPreToolDenialStep(step.Status, step.Content) {
 			tm.PreToolDenials++
 		}
 		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
@@ -1145,7 +1165,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 			if tc.Name == "run_command" {
 				lastPlannerHadRunCommand = true
 				if cmdStr, ok := tc.Args["CommandLine"].(string); ok {
-					if strings.Contains(cmdStr, "read-quarantined") {
+					if reQuarantinedReadCmd.MatchString(cmdStr) {
 						tm.TaintedCmdSeen = true
 					}
 				}

@@ -180,12 +180,17 @@ func attributeFaultLayer(parentConvID, modelName string, firstFailStepIdx int, w
 // to local/memory/rsi/observations.jsonl and updating active canary records in archive.jsonl.
 func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error) {
 	existing, _ := LoadObservations(vaultDir)
+	priorByFP := make(map[string]FrictionEvent, len(existing))
 	byFP := make(map[string]*FrictionEvent, len(existing))
 	var order []string
 	for i := range existing {
 		ev := existing[i]
-		byFP[ev.Fingerprint] = &ev
-		order = append(order, ev.Fingerprint)
+		priorByFP[ev.Fingerprint] = ev
+		if since > 0 || ev.Status != "open" {
+			evCopy := ev
+			byFP[ev.Fingerprint] = &evCopy
+			order = append(order, ev.Fingerprint)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -246,6 +251,17 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 		}
 
 		id := fmt.Sprintf("obs-%s-%s", now.Format("20060102"), fp[:8])
+		firstSeen := ts
+		status := "open"
+		if prev, hadPrev := priorByFP[fp]; hadPrev {
+			id = prev.ID
+			if prev.FirstSeenAt != "" {
+				firstSeen = prev.FirstSeenAt
+			}
+			if prev.Status != "" {
+				status = prev.Status
+			}
+		}
 		var convs []string
 		if convID != "" {
 			convs = []string{convID}
@@ -265,10 +281,10 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 			ConversationIDs: convs,
 			ParentConvID:    parentConv,
 			ModelName:       modelName,
-			FirstSeenAt:     ts,
+			FirstSeenAt:     firstSeen,
 			LastSeenAt:      ts,
 			Tainted:         tainted,
-			Status:          "open",
+			Status:          status,
 		}
 		byFP[fp] = ev
 		order = append(order, fp)
@@ -321,7 +337,7 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 		}
 	}
 
-	// 2. Scan local/memory/interventions.jsonl for explicit proposal rejections
+	// 2. Scan local/memory/interventions.jsonl for explicit user feedback & proposal rejections
 	interventionsFile := filepath.Join(vaultDir, "memory", "interventions.jsonl")
 	if f, err := os.Open(interventionsFile); err == nil {
 		scanner := bufio.NewScanner(f)
@@ -332,24 +348,66 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 			}
 			var item struct {
 				Timestamp  string `json:"timestamp"`
+				Type       string `json:"type"`
+				Category   string `json:"category"`
+				Lesson     string `json:"lesson"`
+				Decision   string `json:"decision"`
 				ProposalID string `json:"proposalId"`
 				ActionType string `json:"actionType"`
 				Summary    string `json:"summary"`
 				Command    string `json:"command"`
 				Reason     string `json:"reason"`
+				Proposal   struct {
+					ID         string `json:"id"`
+					ActionType string `json:"actionType"`
+					Summary    string `json:"summary"`
+					Command    string `json:"command"`
+				} `json:"proposal"`
 			}
-			if json.Unmarshal([]byte(line), &item) == nil && item.ProposalID != "" {
-				skill := inferSkillOrPkg(item.ActionType+" "+item.Command+" "+item.Summary, nil)
+			if json.Unmarshal([]byte(line), &item) != nil {
+				continue
+			}
+			if item.Type == "user_feedback" && (item.Summary != "" || item.Lesson != "") {
+				skill := inferSkillOrPkg(item.Category+" "+item.Summary+" "+item.Lesson, nil)
+				upsert(
+					FrictionUserIntervention,
+					FaultWorkerACIOrSkill,
+					skill,
+					"user_feedback",
+					item.Category,
+					item.Summary,
+					item.Lesson,
+					2,
+					"feedback-"+item.Timestamp,
+					"",
+					"",
+					item.Timestamp,
+					false,
+				)
+				continue
+			}
+			propID := item.ProposalID
+			actType := item.ActionType
+			summary := item.Summary
+			cmd := item.Command
+			if propID == "" && item.Proposal.ID != "" {
+				propID = item.Proposal.ID
+				actType = item.Proposal.ActionType
+				summary = item.Proposal.Summary
+				cmd = item.Proposal.Command
+			}
+			if propID != "" && (item.Decision == "rejected" || item.Reason != "") {
+				skill := inferSkillOrPkg(actType+" "+cmd+" "+summary, nil)
 				upsert(
 					FrictionUserIntervention,
 					FaultWorkerACIOrSkill,
 					skill,
 					"hq_propose",
-					item.Command,
-					fmt.Sprintf("Rejected proposal (%s): %s", item.ActionType, item.Reason),
+					cmd,
+					fmt.Sprintf("Rejected proposal (%s): %s", actType, item.Reason),
 					fmt.Sprintf("Honor user rejection feedback: %s", item.Reason),
 					2,
-					item.ProposalID,
+					propID,
 					"",
 					"",
 					item.Timestamp,
@@ -504,7 +562,10 @@ func mineTranscript(
 					lastPlannerHadRunCmd = true
 					if c, ok := tc.Args["CommandLine"].(string); ok {
 						lastCmdLine = strings.TrimSpace(c)
-						if strings.Contains(lastCmdLine, "read-quarantined") {
+						if strings.HasPrefix(lastCmdLine, "./bin/hq gmail read-quarantined") ||
+							strings.HasPrefix(lastCmdLine, "./bin/hq gchat read-quarantined") ||
+							strings.HasPrefix(lastCmdLine, "bin/hq gmail read-quarantined") ||
+							strings.HasPrefix(lastCmdLine, "bin/hq gchat read-quarantined") {
 							tainted = true
 						}
 					}
@@ -512,14 +573,15 @@ func mineTranscript(
 			}
 		}
 
-		isReadViewer := strings.HasPrefix(raw.Content, "Showing lines ") || strings.Contains(raw.Content, "\nShowing lines ") || (lastPlannerHadTools && !lastPlannerHadRunCmd)
+		isFileViewerOutput := strings.HasPrefix(raw.Content, "Showing lines ") || strings.Contains(raw.Content, "\nShowing lines ")
+		isReadViewer := isFileViewerOutput || (lastPlannerHadTools && !lastPlannerHadRunCmd)
 		isCmdExitErr := false
 		if !isReadViewer {
 			for _, line := range strings.Split(raw.Content, "\n") {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "Command exited with code ") {
 					rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "Command exited with code "))
-					if rest != "" && !strings.HasPrefix(rest, "0") {
+					if len(rest) > 0 && rest[0] >= '1' && rest[0] <= '9' {
 						isCmdExitErr = true
 						break
 					}
@@ -527,7 +589,7 @@ func mineTranscript(
 			}
 		}
 		isErr := strings.EqualFold(strings.TrimSpace(raw.Status), "ERROR") ||
-			strings.Contains(raw.Content, "Encountered error in tool execution:") ||
+			(!isFileViewerOutput && (strings.Contains(raw.Content, "Encountered error in tool execution:") || strings.Contains(raw.Content, "Encountered error in step execution:"))) ||
 			isCmdExitErr
 
 		lower := strings.ToLower(raw.Content)
@@ -539,7 +601,11 @@ func mineTranscript(
 			strings.Contains(lower, "etimedout") ||
 			strings.Contains(lower, "econnreset")
 
-		isDenial := strings.Contains(raw.Content, "Blocked by agy-hq")
+		isDenial := !isReadViewer && strings.Contains(raw.Content, "Blocked by agy-hq") &&
+			(strings.EqualFold(strings.TrimSpace(raw.Status), "ERROR") ||
+				strings.Contains(raw.Content, "Encountered error") ||
+				strings.HasPrefix(strings.TrimSpace(raw.Content), "Blocked by agy-hq") ||
+				strings.Contains(raw.Content, `"decision":"deny"`))
 
 		steps = append(steps, parsedStep{
 			StepIndex: raw.StepIndex,
@@ -652,7 +718,10 @@ func mineTranscript(
 func firstLineExcerpt(s string, maxLen int) string {
 	s = strings.TrimSpace(s)
 	if idx := strings.Index(s, "Command exited with code "); idx >= 0 {
-		s = strings.TrimSpace(s[idx:])
+		rest := strings.TrimSpace(s[idx+len("Command exited with code "):])
+		if len(rest) > 0 && rest[0] >= '1' && rest[0] <= '9' {
+			s = strings.TrimSpace(s[idx:])
+		}
 	}
 	s = strings.ReplaceAll(s, "\n", " ")
 	if runes := []rune(s); len(runes) > maxLen {
