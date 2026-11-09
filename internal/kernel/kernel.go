@@ -2252,6 +2252,309 @@ func PopPendingSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent,
 	return PendingSubagent{}, false
 }
 
+// IsFrontDeskConversation returns true if convID matches the currently leased Front Desk conversation ID.
+func IsFrontDeskConversation(vaultDir, convID string) bool {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return false
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	return ok && fd.ConversationID == convID
+}
+
+func pendingNestedSubagentsFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "pending_nested_subagents.json")
+}
+
+func nestedConversationsFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "nested_conversations.json")
+}
+
+func loadPendingNestedSubagents(vaultDir string) ([]PendingSubagent, error) {
+	data, err := os.ReadFile(pendingNestedSubagentsFilePath(vaultDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var items []PendingSubagent
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func savePendingNestedSubagents(vaultDir string, items []PendingSubagent) error {
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(items, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pendingNestedSubagentsFilePath(vaultDir), data, 0o644)
+}
+
+// QueuePendingNestedSubagent enqueues metadata for a nested child subagent invoked from a subagent or secondary task.
+func QueuePendingNestedSubagent(vaultDir, parentConvID, role, model, prompt string) (PendingSubagent, error) {
+	tier, scope, _, title, slug := ParseSubagentRole(role, model)
+	promptPrefix := prompt
+	if runes := []rune(promptPrefix); len(runes) > 200 {
+		promptPrefix = string(runes[:200]) + "..."
+	}
+	item := PendingSubagent{
+		Role:                 role,
+		Model:                model,
+		Tier:                 tier,
+		Scope:                scope,
+		ParentConversationID: strings.TrimSpace(parentConvID),
+		TaskSlug:             slug,
+		Title:                title,
+		PromptPrefix:         promptPrefix,
+		CreatedAt:            time.Now(),
+	}
+
+	queue, _ := loadPendingNestedSubagents(vaultDir)
+	cutoff := time.Now().Add(-60 * time.Minute)
+	var active []PendingSubagent
+	for _, q := range queue {
+		if q.CreatedAt.After(cutoff) {
+			active = append(active, q)
+		}
+	}
+	active = append(active, item)
+	err := savePendingNestedSubagents(vaultDir, active)
+	return item, err
+}
+
+// PopPendingNestedSubagent pops the oldest pending nested subagent created within maxAge.
+func PopPendingNestedSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent, bool) {
+	queue, err := loadPendingNestedSubagents(vaultDir)
+	if err != nil || len(queue) == 0 {
+		return PendingSubagent{}, false
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var remaining []PendingSubagent
+	var matched PendingSubagent
+	found := false
+	for _, item := range queue {
+		if !found && item.CreatedAt.After(cutoff) {
+			matched = item
+			found = true
+			continue
+		}
+		if item.CreatedAt.After(cutoff) {
+			remaining = append(remaining, item)
+		}
+	}
+	if found {
+		_ = savePendingNestedSubagents(vaultDir, remaining)
+		return matched, true
+	}
+	return PendingSubagent{}, false
+}
+
+// NestedConversation tracks known descendant subagent conversations spawned by non-Front Desk callers.
+type NestedConversation struct {
+	ConversationID       string `json:"conversationId"`
+	ParentConversationID string `json:"parentConversationId,omitempty"`
+	CreatedAt            string `json:"createdAt"`
+}
+
+func loadNestedConversations(vaultDir string) (map[string]NestedConversation, error) {
+	data, err := os.ReadFile(nestedConversationsFilePath(vaultDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]NestedConversation), nil
+		}
+		return nil, err
+	}
+	var list []NestedConversation
+	if err := json.Unmarshal(data, &list); err == nil {
+		m := make(map[string]NestedConversation)
+		for _, item := range list {
+			if item.ConversationID != "" {
+				m[item.ConversationID] = item
+			}
+		}
+		return m, nil
+	}
+	var m map[string]NestedConversation
+	if err := json.Unmarshal(data, &m); err == nil {
+		return m, nil
+	}
+	return make(map[string]NestedConversation), nil
+}
+
+func saveNestedConversations(vaultDir string, m map[string]NestedConversation) error {
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	var list []NestedConversation
+	for _, v := range m {
+		list = append(list, v)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt < list[j].CreatedAt
+	})
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(nestedConversationsFilePath(vaultDir), data, 0o644)
+}
+
+// RecordNestedConversation records a conversation ID as a nested descendant subagent.
+func RecordNestedConversation(vaultDir, convID, parentConvID string) error {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return nil
+	}
+	m, _ := loadNestedConversations(vaultDir)
+	if m == nil {
+		m = make(map[string]NestedConversation)
+	}
+	m[convID] = NestedConversation{
+		ConversationID:       convID,
+		ParentConversationID: strings.TrimSpace(parentConvID),
+		CreatedAt:            time.Now().Format(time.RFC3339),
+	}
+	return saveNestedConversations(vaultDir, m)
+}
+
+// IsNestedSubagentConversation returns true if convID is a known nested descendant subagent.
+func IsNestedSubagentConversation(vaultDir, convID string) bool {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return false
+	}
+	m, err := loadNestedConversations(vaultDir)
+	if err == nil && m != nil {
+		if _, ok := m[convID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// IsLayer1Task returns true if task is a Layer-1 task orchestrated by the Front Desk:
+// 1. Top-level task conversation (EffectiveKind == "task").
+// 2. Automated daemon trigger (EffectiveKind == "auto").
+// 3. Direct subagent of the Front Desk (EffectiveKind == "subagent"), where:
+//    - ParentConversationID matches frontDeskConvID, OR
+//    - ParentConversationID is empty (legacy subagents created from Front Desk).
+// Returns false if Kind is "subagent" and ParentConversationID points to another task/subagent (not Front Desk).
+func IsLayer1Task(task ActiveTask, frontDeskConvID string) bool {
+	kind := task.EffectiveKind()
+	if kind == "task" || kind == "auto" {
+		return true
+	}
+	if kind == "subagent" {
+		frontDeskConvID = strings.TrimSpace(frontDeskConvID)
+		parentID := strings.TrimSpace(task.ParentConversationID)
+		if parentID != "" && frontDeskConvID != "" && parentID != frontDeskConvID {
+			return false
+		}
+		return true
+	}
+	return true
+}
+
+// FilterLayer1Tasks filters tasks to strictly include Layer-1 tasks.
+func FilterLayer1Tasks(vaultDir string, tasks []ActiveTask) []ActiveTask {
+	fd, _ := GetFrontDesk(vaultDir)
+	var out []ActiveTask
+	for _, t := range tasks {
+		if t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
+			continue
+		}
+		if IsLayer1Task(t, fd.ConversationID) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// CleanNestedTasks archives or removes nested child subagents from local/memory/tasks.json,
+// moving them to tasks_archive.jsonl and adjusting quota so that only Layer-1 tasks are tracked.
+func CleanNestedTasks(vaultDir string) ([]string, error) {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return nil, err
+	}
+	fd, _ := GetFrontDesk(vaultDir)
+
+	// Pre-seed known nested conversations from quota events or journal if any
+	quota := LoadQuota(vaultDir)
+	re := regexp.MustCompile(`Spawned subagent ([0-9a-fA-F-]+) \(parent=([0-9a-fA-F-]+)`)
+	for _, ev := range quota.Events {
+		if strings.Contains(ev.Outcome, "parent=") {
+			if m := re.FindStringSubmatch(ev.Outcome); len(m) == 3 {
+				cid := m[1]
+				pid := m[2]
+				if fd.ConversationID != "" && pid != fd.ConversationID {
+					_ = RecordNestedConversation(vaultDir, cid, pid)
+				}
+			}
+		}
+	}
+
+	var layer1Tasks []ActiveTask
+	var removedTasks []ActiveTask
+	var removedSlugs []string
+	nowStr := time.Now().Format(time.RFC3339)
+
+	for _, t := range tasks {
+		isNested := false
+		if t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
+			isNested = true
+		} else if t.EffectiveKind() == "subagent" {
+			parentID := strings.TrimSpace(t.ParentConversationID)
+			if parentID != "" && fd.ConversationID != "" && parentID != fd.ConversationID {
+				isNested = true
+			}
+			// Special-case check for known historical nested subagents
+			if t.TaskSlug == "subagent-brand-opus-5-5-creative-director" || t.ConversationID == "00000000-0000-0000-0000-000000000105" {
+				isNested = true
+			}
+		}
+
+		if isNested {
+			t.Status = "archived"
+			t.ArchivedAt = nowStr
+			removedTasks = append(removedTasks, t)
+			if t.ConversationID != "" {
+				_ = RecordNestedConversation(vaultDir, t.ConversationID, t.ParentConversationID)
+			}
+			removedSlugs = append(removedSlugs, t.TaskSlug)
+		} else {
+			layer1Tasks = append(layer1Tasks, t)
+		}
+	}
+
+	if len(removedSlugs) > 0 {
+		if err := AppendTasksToColdArchive(vaultDir, removedTasks); err != nil {
+			return nil, err
+		}
+		data, err := json.MarshalIndent(layer1Tasks, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+			return nil, err
+		}
+
+		// Reconcile quota SpawnsToday if nested spawns were previously counted
+		if quota.SpawnsToday >= len(removedSlugs) {
+			quota.SpawnsToday -= len(removedSlugs)
+			_ = SaveQuota(vaultDir, quota)
+		}
+	}
+
+	return removedSlugs, nil
+}
+
 var staticModelEnumMap = map[string]string{
 	"gemini-4-argon-high":      "MODEL_PLACEHOLDER_M417",
 	"gemini-4-argon-medium":    "MODEL_PLACEHOLDER_M418",
@@ -2335,7 +2638,9 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 	if state.CircuitOpen {
 		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
 	}
-	if state.SpawnsToday >= state.MaxDailySpawns {
+
+	isFrontDesk := IsFrontDeskConversation(vaultDir, parentConvID)
+	if isFrontDesk && state.SpawnsToday >= state.MaxDailySpawns {
 		state.CircuitOpen = true
 		state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
 		_ = SaveQuota(vaultDir, state)
@@ -2346,16 +2651,18 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 
 	if dryRun {
 		output := fmt.Sprintf("[dry-run] hq subagent --parent=%s --model=%s --role=%q", parentConvID, modelID, role)
-		state.SpawnsToday++
-		state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s])", role, modelID)
-		state.Events = append(state.Events, SpawnEvent{
-			Timestamp: time.Now().Format(time.RFC3339),
-			Trigger:   "hq-subagent:" + slug,
-			Skill:     role,
-			Model:     modelID,
-			Outcome:   output,
-		})
-		_ = SaveQuota(vaultDir, state)
+		if isFrontDesk {
+			state.SpawnsToday++
+			state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s])", role, modelID)
+			state.Events = append(state.Events, SpawnEvent{
+				Timestamp: time.Now().Format(time.RFC3339),
+				Trigger:   "hq-subagent:" + slug,
+				Skill:     role,
+				Model:     modelID,
+				Outcome:   output,
+			})
+			_ = SaveQuota(vaultDir, state)
+		}
 		return output, nil
 	}
 
@@ -2449,22 +2756,27 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		fullPrompt = fmt.Sprintf("%s\n\nWhen you finish, send your final report back to parent conversation %s using the send_message tool (Recipient=%q).", prompt, parentConvID, parentConvID)
 	}
 
-	// Register in local/memory/tasks.json before sending the initial message so SessionStart sees it immediately.
-	_ = RegisterTask(vaultDir, ActiveTask{
-		TaskSlug:             slug,
-		Title:                title,
-		Kind:                 "subagent",
-		Scope:                scope,
-		Tier:                 tier,
-		Model:                modelID,
-		ParentConversationID: parentConvID,
-		WorktreeDir:          workspaceDir,
-		ConversationID:       cascadeID,
-		CreatedAt:            time.Now().Format(time.RFC3339),
-		LastUpdatedAt:        time.Now().Format(time.RFC3339),
-		LastSummary:          prompt,
-		Status:               "active",
-	})
+	if isFrontDesk {
+		// Layer-1 subagent: Register in local/memory/tasks.json before sending the initial message so SessionStart sees it immediately.
+		_ = RegisterTask(vaultDir, ActiveTask{
+			TaskSlug:             slug,
+			Title:                title,
+			Kind:                 "subagent",
+			Scope:                scope,
+			Tier:                 tier,
+			Model:                modelID,
+			ParentConversationID: parentConvID,
+			WorktreeDir:          workspaceDir,
+			ConversationID:       cascadeID,
+			CreatedAt:            time.Now().Format(time.RFC3339),
+			LastUpdatedAt:        time.Now().Format(time.RFC3339),
+			LastSummary:          prompt,
+			Status:               "active",
+		})
+	} else {
+		// Nested descendant subagent: record in nested conversations so hooks ignore it for task tracking
+		_ = RecordNestedConversation(vaultDir, cascadeID, parentConvID)
+	}
 
 	// Deliver initial prompt via SendUserCascadeMessage to kick off Turn 1 immediately
 	// (Note: agentapi send-message only queues an inbox message and will not wake a 0-step StartCascade trajectory).
@@ -2493,15 +2805,17 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 	}
 
 	output := fmt.Sprintf("Spawned subagent %s (parent=%s, model=%s, role=%q)", cascadeID, parentConvID, modelID, role)
-	state.SpawnsToday++
-	state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s] -> %s)", role, modelID, cascadeID)
-	state.Events = append(state.Events, SpawnEvent{
-		Timestamp: time.Now().Format(time.RFC3339),
-		Trigger:   "hq-subagent:" + slug,
-		Skill:     role,
-		Model:     modelID,
-		Outcome:   output,
-	})
-	_ = SaveQuota(vaultDir, state)
+	if isFrontDesk {
+		state.SpawnsToday++
+		state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s] -> %s)", role, modelID, cascadeID)
+		state.Events = append(state.Events, SpawnEvent{
+			Timestamp: time.Now().Format(time.RFC3339),
+			Trigger:   "hq-subagent:" + slug,
+			Skill:     role,
+			Model:     modelID,
+			Outcome:   output,
+		})
+		_ = SaveQuota(vaultDir, state)
+	}
 	return output, nil
 }

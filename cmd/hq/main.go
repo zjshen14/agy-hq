@@ -1341,11 +1341,12 @@ func runTasksCLI(vaultDir string, args []string) {
 	_ = fs.Parse(args)
 
 	hotTasks, _ := kernel.ListTasks(vaultDir)
+	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, hotTasks)
 	coldCount := kernel.CountColdArchivedTasks(vaultDir)
 
 	// If no filter flags are passed, display the tiered Console board view + stats footer
 	if !*activeOnly && !*allFlag && !*archiveOnly && *kindFilter == "" && *scopeFilter == "" && *searchQuery == "" && *limit == 0 && !*asJSON {
-		sel := kernel.SelectConsoleTasks(hotTasks, coldCount, now)
+		sel := kernel.SelectConsoleTasks(layer1Tasks, coldCount, now)
 		fmt.Printf("HQ Task Board — %d Active | %d Idle | %d Completed (Hot) | %d Archived (Hot: %d, Cold: %d)\n",
 			sel.ActiveCount, sel.IdleCount, sel.CompletedCount, sel.ArchivedHotCount+sel.ArchivedColdCount, sel.ArchivedHotCount, sel.ArchivedColdCount)
 		fmt.Println(strings.Repeat("─", 88))

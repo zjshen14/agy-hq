@@ -13,7 +13,7 @@ import (
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -130,6 +130,12 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	if prev.Version < 5 {
 		backfilled, rotated := migrateV5TaskBoardHierarchy(vaultDir)
 		recordStep("v5_taskboard_hierarchy_and_archive", fmt.Sprintf("Backfilled kind/scope on %d task(s) and rotated %d completed/archived item(s) to tasks_archive.jsonl", backfilled, rotated))
+	}
+
+	// Migration v5 -> v6: Clean up nested descendant subagents from tasks.json (enforce Layer-1 Task Board & Quota invariant)
+	if prev.Version < 6 {
+		removedSlugs, _ := kernel.CleanNestedTasks(vaultDir)
+		recordStep("v6_layer1_taskboard_cleanup", fmt.Sprintf("Cleaned %d nested child subagent(s) from tasks.json to enforce Layer-1 task invariant", len(removedSlugs)))
 	}
 
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml

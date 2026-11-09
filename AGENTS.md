@@ -18,6 +18,12 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - Never pollute or dilute the conversation with verbose background task dump logs, mechanical checklists, worktree listings, or unprompted task status banners.
      - All background tracking, task board tables, worktrees, and quota counters stay strictly inside the live `hq_console.md` ledger artifact in 0 LLM tokens (kept up to date by `./bin/hq` and `hq hook stop`).
      - When a background subagent or task completes, deliver a concise conversational takeaway: what was accomplished, what it means/implies for the user, and any recommended next decisions.
+   - **Layer-1 Task Board & Quota Invariant:**
+     - Only the first layer of tasks orchestrated directly by the Front Desk (`[HQ] Front Desk`) counts toward the Task Board (`local/memory/tasks.json`, `hq_console.md`) and daily background spawn quota:
+       1. Direct first-layer subagents dispatched by the Front Desk (`invoke_subagent` or `hq spawn --subagent` from the Front Desk).
+       2. Top-level dedicated Task Conversations (`./bin/hq spawn --task=<slug>`) spawned to tackle complex initiatives.
+       3. Automated proactive daemon triggers (`kind: auto`).
+     - Nested child subagents created by a subagent or secondary task conversation to handle complex sub-problems are NOT tasks. They are ephemeral child processes: they must NOT be added to `tasks.json`, must NOT appear on the Task Board, and must NOT increment or consume the top-level task spawn quota.
    - **Mechanical Non-Blocking Front Desk Guardrails (Hook Enforced):**
      - The Front Desk thread is mechanically enforced by `PreToolUse` hooks: direct source/worktree file edits (`edit_file`/`write_file`) and build/test suites (`run_command` with `go test`, `npm test`, etc.) are hard-blocked on this thread, and inline lookup tools (`read_file`, `grep_search`, `find_by_name`, shell lookups) are capped at **3 tool calls per turn**.
      - Never block the Front Desk thread with inline coding, debugging, test runs, or open-ended research.

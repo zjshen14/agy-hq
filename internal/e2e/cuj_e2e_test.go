@@ -767,8 +767,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v5") {
-		t.Fatalf("expected v0 -> v5 migration output, got:\n%s", upOut)
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v6") {
+		t.Fatalf("expected v0 -> v6 migration output, got:\n%s", upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -799,8 +799,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v5 -> v5") {
-		t.Fatalf("expected idempotent v5 -> v5 on second run, got:\n%s", migOut2)
+	if !strings.Contains(migOut2, "Vault Schema Migration: v6 -> v6") {
+		t.Fatalf("expected idempotent v6 -> v6 on second run, got:\n%s", migOut2)
 	}
 }
 
@@ -1074,6 +1074,72 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	consoleStr = string(consoleBytes)
 	if !strings.Contains(consoleStr, "🛑 `cancelled`") || !strings.Contains(consoleStr, "Worker To Cancel") {
 		t.Fatalf("expected cancelled subagent in hq_console.md, got:\n%s", consoleStr)
+	}
+
+	// 6. Nested Descendant Subagent Lifecycle (Layer-1 Task Board & Quota Invariant)
+	// A subagent (conv-sub-123) invokes a child subagent (conv-sub-child-789)
+	nestedConv := "conv-sub-child-789"
+	nestedInvokePayload := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"invoke_subagent","args":{"Role":"[quick] agy-hq: Child Helper","Model":"flash_lite","Prompt":"Nested sub-problem"}}}`, subConv, subArtDir)
+	nestedPreOut, err := env.run(nestedInvokePayload, "hook", "pre-tool")
+	if err != nil {
+		t.Fatalf("nested invoke_subagent pre-tool: %v (%s)", err, nestedPreOut)
+	}
+	if !strings.Contains(nestedPreOut, `"decision":"allow"`) {
+		t.Fatalf("expected nested invoke_subagent allow, got: %s", nestedPreOut)
+	}
+
+	// Verify quota SpawnsToday DID NOT increment! (Should still be 2 from deskConv spawns)
+	qAfterNested := kernel.LoadQuota(env.vaultDir)
+	if qAfterNested.SpawnsToday != 2 {
+		t.Fatalf("expected SpawnsToday to remain 2 for nested child subagent, got %d", qAfterNested.SpawnsToday)
+	}
+
+	// Child subagent starts session-start
+	childArtDir := filepath.Join(t.TempDir(), "brain-child-789")
+	_ = os.MkdirAll(childArtDir, 0o755)
+	ssChild := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-low"}`, nestedConv, childArtDir)
+	if _, err := env.run(ssChild, "hook", "session-start"); err != nil {
+		t.Fatalf("child session-start failed: %v", err)
+	}
+
+	// Verify tasks.json DOES NOT contain conv-sub-child-789!
+	if _, found := kernel.FindTaskByConversationID(env.vaultDir, nestedConv); found {
+		t.Fatalf("expected nested child subagent %s to NOT be registered in tasks.json", nestedConv)
+	}
+
+	// Child subagent finishes and runs stop
+	childTranscript := filepath.Join(childArtDir, "transcript.jsonl")
+	_ = os.WriteFile(childTranscript, []byte(`{"type":"PLANNER_RESPONSE","content":"Child work finished."}`+"\n"), 0o644)
+	childStop := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-low","terminationReason":"NO_TOOL_CALL"}`, nestedConv, childTranscript, childArtDir)
+	if _, err := env.run(childStop, "hook", "stop"); err != nil {
+		t.Fatalf("child stop failed: %v", err)
+	}
+
+	// Verify tasks.json STILL DOES NOT contain conv-sub-child-789!
+	if _, found := kernel.FindTaskByConversationID(env.vaultDir, nestedConv); found {
+		t.Fatalf("expected nested child subagent %s to NOT be adopted in tasks.json after stop", nestedConv)
+	}
+
+	// Verify Task Board section only contains Layer-1 tasks and NOT the nested child subagent
+	consoleBytes, _ = os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
+	consoleStr = string(consoleBytes)
+	tbStart := strings.Index(consoleStr, "## 📋 2. Task Board")
+	tbEnd := strings.Index(consoleStr, "## 🌿 3. Active Parallel Git Worktrees")
+	if tbStart >= 0 && tbEnd > tbStart {
+		tbSection := consoleStr[tbStart:tbEnd]
+		if strings.Contains(tbSection, "Child Helper") || strings.Contains(tbSection, nestedConv) {
+			t.Fatalf("expected Task Board section to NOT show nested child subagent, got:\n%s", tbSection)
+		}
+	}
+
+	// Also verify hq subagent dry-run:
+	// Calling hq subagent with non-front-desk parent must NOT increment quota
+	if _, err := env.run("", "subagent", "--role=\"[standard] test: Worker\"", "--model=flash", "--parent="+subConv, "--prompt=\"Nested CLI worker\"", "--dry-run"); err != nil {
+		t.Fatalf("hq subagent dry-run: %v", err)
+	}
+	qAfterCLI := kernel.LoadQuota(env.vaultDir)
+	if qAfterCLI.SpawnsToday != 2 {
+		t.Fatalf("expected SpawnsToday to remain 2 after nested hq subagent, got %d", qAfterCLI.SpawnsToday)
 	}
 }
 

@@ -203,6 +203,7 @@ func TestResolveModelEnumAndSpawnSubagent(t *testing.T) {
 
 	vaultDir := t.TempDir()
 	parentID := "00000000-0000-0000-0000-000000000001"
+	_ = SetFrontDesk(vaultDir, parentID, "")
 	role := "[deep] rfc-0005: Opus 5.5 Reviewer"
 	out, err := SpawnSubagent(vaultDir, parentID, role, "Review RFC-0005", "claude-opus-5-5-high", "", false)
 	if err != nil {
@@ -316,5 +317,144 @@ func TestArchiveAndReopenTask(t *testing.T) {
 	tasks, _ = ListTasks(vaultDir)
 	if len(tasks) != 1 || tasks[0].Status != "active" {
 		t.Fatalf("expected task status active, got %+v", tasks)
+	}
+}
+
+func TestLayer1TaskInvariantAndNestedSubagents(t *testing.T) {
+	vaultDir := t.TempDir()
+	deskConv := "conv-desk-12345"
+	if err := SetFrontDesk(vaultDir, deskConv, ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	// 1. IsFrontDeskConversation check
+	if !IsFrontDeskConversation(vaultDir, deskConv) {
+		t.Fatalf("expected IsFrontDeskConversation == true for %s", deskConv)
+	}
+	if IsFrontDeskConversation(vaultDir, "conv-other") {
+		t.Fatalf("expected IsFrontDeskConversation == false for conv-other")
+	}
+
+	// 2. IsLayer1Task check
+	task1 := ActiveTask{Kind: "task", TaskSlug: "test-task"}
+	auto1 := ActiveTask{Kind: "auto", TaskSlug: "auto-morning"}
+	subLayer1 := ActiveTask{Kind: "subagent", TaskSlug: "sub-layer1", ParentConversationID: deskConv}
+	subLegacy := ActiveTask{Kind: "subagent", TaskSlug: "sub-legacy"}
+	subNested := ActiveTask{Kind: "subagent", TaskSlug: "sub-nested", ParentConversationID: "conv-other"}
+
+	if !IsLayer1Task(task1, deskConv) {
+		t.Fatalf("expected task1 to be Layer 1")
+	}
+	if !IsLayer1Task(auto1, deskConv) {
+		t.Fatalf("expected auto1 to be Layer 1")
+	}
+	if !IsLayer1Task(subLayer1, deskConv) {
+		t.Fatalf("expected subLayer1 to be Layer 1")
+	}
+	if !IsLayer1Task(subLegacy, deskConv) {
+		t.Fatalf("expected legacy subagent with empty parent to be Layer 1")
+	}
+	if IsLayer1Task(subNested, deskConv) {
+		t.Fatalf("expected subNested with non-desk parent to NOT be Layer 1")
+	}
+
+	// 3. QueuePendingNestedSubagent & PopPendingNestedSubagent
+	item, err := QueuePendingNestedSubagent(vaultDir, "conv-secondary-task", "[standard] test: Nested Worker", "flash", "nested prompt")
+	if err != nil {
+		t.Fatalf("QueuePendingNestedSubagent: %v", err)
+	}
+	if item.ParentConversationID != "conv-secondary-task" {
+		t.Fatalf("unexpected parentConvID: %s", item.ParentConversationID)
+	}
+
+	popped, ok := PopPendingNestedSubagent(vaultDir, 10*time.Minute)
+	if !ok || popped.ParentConversationID != "conv-secondary-task" {
+		t.Fatalf("expected popped nested subagent, got %+v (ok=%v)", popped, ok)
+	}
+
+	// 4. RecordNestedConversation & IsNestedSubagentConversation
+	nestedConvID := "conv-nested-child-999"
+	if err := RecordNestedConversation(vaultDir, nestedConvID, "conv-secondary-task"); err != nil {
+		t.Fatalf("RecordNestedConversation: %v", err)
+	}
+	if !IsNestedSubagentConversation(vaultDir, nestedConvID) {
+		t.Fatalf("expected IsNestedSubagentConversation == true for %s", nestedConvID)
+	}
+	if IsNestedSubagentConversation(vaultDir, "conv-non-nested") {
+		t.Fatalf("expected IsNestedSubagentConversation == false for conv-non-nested")
+	}
+
+	// 5. FilterLayer1Tasks
+	allTasks := []ActiveTask{
+		task1,
+		subLayer1,
+		subNested,
+		{Kind: "subagent", TaskSlug: "sub-recorded-nested", ConversationID: nestedConvID},
+	}
+	filtered := FilterLayer1Tasks(vaultDir, allTasks)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 Layer-1 tasks, got %d: %+v", len(filtered), filtered)
+	}
+	if filtered[0].TaskSlug != "test-task" || filtered[1].TaskSlug != "sub-layer1" {
+		t.Fatalf("unexpected filtered tasks: %+v", filtered)
+	}
+}
+
+func TestCleanNestedTasks(t *testing.T) {
+	vaultDir := t.TempDir()
+	deskConv := "conv-desk-999"
+	_ = SetFrontDesk(vaultDir, deskConv, "")
+
+	// Set initial quota with 3 spawns
+	q := LoadQuota(vaultDir)
+	q.SpawnsToday = 3
+	_ = SaveQuota(vaultDir, q)
+
+	// Register 1 top-level task, 1 Layer-1 subagent, and 1 nested subagent
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug: "top-level-task",
+		Title:    "[Task:general] Top Level",
+		Kind:     "task",
+		Status:   "active",
+	})
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:             "sub-layer1",
+		Title:                "[Subagent:general] Layer 1 Worker",
+		Kind:                 "subagent",
+		ParentConversationID: deskConv,
+		Status:               "completed",
+	})
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:             "sub-nested-child",
+		Title:                "[Subagent:general] Nested Worker",
+		Kind:                 "subagent",
+		ParentConversationID: "conv-secondary-task",
+		Status:               "completed",
+	})
+
+	removed, err := CleanNestedTasks(vaultDir)
+	if err != nil {
+		t.Fatalf("CleanNestedTasks failed: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "sub-nested-child" {
+		t.Fatalf("expected sub-nested-child to be removed, got: %v", removed)
+	}
+
+	// Verify tasks.json now only has 2 tasks
+	remaining, err := ListTasks(vaultDir)
+	if err != nil || len(remaining) != 2 {
+		t.Fatalf("expected 2 remaining tasks in tasks.json, got %d (%v)", len(remaining), err)
+	}
+
+	// Verify quota SpawnsToday decremented from 3 to 2
+	afterQuota := LoadQuota(vaultDir)
+	if afterQuota.SpawnsToday != 2 {
+		t.Fatalf("expected SpawnsToday == 2, got %d", afterQuota.SpawnsToday)
+	}
+
+	// Verify cold archive received the removed nested subagent
+	cold, coldCount, _ := ListArchivedTasks(vaultDir, 0)
+	if coldCount != 1 || len(cold) != 1 || cold[0].TaskSlug != "sub-nested-child" {
+		t.Fatalf("expected cold archive to have sub-nested-child, got count=%d, list=%+v", coldCount, cold)
 	}
 }

@@ -190,7 +190,12 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			// Subagent or secondary conversation: check if already tracked or waiting in pending queue / spawn list
 			_, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID)
 			if !alreadyTracked {
-				if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
+				if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
+					// Known nested descendant subagent: do NOT register into tasks.json!
+				} else if nestedSub, isNested := kernel.PopPendingNestedSubagent(vaultDir, 60*time.Minute); isNested {
+					_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
+					// Nested descendant subagent: do NOT register into tasks.json!
+				} else if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
 					modelName := sub.Model
 					if modelName == "" {
 						modelName = payload.ModelName
@@ -289,7 +294,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	}
 	if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
 		now := time.Now()
-		selected, omitted := kernel.SelectSessionStartTasks(tasks, now)
+		layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
+		selected, omitted := kernel.SelectSessionStartTasks(layer1Tasks, now)
 		if len(selected) > 0 {
 			var lines []string
 			for _, t := range selected {
@@ -502,8 +508,18 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		role, _ := payload.ToolCall.Args["Role"].(string)
 		model, _ := payload.ToolCall.Args["Model"].(string)
 		prompt, _ := payload.ToolCall.Args["Prompt"].(string)
-		_ = kernel.RecordSubagentSpawn(vaultDir, role, model, prompt)
-		_, _ = kernel.QueuePendingSubagentWithParent(vaultDir, payload.ConversationID, role, model, prompt)
+
+		fd, hasFD := kernel.GetFrontDesk(vaultDir)
+		isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
+
+		if isFrontDesk {
+			_ = kernel.RecordSubagentSpawn(vaultDir, role, model, prompt)
+			_, _ = kernel.QueuePendingSubagentWithParent(vaultDir, payload.ConversationID, role, model, prompt)
+		} else {
+			// Descendant subagent spawned by a subagent or secondary task conversation:
+			// do NOT increment daily spawn quota and do NOT queue as a Layer-1 task.
+			_, _ = kernel.QueuePendingNestedSubagent(vaultDir, payload.ConversationID, role, model, prompt)
+		}
 		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
 		return err
 	}
@@ -750,7 +766,15 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
 					kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 				} else {
-					if !alreadyTracked {
+					isNested := kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID)
+					if !alreadyTracked && !isNested {
+						if nestedSub, foundNested := kernel.PopPendingNestedSubagent(vaultDir, 60*time.Minute); foundNested {
+							_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
+							isNested = true
+						}
+					}
+
+					if !alreadyTracked && !isNested {
 						// Subagent fallback: match against pending queue if not yet registered
 						if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
 							modelName := sub.Model
@@ -825,7 +849,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							ArchivedAt:           matchedTask.ArchivedAt,
 							LastSummary:          newSummary,
 						})
-					} else if !alreadyTracked {
+					} else if !alreadyTracked && !isNested {
 						title := ""
 						if strings.TrimSpace(userPrompt) != "" {
 							title = kernel.SanitizeTaskTitle(userPrompt, "")

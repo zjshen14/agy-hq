@@ -155,8 +155,9 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	pending, _ := approvals.List(vaultDir)
 	wts, _ := worktree.List(vaultDir)
 	tasks, _ := kernel.ListTasks(vaultDir)
+	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
 	now := time.Now()
-	sel := kernel.SelectConsoleTasks(tasks, kernel.CountColdArchivedTasks(vaultDir), now)
+	sel := kernel.SelectConsoleTasks(layer1Tasks, kernel.CountColdArchivedTasks(vaultDir), now)
 	turns := loadTodayJournals(vaultDir)
 	health := doctor.Run(vaultDir)
 	quota := kernel.LoadQuota(vaultDir)
@@ -484,10 +485,11 @@ func SyncMarkdownConsole(vaultDir string) error {
 
 	now := time.Now()
 	allTasks, _ := kernel.ListTasks(vaultDir)
+	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, allTasks)
 	coldCount := kernel.CountColdArchivedTasks(vaultDir)
-	sel := kernel.SelectConsoleTasks(allTasks, coldCount, now)
+	sel := kernel.SelectConsoleTasks(layer1Tasks, coldCount, now)
 
-	if len(allTasks) == 0 && coldCount == 0 {
+	if len(layer1Tasks) == 0 && coldCount == 0 {
 		fmt.Fprintf(&b, "## 📋 2. Task Board (`0` Tracked Conversations)\n")
 		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
 	} else {
