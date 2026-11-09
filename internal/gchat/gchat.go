@@ -898,7 +898,9 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 			SpaceType:   "SPACE",
 		}})
 	}
-	PreWarmSpace(vaultDir, cfg, spaceID)
+	if err := PreWarmSpace(vaultDir, cfg, spaceID); err != nil {
+		return DraftSpec{}, err
+	}
 
 	if strings.TrimSpace(draftID) == "" {
 		b := make([]byte, 4)

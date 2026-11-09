@@ -279,7 +279,9 @@ func LogoutOrResetProfile(vaultDir, accountAlias string) (string, error) {
 		p := filepath.Join(cfg.ChromeProfileDir, rel)
 		if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
 			bak := p + ".bak"
-			_ = os.WriteFile(bak, data, 0o600)
+			if st, bErr := os.Stat(bak); bErr != nil || int64(len(data)) >= st.Size() {
+				_ = os.WriteFile(bak, data, 0o600)
+			}
 			_ = os.Remove(p)
 			_ = os.Remove(p + "-journal")
 			backedUp = append(backedUp, rel)
@@ -526,28 +528,29 @@ func InteractiveLoginWithOptions(vaultDir, accountAlias string, opts LoginOption
 	return ep, nil
 }
 
-// PreWarmSpace navigates the background headless Chrome tab to spaceID so that when the user taps
+// PreWarmSpace ensures the Google Chat CDP session is authenticated (launching guided login if logged out)
+// and navigates the background headless Chrome tab to spaceID so that when the user taps
 // Approve on the 1-tap prompt seconds later, the composer box is already loaded and ready.
-func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) {
+func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) error {
 	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
-		return
+		return nil
 	}
 	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
-		return
+		return nil
 	}
-	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, false)
+	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, true)
 	if err != nil {
-		return
+		return err
 	}
 	targets, err := fetchCDPTargets(ep)
 	if err != nil || len(targets) == 0 {
-		return
+		return nil
 	}
 	cleanSpaceID := strings.TrimPrefix(strings.TrimSpace(spaceID), "spaces/")
 	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "space/")
 	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "dm/")
 	if cleanSpaceID == "" || strings.HasPrefix(cleanSpaceID, "gmail-chat-") {
-		return
+		return nil
 	}
 	for _, t := range targets {
 		if t.Type != "page" || t.WebSocketDebuggerURL == "" {
@@ -560,8 +563,9 @@ func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) {
 			targetURLJSON, _ := json.Marshal(targetURL)
 			_, _ = cdpEvalJS(t.WebSocketDebuggerURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
 		}
-		return
+		return nil
 	}
+	return nil
 }
 
 // cdpEvalJS connects to a Chrome DevTools WebSocket endpoint and runs Runtime.evaluate(expression),
@@ -1160,7 +1164,7 @@ func resolveOrCreateDMViaCDP(vaultDir string, cfg AccountConfig, rawQuery string
 	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
 		return SpaceSummary{}, fmt.Errorf("live CDP DM resolution skipped for custom test endpoint")
 	}
-	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, false)
+	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, true)
 	if err != nil {
 		return SpaceSummary{}, err
 	}
