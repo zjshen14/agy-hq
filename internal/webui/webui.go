@@ -519,7 +519,9 @@ func SyncMarkdownConsole(vaultDir string) error {
 					metaParts = append(metaParts, age)
 				}
 				if t.WorktreeDir != "" {
-					metaParts = append(metaParts, "🌿 wt")
+					if info, sErr := os.Stat(t.WorktreeDir); sErr == nil && info.IsDir() {
+						metaParts = append(metaParts, "🌿 wt")
+					}
 				}
 				if len(metaParts) > 0 {
 					slugCell += fmt.Sprintf(" · *%s*", strings.Join(metaParts, " · "))
