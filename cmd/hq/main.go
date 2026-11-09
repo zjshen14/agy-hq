@@ -138,6 +138,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq upgrade: go build failed (%v):\n%s\n", err, string(out))
 			os.Exit(1)
 		}
+		if !strings.HasPrefix(targetBin, os.TempDir()) {
+			_ = exec.Command("systemctl", "--user", "try-restart", "agy-hq.service").Run()
+		}
 
 		// 4. Re-exec the newly compiled binary's `migrate` subcommand so newly pulled migrations run
 		fmt.Println("==> [4/5] Running non-destructive Vault schema & template migration...")
