@@ -1379,6 +1379,18 @@ func launchChromeWithURL(cfg AccountConfig, headless bool, targetURL string) (in
 	return pid, fmt.Sprintf("Launched isolated Google Chat Chrome profile (%s, PID %d, port %s, profile %s)", mode, pid, port, cfg.ChromeProfileDir), nil
 }
 
+func launchDetachedInteractiveLogin(accountAlias string) {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return
+	}
+	cmd := exec.Command(exe, "gchat", "login", "--account="+accountAlias, "--timeout=180")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	_ = cmd.Start()
+}
+
 func listSpacesViaCDP(cfg AccountConfig, query string, maxResults int) ([]SpaceSummary, error) {
 	base := strings.TrimRight(resolveActiveCDPEndpoint(cfg), "/")
 	if base == "" {

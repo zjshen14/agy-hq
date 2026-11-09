@@ -468,19 +468,32 @@ func InteractiveLoginWithOptions(vaultDir, accountAlias string, opts LoginOption
 	}
 
 	ep := resolveActiveCDPEndpoint(cfg)
+	alreadyOpenLogin := false
 	if ok, _ := CheckCDPEndpoint(ep); ok {
 		if !opts.Reset {
 			if chatTargets, err := fetchCDPTargets(ep); err == nil && len(chatTargets) > 0 {
 				return ep, nil
 			}
+			if allTargets, err := fetchAllCDPTargets(ep); err == nil {
+				for _, t := range allTargets {
+					if t.Type == "page" && isGoogleLoginURL(t.URL) {
+						alreadyOpenLogin = true
+						break
+					}
+				}
+			}
 		}
-		closeCDPBrowser(ep)
-		time.Sleep(400 * time.Millisecond)
+		if !alreadyOpenLogin {
+			closeCDPBrowser(ep)
+			time.Sleep(400 * time.Millisecond)
+		}
 	}
 
-	loginURL := "https://accounts.google.com/ServiceLogin?Email=" + url.QueryEscape(cfg.Email) + "&continue=https://chat.google.com/u/0/app/home"
-	if _, _, err := launchChromeWithURL(cfg, opts.RemoteHeadless, loginURL); err != nil {
-		return "", err
+	if !alreadyOpenLogin {
+		loginURL := "https://accounts.google.com/ServiceLogin?Email=" + url.QueryEscape(cfg.Email) + "&continue=https://chat.google.com/u/0/app/home"
+		if _, _, err := launchChromeWithURL(cfg, opts.RemoteHeadless, loginURL); err != nil {
+			return "", err
+		}
 	}
 
 	deadline := time.Now().Add(opts.Timeout)
@@ -532,7 +545,8 @@ func InteractiveLoginWithOptions(vaultDir, accountAlias string, opts LoginOption
 	return ep, nil
 }
 
-// PreWarmSpace ensures the Google Chat CDP session is authenticated (launching guided login if logged out)
+// PreWarmSpace ensures the Google Chat CDP session is authenticated (spawning a non-blocking
+// detached guided login window if logged out so `hq gchat propose` returns in < 1s)
 // and navigates the background headless Chrome tab to spaceID so that when the user taps
 // Approve on the 1-tap prompt seconds later, the composer box is already loaded and ready.
 func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) error {
@@ -542,9 +556,10 @@ func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) error {
 	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
 		return nil
 	}
-	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, true)
+	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, false)
 	if err != nil {
-		return err
+		launchDetachedInteractiveLogin(cfg.Alias)
+		return nil
 	}
 	targets, err := fetchCDPTargets(ep)
 	if err != nil || len(targets) == 0 {
