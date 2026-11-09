@@ -28,3 +28,8 @@ Work across any number of local or remote GitHub repositories in parallel from i
 4. **CI & PR Triage:**
    - Inside the target worktree, run `gh pr status` and `gh pr checks` to inspect open PRs and failing GitHub Actions runs.
    - Stage any third-party PR merge or release action via `./bin/hq propose --type=pr_merge --summary="..." --cmd="gh pr merge ..."`.
+
+## Learned Operational Rules (RSI Managed)
+
+<!-- rsi:rule id="rsi-rule-swe-pulse-2c42ca" source="obs-20261109-2c42ca57" model_scope="all" added="2026-11-09" helpful="0" harmful="0" -->
+- **[Learned Rule · worker_aci_or_skill]:** When using `user_feedback` in `swe-pulse`, Never perform multi-file code modifications or test suite runs inline on the Front Desk; dispatch invoke_subagent or ./bin/hq spawn. *(Observed 2x; prevents: Always delegate multi-file coding and bugfix tasks (>3 tool calls) to a background subagent in local/worktrees/ instead of blocking the [HQ] Front Desk thread.)*
