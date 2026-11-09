@@ -222,6 +222,12 @@ func TestPhase4_FuzzySpaceResolutionAndAuthURLDetection(t *testing.T) {
 	if !isGoogleLoginURL("https://accounts.google.com/v3/signin/identifier?continue=https://chat.google.com/u/0/app/home") {
 		t.Fatalf("expected accounts.google.com URL to be detected as login URL")
 	}
+	if isGoogleLoginURL("https://accounts.google.com/RotateCookiesPage?og_pid=385&rot=3&origin=https%3A%2F%2Fchat.google.com") {
+		t.Fatalf("expected RotateCookiesPage iframe to NOT be detected as login URL")
+	}
+	if isGoogleLoginURL("https://accounts.youtube.com/accounts/CheckConnection?pmpo=https%3A%2F%2Faccounts.google.com") {
+		t.Fatalf("expected CheckConnection iframe to NOT be detected as login URL")
+	}
 	if !isAuthenticatedChatURL("https://chat.google.com/u/0/app/chat/AAAA_LAUNCH_01") {
 		t.Fatalf("expected chat.google.com room URL to be detected as authenticated")
 	}

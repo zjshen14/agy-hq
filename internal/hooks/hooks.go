@@ -52,12 +52,19 @@ type StopPayload struct {
 type JournalEntry struct {
 	Timestamp         string   `json:"timestamp"`
 	ConversationID    string   `json:"conversationId"`
+	ParentConvID      string   `json:"parentConversationId,omitempty"`
 	ExecutionNum      int      `json:"executionNum"`
 	TranscriptPath    string   `json:"transcriptPath,omitempty"`
 	WorkspacePaths    []string `json:"workspacePaths,omitempty"`
 	ModelName         string   `json:"modelName,omitempty"`
 	StepCount         int      `json:"stepCount,omitempty"`
 	ToolErrorCount    int      `json:"toolErrorCount,omitempty"`
+	StepStartIdx      int      `json:"stepStartIdx,omitempty"`
+	TurnStepCount     int      `json:"turnStepCount,omitempty"`
+	TurnErrorCount    int      `json:"turnErrorCount,omitempty"`
+	TransientErrors   int      `json:"transientErrors,omitempty"`
+	PreToolDenials    int      `json:"preToolDenials,omitempty"`
+	TaintedSession    bool     `json:"taintedSession,omitempty"`
 	UserPrompt        string   `json:"userPrompt,omitempty"`
 	ToolsUsed         []string `json:"toolsUsed,omitempty"`
 	FilesModified     []string `json:"filesModified,omitempty"`
@@ -356,6 +363,7 @@ var (
 		regexp.MustCompile(`(?i)\bgh\s+pr\s+merge\b`),
 		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
 		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
+		regexp.MustCompile(`(?i)\bhq\s+rsi\s+apply\b`),
 	}
 
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|propose|status)\b`)
@@ -439,14 +447,17 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Canonical Gmail / Google Chat Draft Preview overwrite on ask_question for pending gmail_send / gchat_send proposals
+	// Canonical Gmail / Google Chat / RSI Patch Preview overwrite on ask_question for pending proposals
 	if payload.ToolCall.Name == "ask_question" {
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
 			rawArgs, _ := json.Marshal(payload.ToolCall.Args)
 			rawStr := string(rawArgs)
 			for _, prop := range pending {
-				if (prop.ActionType == "gmail_send" || prop.ActionType == "gchat_send") && prop.Metadata != nil && strings.Contains(rawStr, prop.ID) {
+				if (prop.ActionType == "gmail_send" || prop.ActionType == "gchat_send" || prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch") && prop.Metadata != nil && strings.Contains(rawStr, prop.ID) {
 					hashShort := prop.Metadata["contentHash"]
+					if hashShort == "" {
+						hashShort = prop.Metadata["diffSha256"]
+					}
 					if len(hashShort) > 12 {
 						hashShort = hashShort[:12]
 					}
@@ -470,6 +481,19 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 							threadLabel,
 							prop.Metadata["bodyPreview"],
 							hashShort,
+						)
+					} else if prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch" {
+						canonicalQ = fmt.Sprintf(
+							"Approve RSI Self-Improvement Patch %s (%s)?\n• Hypothesis: %s (%s)\n• Fault Layer: %s\n• Target Files: %s\n• Verification Scorecard: %s\n• Diff SHA-256: %s\n• Diff Preview:\n%s",
+							prop.ID,
+							prop.Metadata["ringLabel"],
+							prop.Metadata["rsiId"],
+							prop.Metadata["title"],
+							prop.Metadata["faultLayer"],
+							prop.Metadata["targetFiles"],
+							prop.Metadata["gateSummary"],
+							hashShort,
+							prop.Metadata["canonicalDiffPreview"],
 						)
 					} else {
 						canonicalQ = fmt.Sprintf(
@@ -709,27 +733,44 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 		}
 
-		toolsUsed, filesModified, summary, transcriptUserPrompt, stepCount, toolErrorCount := parseTranscriptSummaryWithMetrics(payload.TranscriptPath)
+		dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
+		_ = os.MkdirAll(dateDir, 0o755)
+		execNum := payload.ExecutionNum
+		if execNum <= 0 {
+			execNum = nextExecutionNum(dateDir, payload.ConversationID)
+		}
+		stepStartIdx := priorJournalStepCount(vaultDir, payload.ConversationID, execNum)
+		tm := parseTranscriptTurnMetrics(payload.TranscriptPath, stepStartIdx)
+		toolsUsed := tm.ToolsUsed
+		filesModified := tm.FilesModified
+		summary := tm.LastResponse
+		transcriptUserPrompt := tm.LastUserPrompt
+		stepCount := tm.StepCount
+		toolErrorCount := tm.ToolErrorCount
 		userPrompt := strings.TrimSpace(payload.LastUserInput)
 		if userPrompt == "" {
 			userPrompt = transcriptUserPrompt
 		}
+		_, isTainted := gmail.IsSessionTainted(vaultDir, payload.ConversationID)
+		parentConvID := resolveParentConversationID(vaultDir, payload.ConversationID)
 
-		dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
-		if err := os.MkdirAll(dateDir, 0o755); err == nil {
-			execNum := payload.ExecutionNum
-			if execNum <= 0 {
-				execNum = nextExecutionNum(dateDir, payload.ConversationID)
-			}
+		if _, err := os.Stat(dateDir); err == nil {
 			entry := JournalEntry{
 				Timestamp:         time.Now().Format(time.RFC3339),
 				ConversationID:    payload.ConversationID,
+				ParentConvID:      parentConvID,
 				ExecutionNum:      execNum,
 				TranscriptPath:    payload.TranscriptPath,
 				WorkspacePaths:    payload.WorkspacePaths,
 				ModelName:         payload.ModelName,
 				StepCount:         stepCount,
 				ToolErrorCount:    toolErrorCount,
+				StepStartIdx:      stepStartIdx,
+				TurnStepCount:     tm.TurnStepCount,
+				TurnErrorCount:    tm.TurnErrorCount,
+				TransientErrors:   tm.TransientErrors,
+				PreToolDenials:    tm.PreToolDenials,
+				TaintedSession:    isTainted || tm.TaintedCmdSeen,
 				UserPrompt:        userPrompt,
 				ToolsUsed:         toolsUsed,
 				FilesModified:     filesModified,
@@ -892,34 +933,151 @@ func nextExecutionNum(dateDir, convID string) int {
 	return maxNum + 1
 }
 
+func priorJournalStepCount(vaultDir, convID string, currentExecNum int) int {
+	if convID == "" {
+		return 0
+	}
+	journalRoot := filepath.Join(vaultDir, "memory", "journal")
+	dateDirs, err := os.ReadDir(journalRoot)
+	if err != nil {
+		return 0
+	}
+	maxStep := 0
+	prefix := convID + "-"
+	for _, d := range dateDirs {
+		if !d.IsDir() {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(journalRoot, d.Name()))
+		for _, f := range files {
+			name := f.Name()
+			if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			numStr := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".json")
+			if n, err := strconv.Atoi(numStr); err == nil && currentExecNum > 0 && n >= currentExecNum {
+				continue
+			}
+			if b, err := os.ReadFile(filepath.Join(journalRoot, d.Name(), name)); err == nil {
+				var je JournalEntry
+				if json.Unmarshal(b, &je) == nil && je.StepCount > maxStep {
+					maxStep = je.StepCount
+				}
+			}
+		}
+	}
+	return maxStep
+}
+
+func resolveParentConversationID(vaultDir, convID string) string {
+	if convID == "" {
+		return ""
+	}
+	if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+		for _, t := range tasks {
+			if t.ConversationID == convID && t.ParentConversationID != "" {
+				return t.ParentConversationID
+			}
+		}
+	}
+	return ""
+}
+
 func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string) {
 	toolsUsed, filesModified, lastResponse, lastUserPrompt, _, _ = parseTranscriptSummaryWithMetrics(transcriptPath)
 	return toolsUsed, filesModified, lastResponse, lastUserPrompt
 }
 
+// isReadOnlyFileViewerOutput returns true if the tool output step is a file viewer (`read_file`)
+// or if the preceding planner step only invoked non-command tools (preventing string literals like
+// "Command exited with code 1" inside source files from triggering false-positive error counts).
+func isReadOnlyFileViewerOutput(content string, lastPlannerHadTools bool, lastPlannerHadRunCommand bool) bool {
+	if strings.HasPrefix(content, "Showing lines ") || strings.Contains(content, "\nShowing lines ") {
+		return true
+	}
+	if lastPlannerHadTools && !lastPlannerHadRunCommand {
+		return true
+	}
+	return false
+}
+
+func hasCommandExitNonZeroLine(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Command exited with code ") {
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "Command exited with code "))
+			if rest != "" && !strings.HasPrefix(rest, "0") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isTranscriptStepError(status, content string) bool {
+	return isTranscriptStepErrorWithContext(status, content, false, true)
+}
+
+func isTranscriptStepErrorWithContext(status, content string, lastPlannerHadTools bool, lastPlannerHadRunCommand bool) bool {
 	if strings.EqualFold(strings.TrimSpace(status), "ERROR") {
 		return true
 	}
 	if strings.Contains(content, "Encountered error in tool execution:") {
 		return true
 	}
-	if idx := strings.Index(content, "Command exited with code "); idx >= 0 {
-		rest := strings.TrimSpace(content[idx+len("Command exited with code "):])
-		if !strings.HasPrefix(rest, "0") {
+	if !isReadOnlyFileViewerOutput(content, lastPlannerHadTools, lastPlannerHadRunCommand) && hasCommandExitNonZeroLine(content) {
+		return true
+	}
+	return false
+}
+
+func isTransientExternalError(content string) bool {
+	lower := strings.ToLower(content)
+	for _, pat := range []string{
+		"429 too many requests",
+		"status 429",
+		"502 bad gateway",
+		"503 service unavailable",
+		"504 gateway timeout",
+		"etimedout",
+		"econnreset",
+		"rate limit exceeded",
+		"connection reset by peer",
+	} {
+		if strings.Contains(lower, pat) {
 			return true
 		}
 	}
 	return false
 }
 
+type transcriptTurnMetrics struct {
+	ToolsUsed       []string
+	FilesModified   []string
+	LastResponse    string
+	LastUserPrompt  string
+	StepCount       int
+	ToolErrorCount  int
+	TurnStepCount   int
+	TurnErrorCount  int
+	TransientErrors int
+	PreToolDenials  int
+	TaintedCmdSeen  bool
+}
+
 func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string, stepCount int, toolErrorCount int) {
+	tm := parseTranscriptTurnMetrics(transcriptPath, 0)
+	return tm.ToolsUsed, tm.FilesModified, tm.LastResponse, tm.LastUserPrompt, tm.StepCount, tm.ToolErrorCount
+}
+
+func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcriptTurnMetrics {
+	var tm transcriptTurnMetrics
 	if transcriptPath == "" {
-		return nil, nil, "", "", 0, 0
+		return tm
 	}
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return nil, nil, "", "", 0, 0
+		return tm
 	}
 	defer f.Close()
 
@@ -929,6 +1087,9 @@ func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []strin
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 2*1024*1024)
+
+	lastPlannerHadTools := false
+	lastPlannerHadRunCommand := false
 
 	for scanner.Scan() {
 		var step struct {
@@ -943,27 +1104,51 @@ func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []strin
 		if err := json.Unmarshal(scanner.Bytes(), &step); err != nil {
 			continue
 		}
-		stepCount++
-		if isTranscriptStepError(step.Status, step.Content) {
-			toolErrorCount++
+		curIdx := tm.StepCount
+		tm.StepCount++
+		inCurrentTurn := curIdx >= stepStartIdx
+
+		if isTranscriptStepErrorWithContext(step.Status, step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) {
+			tm.ToolErrorCount++
+			if inCurrentTurn {
+				tm.TurnErrorCount++
+				if isTransientExternalError(step.Content) {
+					tm.TransientErrors++
+				}
+			}
+		}
+		if inCurrentTurn && strings.Contains(step.Content, "Blocked by agy-hq") {
+			tm.PreToolDenials++
 		}
 		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
 			cleaned := strings.ReplaceAll(step.Content, "<USER_REQUEST>", "")
 			cleaned = strings.ReplaceAll(cleaned, "</USER_REQUEST>", "")
 			cleaned = strings.TrimSpace(cleaned)
 			if cleaned != "" {
-				lastUserPrompt = cleaned
+				tm.LastUserPrompt = cleaned
 			}
 		}
-		if step.Type == "PLANNER_RESPONSE" && strings.TrimSpace(step.Content) != "" {
-			lastResponse = strings.TrimSpace(step.Content)
-			if runes := []rune(lastResponse); len(runes) > 500 {
-				lastResponse = string(runes[:500]) + "..."
+		if step.Type == "PLANNER_RESPONSE" {
+			if strings.TrimSpace(step.Content) != "" {
+				tm.LastResponse = strings.TrimSpace(step.Content)
+				if runes := []rune(tm.LastResponse); len(runes) > 500 {
+					tm.LastResponse = string(runes[:500]) + "..."
+				}
 			}
+			lastPlannerHadTools = len(step.ToolCalls) > 0
+			lastPlannerHadRunCommand = false
 		}
 		for _, tc := range step.ToolCalls {
 			if tc.Name != "" {
 				toolSet[tc.Name] = true
+			}
+			if tc.Name == "run_command" {
+				lastPlannerHadRunCommand = true
+				if cmdStr, ok := tc.Args["CommandLine"].(string); ok {
+					if strings.Contains(cmdStr, "read-quarantined") {
+						tm.TaintedCmdSeen = true
+					}
+				}
 			}
 			if tc.Name == "write_file" || tc.Name == "edit_file" {
 				if rawP, ok := tc.Args["Path"].(string); ok {
@@ -977,10 +1162,10 @@ func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []strin
 				if rawMsg, ok := tc.Args["Message"].(string); ok {
 					msg := strings.Trim(strings.TrimSpace(rawMsg), "\"")
 					if msg != "" {
-						if strings.TrimSpace(lastResponse) == "" || len(lastResponse) < 20 {
-							lastResponse = msg
-							if runes := []rune(lastResponse); len(runes) > 500 {
-								lastResponse = string(runes[:500]) + "..."
+						if strings.TrimSpace(tm.LastResponse) == "" || len(tm.LastResponse) < 20 {
+							tm.LastResponse = msg
+							if runes := []rune(tm.LastResponse); len(runes) > 500 {
+								tm.LastResponse = string(runes[:500]) + "..."
 							}
 						}
 					}
@@ -989,13 +1174,16 @@ func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []strin
 		}
 	}
 
+	if tm.StepCount > stepStartIdx {
+		tm.TurnStepCount = tm.StepCount - stepStartIdx
+	}
 	for k := range toolSet {
-		toolsUsed = append(toolsUsed, k)
+		tm.ToolsUsed = append(tm.ToolsUsed, k)
 	}
 	for k := range fileSet {
-		filesModified = append(filesModified, k)
+		tm.FilesModified = append(tm.FilesModified, k)
 	}
-	return toolsUsed, filesModified, lastResponse, lastUserPrompt, stepCount, toolErrorCount
+	return tm
 }
 
 func cleanUserPrompt(raw string) string {
@@ -1106,6 +1294,9 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 4*1024*1024)
 
+	lastPlannerHadTools := false
+	lastPlannerHadRunCommand := false
+
 	for scanner.Scan() {
 		var step struct {
 			StepIndex int    `json:"step_index"`
@@ -1132,7 +1323,7 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 			}
 		}
 
-		if isTranscriptStepError(step.Status, step.Content) {
+		if isTranscriptStepErrorWithContext(step.Status, step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) {
 			digest.ToolErrorCount++
 			errSummary := strings.TrimSpace(step.Content)
 			if idx := strings.Index(errSummary, "Command exited with code "); idx >= 0 {
@@ -1149,18 +1340,25 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 			})
 		}
 
-		if step.Type == "PLANNER_RESPONSE" && strings.TrimSpace(step.Content) != "" {
-			resp := strings.TrimSpace(step.Content)
-			if runes := []rune(resp); len(runes) > 600 {
-				resp = string(runes[:600]) + "..."
+		if step.Type == "PLANNER_RESPONSE" {
+			if strings.TrimSpace(step.Content) != "" {
+				resp := strings.TrimSpace(step.Content)
+				if runes := []rune(resp); len(runes) > 600 {
+					resp = string(runes[:600]) + "..."
+				}
+				digest.FinalResponse = resp
 			}
-			digest.FinalResponse = resp
+			lastPlannerHadTools = len(step.ToolCalls) > 0
+			lastPlannerHadRunCommand = false
 		}
 
 		for _, tc := range step.ToolCalls {
 			if tc.Name != "" && !toolSeen[tc.Name] {
 				toolSeen[tc.Name] = true
 				toolOrder = append(toolOrder, tc.Name)
+			}
+			if tc.Name == "run_command" {
+				lastPlannerHadRunCommand = true
 			}
 			if tc.Name == "write_file" || tc.Name == "edit_file" {
 				if p, ok := tc.Args["Path"].(string); ok && p != "" && !fileSeen[p] {
@@ -1188,11 +1386,40 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 			fmt.Sprintf("Ground-truth transcript recorded %d tool/command error step(s); verify that the final claim resolved these errors.", digest.ToolErrorCount))
 	}
 	for _, fp := range digest.FilesModified {
-		if _, err := os.Stat(fp); os.IsNotExist(err) {
+		if !isModifiedFilePresentOnDisk(fp, vaultDir) {
 			digest.DiscrepancyWarnings = append(digest.DiscrepancyWarnings,
 				fmt.Sprintf("File %s was written/edited during the session but no longer exists on disk.", fp))
 		}
 	}
 
 	return digest, nil
+}
+
+// isModifiedFilePresentOnDisk checks whether fp exists at its recorded path or, if fp was inside an
+// isolated git worktree (`.../worktrees/<wtName>/<relPath>`) that has since been merged and removed,
+// whether `<rootDir>/<relPath>` exists in the primary checkout.
+func isModifiedFilePresentOnDisk(fp string, vaultDir string) bool {
+	if _, err := os.Stat(fp); err == nil {
+		return true
+	}
+	slashPath := filepath.ToSlash(filepath.Clean(fp))
+	const marker = "/worktrees/"
+	if idx := strings.Index(slashPath, marker); idx >= 0 {
+		after := slashPath[idx+len(marker):]
+		if slashIdx := strings.IndexByte(after, '/'); slashIdx > 0 && slashIdx+1 < len(after) {
+			relPath := filepath.FromSlash(after[slashIdx+1:])
+			candidates := []string{
+				filepath.Join(filepath.Dir(filepath.Clean(vaultDir)), relPath),
+			}
+			if rootDir, err := vault.ResolveRoot(); err == nil && rootDir != "" {
+				candidates = append(candidates, filepath.Join(rootDir, relPath))
+			}
+			for _, c := range candidates {
+				if _, err := os.Stat(c); err == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

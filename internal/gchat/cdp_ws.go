@@ -67,6 +67,10 @@ func isGoogleLoginURL(rawURL string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	if host == "accounts.google.com" {
+		path := strings.ToLower(u.Path)
+		if strings.Contains(path, "rotatecookies") || strings.Contains(path, "checkconnection") {
+			return false
+		}
 		return true
 	}
 	if host == "workspace.google.com" && strings.Contains(u.Path, "/products/chat") {
@@ -222,7 +226,7 @@ func EnsureCDPSession(vaultDir, accountAlias string, allowInteractiveLogin bool)
 		for _, t := range all {
 			if isAuthenticatedChatURL(t.URL) && t.WebSocketDebuggerURL != "" {
 				chatTargets = append(chatTargets, t)
-			} else if isGoogleLoginURL(t.URL) {
+			} else if t.Type == "page" && isGoogleLoginURL(t.URL) {
 				loginTabs++
 			}
 		}

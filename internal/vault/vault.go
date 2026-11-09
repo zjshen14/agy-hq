@@ -124,6 +124,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		filepath.Join(vaultDir, "memory", "pending"),
 		filepath.Join(vaultDir, "memory", "outbox"),
 		filepath.Join(vaultDir, "memory", "proposals"),
+		filepath.Join(vaultDir, "memory", "rsi", "hypotheses"),
 	}
 
 	for _, d := range dirs {

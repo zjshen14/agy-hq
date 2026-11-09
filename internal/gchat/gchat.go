@@ -1286,7 +1286,7 @@ func CheckCDPEndpoint(cdpEndpoint string) (bool, string) {
 	for _, t := range targets {
 		if isAuthenticatedChatURL(t.URL) {
 			chatTabs++
-		} else if isGoogleLoginURL(t.URL) {
+		} else if t.Type == "page" && isGoogleLoginURL(t.URL) {
 			loginTabs++
 		}
 	}
