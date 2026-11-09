@@ -396,7 +396,7 @@ func saveCachedSpaces(vaultDir, account string, spaces []SpaceSummary) error {
 			continue
 		}
 		name := strings.TrimSpace(s.DisplayName)
-		if name == "" || name == spID || name == strings.TrimPrefix(spID, "spaces/") {
+		if name == "" || name == spID || name == strings.TrimPrefix(spID, "spaces/") || strings.EqualFold(name, "Away") || strings.EqualFold(name, "Active") {
 			continue
 		}
 		k := strings.ToLower(acct) + "|" + safeSpaceKey(spID)
@@ -404,7 +404,7 @@ func saveCachedSpaces(vaultDir, account string, spaces []SpaceSummary) error {
 			order = append(order, k)
 		}
 		s.Account = acct
-		s.SpaceID = spID
+		s.SpaceID = normalizeSpaceID(spID)
 		s.DisplayName = name
 		byKey[k] = s
 	}
@@ -423,15 +423,15 @@ func loadCachedSpaces(vaultDir, account string) []SpaceSummary {
 	seen := make(map[string]bool)
 	var out []SpaceSummary
 	add := func(acct, spID, name, spType string) {
-		spID = strings.TrimSpace(spID)
+		spID = normalizeSpaceID(spID)
 		name = strings.TrimSpace(name)
-		if spID == "" {
+		if spID == "" || name == "" || strings.EqualFold(name, "Away") || strings.EqualFold(name, "Active") {
 			return
 		}
 		if account != "" && acct != "" && !strings.EqualFold(acct, account) {
 			return
 		}
-		k := strings.ToLower(acct) + "|" + safeSpaceKey(spID)
+		k := strings.ToLower(acct) + "|" + safeSpaceKey(spID) + "|" + strings.ToLower(name)
 		if seen[k] {
 			return
 		}

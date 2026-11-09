@@ -557,6 +557,8 @@ const jsExtractSpaces = `(() => {
   }
   const seen = new Set();
   const out = [];
+  const skipIds = new Set(['spaces/pinned-item', 'spaces/direct-messages', 'spaces/spaces', 'spaces/shortcut', 'spaces/browse-spaces']);
+  const statusWords = /^(Away|Active|Do not disturb|In a meeting|Out of office|Offline|Unread|Pinned|Muted|Space|Direct message|External|\d+\s+unread.*|\d+:\d+\s*(AM|PM)?|Yesterday|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec.*)$/i;
   for (const doc of docs) {
     const nodes = doc.querySelectorAll('[data-group-id], a[href*="/chat/"], a[href*="/room/"], a[href*="/dm/"], [role="listitem"][aria-label]');
     for (const el of nodes) {
@@ -568,11 +570,23 @@ const jsExtractSpaces = `(() => {
       }
       if (!id) continue;
       if (!id.startsWith('spaces/')) id = 'spaces/' + id.replace(/^(space|room|dm)\//, '');
-      if (seen.has(id)) continue;
+      if (skipIds.has(id) || seen.has(id)) continue;
       seen.add(id);
-      let name = (el.getAttribute('aria-label') || el.innerText || id).split('\n')[0].trim();
-      name = name.replace(/^(Unread\s+|Pinned\s+|Space\s+|Direct message\s+)/i, '').trim();
-      out.push({ spaceId: id, displayName: name || id, spaceType: href.includes('/dm/') ? 'DIRECT_MESSAGE' : 'SPACE' });
+      const aria = (el.getAttribute('aria-label') || '').trim();
+      const lines = (aria ? [aria] : []).concat((el.innerText || '').split('\n')).map(s => s.trim()).filter(Boolean);
+      let name = '';
+      for (const line of lines) {
+        const cleaned = line
+          .replace(/^(Unread\s+|Pinned\s+|Space\s+|Direct message\s+|Conversation with\s+)/i, '')
+          .replace(/,\s*(Away|Active|Do not disturb|Offline|Unread).*$/i, '')
+          .trim();
+        if (cleaned && !statusWords.test(cleaned) && cleaned.length > 1 && !cleaned.startsWith('spaces/')) {
+          name = cleaned;
+          break;
+        }
+      }
+      if (!name) continue;
+      out.push({ spaceId: id, displayName: name, spaceType: (id.endsWith('AAAAE') || href.includes('/dm/')) ? 'DIRECT_MESSAGE' : 'SPACE' });
     }
   }
   return out;
