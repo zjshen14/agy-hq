@@ -914,15 +914,45 @@ func main() {
 		case "login":
 			fs := flag.NewFlagSet("gchat login", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
-			timeoutSec := fs.Int("timeout", 120, "Seconds to wait for interactive Google Sign-In")
+			reset := fs.Bool("reset", false, "Back up and clear existing session cookies to test a fresh first-time login")
+			remote := fs.Bool("remote", false, "Run login in headless mode with automatic email entry, Google Prompt 2-digit readout, and PNG screenshot")
+			screenshot := fs.String("screenshot", "", "Optional path to save live Google Sign-In challenge PNG screenshot")
+			timeoutSec := fs.Int("timeout", 120, "Seconds to wait for Google Sign-In")
 			_ = fs.Parse(os.Args[3:])
-			ep, err := gchat.InteractiveLogin(vaultDir, *account, time.Duration(*timeoutSec)*time.Second)
+			ep, err := gchat.InteractiveLoginWithOptions(vaultDir, *account, gchat.LoginOptions{
+				Reset:          *reset,
+				RemoteHeadless: *remote,
+				ScreenshotPath: *screenshot,
+				Timeout:        time.Duration(*timeoutSec) * time.Second,
+			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gchat login failed: %v\n", err)
 				os.Exit(1)
 			}
 			spaces, _ := gchat.ListSpaces(vaultDir, *account, "", 50)
 			fmt.Printf("Authenticated Google Chat session active in background headless mode (%s, %d space(s) cached)\n", ep, len(spaces))
+
+		case "logout", "reset-session":
+			fs := flag.NewFlagSet("gchat logout", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			_ = fs.Parse(os.Args[3:])
+			msg, err := gchat.LogoutOrResetProfile(vaultDir, *account)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat logout failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(msg)
+
+		case "restore-session":
+			fs := flag.NewFlagSet("gchat restore-session", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			_ = fs.Parse(os.Args[3:])
+			msg, err := gchat.RestoreProfileCookies(vaultDir, *account)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat restore-session failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(msg)
 
 		case "launch-chrome":
 			fs := flag.NewFlagSet("gchat launch-chrome", flag.ExitOnError)

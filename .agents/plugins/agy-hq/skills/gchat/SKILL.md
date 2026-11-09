@@ -57,11 +57,18 @@ These read-only metadata commands are safe to run inline (including at `[HQ] Fro
   ```
   and return the sanitized summary (or stage a reply via `./bin/hq gchat propose`).
 
-## 4. First-Time or Expired Sign-In (`./bin/hq gchat login`)
+## 4. First-Time, Expired, or Remote Sign-In (`./bin/hq gchat login`)
 
 - In steady state, `./bin/hq gchat` reuses the isolated cookies in `local/private/gchat/chrome-profile` and launches Chrome invisibly with `--headless=new` (no window pops up).
-- If cookies are missing or expired (`redirected to accounts.google.com`), run:
+- **Desktop Guided Login (or Testing Fresh Login):**
   ```sh
-  ./bin/hq gchat login
+  ./bin/hq gchat login               # Opens visible sign-in window if logged out
+  ./bin/hq gchat login --reset       # Backs up Cookies -> Cookies.bak and forces a fresh login test
+  ./bin/hq gchat restore-session     # Restores Cookies.bak in 1 second if you cancel a login test
   ```
-  This opens a visible sign-in window, waits for you to complete Google Sign-In/Passkey, caches your spaces list, automatically closes the visible window, and restarts the browser in invisible `--headless=new` mode.
+  `hq gchat login` automatically fills your email address, waits for you to complete Google Sign-In/Passkey, caches your spaces list, closes the visible window, and restarts the browser in invisible `--headless=new` mode.
+- **Remote Login from iPhone (`--remote`):**
+  ```sh
+  ./bin/hq gchat login --remote [--reset]
+  ```
+  Runs in headless mode, auto-fills the Google email, auto-submits `local/private/gchat/.pass` (`0600`) if present, prints any **Google Prompt 2-digit number** (`📱 GOOGLE PROMPT ON PHONE: Tap "Yes" and select number [XX]`), and saves a live PNG screenshot to `local/memory/gchat/login-status.png` so the user can approve the prompt directly on their iPhone.

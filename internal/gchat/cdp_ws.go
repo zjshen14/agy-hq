@@ -250,32 +250,238 @@ func EnsureCDPSession(vaultDir, accountAlias string, allowInteractiveLogin bool)
 	return ep, nil
 }
 
-// InteractiveLogin opens a visible Chrome window to Google Sign-In, polls until chat.google.com loads,
-// caches the user's space list, closes the visible window, and restarts in background `--headless=new` mode.
-func InteractiveLogin(vaultDir, accountAlias string, timeout time.Duration) (string, error) {
+// LoginOptions configures InteractiveLoginWithOptions.
+type LoginOptions struct {
+	Reset          bool
+	RemoteHeadless bool
+	ScreenshotPath string
+	Timeout        time.Duration
+}
+
+// LogoutOrResetProfile closes the active Chrome CDP session, backs up existing session cookies
+// to Cookies.bak inside local/private/gchat/chrome-profile, and removes the active Cookies file
+// so the user can test a fresh first-time login (and restore via RestoreProfileCookies if desired).
+func LogoutOrResetProfile(vaultDir, accountAlias string) (string, error) {
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
 	if err != nil {
 		return "", err
 	}
-	if timeout <= 0 {
-		timeout = 120 * time.Second
+	ep := resolveActiveCDPEndpoint(cfg)
+	if ok, _ := CheckCDPEndpoint(ep); ok {
+		closeCDPBrowser(ep)
+		time.Sleep(500 * time.Millisecond)
+	}
+	var backedUp []string
+	for _, rel := range []string{
+		filepath.Join("Default", "Cookies"),
+		filepath.Join("Default", "Network", "Cookies"),
+	} {
+		p := filepath.Join(cfg.ChromeProfileDir, rel)
+		if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
+			bak := p + ".bak"
+			_ = os.WriteFile(bak, data, 0o600)
+			_ = os.Remove(p)
+			_ = os.Remove(p + "-journal")
+			backedUp = append(backedUp, rel)
+		}
+	}
+	if len(backedUp) == 0 {
+		return fmt.Sprintf("Closed Chrome CDP session for %q (profile was already logged out)", cfg.Alias), nil
+	}
+	return fmt.Sprintf("Logged out Google Chat profile %q (backed up %s to *.bak; run `./bin/hq gchat login` to test login or `./bin/hq gchat restore-session` to restore)", cfg.Alias, strings.Join(backedUp, ", ")), nil
+}
+
+// RestoreProfileCookies restores Cookies.bak in local/private/gchat/chrome-profile and restarts headless Chrome.
+func RestoreProfileCookies(vaultDir, accountAlias string) (string, error) {
+	cfg, err := ResolveAccount(vaultDir, accountAlias)
+	if err != nil {
+		return "", err
 	}
 	ep := resolveActiveCDPEndpoint(cfg)
 	if ok, _ := CheckCDPEndpoint(ep); ok {
-		// Check if already authenticated
-		if chatTargets, err := fetchCDPTargets(ep); err == nil && len(chatTargets) > 0 {
-			return ep, nil
+		closeCDPBrowser(ep)
+		time.Sleep(500 * time.Millisecond)
+	}
+	restored := 0
+	for _, rel := range []string{
+		filepath.Join("Default", "Cookies"),
+		filepath.Join("Default", "Network", "Cookies"),
+	} {
+		p := filepath.Join(cfg.ChromeProfileDir, rel)
+		bak := p + ".bak"
+		if data, err := os.ReadFile(bak); err == nil && len(data) > 0 {
+			if err := os.WriteFile(p, data, 0o600); err == nil {
+				restored++
+			}
+		}
+	}
+	if restored == 0 {
+		return "", fmt.Errorf("no Cookies.bak backup found in %s", cfg.ChromeProfileDir)
+	}
+	newEp, err := EnsureCDPSession(vaultDir, cfg.Alias, false)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Restored Google Chat session cookies for %q and restarted headless Chrome on %s", cfg.Alias, newEp), nil
+}
+
+func captureCDPScreenshot(wsURL, destPath string) error {
+	if strings.TrimSpace(destPath) == "" {
+		return nil
+	}
+	raw, err := cdpCall(wsURL, "Page.captureScreenshot", map[string]interface{}{
+		"format": "png",
+	})
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.Data == "" {
+		return fmt.Errorf("empty screenshot data")
+	}
+	pngBytes, err := base64.StdEncoding.DecodeString(resp.Data)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(destPath, pngBytes, 0o644)
+}
+
+func assistGoogleLoginStep(wsURL, email, vaultDir, screenshotPath string, emailSubmitted, passSubmitted *bool, lastChallenge *string) {
+	if !*emailSubmitted && strings.TrimSpace(email) != "" {
+		emailJSON, _ := json.Marshal(strings.TrimSpace(email))
+		jsFillEmail := fmt.Sprintf(`(() => {
+  const input = document.querySelector('input[type="email"], input#identifierId');
+  if (!input || input.offsetParent === null) return false;
+  if (!input.value) {
+    input.focus();
+    input.value = %s;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const nextBtn = document.querySelector('#identifierNext button, #identifierNext');
+  if (nextBtn) nextBtn.click();
+  return true;
+})()`, string(emailJSON))
+		if raw, err := cdpEvalJS(wsURL, jsFillEmail); err == nil && string(raw) == "true" {
+			*emailSubmitted = true
+			fmt.Printf("  -> Auto-filled Google account email (%s) and clicked Next\n", email)
+			return
+		}
+	}
+
+	if !*passSubmitted {
+		passFile := filepath.Join(vaultDir, "private", "gchat", ".pass")
+		if passBytes, err := os.ReadFile(passFile); err == nil {
+			pass := strings.TrimSpace(string(passBytes))
+			if pass != "" {
+				passJSON, _ := json.Marshal(pass)
+				jsFillPass := fmt.Sprintf(`(() => {
+  const input = document.querySelector('input[type="password"][name="Passwd"], input[type="password"]');
+  if (!input || input.offsetParent === null) return false;
+  input.focus();
+  input.value = %s;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  const nextBtn = document.querySelector('#passwordNext button, #passwordNext');
+  if (nextBtn) nextBtn.click();
+  return true;
+})()`, string(passJSON))
+				if raw, err := cdpEvalJS(wsURL, jsFillPass); err == nil && string(raw) == "true" {
+					*passSubmitted = true
+					fmt.Println("  -> Auto-submitted password from local/private/gchat/.pass (0 LLM tokens)")
+					return
+				}
+			}
+		}
+	}
+
+	const jsInspectChallenge = `(() => {
+  const url = window.location.href;
+  const heading = (document.querySelector('h1, #headingText') || {}).innerText || '';
+  const samp = (document.querySelector('samp, [data-challenge-number], .vxx8jf') || {}).innerText || '';
+  const hasPass = !!document.querySelector('input[type="password"]')?.offsetParent;
+  const bodyText = (document.body ? document.body.innerText : '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 12).join(' | ');
+  return { url, heading: heading.trim(), number: samp.trim(), hasPass, summary: bodyText.slice(0, 240) };
+})()`
+	if raw, err := cdpEvalJS(wsURL, jsInspectChallenge); err == nil && len(raw) > 0 {
+		var info struct {
+			URL     string `json:"url"`
+			Heading string `json:"heading"`
+			Number  string `json:"number"`
+			HasPass bool   `json:"hasPass"`
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(raw, &info) == nil && info.Heading != "" {
+			sig := info.Heading + "|" + info.Number + "|" + fmt.Sprintf("%v", info.HasPass)
+			if sig != *lastChallenge {
+				*lastChallenge = sig
+				if info.Number != "" {
+					fmt.Printf("  📱 GOOGLE PROMPT ON PHONE: %s — Tap \"Yes\" and select number [%s]\n", info.Heading, info.Number)
+				} else if info.HasPass {
+					fmt.Printf("  🔑 Google Sign-In Step: %s (complete in window, or write password to local/private/gchat/.pass with 0600 perms for headless auto-fill)\n", info.Heading)
+				} else {
+					fmt.Printf("  🔐 Google Sign-In Step: %s (%s)\n", info.Heading, info.Summary)
+				}
+				_ = captureCDPScreenshot(wsURL, screenshotPath)
+			}
+		}
+	}
+}
+
+// InteractiveLogin opens a Chrome window to Google Sign-In, polls until chat.google.com loads,
+// caches the user's space list, closes the visible window, and restarts in background `--headless=new` mode.
+func InteractiveLogin(vaultDir, accountAlias string, timeout time.Duration) (string, error) {
+	return InteractiveLoginWithOptions(vaultDir, accountAlias, LoginOptions{Timeout: timeout})
+}
+
+// InteractiveLoginWithOptions performs a guided Google Chat sign-in with optional cookie reset,
+// remote headless mode (with email auto-fill, Google Prompt 2-digit number readout, and live PNG screenshot),
+// and automatic transition into `--headless=new` background mode.
+func InteractiveLoginWithOptions(vaultDir, accountAlias string, opts LoginOptions) (string, error) {
+	cfg, err := ResolveAccount(vaultDir, accountAlias)
+	if err != nil {
+		return "", err
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = 120 * time.Second
+	}
+	if opts.ScreenshotPath == "" {
+		opts.ScreenshotPath = filepath.Join(vaultDir, "memory", "gchat", "login-status.png")
+	}
+	if opts.Reset {
+		msg, err := LogoutOrResetProfile(vaultDir, cfg.Alias)
+		if err != nil {
+			return "", err
+		}
+		fmt.Println(msg)
+	}
+
+	ep := resolveActiveCDPEndpoint(cfg)
+	if ok, _ := CheckCDPEndpoint(ep); ok {
+		if !opts.Reset {
+			if chatTargets, err := fetchCDPTargets(ep); err == nil && len(chatTargets) > 0 {
+				return ep, nil
+			}
 		}
 		closeCDPBrowser(ep)
 		time.Sleep(400 * time.Millisecond)
 	}
 
-	if _, _, err := launchChromeWithURL(cfg, false, "https://accounts.google.com/ServiceLogin?continue=https://chat.google.com/u/0/app/home"); err != nil {
+	loginURL := "https://accounts.google.com/ServiceLogin?Email=" + url.QueryEscape(cfg.Email) + "&continue=https://chat.google.com/u/0/app/home"
+	if _, _, err := launchChromeWithURL(cfg, opts.RemoteHeadless, loginURL); err != nil {
 		return "", err
 	}
 
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(opts.Timeout)
 	var authedTargets []cdpTarget
+	emailSubmitted := false
+	passSubmitted := false
+	lastChallenge := ""
 	for time.Now().Before(deadline) {
 		time.Sleep(1 * time.Second)
 		ep = resolveActiveCDPEndpoint(cfg)
@@ -284,9 +490,17 @@ func InteractiveLogin(vaultDir, accountAlias string, timeout time.Duration) (str
 			authedTargets = targets
 			break
 		}
+		if allTargets, err := fetchAllCDPTargets(ep); err == nil {
+			for _, t := range allTargets {
+				if t.Type == "page" && isGoogleLoginURL(t.URL) && t.WebSocketDebuggerURL != "" {
+					assistGoogleLoginStep(t.WebSocketDebuggerURL, cfg.Email, vaultDir, opts.ScreenshotPath, &emailSubmitted, &passSubmitted, &lastChallenge)
+					break
+				}
+			}
+		}
 	}
 	if len(authedTargets) == 0 {
-		return "", fmt.Errorf("timed out after %s waiting for Google Chat sign-in in Chrome", timeout)
+		return "", fmt.Errorf("timed out after %s waiting for Google Chat sign-in in Chrome (screenshot saved to %s; run `./bin/hq gchat restore-session` to restore previous cookies)", opts.Timeout, opts.ScreenshotPath)
 	}
 
 	// Let sidebar render and cache spaces before switching to background headless mode
@@ -295,15 +509,17 @@ func InteractiveLogin(vaultDir, accountAlias string, timeout time.Duration) (str
 		_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
 	}
 
-	// Close visible login window so cookies flush to disk, then restart silently in --headless=new mode
-	closeCDPBrowser(ep)
-	time.Sleep(500 * time.Millisecond)
-	if _, _, err := LaunchChromeProfile(vaultDir, cfg.Alias, true); err == nil {
-		for i := 0; i < 20; i++ {
-			time.Sleep(250 * time.Millisecond)
-			ep = resolveActiveCDPEndpoint(cfg)
-			if ok, _ := CheckCDPEndpoint(ep); ok {
-				break
+	if !opts.RemoteHeadless {
+		// Close visible login window so cookies flush to disk, then restart silently in --headless=new mode
+		closeCDPBrowser(ep)
+		time.Sleep(500 * time.Millisecond)
+		if _, _, err := LaunchChromeProfile(vaultDir, cfg.Alias, true); err == nil {
+			for i := 0; i < 20; i++ {
+				time.Sleep(250 * time.Millisecond)
+				ep = resolveActiveCDPEndpoint(cfg)
+				if ok, _ := CheckCDPEndpoint(ep); ok {
+					break
+				}
 			}
 		}
 	}
