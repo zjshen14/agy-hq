@@ -196,15 +196,18 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 						modelName = payload.ModelName
 					}
 					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-						TaskSlug:       sub.TaskSlug,
-						Title:          sub.Title,
-						Tier:           sub.Tier,
-						Model:          modelName,
-						ConversationID: payload.ConversationID,
-						Status:         "active",
-						LastSummary:    "Running in background...",
-						CreatedAt:      time.Now().Format(time.RFC3339),
-						LastUpdatedAt:  time.Now().Format(time.RFC3339),
+						TaskSlug:             sub.TaskSlug,
+						Title:                sub.Title,
+						Kind:                 "subagent",
+						Scope:                sub.Scope,
+						ParentConversationID: sub.ParentConversationID,
+						Tier:                 sub.Tier,
+						Model:                modelName,
+						ConversationID:       payload.ConversationID,
+						Status:               "active",
+						LastSummary:          "Running in background...",
+						CreatedAt:            time.Now().Format(time.RFC3339),
+						LastUpdatedAt:        time.Now().Format(time.RFC3339),
 					})
 				} else {
 					_, _ = kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName)
@@ -285,12 +288,19 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		sections = append(sections, "## Active Git Worktrees\n"+strings.Join(lines, "\n"))
 	}
 	if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
-		var lines []string
-		for _, t := range tasks {
-			cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
-			lines = append(lines, fmt.Sprintf("- **%s** (`%s`, status: `%s`, conv: `%s`)", cleanTitle, t.TaskSlug, t.Status, t.ConversationID))
+		now := time.Now()
+		selected, omitted := kernel.SelectSessionStartTasks(tasks, now)
+		if len(selected) > 0 {
+			var lines []string
+			for _, t := range selected {
+				cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
+				lines = append(lines, fmt.Sprintf("- **%s** (`%s`, kind: `%s`, status: `%s`, conv: `%s`)", cleanTitle, t.TaskSlug, t.EffectiveKind(), t.EffectiveStatus(now), t.ConversationID))
+			}
+			if omitted > 0 {
+				lines = append(lines, fmt.Sprintf("- *(+%d older completed/archived task(s) omitted from context; run `./bin/hq tasks` to inspect)*", omitted))
+			}
+			sections = append(sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
 		}
-		sections = append(sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
 	}
 	if cfg, err := kernel.LoadTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
 		fd, _ := kernel.GetFrontDesk(vaultDir)
@@ -493,7 +503,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		model, _ := payload.ToolCall.Args["Model"].(string)
 		prompt, _ := payload.ToolCall.Args["Prompt"].(string)
 		_ = kernel.RecordSubagentSpawn(vaultDir, role, model, prompt)
-		_, _ = kernel.QueuePendingSubagent(vaultDir, role, model, prompt)
+		_, _ = kernel.QueuePendingSubagentWithParent(vaultDir, payload.ConversationID, role, model, prompt)
 		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
 		return err
 	}
@@ -747,16 +757,22 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							if modelName == "" {
 								modelName = payload.ModelName
 							}
+							nowISO := time.Now().Format(time.RFC3339)
 							task := kernel.ActiveTask{
-								TaskSlug:       sub.TaskSlug,
-								Title:          sub.Title,
-								Tier:           sub.Tier,
-								Model:          modelName,
-								ConversationID: payload.ConversationID,
-								Status:         "completed",
-								CreatedAt:      time.Now().Format(time.RFC3339),
-								LastUpdatedAt:  time.Now().Format(time.RFC3339),
-								LastSummary:    summary,
+								TaskSlug:             sub.TaskSlug,
+								Title:                sub.Title,
+								Kind:                 "subagent",
+								Scope:                sub.Scope,
+								ParentConversationID: sub.ParentConversationID,
+								Tier:                 sub.Tier,
+								Model:                modelName,
+								ConversationID:       payload.ConversationID,
+								Status:               "completed",
+								TurnCount:            1,
+								CreatedAt:            nowISO,
+								LastUpdatedAt:        nowISO,
+								CompletedAt:          nowISO,
+								LastSummary:          summary,
 							}
 							if strings.TrimSpace(task.LastSummary) == "" {
 								task.LastSummary = "Task completed."
@@ -772,7 +788,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 
 					if alreadyTracked && matchedTask != nil {
 						// Subagent lifecycle transition: mark completed if it was a subagent task
-						isSubagent := strings.HasPrefix(matchedTask.TaskSlug, "subagent-") || strings.HasPrefix(matchedTask.Title, "[Subagent:")
+						isSubagent := matchedTask.EffectiveKind() == "subagent" || strings.HasPrefix(matchedTask.TaskSlug, "subagent-") || strings.HasPrefix(matchedTask.Title, "[Subagent:")
 						newStatus := matchedTask.Status
 						if isSubagent && matchedTask.Status == "active" {
 							newStatus = "completed"
@@ -784,17 +800,30 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 						if strings.TrimSpace(newSummary) == "" {
 							newSummary = "Task completed."
 						}
+						nowISO := time.Now().Format(time.RFC3339)
+						completedAt := matchedTask.CompletedAt
+						if newStatus == "completed" && completedAt == "" {
+							completedAt = nowISO
+						}
 						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-							TaskSlug:       matchedTask.TaskSlug,
-							Title:          matchedTask.Title,
-							Tier:           matchedTask.Tier,
-							Model:          matchedTask.Model,
-							WorktreeDir:    matchedTask.WorktreeDir,
-							ConversationID: payload.ConversationID,
-							Status:         newStatus,
-							CreatedAt:      matchedTask.CreatedAt,
-							LastUpdatedAt:  time.Now().Format(time.RFC3339),
-							LastSummary:    newSummary,
+							TaskSlug:             matchedTask.TaskSlug,
+							Title:                matchedTask.Title,
+							Kind:                 matchedTask.EffectiveKind(),
+							Scope:                matchedTask.EffectiveScope(),
+							ParentConversationID: matchedTask.ParentConversationID,
+							Tier:                 matchedTask.Tier,
+							Model:                matchedTask.Model,
+							WorktreeDir:          matchedTask.WorktreeDir,
+							RepoRoot:             matchedTask.RepoRoot,
+							ConversationID:       payload.ConversationID,
+							Status:               newStatus,
+							TurnCount:            matchedTask.TurnCount + 1,
+							Pinned:               matchedTask.Pinned,
+							CreatedAt:            matchedTask.CreatedAt,
+							LastUpdatedAt:        nowISO,
+							CompletedAt:          completedAt,
+							ArchivedAt:           matchedTask.ArchivedAt,
+							LastSummary:          newSummary,
 						})
 					} else if !alreadyTracked {
 						title := ""
@@ -803,8 +832,10 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 						}
 						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 							Title:          title,
+							Kind:           "task",
 							Model:          payload.ModelName,
 							ConversationID: payload.ConversationID,
+							TurnCount:      1,
 							LastUpdatedAt:  time.Now().Format(time.RFC3339),
 							LastSummary:    summary,
 						})

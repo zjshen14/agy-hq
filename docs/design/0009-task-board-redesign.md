@@ -1,6 +1,6 @@
 # RFC-0009: Scalable Task Board, Live Console & Hot/Cold Lifecycle Redesign
 
-- **Status:** Draft v3 (Updated: Never Truncate Truly Active Tasks; Cap Only Idle & Completed History)
+- **Status:** Implemented (Approved 2026-11-08 — Never Truncate Truly Active Tasks; Cap Only Idle & Completed History)
 - **Author:** `[Task:taskboard] taskboard-redesign` (`gemini-4-argon-high`)
 - **Created:** 2026-11-08
 - **Related Documents:** [RFC-0001](0001-vault-and-task-isolation.md), [RFC-0006](0006-memory-engine-upgrade.md), [RFC-0007](0007-front-desk-initialization-hardening.md), [06 — Task Board, Console Layout & Conversation Lifecycle Audit](../research/06_taskboard_and_console_audit.md)

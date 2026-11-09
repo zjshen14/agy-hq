@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -122,6 +124,12 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 		upgradedTrigger := upgradeSleepConsolidateTriggerModel(vaultDir)
 		beforeFacts, afterFacts, _ := CompactFacts(vaultDir)
 		recordStep("v4_memory_wiki_and_fact_dedup", fmt.Sprintf("Upgraded 4-layer Memory Engine (seededTopic=%v, addedKnowledgeMap=%v, sleepModelArgon=%v, compactedFacts=%d->%d)", seededTopic, addedMap, upgradedTrigger, beforeFacts, afterFacts))
+	}
+
+	// Migration v4 -> v5: Backfill task hierarchy (kind, scope) in tasks.json and compact historical subagents/archived tasks into tasks_archive.jsonl
+	if prev.Version < 5 {
+		backfilled, rotated := migrateV5TaskBoardHierarchy(vaultDir)
+		recordStep("v5_taskboard_hierarchy_and_archive", fmt.Sprintf("Backfilled kind/scope on %d task(s) and rotated %d completed/archived item(s) to tasks_archive.jsonl", backfilled, rotated))
 	}
 
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml
@@ -334,6 +342,36 @@ func upgradeSleepConsolidateTriggerModel(vaultDir string) bool {
 		return false
 	}
 	return true
+}
+
+func migrateV5TaskBoardHierarchy(vaultDir string) (int, int) {
+	tasksPath := filepath.Join(vaultDir, "memory", "tasks.json")
+	tasks, err := kernel.ListTasks(vaultDir)
+	if err != nil || len(tasks) == 0 {
+		return 0, 0
+	}
+	backfilled := 0
+	for i := range tasks {
+		ek := tasks[i].EffectiveKind()
+		es := tasks[i].EffectiveScope()
+		if tasks[i].Kind != ek || tasks[i].Scope != es {
+			tasks[i].Kind = ek
+			tasks[i].Scope = es
+			backfilled++
+		}
+	}
+	if backfilled > 0 {
+		if b, err := json.MarshalIndent(tasks, "", "  "); err == nil {
+			_ = os.WriteFile(tasksPath, b, 0o644)
+		}
+	}
+	rep, err := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{
+		IdleDormantArchiveAfter: 365 * 24 * time.Hour,
+	})
+	if err != nil || rep == nil {
+		return backfilled, 0
+	}
+	return backfilled, len(rep.RotatedColdSlugs)
 }
 
 // mergeMissingTopLevelYAMLBlocks checks if template YAML has top-level keys ("key:")

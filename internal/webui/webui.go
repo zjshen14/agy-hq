@@ -102,6 +102,40 @@ func NewHandler(vaultDir string) http.Handler {
 		renderHTML(w, state)
 	})
 
+	mux.HandleFunc("/api/tasks/complete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = r.ParseForm()
+		slug := strings.TrimSpace(r.FormValue("slug"))
+		err := kernel.CompleteTask(vaultDir, slug, "")
+		_ = SyncMarkdownConsole(vaultDir)
+		msg := fmt.Sprintf("Completed task %s", slug)
+		if err != nil {
+			msg = fmt.Sprintf("Error completing %s: %v", slug, err)
+		}
+		state := loadState(vaultDir, msg)
+		renderHTML(w, state)
+	})
+
+	mux.HandleFunc("/api/tasks/archive", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = r.ParseForm()
+		slug := strings.TrimSpace(r.FormValue("slug"))
+		err := kernel.ArchiveTask(vaultDir, slug, false)
+		_ = SyncMarkdownConsole(vaultDir)
+		msg := fmt.Sprintf("Archived task %s", slug)
+		if err != nil {
+			msg = fmt.Sprintf("Error archiving %s: %v", slug, err)
+		}
+		state := loadState(vaultDir, msg)
+		renderHTML(w, state)
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		state := loadState(vaultDir, "")
 		renderHTML(w, state)
@@ -114,16 +148,18 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	pending, _ := approvals.List(vaultDir)
 	wts, _ := worktree.List(vaultDir)
 	tasks, _ := kernel.ListTasks(vaultDir)
+	now := time.Now()
+	sel := kernel.SelectConsoleTasks(tasks, kernel.CountColdArchivedTasks(vaultDir), now)
 	turns := loadTodayJournals(vaultDir)
 	health := doctor.Run(vaultDir)
 	quota := kernel.LoadQuota(vaultDir)
 	return DashboardState{
 		VaultDir:    vaultDir,
-		UpdatedAt:   time.Now().Format("15:04:05"),
+		UpdatedAt:   now.Format("15:04:05"),
 		Quota:       quota,
 		Pending:     pending,
 		Worktrees:   wts,
-		Tasks:       tasks,
+		Tasks:       sel.VisibleRows,
 		TodayTurns:  turns,
 		Health:      health,
 		FlashResult: flashMsg,
@@ -313,6 +349,33 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
   <div class="card muted">No pending outbound actions.</div>
 {{end}}
 
+<h2>Live Task Board ({{len .Tasks}})</h2>
+{{if .Tasks}}
+  {{range .Tasks}}
+  <div class="card">
+    <div><strong>{{.Title}}</strong> <span class="badge {{if eq .Status "active"}}PASS{{else}}WARN{{end}}">{{.Status}}</span></div>
+    <div class="muted">Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: {{.ConversationID}}</div>
+    {{if .LastSummary}}<div class="muted" style="margin-top:4px">{{.LastSummary}}</div>{{end}}
+    <div class="actions">
+      {{if eq .Status "active"}}
+      <form method="POST" action="/api/tasks/complete">
+        <input type="hidden" name="slug" value="{{.TaskSlug}}">
+        <button type="submit" class="btn-approve">Complete</button>
+      </form>
+      {{end}}
+      {{if ne .Status "archived"}}
+      <form method="POST" action="/api/tasks/archive">
+        <input type="hidden" name="slug" value="{{.TaskSlug}}">
+        <button type="submit" class="btn-reject">Archive</button>
+      </form>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+{{else}}
+  <div class="card muted">No active tasks on the board.</div>
+{{end}}
+
 <h2>Active Worktrees ({{len .Worktrees}})</h2>
 {{if .Worktrees}}
   {{range .Worktrees}}
@@ -411,42 +474,65 @@ func SyncMarkdownConsole(vaultDir string) error {
 	}
 	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 
-	var visibleTasks []kernel.ActiveTask
-	var archivedCount int
-	for _, t := range state.Tasks {
-		if strings.EqualFold(t.Status, "archived") {
-			archivedCount++
-		} else {
-			visibleTasks = append(visibleTasks, t)
-		}
-	}
+	now := time.Now()
+	allTasks, _ := kernel.ListTasks(vaultDir)
+	coldCount := kernel.CountColdArchivedTasks(vaultDir)
+	sel := kernel.SelectConsoleTasks(allTasks, coldCount, now)
 
-	fmt.Fprintf(&b, "## 📋 2. Task Board (`%d` Tracked Conversations)\n", len(visibleTasks))
-	if len(visibleTasks) == 0 {
-		b.WriteString("- None registered in `local/memory/tasks.json`.\n")
-		if archivedCount > 0 {
-			fmt.Fprintf(&b, "\n- *%d archived task(s) preserved in local/memory/tasks.json*\n", archivedCount)
-		}
-		b.WriteString("\n---\n\n")
+	if len(allTasks) == 0 && coldCount == 0 {
+		fmt.Fprintf(&b, "## 📋 2. Task Board (`0` Tracked Conversations)\n")
+		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
 	} else {
-		b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
-		for _, t := range visibleTasks {
-			cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
-			oneLine := strings.Join(strings.Fields(t.LastSummary), " ")
-			oneLine = strings.ReplaceAll(oneLine, "|", "\\|")
-			if runes := []rune(oneLine); len(runes) > 130 {
-				oneLine = string(runes[:130]) + "..."
+		fmt.Fprintf(&b, "## 📋 2. Task Board (`%d` Active · `%d` Idle · `%d` Completed · `%d` Archived)\n",
+			sel.ActiveCount, sel.IdleCount, sel.CompletedCount, sel.ArchivedHotCount+sel.ArchivedColdCount)
+		if len(sel.VisibleRows) == 0 {
+			b.WriteString("- No active or recently completed tasks on the live board.\n")
+		} else {
+			b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
+			for _, t := range sel.VisibleRows {
+				cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
+				oneLine := strings.Join(strings.Fields(t.LastSummary), " ")
+				oneLine = strings.ReplaceAll(oneLine, "|", "\\|")
+				if runes := []rune(oneLine); len(runes) > 130 {
+					oneLine = string(runes[:130]) + "..."
+				}
+				eff := t.EffectiveStatus(now)
+				badge := "🟢 `active`"
+				switch eff {
+				case "idle":
+					badge = "⏸️ `idle`"
+				case "stalled":
+					badge = "⚠️ `stalled`"
+				case "completed":
+					badge = "✅ `completed`"
+				case "cancelled":
+					badge = "🛑 `cancelled`"
+				case "archived":
+					badge = "📦 `archived`"
+				}
+				if t.Pinned && eff == "active" {
+					badge = "📌 🟢 `active`"
+				}
+				slugCell := fmt.Sprintf("`%s`", t.TaskSlug)
+				var metaParts []string
+				if age := t.FormatRelativeAge(now); age != "" {
+					metaParts = append(metaParts, age)
+				}
+				if t.WorktreeDir != "" {
+					metaParts = append(metaParts, "🌿 wt")
+				}
+				if len(metaParts) > 0 {
+					slugCell += fmt.Sprintf(" · *%s*", strings.Join(metaParts, " · "))
+				}
+				fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | %s | %s |\n", badge, cleanTitle, t.ConversationID, slugCell, oneLine)
 			}
-			badge := "🟢 `active`"
-			if strings.EqualFold(t.Status, "completed") {
-				badge = "✅ `completed`"
-			} else if strings.EqualFold(t.Status, "cancelled") {
-				badge = "🛑 `cancelled`"
-			}
-			fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | `%s` | %s |\n", badge, cleanTitle, t.ConversationID, t.TaskSlug, oneLine)
 		}
-		if archivedCount > 0 {
-			fmt.Fprintf(&b, "\n- *%d archived task(s) preserved in local/memory/tasks.json*\n", archivedCount)
+		if sel.ArchivedHotCount > 0 {
+			fmt.Fprintf(&b, "\n- *%d archived task(s) preserved in local/memory/tasks.json*\n", sel.ArchivedHotCount)
+		}
+		if sel.HiddenCompletedCount > 0 || sel.HiddenIdleCount > 0 || sel.ArchivedColdCount > 0 {
+			fmt.Fprintf(&b, "- *%d older completed, %d idle, and %d cold-archived task(s) omitted from live console — run `./bin/hq tasks --all` or `./bin/hq tasks --archive` to inspect.*\n",
+				sel.HiddenCompletedCount, sel.HiddenIdleCount, sel.ArchivedColdCount)
 		}
 		b.WriteString("\n---\n\n")
 	}

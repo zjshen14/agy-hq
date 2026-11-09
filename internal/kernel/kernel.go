@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -122,23 +123,151 @@ func SanitizeTaskTitle(title, slug string) string {
 	return chosen
 }
 
-// ActiveTask tracks a dedicated multi-turn Task Conversation spawned via `hq spawn` in local/memory/tasks.json.
+// Default lifecycle thresholds for the Task Board (RFC-0009).
+const (
+	DefaultIdleThreshold            = 6 * time.Hour
+	DefaultDormantArchiveThreshold  = 48 * time.Hour
+	DefaultStalledSubagentThreshold = 30 * time.Minute
+	DefaultSubagentHotMaxAge        = 24 * time.Hour
+	DefaultTaskArchiveGracePeriod   = 24 * time.Hour
+	DefaultArchivedColdMaxAge       = 48 * time.Hour
+	MaxHotCompletedSubagents        = 10
+	MaxConsoleIdleTasks             = 5
+	MaxConsoleCompletedTasks        = 3
+	ConsoleCompletedMaxAge          = 2 * time.Hour
+	MaxSessionStartIdleTasks        = 5
+	MaxSessionStartCompletedTasks   = 3
+)
+
+// ActiveTask tracks a dedicated multi-turn Task Conversation or background Subagent
+// in local/memory/tasks.json (hot working set) and local/memory/tasks_archive.jsonl (cold ledger).
 type ActiveTask struct {
-	TaskSlug       string `json:"taskSlug"`
-	Title          string `json:"title"`
-	Tier           string `json:"tier"`
-	Model          string `json:"model"`
-	WorktreeDir    string `json:"worktreeDir,omitempty"`
-	RepoRoot       string `json:"repoRoot,omitempty"`
-	ConversationID string `json:"conversationId,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	LastUpdatedAt  string `json:"lastUpdatedAt"`
-	LastSummary    string `json:"lastSummary,omitempty"`
-	Status         string `json:"status"` // active, completed, archived, cancelled
+	TaskSlug             string `json:"taskSlug"`
+	Title                string `json:"title"`
+	Kind                 string `json:"kind,omitempty"`                 // "task" | "subagent" | "auto"
+	Scope                string `json:"scope,omitempty"`                // e.g. "agy-hq", "brand", "NVDA", "personal"
+	Tier                 string `json:"tier"`                           // "quick" | "standard" | "deep"
+	Model                string `json:"model"`
+	ParentConversationID string `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
+	WorktreeDir          string `json:"worktreeDir,omitempty"`
+	RepoRoot             string `json:"repoRoot,omitempty"`
+	ConversationID       string `json:"conversationId,omitempty"`
+	TurnCount            int    `json:"turnCount,omitempty"`
+	Pinned               bool   `json:"pinned,omitempty"`
+	CreatedAt            string `json:"createdAt"`
+	LastUpdatedAt        string `json:"lastUpdatedAt"`
+	CompletedAt          string `json:"completedAt,omitempty"`
+	ArchivedAt           string `json:"archivedAt,omitempty"`
+	LastSummary          string `json:"lastSummary,omitempty"`
+	Status               string `json:"status"` // active, idle, completed, archived, cancelled
+}
+
+// EffectiveKind returns "task", "subagent", or "auto", inferring from TaskSlug/Title when Kind is empty.
+func (t ActiveTask) EffectiveKind() string {
+	k := strings.ToLower(strings.TrimSpace(t.Kind))
+	if k == "task" || k == "subagent" || k == "auto" {
+		return k
+	}
+	if strings.HasPrefix(t.TaskSlug, "subagent-") || strings.HasPrefix(t.Title, "[Subagent:") {
+		return "subagent"
+	}
+	if strings.HasPrefix(t.Title, "[Auto]") || strings.HasPrefix(t.TaskSlug, "auto-") {
+		return "auto"
+	}
+	return "task"
+}
+
+// EffectiveScope extracts the task/subagent domain scope (e.g. "brand", "agy-hq", "NVDA").
+func (t ActiveTask) EffectiveScope() string {
+	if s := strings.TrimSpace(t.Scope); s != "" {
+		return s
+	}
+	for _, prefix := range []string{"[Task:", "[Subagent:"} {
+		if strings.HasPrefix(t.Title, prefix) {
+			rest := t.Title[len(prefix):]
+			if idx := strings.Index(rest, "]"); idx > 0 {
+				return strings.TrimSpace(rest[:idx])
+			}
+		}
+	}
+	slug := strings.TrimPrefix(t.TaskSlug, "subagent-")
+	if parts := strings.SplitN(slug, "-", 2); len(parts) > 0 && parts[0] != "" && parts[0] != "conv" {
+		return parts[0]
+	}
+	return "general"
+}
+
+// UpdatedTime parses LastUpdatedAt (falling back to CreatedAt) into time.Time.
+func (t ActiveTask) UpdatedTime() time.Time {
+	for _, raw := range []string{t.LastUpdatedAt, t.CreatedAt} {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if ts, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return ts
+		}
+		if ts, err := time.Parse(time.RFC3339, s); err == nil {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+// EffectiveStatus resolves the live display status ("active", "idle", "stalled", "completed", "cancelled", "archived")
+// at reference time now. Top-level tasks untouched for >= 6h (and !Pinned) resolve to "idle";
+// subagents stuck in "active" for >= 30m without a Stop hook resolve to "stalled".
+func (t ActiveTask) EffectiveStatus(now time.Time) string {
+	st := strings.ToLower(strings.TrimSpace(t.Status))
+	switch st {
+	case "completed", "cancelled", "archived", "idle":
+		return st
+	}
+	if t.Pinned {
+		return "active"
+	}
+	updated := t.UpdatedTime()
+	if !updated.IsZero() && !now.IsZero() && now.After(updated) {
+		age := now.Sub(updated)
+		kind := t.EffectiveKind()
+		if kind == "task" && age >= DefaultIdleThreshold {
+			return "idle"
+		}
+		if (kind == "subagent" || kind == "auto") && age >= DefaultStalledSubagentThreshold {
+			return "stalled"
+		}
+	}
+	return "active"
+}
+
+// FormatRelativeAge formats the time elapsed since UpdatedTime() as a compact human badge ("just now", "4m ago", "2h ago", "3d ago").
+func (t ActiveTask) FormatRelativeAge(now time.Time) string {
+	updated := t.UpdatedTime()
+	if updated.IsZero() || now.IsZero() {
+		return ""
+	}
+	if !now.After(updated) {
+		return "just now"
+	}
+	d := now.Sub(updated)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 func tasksFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "tasks.json")
+}
+
+func tasksArchiveFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "tasks_archive.jsonl")
 }
 
 // ListTasks returns all tracked Task Conversations from local/memory/tasks.json.
@@ -154,7 +283,279 @@ func ListTasks(vaultDir string) ([]ActiveTask, error) {
 	if err := json.Unmarshal(data, &tasks); err != nil {
 		return nil, err
 	}
+	for i := range tasks {
+		if tasks[i].Kind == "" {
+			tasks[i].Kind = tasks[i].EffectiveKind()
+		}
+		if tasks[i].Scope == "" {
+			tasks[i].Scope = tasks[i].EffectiveScope()
+		}
+	}
 	return tasks, nil
+}
+
+// ListArchivedTasks reads cold historical tasks from local/memory/tasks_archive.jsonl (newest first).
+// If limit > 0, returns at most limit items along with the total deduplicated count in the file.
+func ListArchivedTasks(vaultDir string, limit int) ([]ActiveTask, int, error) {
+	f, err := os.Open(tasksArchiveFilePath(vaultDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	var ordered []ActiveTask
+	indexByKey := make(map[string]int)
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 2*1024*1024)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var t ActiveTask
+		if json.Unmarshal([]byte(line), &t) != nil {
+			continue
+		}
+		if t.Kind == "" {
+			t.Kind = t.EffectiveKind()
+		}
+		if t.Scope == "" {
+			t.Scope = t.EffectiveScope()
+		}
+		key := t.ConversationID
+		if key == "" {
+			key = t.TaskSlug
+		}
+		if idx, exists := indexByKey[key]; exists && key != "" {
+			ordered[idx] = t
+		} else {
+			if key != "" {
+				indexByKey[key] = len(ordered)
+			}
+			ordered = append(ordered, t)
+		}
+	}
+
+	sort.SliceStable(ordered, func(i, j int) bool {
+		ti, tj := ordered[i].UpdatedTime(), ordered[j].UpdatedTime()
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return i > j
+	})
+
+	total := len(ordered)
+	if limit > 0 && len(ordered) > limit {
+		ordered = ordered[:limit]
+	}
+	return ordered, total, nil
+}
+
+// CountColdArchivedTasks returns the total number of tasks in local/memory/tasks_archive.jsonl.
+func CountColdArchivedTasks(vaultDir string) int {
+	_, total, err := ListArchivedTasks(vaultDir, 1)
+	if err != nil {
+		return 0
+	}
+	return total
+}
+
+// AppendTasksToColdArchive appends tasks to local/memory/tasks_archive.jsonl, deduplicating by ConversationID/TaskSlug.
+func AppendTasksToColdArchive(vaultDir string, toArchive []ActiveTask) error {
+	if len(toArchive) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return err
+	}
+	existing, _, _ := ListArchivedTasks(vaultDir, 0)
+	// Reverse existing back to chronological order before merging
+	for i, j := 0, len(existing)-1; i < j; i, j = i+1, j-1 {
+		existing[i], existing[j] = existing[j], existing[i]
+	}
+	indexByKey := make(map[string]int)
+	for i, t := range existing {
+		key := t.ConversationID
+		if key == "" {
+			key = t.TaskSlug
+		}
+		if key != "" {
+			indexByKey[key] = i
+		}
+	}
+	for _, t := range toArchive {
+		if t.Kind == "" {
+			t.Kind = t.EffectiveKind()
+		}
+		if t.Scope == "" {
+			t.Scope = t.EffectiveScope()
+		}
+		key := t.ConversationID
+		if key == "" {
+			key = t.TaskSlug
+		}
+		if idx, ok := indexByKey[key]; ok && key != "" {
+			existing[idx] = t
+		} else {
+			if key != "" {
+				indexByKey[key] = len(existing)
+			}
+			existing = append(existing, t)
+		}
+	}
+	var b strings.Builder
+	for _, t := range existing {
+		if line, err := json.Marshal(t); err == nil {
+			b.Write(line)
+			b.WriteByte('\n')
+		}
+	}
+	return os.WriteFile(tasksArchiveFilePath(vaultDir), []byte(b.String()), 0o644)
+}
+
+func statusPriority(effStatus string) int {
+	switch effStatus {
+	case "active", "stalled":
+		return 0
+	case "idle":
+		return 1
+	case "completed", "cancelled":
+		return 2
+	default: // "archived"
+		return 3
+	}
+}
+
+// SortTasksForBoard returns a sorted copy of tasks ordered by:
+// 1. Lifecycle tier (active/stalled -> idle -> completed/cancelled -> archived)
+// 2. Pinned (true before false)
+// 3. LastUpdatedAt descending (newest first), tie-broken by reverse slice index.
+func SortTasksForBoard(tasks []ActiveTask, now time.Time) []ActiveTask {
+	type indexedTask struct {
+		task ActiveTask
+		idx  int
+	}
+	items := make([]indexedTask, len(tasks))
+	for i, t := range tasks {
+		items[i] = indexedTask{task: t, idx: i}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		ti, tj := items[i].task, items[j].task
+		pi := statusPriority(ti.EffectiveStatus(now))
+		pj := statusPriority(tj.EffectiveStatus(now))
+		if pi != pj {
+			return pi < pj
+		}
+		if ti.Pinned != tj.Pinned {
+			return ti.Pinned
+		}
+		ui, uj := ti.UpdatedTime(), tj.UpdatedTime()
+		if !ui.Equal(uj) {
+			return ui.After(uj)
+		}
+		return items[i].idx > items[j].idx
+	})
+	out := make([]ActiveTask, len(items))
+	for i, it := range items {
+		out[i] = it.task
+	}
+	return out
+}
+
+// ConsoleTaskSelection holds the tiered task slice and summary counters for hq_console.md.
+type ConsoleTaskSelection struct {
+	VisibleRows          []ActiveTask
+	ActiveCount          int
+	IdleCount            int
+	CompletedCount       int
+	ArchivedHotCount     int
+	ArchivedColdCount    int
+	HiddenIdleCount      int
+	HiddenCompletedCount int
+}
+
+// SelectConsoleTasks applies the RFC-0009 per-tier visibility policy for local/CONSOLE.md and hq_console.md:
+// - Tier 1 (Active / Stalled): Show 100% (never truncate genuinely active work!).
+// - Tier 2 (Idle 6h..48h): Show up to MaxConsoleIdleTasks (5) newest.
+// - Tier 3 (Completed / Cancelled): Show up to MaxConsoleCompletedTasks (3) newest.
+// - Tier 4 (Archived): 0 table rows (summarized in footer counter).
+func SelectConsoleTasks(tasks []ActiveTask, coldArchivedCount int, now time.Time) ConsoleTaskSelection {
+	sorted := SortTasksForBoard(tasks, now)
+	sel := ConsoleTaskSelection{
+		ArchivedColdCount: coldArchivedCount,
+	}
+	var activeRows []ActiveTask
+	var idleRows []ActiveTask
+	var completedRows []ActiveTask
+
+	for _, t := range sorted {
+		eff := t.EffectiveStatus(now)
+		switch eff {
+		case "active", "stalled":
+			sel.ActiveCount++
+			activeRows = append(activeRows, t)
+		case "idle":
+			sel.IdleCount++
+			if len(idleRows) < MaxConsoleIdleTasks {
+				idleRows = append(idleRows, t)
+			} else {
+				sel.HiddenIdleCount++
+			}
+		case "completed", "cancelled":
+			sel.CompletedCount++
+			if len(completedRows) < MaxConsoleCompletedTasks {
+				completedRows = append(completedRows, t)
+			} else {
+				sel.HiddenCompletedCount++
+			}
+		case "archived":
+			sel.ArchivedHotCount++
+		}
+	}
+
+	sel.VisibleRows = append(sel.VisibleRows, activeRows...)
+	sel.VisibleRows = append(sel.VisibleRows, idleRows...)
+	sel.VisibleRows = append(sel.VisibleRows, completedRows...)
+	return sel
+}
+
+// SelectSessionStartTasks selects the bounded task slice injected into SessionStart (<SYSTEM_MESSAGE>):
+// - All active/stalled tasks
+// - Up to MaxSessionStartIdleTasks (5) idle tasks
+// - Up to MaxSessionStartCompletedTasks (3) recently completed tasks
+func SelectSessionStartTasks(tasks []ActiveTask, now time.Time) (selected []ActiveTask, omittedCount int) {
+	sorted := SortTasksForBoard(tasks, now)
+	idleShown := 0
+	compShown := 0
+	for _, t := range sorted {
+		eff := t.EffectiveStatus(now)
+		switch eff {
+		case "active", "stalled":
+			selected = append(selected, t)
+		case "idle":
+			if idleShown < MaxSessionStartIdleTasks {
+				selected = append(selected, t)
+				idleShown++
+			} else {
+				omittedCount++
+			}
+		case "completed", "cancelled":
+			if compShown < MaxSessionStartCompletedTasks {
+				selected = append(selected, t)
+				compShown++
+			} else {
+				omittedCount++
+			}
+		default:
+			omittedCount++
+		}
+	}
+	return selected, omittedCount
 }
 
 // FindTaskByConversationID finds an ActiveTask by its ConversationID in local/memory/tasks.json.
@@ -172,6 +573,30 @@ func FindTaskByConversationID(vaultDir, convID string) (ActiveTask, bool) {
 		}
 	}
 	return ActiveTask{}, false
+}
+
+// FindTaskAnywhere searches hot tasks.json first ("hot") and cold tasks_archive.jsonl second ("cold")
+// by TaskSlug or ConversationID.
+func FindTaskAnywhere(vaultDir, target string) (ActiveTask, string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ActiveTask{}, "", false
+	}
+	if tasks, err := ListTasks(vaultDir); err == nil {
+		for _, t := range tasks {
+			if t.TaskSlug == target || t.ConversationID == target {
+				return t, "hot", true
+			}
+		}
+	}
+	if archived, _, err := ListArchivedTasks(vaultDir, 0); err == nil {
+		for _, t := range archived {
+			if t.TaskSlug == target || t.ConversationID == target {
+				return t, "cold", true
+			}
+		}
+	}
+	return ActiveTask{}, "", false
 }
 
 // LinkPendingSpawnTask links an active task in local/memory/tasks.json that was registered
@@ -215,11 +640,20 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.Title == "" {
 				task.Title = tasks[i].Title
 			}
+			if task.Kind == "" {
+				task.Kind = tasks[i].Kind
+			}
+			if task.Scope == "" {
+				task.Scope = tasks[i].Scope
+			}
 			if task.Tier == "" {
 				task.Tier = tasks[i].Tier
 			}
 			if task.Model == "" {
 				task.Model = tasks[i].Model
+			}
+			if task.ParentConversationID == "" {
+				task.ParentConversationID = tasks[i].ParentConversationID
 			}
 			if task.WorktreeDir == "" {
 				task.WorktreeDir = tasks[i].WorktreeDir
@@ -227,8 +661,20 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.RepoRoot == "" {
 				task.RepoRoot = tasks[i].RepoRoot
 			}
+			if task.TurnCount == 0 {
+				task.TurnCount = tasks[i].TurnCount
+			}
+			if !task.Pinned && tasks[i].Pinned {
+				task.Pinned = tasks[i].Pinned
+			}
 			if task.CreatedAt == "" {
 				task.CreatedAt = tasks[i].CreatedAt
+			}
+			if task.CompletedAt == "" {
+				task.CompletedAt = tasks[i].CompletedAt
+			}
+			if task.ArchivedAt == "" {
+				task.ArchivedAt = tasks[i].ArchivedAt
 			}
 			if task.Status == "" {
 				task.Status = tasks[i].Status
@@ -237,6 +683,11 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				task.LastSummary = tasks[i].LastSummary
 			}
 			task.Title = SanitizeTaskTitle(task.Title, task.TaskSlug)
+			task.Kind = task.EffectiveKind()
+			task.Scope = task.EffectiveScope()
+			if (task.Status == "completed" || task.Status == "cancelled") && task.CompletedAt == "" {
+				task.CompletedAt = task.LastUpdatedAt
+			}
 			tasks[i] = task
 			updated = true
 			break
@@ -256,7 +707,12 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				if task.LastSummary != "" {
 					tasks[i].LastSummary = task.LastSummary
 				}
+				if task.TurnCount > 0 {
+					tasks[i].TurnCount = task.TurnCount
+				}
 				tasks[i].Title = SanitizeTaskTitle(tasks[i].Title, tasks[i].TaskSlug)
+				tasks[i].Kind = tasks[i].EffectiveKind()
+				tasks[i].Scope = tasks[i].EffectiveScope()
 				updated = true
 				break
 			}
@@ -274,11 +730,19 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			task.Title = "[Task:general] Untitled Task"
 		}
 		task.Title = SanitizeTaskTitle(task.Title, task.TaskSlug)
+		task.Kind = task.EffectiveKind()
+		task.Scope = task.EffectiveScope()
 		if task.Status == "" {
 			task.Status = "active"
 		}
 		if task.CreatedAt == "" {
 			task.CreatedAt = time.Now().Format(time.RFC3339)
+		}
+		if task.LastUpdatedAt == "" {
+			task.LastUpdatedAt = task.CreatedAt
+		}
+		if (task.Status == "completed" || task.Status == "cancelled") && task.CompletedAt == "" {
+			task.CompletedAt = task.LastUpdatedAt
 		}
 		tasks = append(tasks, task)
 	}
@@ -295,14 +759,41 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 	if err != nil {
 		return err
 	}
+	nowStr := time.Now().Format(time.RFC3339)
 	found := false
 	for i := range tasks {
 		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
 			tasks[i].Status = "completed"
-			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+			tasks[i].LastUpdatedAt = nowStr
+			tasks[i].CompletedAt = nowStr
 			if strings.TrimSpace(summary) != "" {
 				tasks[i].LastSummary = strings.TrimSpace(summary)
 			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
+	}
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// SetTaskPinned pins or unpins a task in local/memory/tasks.json so it stays anchored at the top of the Active board.
+func SetTaskPinned(vaultDir, slugOrConvID string, pinned bool) error {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range tasks {
+		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
+			tasks[i].Pinned = pinned
+			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
 			found = true
 			break
 		}
@@ -328,6 +819,7 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 	if err != nil {
 		return err
 	}
+	nowStr := time.Now().Format(time.RFC3339)
 	found := false
 	for i := range tasks {
 		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
@@ -367,7 +859,8 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 			}
 
 			task.Status = "archived"
-			task.LastUpdatedAt = time.Now().Format(time.RFC3339)
+			task.LastUpdatedAt = nowStr
+			task.ArchivedAt = nowStr
 			found = true
 			break
 		}
@@ -383,48 +876,88 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
 }
 
-// ReopenTask restores a task in local/memory/tasks.json (matched by TaskSlug or ConversationID) back to active status.
-// If WorktreeDir is specified but does not exist on disk, it checks if branch `hq/<taskSlug>` or `<taskSlug>` exists,
-// and recreates the worktree via `git -C <repoRoot> worktree add <worktreeDir> <branch>`.
-// Sets task status to "active", sets LastUpdatedAt to now, and saves tasks.json.
+func restoreWorktreeForReopen(vaultDir string, task *ActiveTask) error {
+	if task.WorktreeDir == "" {
+		return nil
+	}
+	if _, err := os.Stat(task.WorktreeDir); !os.IsNotExist(err) {
+		return nil
+	}
+	repoRoot := task.RepoRoot
+	if repoRoot == "" {
+		repoRoot = findRepoRootForTask(vaultDir, task)
+	}
+	branch := ""
+	if gitBranchExists(repoRoot, "hq/"+task.TaskSlug) {
+		branch = "hq/" + task.TaskSlug
+	} else if gitBranchExists(repoRoot, task.TaskSlug) {
+		branch = task.TaskSlug
+	}
+	_ = os.MkdirAll(filepath.Dir(task.WorktreeDir), 0o755)
+	var cmd *exec.Cmd
+	if branch != "" {
+		cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", task.WorktreeDir, branch)
+	} else {
+		cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "hq/"+task.TaskSlug, task.WorktreeDir)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree add failed: %w (%s)", err, string(out))
+	}
+	return nil
+}
+
+// ReopenTask restores a task in local/memory/tasks.json (or recalls it from cold storage
+// local/memory/tasks_archive.jsonl) back to active status, recreating its git worktree if needed.
 func ReopenTask(vaultDir, target string) error {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil {
 		return err
 	}
+	nowStr := time.Now().Format(time.RFC3339)
 	found := false
 	for i := range tasks {
 		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
-			task := &tasks[i]
-			if task.WorktreeDir != "" {
-				if _, err := os.Stat(task.WorktreeDir); os.IsNotExist(err) {
-					repoRoot := task.RepoRoot
-					if repoRoot == "" {
-						repoRoot = findRepoRootForTask(vaultDir, task)
-					}
-					branch := ""
-					if gitBranchExists(repoRoot, "hq/"+task.TaskSlug) {
-						branch = "hq/" + task.TaskSlug
-					} else if gitBranchExists(repoRoot, task.TaskSlug) {
-						branch = task.TaskSlug
-					}
-					_ = os.MkdirAll(filepath.Dir(task.WorktreeDir), 0o755)
-					var cmd *exec.Cmd
-					if branch != "" {
-						cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", task.WorktreeDir, branch)
-					} else {
-						cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "hq/"+task.TaskSlug, task.WorktreeDir)
-					}
-					if out, err := cmd.CombinedOutput(); err != nil {
-						return fmt.Errorf("git worktree add failed: %w (%s)", err, string(out))
-					}
-				}
+			if err := restoreWorktreeForReopen(vaultDir, &tasks[i]); err != nil {
+				return err
 			}
-
-			task.Status = "active"
-			task.LastUpdatedAt = time.Now().Format(time.RFC3339)
+			tasks[i].Status = "active"
+			tasks[i].LastUpdatedAt = nowStr
 			found = true
 			break
+		}
+	}
+	if !found {
+		// Check cold storage (local/memory/tasks_archive.jsonl)
+		archived, _, archErr := ListArchivedTasks(vaultDir, 0)
+		if archErr == nil && len(archived) > 0 {
+			var recalled *ActiveTask
+			var remaining []ActiveTask
+			for i := len(archived) - 1; i >= 0; i-- {
+				t := archived[i]
+				if recalled == nil && (t.TaskSlug == target || t.ConversationID == target) {
+					cp := t
+					recalled = &cp
+					continue
+				}
+				remaining = append(remaining, t)
+			}
+			if recalled != nil {
+				if err := restoreWorktreeForReopen(vaultDir, recalled); err != nil {
+					return err
+				}
+				recalled.Status = "active"
+				recalled.LastUpdatedAt = nowStr
+				tasks = append(tasks, *recalled)
+				found = true
+				var b strings.Builder
+				for _, rem := range remaining {
+					if line, mErr := json.Marshal(rem); mErr == nil {
+						b.Write(line)
+						b.WriteByte('\n')
+					}
+				}
+				_ = os.WriteFile(tasksArchiveFilePath(vaultDir), []byte(b.String()), 0o644)
+			}
 		}
 	}
 	if !found {
@@ -436,6 +969,314 @@ func ReopenTask(vaultDir, target string) error {
 		return err
 	}
 	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// CompactTasksOptions configures rolling auto-archiving and hot-to-cold storage rotation.
+type CompactTasksOptions struct {
+	Now                      time.Time
+	SubagentHotMaxAge        time.Duration
+	MaxHotCompletedSubagents int
+	TaskAutoArchiveAfter     time.Duration
+	IdleDormantArchiveAfter  time.Duration
+	ArchivedColdMaxAge       time.Duration
+	DryRun                   bool
+}
+
+// CompactTasksReport summarizes what CompactTasks transitioned and rotated.
+type CompactTasksReport struct {
+	HotBefore         int      `json:"hotBefore"`
+	HotAfter          int      `json:"hotAfter"`
+	AutoArchivedSlugs []string `json:"autoArchivedSlugs,omitempty"`
+	RotatedColdSlugs  []string `json:"rotatedColdSlugs,omitempty"`
+	TotalColdAfter    int      `json:"totalColdAfter"`
+}
+
+func isWorktreeCleanOrAbsent(wtDir string) bool {
+	if strings.TrimSpace(wtDir) == "" {
+		return true
+	}
+	info, err := os.Stat(wtDir)
+	if err != nil || !info.IsDir() {
+		return true
+	}
+	cmd := exec.Command("git", "-C", wtDir, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) == 0
+}
+
+// CompactTasks executes the RFC-0009 rolling lifecycle compaction:
+// 1. Auto-archives completed/cancelled top-level tasks older than TaskAutoArchiveAfter (24h) if their worktree is clean.
+// 2. Auto-archives unpinned idle top-level tasks untouched for > IdleDormantArchiveAfter (48h) if their worktree is clean.
+// 3. Flushes completed/cancelled subagents (>24h or beyond MaxHotCompletedSubagents) and archived tasks (>48h)
+//    from local/memory/tasks.json into append-only local/memory/tasks_archive.jsonl.
+func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksReport, error) {
+	if opts.Now.IsZero() {
+		opts.Now = time.Now()
+	}
+	if opts.SubagentHotMaxAge <= 0 {
+		opts.SubagentHotMaxAge = DefaultSubagentHotMaxAge
+	}
+	if opts.MaxHotCompletedSubagents <= 0 {
+		opts.MaxHotCompletedSubagents = MaxHotCompletedSubagents
+	}
+	if opts.TaskAutoArchiveAfter <= 0 {
+		opts.TaskAutoArchiveAfter = DefaultTaskArchiveGracePeriod
+	}
+	if opts.IdleDormantArchiveAfter <= 0 {
+		opts.IdleDormantArchiveAfter = DefaultDormantArchiveThreshold
+	}
+	if opts.ArchivedColdMaxAge <= 0 {
+		opts.ArchivedColdMaxAge = DefaultArchivedColdMaxAge
+	}
+
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return nil, err
+	}
+	rep := &CompactTasksReport{
+		HotBefore: len(tasks),
+	}
+	if len(tasks) == 0 {
+		rep.TotalColdAfter = CountColdArchivedTasks(vaultDir)
+		return rep, nil
+	}
+
+	nowStr := opts.Now.Format(time.RFC3339)
+
+	// Step 1: Auto-archive eligible completed (>24h) or dormant (>48h) top-level tasks with clean worktrees
+	for i := range tasks {
+		t := &tasks[i]
+		kind := t.EffectiveKind()
+		updated := t.UpdatedTime()
+		age := time.Duration(0)
+		if !updated.IsZero() && opts.Now.After(updated) {
+			age = opts.Now.Sub(updated)
+		}
+		st := strings.ToLower(strings.TrimSpace(t.Status))
+		shouldArchive := false
+		if kind == "task" && (st == "completed" || st == "cancelled") && age >= opts.TaskAutoArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
+			shouldArchive = true
+		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
+			shouldArchive = true
+		}
+		if shouldArchive {
+			if !opts.DryRun && t.WorktreeDir != "" {
+				if info, sErr := os.Stat(t.WorktreeDir); sErr == nil && info.IsDir() {
+					repoRoot := t.RepoRoot
+					if repoRoot == "" {
+						repoRoot = resolveRepoRootForWorktree(vaultDir, t.WorktreeDir)
+					}
+					_ = exec.Command("git", "-C", repoRoot, "worktree", "remove", t.WorktreeDir).Run()
+					_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
+				}
+			}
+			t.Status = "archived"
+			if t.ArchivedAt == "" {
+				t.ArchivedAt = nowStr
+			}
+			rep.AutoArchivedSlugs = append(rep.AutoArchivedSlugs, t.TaskSlug)
+		}
+	}
+
+	// Step 2: Rank completed/cancelled subagents newest-first to identify items exceeding MaxHotCompletedSubagents
+	type subIdx struct {
+		idx int
+		ts  time.Time
+	}
+	var compSubs []subIdx
+	for i, t := range tasks {
+		st := strings.ToLower(strings.TrimSpace(t.Status))
+		if (t.EffectiveKind() == "subagent" || t.EffectiveKind() == "auto") && (st == "completed" || st == "cancelled") {
+			compSubs = append(compSubs, subIdx{idx: i, ts: t.UpdatedTime()})
+		}
+	}
+	sort.SliceStable(compSubs, func(i, j int) bool {
+		if !compSubs[i].ts.Equal(compSubs[j].ts) {
+			return compSubs[i].ts.After(compSubs[j].ts)
+		}
+		return compSubs[i].idx > compSubs[j].idx
+	})
+	subOverCap := make(map[int]bool)
+	for rank, item := range compSubs {
+		if rank >= opts.MaxHotCompletedSubagents {
+			subOverCap[item.idx] = true
+		}
+	}
+
+	var keptHot []ActiveTask
+	var rotatedCold []ActiveTask
+	for i, t := range tasks {
+		st := strings.ToLower(strings.TrimSpace(t.Status))
+		kind := t.EffectiveKind()
+		updated := t.UpdatedTime()
+		age := time.Duration(0)
+		if !updated.IsZero() && opts.Now.After(updated) {
+			age = opts.Now.Sub(updated)
+		}
+
+		rotate := false
+		if (kind == "subagent" || kind == "auto") && (st == "completed" || st == "cancelled") {
+			if age >= opts.SubagentHotMaxAge || subOverCap[i] {
+				rotate = true
+			}
+		} else if st == "archived" && age >= opts.ArchivedColdMaxAge {
+			rotate = true
+		}
+
+		if rotate {
+			rotatedCold = append(rotatedCold, t)
+			rep.RotatedColdSlugs = append(rep.RotatedColdSlugs, t.TaskSlug)
+		} else {
+			keptHot = append(keptHot, t)
+		}
+	}
+
+	rep.HotAfter = len(keptHot)
+	if !opts.DryRun {
+		if len(rotatedCold) > 0 {
+			if err := AppendTasksToColdArchive(vaultDir, rotatedCold); err != nil {
+				return rep, err
+			}
+		}
+		if len(rotatedCold) > 0 || len(rep.AutoArchivedSlugs) > 0 {
+			data, err := json.MarshalIndent(keptHot, "", "  ")
+			if err != nil {
+				return rep, err
+			}
+			if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+				return rep, err
+			}
+		}
+	}
+	rep.TotalColdAfter = CountColdArchivedTasks(vaultDir)
+	if opts.DryRun {
+		rep.TotalColdAfter += len(rotatedCold)
+	}
+	return rep, nil
+}
+
+// TaskStats summarizes task counts across status, kind, tier, and storage layer for `./bin/hq tasks stats`.
+type TaskStats struct {
+	HotTotal       int            `json:"hotTotal"`
+	ColdTotal      int            `json:"coldTotal"`
+	ByStatus       map[string]int `json:"byStatus"`
+	ByKind         map[string]int `json:"byKind"`
+	ByTier         map[string]int `json:"byTier"`
+	ByScope        map[string]int `json:"byScope"`
+}
+
+// ComputeTaskStats aggregates counts across hot tasks.json and cold tasks_archive.jsonl.
+func ComputeTaskStats(vaultDir string, now time.Time) TaskStats {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	hot, _ := ListTasks(vaultDir)
+	cold, coldCount, _ := ListArchivedTasks(vaultDir, 0)
+	st := TaskStats{
+		HotTotal:  len(hot),
+		ColdTotal: coldCount,
+		ByStatus:  make(map[string]int),
+		ByKind:    make(map[string]int),
+		ByTier:    make(map[string]int),
+		ByScope:   make(map[string]int),
+	}
+	for _, t := range hot {
+		eff := t.EffectiveStatus(now)
+		st.ByStatus[eff]++
+		st.ByKind[t.EffectiveKind()]++
+		if t.Tier != "" {
+			st.ByTier[t.Tier]++
+		}
+		st.ByScope[t.EffectiveScope()]++
+	}
+	for _, t := range cold {
+		st.ByStatus["cold_archive"]++
+		st.ByKind[t.EffectiveKind()]++
+		if t.Tier != "" {
+			st.ByTier[t.Tier]++
+		}
+		st.ByScope[t.EffectiveScope()]++
+	}
+	return st
+}
+
+// FilterTasks queries hot tasks (and optionally cold tasks_archive.jsonl) with status, kind, scope, and full-text search filters.
+func FilterTasks(vaultDir string, activeOnly, archiveOnly, includeAllHot, includeArchive bool, kindFilter, scopeFilter, searchQuery string, limit int, now time.Time) ([]ActiveTask, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	hot, err := ListTasks(vaultDir)
+	if err != nil {
+		return nil, err
+	}
+	combined := append([]ActiveTask(nil), hot...)
+	if includeArchive || archiveOnly {
+		cold, _, _ := ListArchivedTasks(vaultDir, 0)
+		seen := make(map[string]bool)
+		for _, t := range combined {
+			if t.ConversationID != "" {
+				seen[t.ConversationID] = true
+			}
+			if t.TaskSlug != "" {
+				seen[t.TaskSlug] = true
+			}
+		}
+		for _, c := range cold {
+			if (c.ConversationID != "" && seen[c.ConversationID]) || (c.TaskSlug != "" && seen[c.TaskSlug]) {
+				continue
+			}
+			combined = append(combined, c)
+		}
+	}
+
+	sorted := SortTasksForBoard(combined, now)
+	kindFilter = strings.ToLower(strings.TrimSpace(kindFilter))
+	scopeFilter = strings.ToLower(strings.TrimSpace(scopeFilter))
+	q := strings.ToLower(strings.TrimSpace(searchQuery))
+
+	var out []ActiveTask
+	compShown := 0
+	for _, t := range sorted {
+		eff := t.EffectiveStatus(now)
+		if activeOnly && eff != "active" && eff != "stalled" && eff != "idle" {
+			continue
+		}
+		if archiveOnly && eff != "archived" {
+			continue
+		}
+		if !activeOnly && !archiveOnly && !includeAllHot && !includeArchive && q == "" && kindFilter == "" && scopeFilter == "" {
+			// Default `./bin/hq tasks` view: all active/stalled/idle + up to 5 recent completed
+			if eff == "archived" {
+				continue
+			}
+			if eff == "completed" || eff == "cancelled" {
+				if compShown >= 5 {
+					continue
+				}
+				compShown++
+			}
+		}
+		if kindFilter != "" && t.EffectiveKind() != kindFilter {
+			continue
+		}
+		if scopeFilter != "" && !strings.EqualFold(t.EffectiveScope(), scopeFilter) {
+			continue
+		}
+		if q != "" {
+			haystack := strings.ToLower(t.TaskSlug + " " + t.Title + " " + t.LastSummary + " " + t.ConversationID + " " + t.EffectiveScope() + " " + t.Model)
+			if !strings.Contains(haystack, q) {
+				continue
+			}
+		}
+		out = append(out, t)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func resolveRepoRootForWorktree(vaultDir, worktreeDir string) string {
@@ -1306,13 +2147,15 @@ func ParseSubagentRole(role, model string) (tier, scope, roleName, title, slug s
 
 // PendingSubagent stores metadata of a subagent invoked via invoke_subagent.
 type PendingSubagent struct {
-	Role         string    `json:"role"`
-	Model        string    `json:"model"`
-	Tier         string    `json:"tier,omitempty"`
-	TaskSlug     string    `json:"taskSlug"`
-	Title        string    `json:"title"`
-	PromptPrefix string    `json:"promptPrefix,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
+	Role                 string    `json:"role"`
+	Model                string    `json:"model"`
+	Tier                 string    `json:"tier,omitempty"`
+	Scope                string    `json:"scope,omitempty"`
+	ParentConversationID string    `json:"parentConversationId,omitempty"`
+	TaskSlug             string    `json:"taskSlug"`
+	Title                string    `json:"title"`
+	PromptPrefix         string    `json:"promptPrefix,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
 }
 
 func pendingSubagentsFilePath(vaultDir string) string {
@@ -1347,19 +2190,26 @@ func savePendingSubagents(vaultDir string, items []PendingSubagent) error {
 
 // QueuePendingSubagent enqueues metadata for an invoked subagent.
 func QueuePendingSubagent(vaultDir, role, model, prompt string) (PendingSubagent, error) {
-	tier, _, _, title, slug := ParseSubagentRole(role, model)
+	return QueuePendingSubagentWithParent(vaultDir, "", role, model, prompt)
+}
+
+// QueuePendingSubagentWithParent enqueues metadata for an invoked subagent along with its parentConversationId.
+func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt string) (PendingSubagent, error) {
+	tier, scope, _, title, slug := ParseSubagentRole(role, model)
 	promptPrefix := prompt
 	if runes := []rune(promptPrefix); len(runes) > 200 {
 		promptPrefix = string(runes[:200]) + "..."
 	}
 	item := PendingSubagent{
-		Role:         role,
-		Model:        model,
-		Tier:         tier,
-		TaskSlug:     slug,
-		Title:        title,
-		PromptPrefix: promptPrefix,
-		CreatedAt:    time.Now(),
+		Role:                 role,
+		Model:                model,
+		Tier:                 tier,
+		Scope:                scope,
+		ParentConversationID: strings.TrimSpace(parentConvID),
+		TaskSlug:             slug,
+		Title:                title,
+		PromptPrefix:         promptPrefix,
+		CreatedAt:            time.Now(),
 	}
 
 	queue, _ := loadPendingSubagents(vaultDir)
@@ -1492,7 +2342,7 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		return "", fmt.Errorf("daily spawn budget exhausted (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
 	}
 
-	tier, _, _, title, slug := ParseSubagentRole(role, modelID)
+	tier, scope, _, title, slug := ParseSubagentRole(role, modelID)
 
 	if dryRun {
 		output := fmt.Sprintf("[dry-run] hq subagent --parent=%s --model=%s --role=%q", parentConvID, modelID, role)
@@ -1601,16 +2451,19 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 
 	// Register in local/memory/tasks.json before sending the initial message so SessionStart sees it immediately.
 	_ = RegisterTask(vaultDir, ActiveTask{
-		TaskSlug:       slug,
-		Title:          title,
-		Tier:           tier,
-		Model:          modelID,
-		WorktreeDir:    workspaceDir,
-		ConversationID: cascadeID,
-		CreatedAt:      time.Now().Format(time.RFC3339),
-		LastUpdatedAt:  time.Now().Format(time.RFC3339),
-		LastSummary:    prompt,
-		Status:         "active",
+		TaskSlug:             slug,
+		Title:                title,
+		Kind:                 "subagent",
+		Scope:                scope,
+		Tier:                 tier,
+		Model:                modelID,
+		ParentConversationID: parentConvID,
+		WorktreeDir:          workspaceDir,
+		ConversationID:       cascadeID,
+		CreatedAt:            time.Now().Format(time.RFC3339),
+		LastUpdatedAt:        time.Now().Format(time.RFC3339),
+		LastSummary:          prompt,
+		Status:               "active",
 	})
 
 	// Deliver initial prompt via SendUserCascadeMessage to kick off Turn 1 immediately

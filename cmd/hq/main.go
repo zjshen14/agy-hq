@@ -506,6 +506,7 @@ func main() {
 		if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:       *taskSlug,
 			Title:          *title,
+			Kind:           "task",
 			ConversationID: *convID,
 			LastUpdatedAt:  time.Now().Format(time.RFC3339),
 			LastSummary:    *summary,
@@ -645,6 +646,8 @@ func main() {
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:      *taskName,
 			Title:         title,
+			Kind:          "task",
+			Scope:         scope,
 			Tier:          resolvedTier,
 			Model:         resolvedModel,
 			WorktreeDir:   wtDir,
@@ -659,6 +662,8 @@ func main() {
 			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 				TaskSlug:       *taskName,
 				Title:          title,
+				Kind:           "task",
+				Scope:          scope,
 				Tier:           resolvedTier,
 				Model:          resolvedModel,
 				WorktreeDir:    wtDir,
@@ -1205,6 +1210,11 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", before, after)
+			if res, tErr := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{}); tErr == nil {
+				_ = webui.SyncMarkdownConsole(vaultDir)
+				fmt.Printf("Compacted tasks.json: %d -> %d hot tasks (rotated %d to tasks_archive.jsonl, total cold: %d)\n",
+					res.HotBefore, res.HotAfter, len(res.RotatedColdSlugs), res.TotalColdAfter)
+			}
 
 		case "verify-transcript":
 			if len(os.Args) < 4 {
@@ -1226,9 +1236,189 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "tasks":
+		runTasksCLI(vaultDir, os.Args[2:])
+
 	default:
 		printUsage()
 		os.Exit(1)
+	}
+}
+
+func runTasksCLI(vaultDir string, args []string) {
+	now := time.Now()
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "stats":
+			fs := flag.NewFlagSet("tasks stats", flag.ExitOnError)
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(args[1:])
+			stats := kernel.ComputeTaskStats(vaultDir, now)
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(stats)
+				return
+			}
+			fmt.Printf("HQ Task Board Telemetry & Storage Summary\n")
+			fmt.Printf("  Hot Index (tasks.json):           %d tasks (active: %d, idle: %d, stalled: %d, completed: %d, cancelled: %d, archived: %d)\n",
+				stats.HotTotal, stats.ByStatus["active"], stats.ByStatus["idle"], stats.ByStatus["stalled"], stats.ByStatus["completed"], stats.ByStatus["cancelled"], stats.ByStatus["archived"])
+			fmt.Printf("  Cold Ledger (tasks_archive.jsonl): %d archived tasks\n", stats.ColdTotal)
+			fmt.Printf("  By Kind:  task=%d, subagent=%d, auto=%d\n",
+				stats.ByKind["task"], stats.ByKind["subagent"], stats.ByKind["auto"])
+			if len(stats.ByTier) > 0 {
+				fmt.Printf("  By Tier:  deep=%d, standard=%d, quick=%d\n",
+					stats.ByTier["deep"], stats.ByTier["standard"], stats.ByTier["quick"])
+			}
+			return
+
+		case "compact":
+			fs := flag.NewFlagSet("tasks compact", flag.ExitOnError)
+			dryRun := fs.Bool("dry-run", false, "Preview compaction without writing files")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(args[1:])
+			res, err := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{
+				Now:    now,
+				DryRun: *dryRun,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq tasks compact error: %v\n", err)
+				os.Exit(1)
+			}
+			if !*dryRun {
+				_ = webui.SyncMarkdownConsole(vaultDir)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(res)
+				return
+			}
+			prefix := "Compacted"
+			if *dryRun {
+				prefix = "[DRY-RUN] Would compact"
+			}
+			fmt.Printf("%s tasks.json: %d -> %d hot tasks (auto-archived: %d, rotated to cold archive: %d, total cold archive: %d)\n",
+				prefix, res.HotBefore, res.HotAfter, len(res.AutoArchivedSlugs), len(res.RotatedColdSlugs), res.TotalColdAfter)
+			for _, slug := range res.RotatedColdSlugs {
+				fmt.Printf("  - rotated: %s\n", slug)
+			}
+			return
+
+		case "pin", "unpin":
+			pinned := args[0] == "pin"
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "usage: hq tasks %s <task-slug-or-conv-id>\n", args[0])
+				os.Exit(1)
+			}
+			target := args[1]
+			if err := kernel.SetTaskPinned(vaultDir, target, pinned); err != nil {
+				fmt.Fprintf(os.Stderr, "hq tasks %s error: %v\n", args[0], err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			if pinned {
+				fmt.Printf("Pinned task %q to Tier 1 on the HQ Console\n", target)
+			} else {
+				fmt.Printf("Unpinned task %q\n", target)
+			}
+			return
+		}
+	}
+
+	fs := flag.NewFlagSet("tasks", flag.ExitOnError)
+	activeOnly := fs.Bool("active", false, "Show only active, idle, and stalled tasks")
+	allFlag := fs.Bool("all", false, "Include all hot and cold archived tasks")
+	archiveOnly := fs.Bool("archive", false, "Show only archived tasks (from tasks.json and tasks_archive.jsonl)")
+	kindFilter := fs.String("kind", "", "Filter by kind (task, subagent, auto)")
+	scopeFilter := fs.String("scope", "", "Filter by scope (e.g. gmail, gchat, headquarter)")
+	searchQuery := fs.String("search", "", "Case-insensitive substring search across slug, title, summary, and conversation ID")
+	limit := fs.Int("limit", 0, "Maximum number of tasks to display (0 = default)")
+	asJSON := fs.Bool("json", false, "Output matching tasks as JSON")
+	_ = fs.Parse(args)
+
+	hotTasks, _ := kernel.ListTasks(vaultDir)
+	coldCount := kernel.CountColdArchivedTasks(vaultDir)
+
+	// If no filter flags are passed, display the tiered Console board view + stats footer
+	if !*activeOnly && !*allFlag && !*archiveOnly && *kindFilter == "" && *scopeFilter == "" && *searchQuery == "" && *limit == 0 && !*asJSON {
+		sel := kernel.SelectConsoleTasks(hotTasks, coldCount, now)
+		fmt.Printf("HQ Task Board — %d Active | %d Idle | %d Completed (Hot) | %d Archived (Hot: %d, Cold: %d)\n",
+			sel.ActiveCount, sel.IdleCount, sel.CompletedCount, sel.ArchivedHotCount+sel.ArchivedColdCount, sel.ArchivedHotCount, sel.ArchivedColdCount)
+		fmt.Println(strings.Repeat("─", 88))
+		if len(sel.VisibleRows) == 0 {
+			fmt.Println("  No active or recent tasks.")
+		}
+		for _, t := range sel.VisibleRows {
+			printTaskBoardLine(t, now)
+		}
+		if sel.HiddenIdleCount > 0 || sel.HiddenCompletedCount > 0 || sel.ArchivedHotCount > 0 || sel.ArchivedColdCount > 0 {
+			fmt.Println(strings.Repeat("─", 88))
+			fmt.Printf("  Hidden from default view: %d idle, %d older completed, %d archived. Run `./bin/hq tasks --all` or `--search=<q>`.\n",
+				sel.HiddenIdleCount, sel.HiddenCompletedCount, sel.ArchivedHotCount+sel.ArchivedColdCount)
+		}
+		return
+	}
+
+	includeArchive := *allFlag || *archiveOnly || *searchQuery != ""
+	filtered, err := kernel.FilterTasks(vaultDir, *activeOnly, *archiveOnly, *allFlag, includeArchive, *kindFilter, *scopeFilter, *searchQuery, *limit, now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hq tasks error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(filtered)
+		return
+	}
+
+	fmt.Printf("Matching Tasks (%d):\n", len(filtered))
+	for _, t := range filtered {
+		printTaskBoardLine(t, now)
+	}
+}
+
+func printTaskBoardLine(t kernel.ActiveTask, now time.Time) {
+	eff := t.EffectiveStatus(now)
+	badge := "🟢 active   "
+	switch eff {
+	case "idle":
+		badge = "⏸️ idle     "
+	case "stalled":
+		badge = "⚠️ stalled  "
+	case "completed":
+		badge = "✅ completed"
+	case "cancelled":
+		badge = "🛑 cancelled"
+	case "archived":
+		badge = "📦 archived "
+	}
+	age := t.FormatRelativeAge(now)
+	if age == "" {
+		age = "-"
+	}
+	cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
+	pinMark := ""
+	if t.Pinned {
+		pinMark = " 📌"
+	}
+	convShort := t.ConversationID
+	if len(convShort) > 8 {
+		convShort = convShort[:8]
+	}
+	if convShort == "" {
+		convShort = "pending "
+	}
+	summary := strings.Join(strings.Fields(t.LastSummary), " ")
+	if len(summary) > 90 {
+		summary = summary[:87] + "..."
+	}
+	fmt.Printf("  %s  %-6s  %-28s  (%s · %-8s)%s\n", badge, age, t.TaskSlug, t.EffectiveKind(), convShort, pinMark)
+	fmt.Printf("                Title:   %s\n", cleanTitle)
+	if summary != "" {
+		fmt.Printf("                Summary: %s\n", summary)
 	}
 }
 
@@ -1241,6 +1431,8 @@ Commands:
   migrate [--quiet]                   Run non-destructive Vault schema & template migrations
   doctor                              Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
+  tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
+  tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
   memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
@@ -1255,7 +1447,7 @@ Commands:
   subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation
   complete <task-slug-or-conv-id>     Mark an active task as completed
   archive <task-slug-or-conv-id>      Archive a completed task conversation
-  reopen <task-slug-or-conv-id>       Reopen an archived task conversation
+  reopen <task-slug-or-conv-id>       Reopen an archived task conversation (recalls from cold archive if needed)
   adopt --conv=<id> --task=<slug>     Adopt an existing conversation (or demote Front Desk to a Task)
   claim-desk --conv=<id>              Claim the single active [HQ] Front Desk intake lease
   release-desk                        Release Front Desk lease so next new conversation claims it`)

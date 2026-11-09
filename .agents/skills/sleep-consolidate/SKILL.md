@@ -61,11 +61,11 @@ description: >-
 ### Stage 4: Procedural Skill Proposals & Private Vault Commit
 1. **Stage Skill Proposals (Never Auto-Edit `SKILL.md`):**
    - If a repeated workflow or user intervention occurred today, write a proposed skill diff or draft skill to `local/memory/proposals/YYYY-MM-DD-<slug>.md` for user review.
-2. **Task Lifecycle Consolidation (24-Hour Grace Period & Archive):**
-   - Inspect tasks in `local/memory/tasks.json` with `status == "completed"` whose `lastUpdatedAt` is > 24 hours ago.
-   - If the task worktree is clean (`git status --porcelain` is empty) and its branch is merged to main (or PR closed), run `./bin/hq archive <slug>` to cleanly reclaim disk space while preserving conversation history in `tasks.json`.
+2. **Task Lifecycle Consolidation & Hot/Cold Archive Rotation (`./bin/hq tasks compact`):**
+   - Run `./bin/hq tasks compact` to automatically archive eligible completed (`>24h`) and dormant (`>48h`) tasks with clean worktrees and rotate historical subagents and archived tasks from `local/memory/tasks.json` into `local/memory/tasks_archive.jsonl`.
+   - For any remaining `completed` task that needs explicit worktree cleanup, run `./bin/hq archive <slug>`.
 3. **Verify Budget & Commit Vault:**
-   - Run `./bin/hq memory compact` and `./bin/hq memory status` to confirm `local/MEMORY.md` is $\le 80$ lines (`[OK]`) and `facts.jsonl` is deduplicated.
+   - Run `./bin/hq memory compact` and `./bin/hq memory status` to confirm `local/MEMORY.md` is $\le 80$ lines (`[OK]`), `facts.jsonl` is deduplicated, and `tasks.json` is compacted.
    - Commit changes to the private Vault repository:
      ```sh
      git -C local add -A && git -C local commit -m "chore(memory): nightly dreaming consolidation YYYY-MM-DD"

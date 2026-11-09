@@ -767,8 +767,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v4") {
-		t.Fatalf("expected v0 -> v4 migration output, got:\n%s", upOut)
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v5") {
+		t.Fatalf("expected v0 -> v5 migration output, got:\n%s", upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -783,10 +783,10 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 		t.Fatalf("expected missing top-level blocks to be appended to config.yaml, got:\n%s", string(gotCfg))
 	}
 
-	// 3. Verify legacy task title was normalized to [Task:opencli] Fix CLI Bug
+	// 3. Verify legacy task title was normalized to [Task:opencli] Fix CLI Bug and kind/scope were backfilled
 	tasks, _ := kernel.ListTasks(env.vaultDir)
-	if len(tasks) != 1 || tasks[0].Title != "[Task:opencli] Fix CLI Bug" {
-		t.Fatalf("expected legacy task title to be migrated to '[Task:opencli] Fix CLI Bug', got: %+v", tasks)
+	if len(tasks) != 1 || tasks[0].Title != "[Task:opencli] Fix CLI Bug" || tasks[0].Kind != "task" || tasks[0].Scope != "opencli" {
+		t.Fatalf("expected legacy task title/kind/scope to be migrated, got: %+v", tasks)
 	}
 
 	// 4. Verify deprecated hq_console_mobile.md was removed
@@ -794,13 +794,13 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 		t.Fatalf("expected deprecated hq_console_mobile.md to be removed during migration")
 	}
 
-	// 5. Verify schema_version.json is now at version 4 and re-running `hq migrate` is a clean idempotent no-op
+	// 5. Verify schema_version.json is now at version 5 and re-running `hq migrate` is a clean idempotent no-op
 	migOut2, err := env.run("", "migrate")
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v4 -> v4") {
-		t.Fatalf("expected idempotent v4 -> v4 on second run, got:\n%s", migOut2)
+	if !strings.Contains(migOut2, "Vault Schema Migration: v5 -> v5") {
+		t.Fatalf("expected idempotent v5 -> v5 on second run, got:\n%s", migOut2)
 	}
 }
 
@@ -1731,4 +1731,190 @@ func TestCUJ16_GoogleChatQuarantineAndApproval(t *testing.T) {
 		t.Fatalf("hq approve gchat_send failed: %v (%s)", err, appOut)
 	}
 }
+
+// CUJ-16: Scalable Task Board, Per-Tier Console Visibility, Hot/Cold Archive & Recall (RFC-0009)
+func TestCUJ16_TaskBoardTieredConsoleAndColdArchive(t *testing.T) {
+	env := setupHQEnv(t)
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	artDir := filepath.Join(t.TempDir(), "brain-desk")
+	_ = os.MkdirAll(artDir, 0o755)
+	if _, err := env.run("", "claim-desk", "--conv=conv-desk-main", "--artifact-dir="+artDir); err != nil {
+		t.Fatalf("claim-desk: %v", err)
+	}
+
+	now := time.Now().UTC()
+	var seeded []kernel.ActiveTask
+
+	// 1. Seed 10 active tasks (> 8 active tasks to verify Tier 1 shows 100% without truncation)
+	for i := 1; i <= 10; i++ {
+		ts := now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)
+		seeded = append(seeded, kernel.ActiveTask{
+			TaskSlug:       fmt.Sprintf("active-task-%02d", i),
+			Title:          fmt.Sprintf("[Task:core] Active Initiative %02d", i),
+			Kind:           "task",
+			Scope:          "core",
+			Tier:           "deep",
+			Model:          "gemini-4-argon-high",
+			ConversationID: fmt.Sprintf("conv-act-%02d", i),
+			Status:         "active",
+			CreatedAt:      ts,
+			LastUpdatedAt:  ts,
+			LastSummary:    fmt.Sprintf("Working on active step %d", i),
+		})
+	}
+
+	// 2. Seed 7 idle tasks (untouched 8h..14h ago -> Tier 2 caps at MaxConsoleIdleTasks = 5)
+	for i := 1; i <= 7; i++ {
+		ts := now.Add(-time.Duration(7+i) * time.Hour).Format(time.RFC3339)
+		seeded = append(seeded, kernel.ActiveTask{
+			TaskSlug:       fmt.Sprintf("idle-task-%02d", i),
+			Title:          fmt.Sprintf("[Task:notes] Idle Exploration %02d", i),
+			Kind:           "task",
+			Scope:          "notes",
+			Tier:           "standard",
+			Model:          "gemini-3.8-flash-high",
+			ConversationID: fmt.Sprintf("conv-idle-%02d", i),
+			Status:         "active",
+			CreatedAt:      ts,
+			LastUpdatedAt:  ts,
+			LastSummary:    fmt.Sprintf("Paused exploration %d", i),
+		})
+	}
+
+	// 3. Seed 6 completed subagents (2 recent, 4 older > 30h ago -> Tier 3 caps at MaxConsoleCompletedTasks = 3)
+	for i := 1; i <= 6; i++ {
+		ageHours := i
+		if i > 2 {
+			ageHours = 30 + i
+		}
+		ts := now.Add(-time.Duration(ageHours) * time.Hour).Format(time.RFC3339)
+		seeded = append(seeded, kernel.ActiveTask{
+			TaskSlug:       fmt.Sprintf("subagent-audit-%02d", i),
+			Title:          fmt.Sprintf("[Subagent:standard] repo: Audit Run %02d", i),
+			Kind:           "subagent",
+			Scope:          "repo",
+			Tier:           "standard",
+			Model:          "gemini-3.8-flash-high",
+			ConversationID: fmt.Sprintf("conv-sub-%02d", i),
+			Status:         "completed",
+			CreatedAt:      ts,
+			LastUpdatedAt:  ts,
+			CompletedAt:    ts,
+			LastSummary:    fmt.Sprintf("Completed subagent audit %02d takeaway", i),
+		})
+	}
+
+	// 4. Seed 2 archived tasks (> 72h ago -> ready for cold rotation on compact)
+	for i := 1; i <= 2; i++ {
+		ts := now.Add(-time.Duration(72+i) * time.Hour).Format(time.RFC3339)
+		seeded = append(seeded, kernel.ActiveTask{
+			TaskSlug:       fmt.Sprintf("legacy-feature-%02d", i),
+			Title:          fmt.Sprintf("[Task:legacy] Old Feature %02d", i),
+			Kind:           "task",
+			Scope:          "legacy",
+			Tier:           "standard",
+			ConversationID: fmt.Sprintf("conv-arch-%02d", i),
+			Status:         "archived",
+			CreatedAt:      ts,
+			LastUpdatedAt:  ts,
+			ArchivedAt:     ts,
+			LastSummary:    fmt.Sprintf("Shipped legacy feature %02d", i),
+		})
+	}
+
+	for _, st := range seeded {
+		if err := kernel.RegisterTask(env.vaultDir, st); err != nil {
+			t.Fatalf("RegisterTask(%s): %v", st.TaskSlug, err)
+		}
+	}
+
+	// Sync console and verify Tier 1 (all 10 active shown), Tier 2 (5 of 7 idle shown), Tier 3 (3 of 6 completed shown), and 0 <details> bloat
+	if _, err := env.run("", "status", "--quiet"); err != nil {
+		t.Fatalf("hq status: %v", err)
+	}
+	consoleBytes, err := os.ReadFile(filepath.Join(artDir, "hq_console.md"))
+	if err != nil {
+		t.Fatalf("read hq_console.md: %v", err)
+	}
+	consoleMD := string(consoleBytes)
+
+	for i := 1; i <= 10; i++ {
+		slug := fmt.Sprintf("`active-task-%02d`", i)
+		if !strings.Contains(consoleMD, slug) {
+			t.Fatalf("expected all 10 active tasks to be rendered in hq_console.md (missing %s)", slug)
+		}
+	}
+	// Newest 5 idle tasks (idle-task-01..05) shown; idle-task-06 and idle-task-07 omitted
+	if !strings.Contains(consoleMD, "`idle-task-01`") || !strings.Contains(consoleMD, "`idle-task-05`") {
+		t.Fatalf("expected top 5 idle tasks in hq_console.md, got:\n%s", consoleMD)
+	}
+	if strings.Contains(consoleMD, "`idle-task-06`") || strings.Contains(consoleMD, "`idle-task-07`") {
+		t.Fatalf("expected 6th and 7th idle tasks to be omitted from hq_console.md table")
+	}
+	// Newest 3 completed subagents (subagent-audit-01..03) shown; 04..06 omitted
+	if !strings.Contains(consoleMD, "`subagent-audit-01`") || !strings.Contains(consoleMD, "`subagent-audit-03`") {
+		t.Fatalf("expected 3 most recent completed subagents in hq_console.md")
+	}
+	if strings.Contains(consoleMD, "`subagent-audit-04`") || strings.Contains(consoleMD, "<details>") {
+		t.Fatalf("expected older completed tasks to be omitted without <details> bloat in hq_console.md")
+	}
+
+	// Pinning idle-task-07 promotes it to Tier 1 (`active` visibility) even though it is 14h old
+	if out, err := env.run("", "tasks", "pin", "idle-task-07"); err != nil {
+		t.Fatalf("hq tasks pin failed: %v (%s)", err, out)
+	}
+	consoleAfterPin, _ := os.ReadFile(filepath.Join(artDir, "hq_console.md"))
+	if !strings.Contains(string(consoleAfterPin), "`idle-task-07`") || !strings.Contains(string(consoleAfterPin), "📌") {
+		t.Fatalf("expected pinned idle-task-07 to appear in hq_console.md with 📌 badge, got:\n%s", string(consoleAfterPin))
+	}
+
+	// Verify SessionStart bounded task injection omits older completed/archived tasks
+	sessIn := `{"conversationId":"conv-desk-main","artifactDirectoryPath":"` + artDir + `"}`
+	sessOut, err := env.run(sessIn, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start failed: %v (%s)", err, sessOut)
+	}
+	if !strings.Contains(sessOut, "older completed/archived task(s) omitted from context") {
+		t.Fatalf("expected SessionStart to bound Tracked Task Conversations and report omitted count, got:\n%s", sessOut)
+	}
+
+	// Run `./bin/hq tasks compact` to rotate old completed subagents and >48h archived tasks into local/memory/tasks_archive.jsonl
+	compactOut, err := env.run("", "tasks", "compact")
+	if err != nil {
+		t.Fatalf("hq tasks compact failed: %v (%s)", err, compactOut)
+	}
+	if !strings.Contains(compactOut, "rotated to cold archive:") {
+		t.Fatalf("expected compact output to report rotated tasks, got:\n%s", compactOut)
+	}
+	if coldCount := kernel.CountColdArchivedTasks(env.vaultDir); coldCount < 5 {
+		t.Fatalf("expected at least 5 tasks in cold tasks_archive.jsonl after compact, got %d", coldCount)
+	}
+
+	// Verify `./bin/hq tasks --search=legacy-feature-01` finds the task inside cold storage
+	searchOut, err := env.run("", "tasks", "--search=legacy-feature-01")
+	if err != nil || !strings.Contains(searchOut, "legacy-feature-01") {
+		t.Fatalf("expected hq tasks --search to find cold-archived task legacy-feature-01, got:\n%s (%v)", searchOut, err)
+	}
+
+	// Verify `./bin/hq reopen legacy-feature-01` recalls the task from tasks_archive.jsonl back into hot tasks.json as active
+	reopenOut, err := env.run("", "reopen", "legacy-feature-01")
+	if err != nil || !strings.Contains(reopenOut, "Reopened task \"legacy-feature-01\"") {
+		t.Fatalf("expected hq reopen to recall legacy-feature-01 from cold archive, got:\n%s (%v)", reopenOut, err)
+	}
+	hotTasks, _ := kernel.ListTasks(env.vaultDir)
+	foundRecalled := false
+	for _, ht := range hotTasks {
+		if ht.TaskSlug == "legacy-feature-01" && ht.Status == "active" {
+			foundRecalled = true
+			break
+		}
+	}
+	if !foundRecalled {
+		t.Fatalf("expected legacy-feature-01 to be restored to hot tasks.json with status=active")
+	}
+}
+
 
