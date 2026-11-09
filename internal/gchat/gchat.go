@@ -368,6 +368,38 @@ func spacesCachePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "gchat", "spaces_cache.json")
 }
 
+func isIgnoredSpaceDisplayName(name, spID string) bool {
+	n := strings.TrimSpace(name)
+	if n == "" || n == spID || n == strings.TrimPrefix(spID, "spaces/") {
+		return true
+	}
+	lower := strings.ToLower(n)
+	if lower == "away" || lower == "active" || lower == "offline" || lower == "do not disturb" {
+		return true
+	}
+	if strings.HasPrefix(lower, "google account:") || strings.Contains(lower, "google membership") {
+		return true
+	}
+	if strings.HasPrefix(lower, "service worker ") || strings.HasPrefix(lower, "google chat (spaces/cdp-") {
+		return true
+	}
+	return false
+}
+
+func looksLikeExplicitSpaceID(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.Contains(s, " ") || strings.Contains(s, "@") {
+		return false
+	}
+	if strings.HasPrefix(s, "spaces/") || strings.HasPrefix(s, "space/") || strings.HasPrefix(s, "dm/") || strings.HasPrefix(s, "room/") {
+		return true
+	}
+	if strings.HasPrefix(s, "AAQA") || strings.HasSuffix(s, "AAAAE") || strings.HasPrefix(s, "gmail-chat-") || strings.HasPrefix(s, "cdp-") {
+		return true
+	}
+	return false
+}
+
 func saveCachedSpaces(vaultDir, account string, spaces []SpaceSummary) error {
 	if len(spaces) == 0 {
 		return nil
@@ -396,7 +428,7 @@ func saveCachedSpaces(vaultDir, account string, spaces []SpaceSummary) error {
 			continue
 		}
 		name := strings.TrimSpace(s.DisplayName)
-		if name == "" || name == spID || name == strings.TrimPrefix(spID, "spaces/") || strings.EqualFold(name, "Away") || strings.EqualFold(name, "Active") {
+		if isIgnoredSpaceDisplayName(name, spID) {
 			continue
 		}
 		k := strings.ToLower(acct) + "|" + safeSpaceKey(spID)
@@ -425,7 +457,7 @@ func loadCachedSpaces(vaultDir, account string) []SpaceSummary {
 	add := func(acct, spID, name, spType string) {
 		spID = normalizeSpaceID(spID)
 		name = strings.TrimSpace(name)
-		if spID == "" || name == "" || strings.EqualFold(name, "Away") || strings.EqualFold(name, "Active") {
+		if spID == "" || isIgnoredSpaceDisplayName(name, spID) {
 			return
 		}
 		if account != "" && acct != "" && !strings.EqualFold(acct, account) {
@@ -589,8 +621,19 @@ func ResolveSpaceTarget(vaultDir, accountAlias, target string) (string, string, 
 		}
 	}
 
-	// If target looks like an explicit space ID (no whitespace), accept it directly
-	if strings.HasPrefix(raw, "spaces/") || !strings.Contains(raw, " ") {
+	// If target is an explicit space ID (e.g. "spaces/AAAA_LAUNCH_01", "AAAA_LAUNCH_01", "TEST_DM_AAAAE"), accept it directly
+	if looksLikeExplicitSpaceID(raw) {
+		return normalizeSpaceID(raw), raw, nil
+	}
+
+	// If target was not in the 20 visible sidebar spaces (e.g. a new email address like "alice@gmail.com"
+	// or a username handle like "alex_dev"), use Google Chat's "New chat" PeopleKit search via CDP to resolve/create the DM
+	if dm, dmErr := resolveOrCreateDMViaCDP(vaultDir, cfg, raw); dmErr == nil && dm.SpaceID != "" {
+		return dm.SpaceID, dm.DisplayName, nil
+	}
+
+	// In mock/test mode (non-live CDP), allow single-token space IDs that don't contain '@'
+	if !strings.Contains(raw, " ") && !strings.Contains(raw, "@") && (mockDir(vaultDir) != "" || cfg.Transport != "cdp" || (cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint)) {
 		return raw, raw, nil
 	}
 

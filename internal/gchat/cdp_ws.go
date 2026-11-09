@@ -796,7 +796,7 @@ const jsExtractSpaces = `(() => {
           .replace(/^(Unread\s+|Pinned\s+|Space\s+|Direct message\s+|Conversation with\s+)/i, '')
           .replace(/,\s*(Away|Active|Do not disturb|Offline|Unread).*$/i, '')
           .trim();
-        if (cleaned && !statusWords.test(cleaned) && cleaned.length > 1 && !cleaned.startsWith('spaces/')) {
+        if (cleaned && !statusWords.test(cleaned) && !/^Google Account:/i.test(cleaned) && !/Google membership/i.test(cleaned) && cleaned.length > 1 && !cleaned.startsWith('spaces/')) {
           name = cleaned;
           break;
         }
@@ -1148,4 +1148,160 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 		return "", fmt.Errorf("CDP send failed: %w", lastErr)
 	}
 	return "", fmt.Errorf("no active Google Chat message composer box found in Chrome CDP tabs")
+}
+
+// resolveOrCreateDMViaCDP uses Google Chat's "New chat" PeopleKit UI in headless Chrome to resolve
+// or start a Direct Message with an email address, username handle, or contact not currently visible
+// in the top 20 sidebar items.
+func resolveOrCreateDMViaCDP(vaultDir string, cfg AccountConfig, rawQuery string) (SpaceSummary, error) {
+	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
+		return SpaceSummary{}, fmt.Errorf("live CDP DM resolution unavailable in non-CDP mode")
+	}
+	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
+		return SpaceSummary{}, fmt.Errorf("live CDP DM resolution skipped for custom test endpoint")
+	}
+	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, false)
+	if err != nil {
+		return SpaceSummary{}, err
+	}
+	targets, err := fetchCDPTargets(ep)
+	if err != nil || len(targets) == 0 {
+		return SpaceSummary{}, fmt.Errorf("no active Google Chat tabs found")
+	}
+
+	var wsURL string
+	for _, t := range targets {
+		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
+			wsURL = t.WebSocketDebuggerURL
+			break
+		}
+	}
+	if wsURL == "" {
+		return SpaceSummary{}, fmt.Errorf("no page WebSocket target found in Chrome")
+	}
+	applyCDPNetworkJail(wsURL)
+
+	// Build candidate search strings: if bare username without '@' or whitespace (e.g. "alex_dev"),
+	// try "<username>@gmail.com" first so PeopleKit immediately surfaces the exact email chip.
+	q := strings.TrimSpace(rawQuery)
+	var candidates []string
+	if !strings.Contains(q, "@") && !strings.Contains(q, " ") {
+		candidates = []string{q + "@gmail.com", q}
+	} else {
+		candidates = []string{q}
+	}
+
+	const jsClickNewChat = `(() => {
+  const fire = (el) => {
+    for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+    }
+  };
+  const btn = document.querySelector('button[jsname="TrXBg"]') ||
+    Array.from(document.querySelectorAll('button, [role="button"]')).find(el => (el.innerText || '').trim().includes('New chat'));
+  if (!btn) return false;
+  fire(btn);
+  return true;
+})()`
+
+	for _, searchStr := range candidates {
+		_, _ = cdpEvalJS(wsURL, jsClickNewChat)
+
+		// Wait up to 2.5s for PeopleKit input `input[aria-label="Add 1 or more people"]`
+		searchJSON, _ := json.Marshal(searchStr)
+		jsTypeSearch := fmt.Sprintf(`(() => {
+  const input = document.querySelector('input[aria-label="Add 1 or more people"], input.I4p4db.XdSAtd');
+  if (!input) return false;
+  input.focus();
+  input.value = '';
+  document.execCommand('selectAll', false, null);
+  document.execCommand('insertText', false, %s);
+  if (!input.value) input.value = %s;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+})()`, string(searchJSON), string(searchJSON))
+
+		typed := false
+		for i := 0; i < 10; i++ {
+			time.Sleep(250 * time.Millisecond)
+			if raw, err := cdpEvalJS(wsURL, jsTypeSearch); err == nil && string(raw) == "true" {
+				typed = true
+				break
+			}
+		}
+		if !typed {
+			continue
+		}
+
+		// Poll up to 2.5s for PeopleKit autocomplete option `[role="option"][pkd-target]`
+		const jsPickOption = `(() => {
+  const fire = (el) => {
+    for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+    }
+  };
+  const opt = document.querySelector('[role="option"][pkd-target], .AZW99.XdSAtd[role="option"]');
+  if (!opt || opt.offsetParent === null) return '';
+  const text = (opt.innerText || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 2).join(' — ');
+  fire(opt);
+  return text || 'matched';
+})()`
+
+		pickedLabel := ""
+		for i := 0; i < 10; i++ {
+			time.Sleep(280 * time.Millisecond)
+			if raw, err := cdpEvalJS(wsURL, jsPickOption); err == nil {
+				val := strings.Trim(string(raw), `"`)
+				if val != "" && val != "null" {
+					pickedLabel = val
+					break
+				}
+			}
+		}
+		if pickedLabel == "" {
+			continue
+		}
+
+		// Click "Start chat" button if visible and wait for URL to navigate to /app/chat/<id> or /app/dm/<id>
+		const jsStartAndCheckURL = `(() => {
+  const fire = (el) => {
+    for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+    }
+  };
+  const startBtn = document.querySelector('button[jsname="OCpkoe"]') ||
+    Array.from(document.querySelectorAll('button, [role="button"]')).find(el => /^Start chat$/i.test((el.innerText || '').trim()));
+  if (startBtn && !startBtn.disabled && startBtn.getAttribute('aria-disabled') !== 'true') {
+    fire(startBtn);
+  }
+  const m = window.location.href.match(/\/(?:chat|dm|room|spaces)\/([A-Za-z0-9_\-]+)/);
+  if (m && m[1] && m[1] !== 'home') return m[1];
+  return '';
+})()`
+
+		for i := 0; i < 12; i++ {
+			time.Sleep(300 * time.Millisecond)
+			if raw, err := cdpEvalJS(wsURL, jsStartAndCheckURL); err == nil {
+				spID := strings.Trim(string(raw), `"`)
+				if spID != "" && spID != "null" && spID != "home" {
+					displayName := q
+					if pickedLabel != "matched" && pickedLabel != "" {
+						displayName = pickedLabel
+					}
+					summary := SpaceSummary{
+						SpaceID:     "spaces/" + spID,
+						Account:     cfg.Alias,
+						DisplayName: displayName,
+						SpaceType:   "DIRECT_MESSAGE",
+						Source:      "cdp",
+					}
+					_ = saveCachedSpaces(vaultDir, cfg.Alias, []SpaceSummary{summary})
+					return summary, nil
+				}
+			}
+		}
+	}
+
+	return SpaceSummary{}, fmt.Errorf("could not find Google Chat contact matching %q via New Chat search", rawQuery)
 }

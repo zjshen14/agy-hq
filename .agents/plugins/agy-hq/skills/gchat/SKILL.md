@@ -20,7 +20,11 @@ When the user asks to send a message to a Google Chat space or DM (even from `[H
    ```sh
    ./bin/hq gchat propose --to="Project Launch Space" --body="Your message text here"
    ```
-   - `--to` accepts a human-friendly Space/DM name (e.g., `"Project Launch Space"`, `"Engineering Core"`, `"Alice"`) or a raw Space ID (`AAAA_LAUNCH_01` or `spaces/AAAA_LAUNCH_01`).
+   - `--to` accepts:
+     - A human-friendly Space/DM name (e.g., `"Project Launch Space"`, `"Engineering Core"`, `"Alice Chen"`),
+     - Any **email address or username handle** (`"alice@gmail.com"`, `"alex_dev"`)—even if they have no existing DM in the top 20 sidebar spaces (`hq gchat propose` automatically runs Google Chat's `"New chat"` PeopleKit search in Go in ~2 seconds and caches the resulting DM `spaceId`), or
+     - A raw Space ID (`AAAA_LAUNCH_01` or `spaces/AAAA_LAUNCH_01`).
+   - **Never spawn a subagent** to manually search for or start a new DM in Chrome—`./bin/hq gchat propose --to="<name, email, or handle>" --body="..."` handles both existing spaces and brand-new DMs natively in 1 CLI call.
    - `hq gchat propose` automatically:
      1. Ensures the invisible `--headless=new` Chrome CDP session is running using saved cookies in `local/private/gchat/chrome-profile` (zero desktop popup windows),
      2. Fuzzy-resolves `--to` against cached/live spaces (`local/memory/gchat/spaces_cache.json`),

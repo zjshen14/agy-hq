@@ -264,5 +264,16 @@ func TestPhase4_FuzzySpaceResolutionAndAuthURLDetection(t *testing.T) {
 	if spec.SpaceID != "spaces/AAAA_LAUNCH_01" || spec.SpaceName != "Project Launch Space" {
 		t.Fatalf("expected draft SpaceID=spaces/AAAA_LAUNCH_01 and SpaceName=Project Launch Space, got %+v", spec)
 	}
+
+	// 3. Verify Google Account header and Service Worker labels are filtered out of space cache
+	if !isIgnoredSpaceDisplayName("Google Account: User (user@gmail.com), Google membership", "spaces/AAAA_DM_ALICE") {
+		t.Fatalf("expected Google Account header label to be filtered out")
+	}
+	if looksLikeExplicitSpaceID("alice@gmail.com") {
+		t.Fatalf("expected email address to NOT be treated as an explicit space ID")
+	}
+	if !looksLikeExplicitSpaceID("spaces/TEST_DM_AAAAE") || !looksLikeExplicitSpaceID("TEST_DM_AAAAE") {
+		t.Fatalf("expected TEST_DM_AAAAE to be recognized as an explicit space ID")
+	}
 }
 
