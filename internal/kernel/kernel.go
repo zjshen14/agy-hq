@@ -1613,30 +1613,30 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		Status:         "active",
 	})
 
-	// Deliver initial message via agentapi send-message (SendAgentMessage), with Connect JSON fallback.
+	// Deliver initial prompt via SendUserCascadeMessage to kick off Turn 1 immediately
+	// (Note: agentapi send-message only queues an inbox message and will not wake a 0-step StartCascade trajectory).
 	sent := false
-	if parentConvID != "" {
-		msgCmd := exec.Command("agentapi", "send-message", "--title=Message from "+parentConvID, cascadeID, fullPrompt)
-		if err := msgCmd.Run(); err == nil {
-			sent = true
-		}
-	}
-	if !sent {
-		sendURL := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage", lsAddr)
-		sendPayload, _ := json.Marshal(map[string]interface{}{
-			"cascadeId": cascadeID,
-			"items": []map[string]interface{}{
-				{"text": fullPrompt},
-			},
-		})
-		if sendReq, reqErr := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(sendPayload)); reqErr == nil {
-			sendReq.Header.Set("Content-Type", "application/json")
-			sendReq.Header.Set("x-codeium-csrf-token", csrfToken)
-			if sendResp, doErr := client.Do(sendReq); doErr == nil {
-				_, _ = io.Copy(io.Discard, sendResp.Body)
-				_ = sendResp.Body.Close()
+	sendURL := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage", lsAddr)
+	sendPayload, _ := json.Marshal(map[string]interface{}{
+		"cascadeId": cascadeID,
+		"items": []map[string]interface{}{
+			{"text": fullPrompt},
+		},
+	})
+	if sendReq, reqErr := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(sendPayload)); reqErr == nil {
+		sendReq.Header.Set("Content-Type", "application/json")
+		sendReq.Header.Set("x-codeium-csrf-token", csrfToken)
+		if sendResp, doErr := client.Do(sendReq); doErr == nil {
+			_, _ = io.Copy(io.Discard, sendResp.Body)
+			_ = sendResp.Body.Close()
+			if sendResp.StatusCode >= 200 && sendResp.StatusCode < 300 {
+				sent = true
 			}
 		}
+	}
+	if !sent && parentConvID != "" {
+		msgCmd := exec.Command("agentapi", "send-message", "--title=Message from "+parentConvID, cascadeID, fullPrompt)
+		_ = msgCmd.Run()
 	}
 
 	output := fmt.Sprintf("Spawned subagent %s (parent=%s, model=%s, role=%q)", cascadeID, parentConvID, modelID, role)

@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/agy-hq-icon-obsidian.png" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/branding/agy-hq-icon-white.png" />
+    <img src="assets/branding/agy-hq-icon-obsidian.png" width="128" height="128" alt="agy-hq logo" />
+  </picture>
+</p>
+
 # `agy-hq` — Personal Agent OS for Google Antigravity
 
 **`agy-hq`** (Headquarter) is a lightweight, open-source **Personal Agent OS** built on top of **Google Antigravity**. It turns an always-on Mac running Antigravity into a 24/7 general-purpose, proactive personal assistant—while keeping **100% of your personal memory, files, and credentials isolated in a private `Vault` (`local/`)**.

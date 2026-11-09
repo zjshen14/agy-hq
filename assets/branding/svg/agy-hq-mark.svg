@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Squircle Backgrounds -->
+    <linearGradient id="bg-obsidian" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1C202B"/>
+      <stop offset="100%" stop-color="#0E1017"/>
+    </linearGradient>
+    <linearGradient id="bg-white" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F5F7FC"/>
+    </linearGradient>
+    <linearGradient id="bg-sapphire" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#121D3A"/>
+      <stop offset="100%" stop-color="#090E1E"/>
+    </linearGradient>
+
+    <!-- Asymmetric Wing Multi-Lobe Antigravity Mesh Gradients -->
+    <radialGradient id="wing-lime" cx="286" cy="398" r="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#8AE05C" stop-opacity="0.95"/>
+      <stop offset="60%" stop-color="#8AE05C" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#378DFC" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="wing-coral" cx="764" cy="462" r="230" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F85852" stop-opacity="0.95"/>
+      <stop offset="65%" stop-color="#F85852" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#378DFC" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="wing-orange" cx="672" cy="344" r="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FF9A26" stop-opacity="0.98"/>
+      <stop offset="60%" stop-color="#FF9A26" stop-opacity="0.40"/>
+      <stop offset="100%" stop-color="#F85852" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Floating Orb Multi-Lobe Antigravity Mesh Gradients -->
+    <radialGradient id="orb-lime" cx="383" cy="347" r="135" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#9CD64A" stop-opacity="0.95"/>
+      <stop offset="65%" stop-color="#9CD64A" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#378DFC" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb-coral" cx="553" cy="341" r="135" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F65A4C" stop-opacity="0.95"/>
+      <stop offset="65%" stop-color="#F65A4C" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#378DFC" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb-orange" cx="468" cy="290" r="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FC8E26" stop-opacity="1"/>
+      <stop offset="58%" stop-color="#FC8E26" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#F65A4C" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- Asymmetric Wing Cradle (Antigravity 4-Color Spectrum) -->
+  <g id="asymmetric-wing">
+    <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="#378DFC"/>
+    <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wing-lime)"/>
+    <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wing-coral)"/>
+    <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wing-orange)"/>
+  </g>
+
+  <!-- Floating Proactive Assistant Orb (Antigravity 4-Color Spectrum) -->
+  <g id="floating-orb">
+    <circle cx="468" cy="398" r="142" fill="#378DFC"/>
+    <circle cx="468" cy="398" r="142" fill="url(#orb-lime)"/>
+    <circle cx="468" cy="398" r="142" fill="url(#orb-coral)"/>
+    <circle cx="468" cy="398" r="142" fill="url(#orb-orange)"/>
+  </g>
+</svg>

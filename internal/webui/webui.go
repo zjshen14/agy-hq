@@ -248,7 +248,27 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 </head>
 <body>
 <header>
-  <h1>🏛️ agy-hq Console</h1>
+  <h1 style="display:flex;align-items:center;gap:8px;">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="22" height="22" style="flex-shrink:0">
+      <defs>
+        <radialGradient id="hq-wl" cx="286" cy="398" r="240" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#8AE05C" stop-opacity="0.95"/><stop offset="60%" stop-color="#8AE05C" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient>
+        <radialGradient id="hq-wc" cx="764" cy="462" r="230" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F85852" stop-opacity="0.95"/><stop offset="65%" stop-color="#F85852" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient>
+        <radialGradient id="hq-wo" cx="672" cy="344" r="210" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#FF9A26" stop-opacity="0.98"/><stop offset="60%" stop-color="#FF9A26" stop-opacity="0.40"/><stop offset="100%" stop-color="#F85852" stop-opacity="0"/></radialGradient>
+        <radialGradient id="hq-ol" cx="383" cy="347" r="135" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#9CD64A" stop-opacity="0.95"/><stop offset="65%" stop-color="#9CD64A" stop-opacity="0.30"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient>
+        <radialGradient id="hq-oc" cx="553" cy="341" r="135" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F65A4C" stop-opacity="0.95"/><stop offset="65%" stop-color="#F65A4C" stop-opacity="0.30"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient>
+        <radialGradient id="hq-oo" cx="468" cy="290" r="140" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#FC8E26" stop-opacity="1"/><stop offset="58%" stop-color="#FC8E26" stop-opacity="0.45"/><stop offset="100%" stop-color="#F65A4C" stop-opacity="0"/></radialGradient>
+      </defs>
+      <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="#378DFC"/>
+      <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#hq-wl)"/>
+      <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#hq-wc)"/>
+      <path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#hq-wo)"/>
+      <circle cx="468" cy="398" r="142" fill="#378DFC"/>
+      <circle cx="468" cy="398" r="142" fill="url(#hq-ol)"/>
+      <circle cx="468" cy="398" r="142" fill="url(#hq-oc)"/>
+      <circle cx="468" cy="398" r="142" fill="url(#hq-oo)"/>
+    </svg>
+    agy-hq Console
+  </h1>
   <span class="muted">Updated {{.UpdatedAt}} · <a href="/" style="color:var(--accent)">Refresh</a></span>
 </header>
 
