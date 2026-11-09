@@ -97,6 +97,17 @@ Beyond academic papers, commercial coding agents, always-on personal assistants,
 5. **1-Tap Inline Diff Review (Devin / Cursor Memories):**
    - Users ignore verbose weekly markdown reports (`local/memory/proposals/*.md`), which is why `agy-hq`'s `proposals/` folder sat empty. Surfacing a concise, verified diff card with a **1-tap Approve/Reject button** (`ask_question` backed by `./bin/hq approve`) achieves high review velocity with full human control.
 
+### 2.3 Beyond SWE: Multi-Agent Attribution, Implicit Edit Learning & Cost-Quality Routing
+A critical audit of our initial RFC draft against broader agent literature exposed four non-SWE frontiers essential for a general-purpose Personal Agent OS:
+1. **Implicit Preference Learning from User Edits (*PRELUDE / CIPHER*, Gao et al., ACL 2024 / Microsoft Research):**
+   - In non-code domains (email/chat drafting, memo writing, investment notes), there is no compiler or unit test. *PRELUDE* proves that the **diff between an agent's proposed draft and the user's final edited text** ($\Delta_{\text{edit}} = \text{Text}_{\text{user}} - \text{Text}_{\text{agent}}$) is the highest-signal, zero-friction supervision source—allowing the system to infer latent style, tone, and structural rules without forcing the user to write explicit prompt instructions.
+2. **Hierarchical Multi-Agent Failure Attribution (*Who&When*, *TRAIL*, *Causal Agent Replay*, *TRUCE*, ICML 2025–2026):**
+   - In parent-child agent hierarchies (such as `agy-hq`'s Front Desk $\rightarrow$ Subagent / Spawned Task DAG), a child failure is frequently caused by **parent delegation under-specification** (missing context or wrong file paths) or **model-tier misrouting** rather than a missing worker skill. Attribution must inspect the `(ParentPrompt, ChildTier, ChildTrajectory)` tuple before deciding which layer to patch.
+3. **Dynamic Cost-Quality Routing (*RouteLLM*, Ong et al., LMSYS / UC Berkeley, ICLR 2025):**
+   - Rather than static hand-tuned routing rules, *RouteLLM* demonstrates that calibrating routing thresholds from historical trajectory success vs. token cost preserves `95%+` of frontier model quality while cutting expensive tier usage by up to `85%`.
+4. **Model-Conditional Scaffolding & Upgrade Ablation (Industry Lesson from Cursor, Devin & Cline):**
+   - Prompt workarounds evolved to patch quirks of one model family (`Gemini 3.8 Flash`) often degrade other families (`Claude Opus 5.5` or `Gemini 4 Argon`) or become dead weight after a model upgrade ("scaffolding overfitting"). Learned rules require explicit `model_scope` tags and periodic **ablation sweeps** (`./bin/hq rsi ablate`) against replay fixtures.
+
 ---
 
 ## 3. How Production Agent Systems Implement Trace Analysis, Synthetic Regression Testing & Self-Patching
@@ -195,7 +206,7 @@ Allowing an agentic system to modify its own skills, hooks, and CLI code introdu
 
 ---
 
-## 6. Bibliography & Primary Sources (26 Authoritative Works)
+## 6. Bibliography & Primary Sources (30 Authoritative Works)
 
 ### A. Classical Foundations & Intrinsic Self-Correction Limits
 1. **Schmidhuber, J. (2003).** *Gödel Machines: Self-Referential Universal Problem Solvers Making Provably Optimal Self-Improvements.* [arXiv:cs/0309048](https://arxiv.org/abs/cs/0309048)
@@ -232,3 +243,9 @@ Allowing an agentic system to modify its own skills, hooks, and CLI code introdu
 24. **Denison, C., MacDiarmid, M., Barez, F., Duvenaud, D., Kravec, S., Marks, S., Schiefer, N., Soklaski, R., Tamkin, A., Kaplan, J., Shlegeris, B., Bowman, S. R., Perez, E., & Hubinger, E. / Anthropic (2024).** *Sycophancy to Subterfuge: Investigating Reward-Tampering in Large Language Models.* [arXiv:2406.10162](https://arxiv.org/abs/2406.10162)
 25. **Benton, J., et al. / Anthropic (2024) & Meinke, A., et al. / Apollo Research (2024).** *Sabotage Evaluations for Frontier Models* ([arXiv:2410.21514](https://arxiv.org/abs/2410.21514)) & *Frontier Models are Capable of In-Context Scheming* ([arXiv:2412.04984](https://arxiv.org/abs/2412.04984)).
 26. **Debenedetti, E., et al. / Google DeepMind & ETH Zurich (2025).** *Defeating Prompt Injections by Design (CaMeL).* [arXiv:2503.18813](https://arxiv.org/abs/2503.18813) · **Martin, L. / Anthropic (2026).** *The Components of Agent Memory: 4-Layer Hierarchy & Ground-Truth Dreaming.*
+
+### F. Non-Code Implicit Preference Learning, Multi-Agent Credit Assignment & Routing
+27. **Gao, G., Taymanov, A., Salinas, E., Mineiro, P., & Misra, D. / Microsoft Research (2024).** *Aligning LLM Agents by Learning Latent Preference from User Edits (PRELUDE / CIPHER).* ACL 2024 / NeurIPS 2024. [arXiv:2404.15269](https://arxiv.org/abs/2404.15269)
+28. **Lightman, H., Kosaraju, V., Burda, Y., Edwards, H., Baker, B., Lee, T., Leike, J., Schulman, J., Sutskever, I., & Cobbe, K. / OpenAI (2024).** *Let's Verify Step by Step (Process vs. Outcome Supervision).* ICLR 2024. [arXiv:2305.20050](https://arxiv.org/abs/2305.20050)
+29. **Ong, I., Almahairi, A., Wu, V., Chiang, W.-L., Wu, T., Gonzalez, J. E., Kadous, M. W., & Stoica, I. / LMSYS & UC Berkeley (2025).** *RouteLLM: Learning to Route LLMs with Preference Data.* ICLR 2025. [arXiv:2406.18665](https://arxiv.org/abs/2406.18665)
+30. **Multi-Agent Failure Attribution & Rule Credit Estimation (2025–2026):** *Who&When: Automated Failure Attribution of LLM Multi-Agent Systems* (2025) & *TRUCE / Causal Agent Replay: Trajectory-Based Rule Credit Estimation* (ICML 2025/2026).
