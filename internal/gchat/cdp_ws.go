@@ -432,6 +432,26 @@ func evalThreadViaWebSocket(targets []cdpTarget, alias, spaceID, threadID string
 }
 
 func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) {
+	cleanSpaceID := strings.TrimPrefix(spec.SpaceID, "spaces/")
+	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "space/")
+	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "dm/")
+
+	// Prioritize page targets over subframe/iframe targets
+	var sortedTargets []cdpTarget
+	for _, t := range targets {
+		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
+			sortedTargets = append(sortedTargets, t)
+		}
+	}
+	for _, t := range targets {
+		if t.Type != "page" && t.WebSocketDebuggerURL != "" {
+			sortedTargets = append(sortedTargets, t)
+		}
+	}
+	if len(sortedTargets) == 0 {
+		return "", fmt.Errorf("no active Google Chat WebSocket targets found")
+	}
+
 	bodyJSON, _ := json.Marshal(spec.Body)
 	jsFocusAndInsert := fmt.Sprintf(`(() => {
   const docs = [document];
@@ -450,30 +470,143 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
   return false;
 })()`, string(bodyJSON))
 
-	for _, t := range targets {
-		if t.WebSocketDebuggerURL == "" {
+	const jsClickSendBtn = `(() => {
+  const docs = [document];
+  for (const f of document.querySelectorAll('iframe')) {
+    try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+  }
+  for (const doc of docs) {
+    const btn = doc.querySelector('button[aria-label="Send message"], button[aria-label*="Send"], [data-tooltip*="Send"]');
+    if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+      btn.click();
+      return true;
+    }
+  }
+  return false;
+})()`
+
+	const jsCheckComposer = `(() => {
+  const docs = [document];
+  for (const f of document.querySelectorAll('iframe')) {
+    try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+  }
+  for (const doc of docs) {
+    if (doc.querySelector('div[role="textbox"][contenteditable="true"]')) return true;
+  }
+  return false;
+})()`
+
+	var lastErr error
+	for _, t := range sortedTargets {
+		wsURL := t.WebSocketDebuggerURL
+
+		// 1. Ensure tab is navigated to the target space
+		if cleanSpaceID != "" {
+			locBytes, err := cdpEvalJS(wsURL, "window.location.href")
+			curLoc := ""
+			if err == nil {
+				curLoc = strings.Trim(string(locBytes), `"`)
+			}
+
+			if !strings.Contains(curLoc, cleanSpaceID) {
+				// Try client-side routing via sidebar click first
+				cleanSpaceJSON, _ := json.Marshal(cleanSpaceID)
+				jsClickSidebar := fmt.Sprintf(`(() => {
+  const id = %s;
+  const selectors = [
+    `+"`"+`[data-group-id="space/${id}"]`+"`"+`,
+    `+"`"+`[data-group-id="${id}"]`+"`"+`,
+    `+"`"+`[data-group-id="dm/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/chat/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/room/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/dm/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/spaces/${id}"]`+"`"+`
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) { el.click(); return true; }
+  }
+  return false;
+})()`, string(cleanSpaceJSON))
+
+				clickedSidebar, _ := cdpEvalJS(wsURL, jsClickSidebar)
+				if string(clickedSidebar) == "true" {
+					for i := 0; i < 4; i++ {
+						time.Sleep(500 * time.Millisecond)
+						ready, _ := cdpEvalJS(wsURL, jsCheckComposer)
+						if string(ready) == "true" {
+							break
+						}
+					}
+				}
+
+				// If not yet on space, navigate URL directly
+				locBytesAfter, _ := cdpEvalJS(wsURL, "window.location.href")
+				if !strings.Contains(string(locBytesAfter), cleanSpaceID) {
+					targetURL := fmt.Sprintf("https://chat.google.com/room/%s", cleanSpaceID)
+					if strings.Contains(curLoc, "mail.google.com") || strings.Contains(t.URL, "mail.google.com") {
+						targetURL = fmt.Sprintf("https://mail.google.com/mail/u/0/#chat/space/%s", cleanSpaceID)
+					}
+					targetURLJSON, _ := json.Marshal(targetURL)
+					_, _ = cdpEvalJS(wsURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
+				}
+			}
+		}
+
+		// 2. Wait up to 10 seconds for the composer element to appear
+		composerReady := false
+		for i := 0; i < 20; i++ {
+			raw, err := cdpEvalJS(wsURL, jsCheckComposer)
+			if err == nil && string(raw) == "true" {
+				composerReady = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !composerReady {
+			lastErr = fmt.Errorf("timeout waiting for composer in tab %s", t.ID)
 			continue
 		}
-		raw, err := cdpEvalJS(t.WebSocketDebuggerURL, jsFocusAndInsert)
+
+		// Settle
+		time.Sleep(300 * time.Millisecond)
+
+		// 3. Inject the draft text into the composer
+		raw, err := cdpEvalJS(wsURL, jsFocusAndInsert)
 		if err != nil || string(raw) != "true" {
+			lastErr = fmt.Errorf("failed to focus or insert text into composer in tab %s: %v", t.ID, err)
 			continue
 		}
-		// Dispatch Enter key via CDP Input.dispatchKeyEvent to submit the message
-		_, _ = cdpCall(t.WebSocketDebuggerURL, "Input.dispatchKeyEvent", map[string]interface{}{
-			"type":                  "keyDown",
-			"key":                   "Enter",
-			"code":                  "Enter",
-			"windowsVirtualKeyCode": 13,
-			"nativeVirtualKeyCode":  13,
-		})
-		_, _ = cdpCall(t.WebSocketDebuggerURL, "Input.dispatchKeyEvent", map[string]interface{}{
-			"type":                  "keyUp",
-			"key":                   "Enter",
-			"code":                  "Enter",
-			"windowsVirtualKeyCode": 13,
-			"nativeVirtualKeyCode":  13,
-		})
-		return fmt.Sprintf("delivered via Chrome CDP WebSocket (%s)", t.ID), nil
+
+		// Wait 300ms for send button to update state
+		time.Sleep(300 * time.Millisecond)
+
+		// 4. Click Send button or dispatch Enter
+		sendRes, err := cdpEvalJS(wsURL, jsClickSendBtn)
+		if err != nil || string(sendRes) != "true" {
+			// Fallback: Dispatch Enter key via CDP Input.dispatchKeyEvent
+			_, _ = cdpCall(wsURL, "Input.dispatchKeyEvent", map[string]interface{}{
+				"type":                  "keyDown",
+				"key":                   "Enter",
+				"code":                  "Enter",
+				"windowsVirtualKeyCode": 13,
+				"nativeVirtualKeyCode":  13,
+			})
+			_, _ = cdpCall(wsURL, "Input.dispatchKeyEvent", map[string]interface{}{
+				"type":                  "keyUp",
+				"key":                   "Enter",
+				"code":                  "Enter",
+				"windowsVirtualKeyCode": 13,
+				"nativeVirtualKeyCode":  13,
+			})
+		}
+
+		time.Sleep(1 * time.Second)
+		return fmt.Sprintf("delivered via Chrome CDP WebSocket (%s to %s)", t.ID, spec.SpaceID), nil
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("CDP send failed: %w", lastErr)
 	}
 	return "", fmt.Errorf("no active Google Chat message composer box found in Chrome CDP tabs")
 }

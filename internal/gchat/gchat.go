@@ -1133,9 +1133,11 @@ func sendDraftViaCDP(cfg AccountConfig, spec DraftSpec) (string, error) {
 	}
 	targets, wsErr := fetchCDPTargets(base)
 	if wsErr == nil && len(targets) > 0 {
-		if out, err := sendDraftViaWebSocket(targets, spec); err == nil {
+		out, wsSendErr := sendDraftViaWebSocket(targets, spec)
+		if wsSendErr == nil {
 			return out, nil
 		}
+		return "", fmt.Errorf("CDP WebSocket send failed: %w", wsSendErr)
 	}
 	if err != nil {
 		return "", fmt.Errorf("CDP send failed (ensure Chrome CDP is running on %s): %w", base, err)
