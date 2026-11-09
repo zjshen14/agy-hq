@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/branding/agy-hq-icon-obsidian.png" />
+    <source media="(prefers-color-scheme: light)" srcset="../assets/branding/agy-hq-icon-white.png" />
+    <img src="../assets/branding/agy-hq-icon-obsidian.png" width="96" height="96" alt="agy-hq logo" />
+  </picture>
+</p>
+
 # `agy-hq` Documentation Hub
 
 Welcome to the documentation for **`agy-hq` (Headquarter)** — a lightweight, open-source Personal Agent OS built on top of Google Antigravity.

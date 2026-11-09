@@ -50,6 +50,7 @@ What this single line does:
 agy-hq/                                # LAYER 1: Open-Source Agent OS (This Git Repo)
 ├── .gitignore                         # Strictly ignores /local/, /bin/, and secrets
 ├── AGENTS.md                          # General-purpose personal assistant rules
+├── assets/branding/                   # Official Asymmetric Wing Cradle icon pack (SVG, PNG & social preview)
 ├── cmd/hq/                            # Go CLI: init | hook | daemon | propose | notify | status
 ├── internal/                          # Go microkernel (hooks, 0-token trigger runner, approvals, Aux UI)
 ├── templates/                         # Starter blueprints copied by `hq init` into ./local/

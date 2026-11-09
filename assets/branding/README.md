@@ -40,6 +40,7 @@ Both the Asymmetric Wing and the Floating Orb share Google Antigravity's 4-color
 - `agy-hq-icon-white.png` (`1024×1024`) — Native white squircle icon
 - `agy-hq-icon-sapphire.png` (`1024×1024`) — Midnight sapphire squircle icon
 - `agy-hq-mark.png` (`1024×1024`) — Standalone transparent-background glyph
+- `social-preview.png` (`1280×640`) — GitHub repository OpenGraph / Social Preview banner
 - `svg/agy-hq-icon-obsidian.svg` — Pure cubic-Bezier vector (Pro Obsidian)
 - `svg/agy-hq-icon-white.svg` — Pure cubic-Bezier vector (Native White)
 - `svg/agy-hq-icon-sapphire.svg` — Pure cubic-Bezier vector (Midnight Sapphire)
