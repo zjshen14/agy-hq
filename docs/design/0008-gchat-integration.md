@@ -1,8 +1,9 @@
 # RFC-0008: Decoupled Google Chat Integration (Layer 1 Infrastructure, Hybrid Transports & Layer 2 Workflows)
 
-- **Status:** Approved & Implemented (Phases 1–3: Personal `@gmail.com` Managed Chrome CDP + Gmail Notification Bridge)
+- **Status:** Approved & Implemented (Phases 1–4 Complete: Layer 1 Infra, Hardened Headless CDP, Fuzzy Space Resolution, 1-Step `hq gchat propose` & `gchat` Skill)
 - **Author:** `[Task:gchat] gchat-integration-rfc` (`gemini-4-argon-high`)
 - **Created:** 2026-11-08
+- **Updated:** 2026-11-08 (Phase 4 Zero-Friction Native UX & Hardened Browser Network Jail)
 - **Related Documents:** [RFC-0001](0001-vault-and-task-isolation.md), [RFC-0003](0003-approval-bound-execution.md), [RFC-0004](0004-heartbeat-and-channels.md), [RFC-0005](0005-gmail-integration.md), [05 — Google Chat Integration Audit](../research/05_gchat_integration.md)
 
 ---
@@ -125,11 +126,17 @@ type Provider interface {
 
 #### Transport 2: `CDPBrowserTransport` (`transport: "cdp"` — Personal `@gmail.com` Accounts)
 - Solves Google's consumer API block on `@gmail.com` accounts without reverse-engineering private protobuf tokens (`COMPASS` / `WebChannel`).
-- **One-Time Setup (`./bin/hq gchat init --email=user@gmail.com --transport=cdp`):**
-  - Creates `local/private/gchat/chrome-profile` (`0700`) and launches a dedicated local Chrome instance (`--remote-debugging-port=9222 --user-data-dir=local/private/gchat/chrome-profile https://chat.google.com`) so the user signs in once without exposing their everyday browser tabs.
-- **Deterministic Go CDP Execution:**
-  - `ListSpaces`, `SearchMessages`, and `ReadThread` inspect the accessibility tree / DOM of `chat.google.com` in read-only mode.
-  - `SendMessage` is only reachable via `./bin/hq approve` $\rightarrow$ `./bin/hq gchat send-draft`, which navigates to `https://chat.google.com/u/0/app/chat/<spaceId>`, verifies the recipient header in Go, injects the plain-text body, and submits it with `0` LLM tokens in the loop.
+- **Strict Profile Isolation (`local/private/gchat/chrome-profile`, `0700`):**
+  - Never copies or reads `~/.config/google-chrome/Default/Cookies` from the user's primary desktop browser (preserving zero access to banking, corporate SSO, or password manager sessions).
+- **Guided First-Time Login (`./bin/hq gchat login` — Auto-Wait $\rightarrow$ Cache Spaces $\rightarrow$ Auto-Switch to Headless):**
+  - When cookies are missing or expired (`isGoogleLoginURL` detects redirection to `accounts.google.com`), `InteractiveLogin` launches a visible Chrome window to Google Sign-In, polls `/json/list` every `1s` until `isAuthenticatedChatURL` (`u.Hostname() == "chat.google.com"` or `mail.google.com/chat`) is reached, extracts and caches the user's spaces/DM contacts into `local/memory/gchat/spaces_cache.json`, closes the visible window via `Browser.close` so cookies flush cleanly to disk, and restarts Chrome in invisible `--headless=new` mode.
+- **Zero-Popup Steady-State Lifecycle (`EnsureCDPSession`):**
+  - Whenever any `./bin/hq gchat` command runs and CDP is not yet active on `127.0.0.1:9222` (or the port in `DevToolsActivePort`), `EnsureCDPSession` checks `hasSavedProfileCookies(cfg.ChromeProfileDir)` and auto-starts Chrome in `--headless=new` background mode (`Setsid: true`, detached from subagent cgroups) with zero desktop popup windows.
+- **Deterministic Go CDP Execution (`internal/gchat/cdp_ws.go`):**
+  - Built-in zero-dependency RFC 6455 WebSocket client (`cdpCall` / `cdpEvalJS`).
+  - `ListSpaces`, `SearchMessages`, and `ReadThread` inspect the DOM of `chat.google.com` (including cross-frame traversal and sidebar status-word filtering) in read-only mode.
+  - `PreWarmSpace` navigates the background headless tab to `https://chat.google.com/room/<spaceId>` as soon as a draft/proposal is created so the composer is already rendered before the user taps **Approve**.
+  - `SendMessage` is only reachable via `./bin/hq approve` $\rightarrow$ `./bin/hq gchat send-draft`, which focuses the composer textbox (`div[role="textbox"][contenteditable="true"]`), inserts the verified plain-text body, and clicks the Send button (with `Input.dispatchKeyEvent` `Enter` fallback) in `0` LLM tokens.
 
 #### Transport 3: `GmailNotificationBridge` (`transport: "gmail-bridge"` — Zero-Auth Read-Only Fallback)
 - Automatically used as a read-only fallback when `transport == "cdp"` is offline or when `transport == "gmail-bridge"` is configured.
@@ -148,22 +155,24 @@ type Provider interface {
 ### 3.1 CLI Command Reference
 
 ```sh
-# 1. Account Setup & Diagnostics
+# 1. Account Setup, Guided Login & Diagnostics
 ./bin/hq gchat init --email=<addr> [--alias=personal] [--transport=cdp|oauth|webhook|gmail-bridge]
+./bin/hq gchat login [--account=<alias>] [--timeout=120]   # Visible 1-time Google Sign-In -> caches spaces -> auto-switches to --headless=new
 ./bin/hq gchat add-account --alias=<name> --email=<addr> --transport=<type> [...]
 ./bin/hq gchat accounts
 
-# 2. Safe Discovery & Metadata Search (Metadata Only — Does Not Taint Session)
+# 2. Safe Discovery & Metadata Search (Metadata Only — Supports Fuzzy Space Names, Does Not Taint Session)
 ./bin/hq gchat spaces [--account=<alias>] [--query="..."] [--max=20]
-./bin/hq gchat search [--account=<alias>] [--space=<spaceId>] [--query="..."] [--max=20]
+./bin/hq gchat search [--account=<alias>] [--space="<Space Name or ID>"] [--query="..."] [--max=20]
 
-# 3. Quarantined Thread Reader (Sanitizes Text, Wraps in Nonce, Marks Session Tainted)
-./bin/hq gchat read-quarantined --space=<spaceId> [--thread=<threadId>] [--max=20] [--account=<alias>]
+# 3. Quarantined Thread Reader (Sanitizes Text, Wraps in Nonce, Marks Session Tainted — Subagent Only)
+./bin/hq gchat read-quarantined --space="<Space Name or ID>" [--thread=<threadId>] [--max=20] [--account=<alias>]
 
-# 4. Local Immutable Draft Staging (Safe & Autonomous — Never Sends Live Network Traffic)
-./bin/hq gchat draft --space=<spaceId> [--thread=<threadId>] --body="..." [--draft=<draftId>] [--account=<alias>]
+# 4. 1-Step Outbound Draft + Proposal Staging (Resolves Natural Space Name, Pre-Warms Tab, Stages gchat_send)
+./bin/hq gchat propose --to="<Space or Contact Name or ID>" --body="..." [--thread=<threadId>] [--account=<alias>]
 
-# 5. Tamper-Proof 1-Tap Proposal & Deterministic Send (Bound by PreToolUse + ask_question)
+# 5. Low-Level Draft & Deterministic Approval Execution (Bound by PreToolUse + ask_question)
+./bin/hq gchat draft --to="<Space Name or ID>" [--thread=<threadId>] --body="..." [--draft=<draftId>] [--account=<alias>]
 ./bin/hq propose --type=gchat_send --draft=<draftId> [--account=<alias>]
 ./bin/hq approve <proposalId> --sha256=<prefix>   # Internally runs: ./bin/hq gchat send-draft --account=<alias> --draft=<draftId> --hash=<prefix>
 
@@ -172,9 +181,20 @@ type Provider interface {
 ./bin/hq gchat triage-result --batch=<batchId> --json='[...]'
 ```
 
-### 3.2 Mechanical Security Guardrails (Breaking the Lethal Trifecta)
+### 3.2 Fuzzy Space & Contact Name Resolution (`ResolveSpaceTarget`)
 
-Google Chat messages are untrusted external inputs that arrive in real time and often contain links, `@mentions`, or adversarial instructions. We enforce five mechanical boundaries in Go:
+Users and the `[HQ] Front Desk` coordinator should never need to memorize opaque Google Chat IDs like `spaces/AAAA_LAUNCH_01` or `spaces/AAAA_DM_ALICE`:
+- Every call to `ListSpaces`, `InteractiveLogin`, `saveSpaceAccess`, or `CreateOrUpdateDraft` updates `local/memory/gchat/spaces_cache.json`.
+- `ResolveSpaceTarget(vaultDir, accountAlias, target)` resolves `--to` / `--space` across `spaces_cache.json`, `local/memory/gchat/spaces/*.json`, and `local/memory/gchat/drafts/*.json` using a 4-tier matcher:
+  1. Exact `SpaceID` match (`spaces/AAAA_LAUNCH_01` or `AAAA_LAUNCH_01`),
+  2. Case-insensitive exact `DisplayName` match (`"Engineering Core"`, `"Project Launch Space"`, `"Alice Chen"`),
+  3. Case-insensitive substring match (`"project launch"`),
+  4. Multi-word token overlap match (`"Project Launch Fair"` $\rightarrow$ matches `"Project"` + `"Science"`).
+- If a human name is not found in the local cache, `ResolveSpaceTarget` automatically refreshes from `ListSpaces` once before returning an actionable error listing known space names.
+
+### 3.3 Mechanical Security Guardrails (Breaking the Lethal Trifecta)
+
+Google Chat messages are untrusted external inputs that arrive in real time and often contain links, `@mentions`, or adversarial instructions. We enforce six mechanical boundaries in Go:
 
 #### Guardrail 1: Quarantined Reader Sanitization & Nonce Envelope (`read-quarantined`)
 - `ReadQuarantinedThread` strips HTML/markdown control tags, hidden text, and zero-width characters, defangs all URLs (`https://` $\rightarrow$ `hxxps://`), truncates individual messages at `4 KB` (thread cap `8 KB`), and wraps the output in a per-invocation 128-bit random hex nonce:
@@ -240,6 +260,16 @@ Google Chat messages are untrusted external inputs that arrive in real time and 
 - When the user taps **Approve**, `./bin/hq approve <id> --sha256=<prefix>` verifies the proposal's SHA-256 and executes `./bin/hq gchat send-draft --account=<alias> --draft=<draftId> --hash=<prefix>` in Go.
 - `VerifyAndSendDraft` re-reads `local/memory/gchat/drafts/<draftId>.json`, recomputes `ComputeDraftContentHash(account, spaceId, threadId, body)`, and verifies it matches `--hash=<prefix>` before invoking the transport's `SendMessage`. If the draft file was modified after staging, execution aborts with `draft contentHash mismatch (bait-and-switch blocked)`.
 
+#### Guardrail 6: Hardened Browser Network & Service Jail (`HostResolverJailRule` + `Network.setBlockedURLs`)
+Because a Google web login inside `local/private/gchat/chrome-profile` sets `.google.com` cookies (`SID`, `HSID`, `SSID`), we harden the headless Chrome process at three layers (`internal/gchat/cdp_ws.go`):
+1. **Third-Party DNS Egress Jail (`--host-resolver-rules`):** Headless Chrome is launched with `HostResolverJailRule`:
+   ```text
+   MAP * 127.0.0.1, EXCLUDE chat.google.com, EXCLUDE *.chat.google.com, EXCLUDE mail.google.com, EXCLUDE *.google.com, EXCLUDE google.com, EXCLUDE *.gstatic.com, EXCLUDE gstatic.com, EXCLUDE *.googleapis.com, EXCLUDE googleapis.com, EXCLUDE *.googleusercontent.com
+   ```
+   Any attempt by an external image beacon, link preview, or injected script to contact a non-Google host resolves immediately to `127.0.0.1`.
+2. **Non-Chat Google Surface Blocklist (`Network.setBlockedURLs`):** On every active page target, `applyCDPNetworkJail` enables the CDP `Network` domain and blocks non-Chat Google services (`*://myaccount.google.com/*`, `*://drive.google.com/*`, `*://docs.google.com/*`, `*://pay.google.com/*`, `*://takeout.google.com/*`, `*://myactivity.google.com/*`, `*://passwords.google.com/*`, `*://contacts.google.com/*`) so the profile is mechanically restricted to Google Chat.
+3. **Loopback-Only DevTools & `0700` Vault Storage:** Chrome binds `--remote-debugging-port` strictly to `127.0.0.1` (`--disable-extensions`, `--disable-sync`, `--disable-background-networking`, `--mute-audio`) with `0700` permissions on `local/private/gchat/chrome-profile`, while `PreToolUse` blocks `read_file`/`grep_search`/`find_by_name` on `local/private/**`.
+
 ---
 
 ## 4. Layer 1B & Layer 2 Specification: Sidecar Watcher, `ChannelAdapter` & Workflows
@@ -259,22 +289,21 @@ Google Chat messages are untrusted external inputs that arrive in real time and 
 
 ---
 
-## 5. Phased Implementation Plan (For User Review)
+## 5. Phased Implementation Summary (All Phases Complete)
 
-Per `AGENTS.md` ("Research $\rightarrow$ RFC $\rightarrow$ Approval $\rightarrow$ Code"), **no production code has been modified yet**. Upon your approval of this RFC, we will execute the implementation in 4 bounded phases inside an isolated git worktree (`local/worktrees/headquarter-gchat-integration/`):
+All four phases of RFC-0008 have been implemented, verified by automated unit and E2E tests (`go test ./...`), and deployed to `main`:
 
 | Phase | Scope & Deliverables | Verification Criteria |
 | :--- | :--- | :--- |
-| **Phase 1: Layer 1 Core & Mechanical Safety Gates (`internal/gchat`, `internal/hooks`, `cmd/hq`)** | • Implement `internal/gchat` (`accounts.json` registry, `Provider` interface, `MockTransport`, `OAuthRESTTransport`, `WebhookTransport`, `FormatQuarantinedChatThread`, local `DraftSpec` & `VerifyAndSendDraft`, `RunPrecheck`, `RecordTriageResults`).<br>• Wire `./bin/hq gchat <init|accounts|spaces|search|read-quarantined|draft|send-draft|precheck|triage-result>` and `./bin/hq propose --type=gchat_send --draft=<id>` in `cmd/hq/main.go`.<br>• Add `PreToolUse` outbound blocks for `hq gchat send-draft`, `gws chat`, and `chrome-devtools` on `chat.google.com`, plus the canonical `ask_question` overwrite for `gchat_send`. | • Unit tests in `internal/gchat/gchat_test.go` & `internal/hooks/hooks_test.go` covering quarantine sanitization, tainted cross-space draft rejection, bait-and-switch hash verification, and `ask_question` overwrite.<br>• New CUJ E2E test (`TestCUJ16_GoogleChatQuarantineAndApproval` in `internal/e2e/cuj_e2e_test.go`). |
-| **Phase 2: Personal `@gmail.com` Transports (`gmail-bridge` + `cdp`)** | • Implement `GmailNotificationBridge` (`from:chat-noreply@google.com` parser via `internal/gmail`) for zero-setup read-only personal Chat triage.<br>• Implement `CDPBrowserTransport` (`local/private/gchat/chrome-profile` launcher + deterministic Go CDP reader/sender on `127.0.0.1:9222`) for full personal `@gmail.com` DM & Space support. | • Deterministic tests with mock `chat-noreply@google.com` MIME fixtures and local headless CDP harness test.<br>• `hq doctor` health check for configured `gchat` accounts. |
-| **Phase 3: Daemon Sidecar & Layer 2 Skills (`/morning-brief`, `/inbox-triage`)** | • Wire `gchat.RunPrecheck` into `hq daemon` (`internal/kernel/kernel.go`).<br>• Update `.agents/plugins/agy-hq/skills/morning-brief/SKILL.md` and `.agents/plugins/agy-hq/skills/inbox-triage/SKILL.md` to include unread Google Chat DMs/mentions and stage 1-tap `gchat_send` reply proposals. | • `hq heartbeat --dry-run` and `hq gchat precheck` E2E verification (`0` tokens when quiet; batch creation on new unread DM). |
-| **Phase 4: Zero-Friction Native UX & Hardened Headless CDP (`.agents/plugins/agy-hq/skills/gchat/SKILL.md`, `internal/gchat/cdp_ws.go`)** | • **First-Class Skill (`gchat/SKILL.md`):** Inject `./bin/hq gchat` workflow into `<skills>` so `[HQ] Front Desk` stages messages inline in 1 command without spawning subagents.<br>• **Invisible Headless Lifecycle + Guided First-Time Login (`./bin/hq gchat login`):** Reuse `local/private/gchat/chrome-profile` (`0700`) cookies in `--headless=new` mode (`EnsureCDPSession`); on first-time or expired login, open visible sign-in window, poll `isAuthenticatedChatURL` (`u.Hostname() == "chat.google.com"`), cache spaces, close visible window, and restart in `--headless=new`.<br>• **Hardened Browser Network Jail:** Enforce `--host-resolver-rules` (`HostResolverJailRule` blocking third-party DNS egress) and CDP `Network.setBlockedURLs` blocking non-Chat Google services (`myaccount.google.com`, `drive.google.com`, `docs.google.com`, `pay.google.com`, `takeout.google.com`).<br>• **Fuzzy Space Name Resolution & 1-Step `hq gchat propose`:** Cache space names (`local/memory/gchat/spaces_cache.json`) and resolve natural names (`--to="Project Launch Space"` $\rightarrow$ `spaces/AAAA_LAUNCH_01`), pre-warm the target space tab (`PreWarmSpace`), and stage `gchat_send` proposals in a single CLI command. | • Unit tests (`TestPhase4_FuzzySpaceResolutionAndAuthURLDetection` in `internal/gchat/gchat_test.go`) and E2E tests (`go test ./...` 100%). |
+| **Phase 1: Layer 1 Core & Mechanical Safety Gates (`internal/gchat`, `internal/hooks`, `cmd/hq`)** | • Implemented `internal/gchat` (`accounts.json` registry, `Provider` transports, `FormatQuarantinedThread`, local `DraftSpec` & `VerifyAndSendDraft`, `RunPrecheck`, `RecordTriageResults`).<br>• Wired `./bin/hq gchat <init|accounts|spaces|search|read-quarantined|draft|send-draft|precheck|triage-result>` and `./bin/hq propose --type=gchat_send --draft=<id>` in `cmd/hq/main.go`.<br>• Added `PreToolUse` outbound blocks for `hq gchat send-draft`, `gws chat`, and `chrome-devtools` on `chat.google.com`, plus the canonical `ask_question` overwrite for `gchat_send`. | • Unit tests in `internal/gchat/gchat_test.go` & `internal/hooks/hooks_test.go` covering quarantine sanitization, tainted cross-space draft rejection, bait-and-switch hash verification, and `ask_question` overwrite.<br>• CUJ E2E test (`TestCUJ16_GoogleChatQuarantineAndApproval` in `internal/e2e/cuj_e2e_test.go`). |
+| **Phase 2: Personal `@gmail.com` Transports (`gmail-bridge` + `cdp`)** | • Implemented `GmailNotificationBridge` (`from:chat-noreply@google.com` parser via `internal/gmail`) for zero-setup read-only personal Chat triage.<br>• Implemented `CDPBrowserTransport` (`local/private/gchat/chrome-profile` launcher + deterministic Go CDP WebSocket reader/sender on `127.0.0.1:9222`) for full personal `@gmail.com` DM & Space support. | • Deterministic tests with mock `chat-noreply@google.com` fixtures and local CDP server test (`TestCDPTransportAndGmailNotificationBridgeFallback`).<br>• `hq doctor` health check for configured `gchat` accounts. |
+| **Phase 3: Daemon Sidecar & Layer 2 Skills (`/morning-brief`, `/inbox-triage`)** | • Wired `gchat.RunPrecheck` into `hq daemon` (`internal/kernel/kernel.go`).<br>• Updated `.agents/plugins/agy-hq/skills/morning-brief/SKILL.md` and `.agents/plugins/agy-hq/skills/inbox-triage/SKILL.md` to include unread Google Chat DMs/mentions and stage 1-tap `gchat_send` reply proposals. | • `hq heartbeat --dry-run` and `hq gchat precheck` E2E verification (`0` tokens when quiet; batch creation on new unread DM). |
+| **Phase 4: Zero-Friction Native UX & Hardened Headless CDP (`.agents/plugins/agy-hq/skills/gchat/SKILL.md`, `internal/gchat/cdp_ws.go`)** | • **First-Class Skill (`gchat/SKILL.md`):** Injected `./bin/hq gchat` workflow into `<skills>` so `[HQ] Front Desk` stages messages inline in 1 command without spawning subagents.<br>• **Invisible Headless Lifecycle + Guided First-Time Login (`./bin/hq gchat login`):** Reuses `local/private/gchat/chrome-profile` (`0700`) cookies in `--headless=new` mode (`EnsureCDPSession`); on first-time or expired login, opens visible sign-in window, polls `isAuthenticatedChatURL` (`u.Hostname() == "chat.google.com"`), caches spaces, closes visible window, and restarts in `--headless=new`.<br>• **Hardened Browser Network Jail:** Enforces `--host-resolver-rules` (`HostResolverJailRule` blocking third-party DNS egress) and CDP `Network.setBlockedURLs` blocking non-Chat Google services (`myaccount.google.com`, `drive.google.com`, `docs.google.com`, `pay.google.com`, `takeout.google.com`).<br>• **Fuzzy Space Name Resolution & 1-Step `hq gchat propose`:** Caches space/DM names (`local/memory/gchat/spaces_cache.json`), resolves natural names (`--to="Engineering Core"` or `"Project Launch Space"` $\rightarrow$ `spaces/AAAA_LAUNCH_01`), pre-warms the target space tab (`PreWarmSpace`), and stages `gchat_send` proposals in a single CLI command. | • Unit tests (`TestPhase4_FuzzySpaceResolutionAndAuthURLDetection` in `internal/gchat/gchat_test.go`) and live end-to-end verification against `chat.google.com`. |
 
 ---
 
-## 6. Open Design Decisions for User Review
+## 6. Resolved Design Decisions
 
-1. **Primary Account Topology for `user@gmail.com`:**
-   - Do you want to use Google Chat strictly with your **personal `user@gmail.com` account** (using **Managed Chrome CDP + `chat-noreply@google.com` Gmail Bridge**), or do you also have a **Google Workspace account** you want connected via **REST API v1 OAuth / External Space Bridge**?
-2. **Rollout Scope:**
-   - Should we proceed with **Phases 1–3** (Core `./bin/hq gchat` CLI, mechanical approval gates, Personal `@gmail.com` CDP + Gmail-bridge transports, and `/morning-brief` + `/inbox-triage` integration) first, or include **Phase 4 (`ChannelAdapter` self-chat mirroring)** in the same build?
+1. **Personal `@gmail.com` Primary Transport:** Adopted **Isolated Headless Chrome CDP (`cdp`) + Gmail Notification Bridge (`gmail-bridge`)** with guided 1-time login (`./bin/hq gchat login`) and automatic `--headless=new` background execution.
+2. **Browser Cookie Isolation vs. Security:** Rejected copying `~/.config/google-chrome` cookies from the user's primary desktop browser; enforced a dedicated `0700` profile (`local/private/gchat/chrome-profile`) locked down with `--host-resolver-rules` (`HostResolverJailRule`) and CDP `Network.setBlockedURLs`.
+3. **Inline Front Desk Ergonomics:** Added `.agents/plugins/agy-hq/skills/gchat/SKILL.md` and the compound `./bin/hq gchat propose --to="<Space Name>" --body="..."` command so staging an outbound Google Chat message from `[HQ] Front Desk` takes 1 tool call (`< 1s`) before presenting the 1-tap `ask_question` approval prompt.
