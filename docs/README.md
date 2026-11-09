@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="../assets/branding/agy-hq-icon-obsidian.png" />
-    <source media="(prefers-color-scheme: light)" srcset="../assets/branding/agy-hq-icon-white.png" />
-    <img src="../assets/branding/agy-hq-icon-obsidian.png" width="96" height="96" alt="agy-hq logo" />
-  </picture>
+  <img src="../assets/branding/icons/icon-obsidian-128x128.png" width="96" height="96" alt="agy-hq logo" />
 </p>
 
 # `agy-hq` Documentation Hub
