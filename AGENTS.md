@@ -12,7 +12,7 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
    - Store all personal notes, research, and drafts in `local/notes/`.
    - Store high-PII financial and tax records in `local/private/`.
 3. **Single Front-Desk Coordinator + Scoped Task Conversations & Subagents:**
-   - **1 Front Desk Thread (`local/memory/front_desk.json`):** Acts as the main intake desk and global coordinator.
+   - **1 Front Desk Thread (`local/memory/front_desk.json`):** Acts as the main intake desk and global coordinator. Always recommend pinning this thread to the Antigravity sidebar so it stays permanently anchored above ephemeral task threads.
    - **Clean Front Desk & Silent Ledger Discipline:**
      - The Front Desk chat is strictly for direct human conversation, fast answers, and synthesized executive takeaways.
      - Never pollute or dilute the conversation with verbose background task dump logs, mechanical checklists, worktree listings, or unprompted task status banners.
@@ -42,6 +42,7 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
        1. **Zero Redundant Lookups:** `SessionStart` already injects `USER.md`, `MEMORY.md`, `front_desk.json`, active worktrees, tracked Task Conversations, and `local/triggers.yaml` schedules—do not re-read them via tool calls. (Turn-1 housekeeping reads of `local/CONSOLE.md`, `hq_console.md`, and `local/triggers.yaml` are exempted from the 3-lookup cap.)
        2. **Pin the Live Status Artifact (`hq_console.md`):** Read `local/CONSOLE.md` and call `write_file` (`Overwrite=true`, `ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: "Live [HQ] Front Desk Console & Task Board"}`) on `<artifactDirectoryPath>/hq_console.md` so Antigravity registers the live Task Board & Console artifact card in the new Front Desk thread (`consolePinned: true` in `front_desk.json`). Thereafter, `bin/hq` and `hq hook stop` automatically keep `<artifactDirectoryPath>/hq_console.md` and its `.metadata.json` updated in 0 LLM tokens.
        3. **Arm Declared Proactive Schedules (`local/triggers.yaml`):** For every unarmed schedule listed by `SessionStart` (or `./bin/hq claim-desk`), call `schedule(CronExpression="<5-field-cron>", IsDaemon=true, Prompt="[Auto] ...")` (`morning-brief`, `edgar-close-watch`, `sleep-consolidate`). `PreToolUse` and transcript reconciliation automatically record each armed schedule in `front_desk.json` (`armedTriggers`).
+       4. **Pin Front Desk to Sidebar:** Pin the `[HQ] Front Desk` conversation to the Antigravity sidebar (via the conversation header menu or pin action) so it remains permanently anchored above ephemeral task threads.
    - **Conversation, Task & Worktree Naming Convention:**
      - **Front Desk Thread Title:** `[HQ] Front Desk` (or `[HQ] Front Desk (YYYY-MM)` when starting a new shift).
      - **Separate Task Conversation Title (`./bin/hq spawn` / `adopt`):** `[Task:<scope>] <Short Title>` (e.g., `[Task:opencli] Fix PR #279`, `[Task:research] Live Voice Streaming`, `[Task:NVDA] Q3 Thesis Check`).

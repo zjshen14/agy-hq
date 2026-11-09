@@ -31,6 +31,8 @@ What this single line does:
 4. Runs `./bin/hq doctor` to verify all health checks pass.
 
 > **Zero-Touch GUI Option:** Even if you only `git clone` and open `headquarter` directly in Antigravity without running `./scripts/bootstrap.sh`, the `SessionStart` hook in [`.agents/hooks.json`](.agents/hooks.json) automatically compiles `./bin/hq`, initializes `./local/`, claims your `[HQ] Front Desk` conversation, and pins the live `hq_console.md` artifact on Turn 1.
+>
+> 💡 **Tip:** Pin your `[HQ] Front Desk` conversation to the Antigravity sidebar (via the conversation header menu) so it stays permanently anchored at the top above ephemeral task threads.
 
 ---
 

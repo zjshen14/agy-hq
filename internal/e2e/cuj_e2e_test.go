@@ -1233,6 +1233,8 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	}
 	if out, err := env.runWithEnv("", metaEnv, "init"); err != nil {
 		t.Fatalf("hq init with metadata failed: %v (%s)", err, out)
+	} else if !strings.Contains(out, "Tip: Pin the '[HQ] Front Desk' conversation to your Antigravity sidebar") {
+		t.Fatalf("expected sidebar pin tip in hq init output, got:\n%s", out)
 	}
 
 	// Even though `hq init` already created front_desk.json for deskConv1, Turn-1 SessionStart MUST
@@ -1248,8 +1250,9 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	if !strings.Contains(ssOut1, "Step 3 (Arm Proactive Schedules from `local/triggers.yaml`)") ||
 		!strings.Contains(ssOut1, `30 7 * * *`) ||
 		!strings.Contains(ssOut1, `30 13 * * 1-5`) ||
-		!strings.Contains(ssOut1, `30 23 * * *`) {
-		t.Fatalf("expected Step 3 with 5-field cron expressions for all 3 triggers in session-start, got:\n%s", ssOut1)
+		!strings.Contains(ssOut1, `30 23 * * *`) ||
+		!strings.Contains(ssOut1, "Sidebar Pin") {
+		t.Fatalf("expected Step 3 with 5-field cron expressions and sidebar pin tip in session-start, got:\n%s", ssOut1)
 	}
 
 	// 2. Verify Turn-1 housekeeping reads (CONSOLE.md, hq_console.md, triggers.yaml) are EXEMPT from the 3-lookup cap
@@ -1367,8 +1370,8 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim-desk shift 2 failed: %v (%s)", err, claimOut)
 	}
-	if !strings.Contains(claimOut, "Step 1 (Pin Console Artifact)") || !strings.Contains(claimOut, "Step 2 (Arm 3 Proactive Schedule(s)") {
-		t.Fatalf("expected Turn-1 checklist in claim-desk output, got:\n%s", claimOut)
+	if !strings.Contains(claimOut, "Step 1 (Pin Console Artifact)") || !strings.Contains(claimOut, "Step 2 (Arm 3 Proactive Schedule(s)") || !strings.Contains(claimOut, "Tip: Pin the '[HQ] Front Desk' conversation to your Antigravity sidebar") {
+		t.Fatalf("expected Turn-1 checklist and pin tip in claim-desk output, got:\n%s", claimOut)
 	}
 
 	// Outgoing Front Desk (deskConv1) must be archived in tasks.json as completed

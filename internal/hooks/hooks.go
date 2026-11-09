@@ -133,8 +133,10 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				"## 🎯 Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)\n"+
 					"- You are the single Front Desk intake coordinator (`%s`).\n"+
 					"- **Hard Mechanical Limit:** You have at most **3 inline lookup tool calls** per turn, and direct code/worktree edits or test runs are mechanically blocked by PreToolUse hooks on this thread.\n"+
-					"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `local/worktrees/<repo>-<task>/`) or `./bin/hq spawn` so the user can keep chatting without waiting.",
+					"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `local/worktrees/<repo>-<task>/`) or `./bin/hq spawn` so the user can keep chatting without waiting.\n"+
+					"- **Sidebar Pin Recommendation:** %s",
 				payload.ConversationID,
+				kernel.FrontDeskPinTip,
 			)
 			sections = append(sections, roleBanner)
 
@@ -179,7 +181,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 				}
 				initLines = append(initLines, fmt.Sprintf(
-					"- **Step 4 (Concise Welcome):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations.",
+					"- **Step 4 (Concise Welcome & Sidebar Pin):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations, and recommend the user pin this `[HQ] Front Desk` conversation to their Antigravity sidebar so it stays anchored at the top.",
 					artPath,
 				))
 				sections = append(sections, strings.Join(initLines, "\n"))
@@ -210,8 +212,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 
 			sections = append(sections, fmt.Sprintf(
-				"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.",
+				"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.\n- **Tip:** %s",
 				existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
+				kernel.FrontDeskPinTip,
 			))
 		}
 	} else if payload.ArtifactDirectoryPath != "" {
