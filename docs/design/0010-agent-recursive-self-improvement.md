@@ -1,6 +1,6 @@
 # RFC-0010: Bounded Agent Recursive Self-Improvement (RSI) — 4-Stage Trace Mining, Delta Hypothesis Synthesis, Sandboxed Verification & Human-Gated Harness Evolution
 
-- **Status:** Draft (Phase 1 Research & Architecture Complete — Ready for User Review)
+- **Status:** Approved & Implemented (Phases 1–4 Complete, Verified by `CUJ-17`)
 - **Author:** `[Task:agent] agent-rsi-framework` (`gemini-4-argon-high`)
 - **Created:** 2026-11-08
 - **Extends:** [RFC-0002 (Sleep-Time Memory Consolidation)](./0002-memory-and-consolidation.md), [RFC-0003 (Approval-Bound Execution)](./0003-approval-bound-execution.md), [RFC-0006 (4-Layer Memory & Ground-Truth Dreaming)](./0006-memory-engine-upgrade.md), [RFC-0009 (Scalable Task Board & Parent-Child Lineage)](./0009-task-board-redesign.md)

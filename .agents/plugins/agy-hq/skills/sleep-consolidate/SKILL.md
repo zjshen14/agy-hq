@@ -58,14 +58,26 @@ description: >-
      ./bin/hq memory add-fact --topic="<topic>" --statement="<concise fact>" --source="<convId>" --verified
      ```
 
-### Stage 4: Procedural Skill Proposals & Private Vault Commit
-1. **Stage Skill Proposals (Never Auto-Edit `SKILL.md`):**
-   - If a repeated workflow or user intervention occurred today, write a proposed skill diff or draft skill to `local/memory/proposals/YYYY-MM-DD-<slug>.md` for user review.
+### Stage 4: Verified Recursive Self-Improvement (`./bin/hq rsi`) & Private Vault Commit
+1. **Run the 4-Stage RSI Pipeline (RFC-0010 — Never Unilaterally Edit `SKILL.md` or Kernel Code):**
+   - Mine 0-token ground-truth friction events (error-recovery chains, `PreToolUse` denials, user interventions, and `PRELUDE` draft edit-diffs) and update active canary records:
+     ```sh
+     ./bin/hq rsi mine --since=24h
+     ```
+   - Synthesize structured ACE delta hypotheses (`add_skill_rule`, `patch_skill_rule`, `deprecate_skill_rule`, or LATM Tier B$\to$C promotions) for observations passing the Meta-ROI gate and 75% Quota Circuit Breaker:
+     ```sh
+     ./bin/hq rsi hypothesize
+     ```
+   - For each generated hypothesis `<rsi-id>`, run the 4-Gate Sandboxed Verification Harness (Gate 1 TCB/AST anti-Goodharting, Gate 2A/2B counterfactual reproduction, Gate 3 regression & PII guard, Gate 4 complexity/budget & contradiction guard) and stage verified passes into the live approval queue:
+     ```sh
+     ./bin/hq rsi verify <rsi-id> && ./bin/hq rsi propose <rsi-id>
+     ```
+   - When the workspace upgrades to a new frontier model, run `./bin/hq rsi ablate --model=<new-model>` to stage deprecation of obsolete model-scoped rules.
 2. **Task Lifecycle Consolidation & Hot/Cold Archive Rotation (`./bin/hq tasks compact`):**
    - Run `./bin/hq tasks compact` to automatically archive eligible completed (`>24h`) and dormant (`>48h`) tasks with clean worktrees and rotate historical subagents and archived tasks from `local/memory/tasks.json` into `local/memory/tasks_archive.jsonl`.
    - For any remaining `completed` task that needs explicit worktree cleanup, run `./bin/hq archive <slug>`.
 3. **Verify Budget & Commit Vault:**
-   - Run `./bin/hq memory compact` and `./bin/hq memory status` to confirm `local/MEMORY.md` is $\le 80$ lines (`[OK]`), `facts.jsonl` is deduplicated, and `tasks.json` is compacted.
+   - Run `./bin/hq memory compact`, `./bin/hq memory status`, and `./bin/hq rsi status` to confirm `local/MEMORY.md` is $\le 80$ lines (`[OK]`), `facts.jsonl` is deduplicated, and `tasks.json` is compacted.
    - Commit changes to the private Vault repository:
      ```sh
      git -C local add -A && git -C local commit -m "chore(memory): nightly dreaming consolidation YYYY-MM-DD"

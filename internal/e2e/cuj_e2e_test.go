@@ -13,6 +13,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/rsi"
 )
 
 type hqEnv struct {
@@ -1982,5 +1983,176 @@ func TestCUJ16_TaskBoardTieredConsoleAndColdArchive(t *testing.T) {
 		t.Fatalf("expected legacy-feature-01 to be restored to hot tasks.json with status=active")
 	}
 }
+
+// CUJ-17: Agent Recursive Self-Improvement (RSI) — Telemetry Hardening, 4-Stage Mining/Hypothesis/Verification,
+// Anti-Goodharting TCB Defenses, Approval-Bound Application & Model-Upgrade Ablation (RFC-0010)
+func TestCUJ17_AgentRSIMiningVerificationAndApproval(t *testing.T) {
+	env := setupHQEnv(t)
+
+	// Use an isolated rootDir for CUJ-17 so applying SKILL.md deltas never dirties the live checkout
+	isolatedRoot := t.TempDir()
+	env.vaultDir = filepath.Join(isolatedRoot, "local")
+	_ = copyDirRecursive(filepath.Join(env.rootDir, "templates"), filepath.Join(isolatedRoot, "templates"))
+	_ = copyDirRecursive(filepath.Join(env.rootDir, ".agents"), filepath.Join(isolatedRoot, ".agents"))
+	_ = os.WriteFile(filepath.Join(isolatedRoot, "cmd_target.go"), []byte("package main\n"), 0o644)
+	env.rootDir = isolatedRoot
+
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	// 1. Verify Phase 1 Telemetry Hardening (Defects A, B, C):
+	//    - Defect A: read_file output containing literal "Command exited with code 1" must NOT count as a tool error
+	//    - Defect B: Per-turn delta TurnErrorCount / StepStartIdx across ExecutionNum 1 -> 2
+	//    - Defect C: File modified inside local/worktrees/<wt>/cmd_target.go that exists at <rootDir>/cmd_target.go
+	//      must NOT trigger a false-positive "no longer exists on disk" warning in verify-transcript
+	txTelemetry := filepath.Join(t.TempDir(), "tx-telemetry.jsonl")
+	wtDeletedFile := filepath.Join(env.vaultDir, "worktrees", "headquarter-rsi", "cmd_target.go")
+	turn1Lines := []string{
+		`{"step_index":0,"type":"USER_INPUT","content":"Read hooks.go and edit worktree file"}`,
+		fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"Reading and editing...","tool_calls":[{"name":"read_file","args":{"Path":"hooks.go"}},{"name":"edit_file","args":{"Path":%q}}]}`, wtDeletedFile),
+		`{"step_index":2,"type":"GENERIC","status":"DONE","content":"Created At: 2026-11-09T00:00:00Z\nCompleted At: 2026-11-09T00:00:01Z\nShowing lines 1-20 of 100\n10: if strings.Contains(s, \"Command exited with code 1\") { return true }"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","content":"Finished turn 1 cleanly."}`,
+	}
+	_ = os.WriteFile(txTelemetry, []byte(strings.Join(turn1Lines, "\n")+"\n"), 0o644)
+
+	stop1 := fmt.Sprintf(`{"conversationId":"conv-rsi-telemetry","executionNum":1,"transcriptPath":%q,"lastUserInput":"Read hooks.go"}`, txTelemetry)
+	if _, err := env.run(stop1, "hook", "stop"); err != nil {
+		t.Fatalf("hook stop turn 1: %v", err)
+	}
+
+	verDigestOut, err := env.run("", "memory", "verify-transcript", "conv-rsi-telemetry")
+	if err != nil {
+		t.Fatalf("verify-transcript failed: %v (%s)", err, verDigestOut)
+	}
+	if !strings.Contains(verDigestOut, `"toolErrorCount": 0`) {
+		t.Fatalf("Defect A regression: read_file containing 'Command exited with code 1' triggered false-positive error:\n%s", verDigestOut)
+	}
+	if strings.Contains(verDigestOut, "no longer exists on disk") {
+		t.Fatalf("Defect C regression: merged worktree file cmd_target.go triggered false-positive missing file warning:\n%s", verDigestOut)
+	}
+
+	// Now append Turn 2 with 1 real command failure and 1 recovery, then run Stop executionNum=2
+	turn2Lines := append(turn1Lines,
+		`{"step_index":4,"type":"USER_INPUT","content":"Send GChat update"}`,
+		`{"step_index":5,"type":"PLANNER_RESPONSE","status":"DONE","content":"Proposing gchat...","tool_calls":[{"name":"run_command","args":{"CommandLine":"./bin/hq gchat propose --unknown-flag"}}]}`,
+		`{"step_index":6,"type":"GENERIC","status":"DONE","content":"Created At: 2026-11-09T00:01:00Z\nCommand exited with code 2.\nflag provided but not defined: -unknown-flag"}`,
+		`{"step_index":7,"type":"PLANNER_RESPONSE","status":"DONE","content":"Retrying with --to and --body","tool_calls":[{"name":"run_command","args":{"CommandLine":"./bin/hq gchat propose --to=\"Alice\" --body=\"Ready\""}}]}`,
+		`{"step_index":8,"type":"GENERIC","status":"DONE","content":"Created At: 2026-11-09T00:01:02Z\nStaged Google Chat proposal prop-1"}`,
+	)
+	_ = os.WriteFile(txTelemetry, []byte(strings.Join(turn2Lines, "\n")+"\n"), 0o644)
+
+	stop2 := fmt.Sprintf(`{"conversationId":"conv-rsi-telemetry","executionNum":2,"transcriptPath":%q,"modelName":"gemini-3.8-flash-high","lastUserInput":"Send GChat update"}`, txTelemetry)
+	if _, err := env.run(stop2, "hook", "stop"); err != nil {
+		t.Fatalf("hook stop turn 2: %v", err)
+	}
+	today := time.Now().Format("2006-01-02")
+	j2Bytes, err := os.ReadFile(filepath.Join(env.vaultDir, "memory", "journal", today, "conv-rsi-telemetry-2.json"))
+	if err != nil {
+		t.Fatalf("read journal 2: %v", err)
+	}
+	if !strings.Contains(string(j2Bytes), `"stepStartIdx": 4`) || !strings.Contains(string(j2Bytes), `"turnStepCount": 5`) || !strings.Contains(string(j2Bytes), `"turnErrorCount": 1`) {
+		t.Fatalf("expected Defect B per-turn delta metrics (stepStartIdx=4, turnStepCount=5, turnErrorCount=1), got:\n%s", string(j2Bytes))
+	}
+
+	// Seed a PRELUDE edited draft to test implicit preference learning without needing >=4 occurrences
+	_ = os.MkdirAll(filepath.Join(env.vaultDir, "private", "gchat", "drafts"), 0o755)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "private", "gchat", "drafts", "gchat-draft-edit1.json"),
+		[]byte(`{"draftId":"gchat-draft-edit1","body":"Best regards,\nAgent","userEditedBody":"Ship it at 2pm.","conversationId":"conv-rsi-telemetry","updatedAt":"2026-11-09T01:00:00Z"}`), 0o644)
+
+	// 2. Stage 1 (`hq rsi mine`) & Stage 2 (`hq rsi hypothesize --force`)
+	mineOut, err := env.run("", "rsi", "mine")
+	if err != nil || !strings.Contains(mineOut, "RSI Stage 1 (Mine): 2 deduplicated friction event(s)") {
+		t.Fatalf("hq rsi mine failed: %v\n%s", err, mineOut)
+	}
+
+	hypOut, err := env.run("", "rsi", "hypothesize", "--force")
+	if err != nil || !strings.Contains(hypOut, "synthesized 2 hypothesis specification(s)") {
+		t.Fatalf("hq rsi hypothesize failed: %v\n%s", err, hypOut)
+	}
+
+	hyps, err := rsi.ListHypotheses(env.vaultDir)
+	if err != nil || len(hyps) < 2 {
+		t.Fatalf("expected at least 2 hypotheses on disk, got %d (%v)", len(hyps), err)
+	}
+	targetHypID := hyps[0].ID
+
+	// 3. Stage 3 (`hq rsi verify <id>`) — verify valid hypothesis passes Gates 1-4, while Goodharted hypothesis fails Gate 1
+	verOut, err := env.run("", "rsi", "verify", targetHypID)
+	if err != nil || !strings.Contains(verOut, "[VERIFIED]") {
+		t.Fatalf("hq rsi verify %s failed: %v\n%s", targetHypID, err, verOut)
+	}
+
+	badHyp := &rsi.RSIHypothesis{
+		ID:             "rsi-goodhart-attempt",
+		Ring:           rsi.Ring1KernelCode,
+		TargetFiles:    []string{"internal/approvals/approvals.go"},
+		ReplayTestName: "TestEvil",
+		ProposedDiff:   "--- a/internal/approvals/approvals.go\n+++ b/internal/approvals/approvals.go\n+// touch ring 0\n",
+		Status:         "draft",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	_ = rsi.SaveHypothesis(env.vaultDir, badHyp)
+	if badVerOut, err := env.run("", "rsi", "verify", badHyp.ID); err == nil {
+		t.Fatalf("expected Goodharted Ring 0 hypothesis to fail hq rsi verify, but succeeded:\n%s", badVerOut)
+	}
+
+	// 4. Verify PreToolUse blocks direct `hq rsi apply` outside `hq approve`
+	directApply := fmt.Sprintf(`{"conversationId":"conv-main","toolCall":{"name":"run_command","args":{"CommandLine":"./bin/hq rsi apply %s"}}}`, targetHypID)
+	hookApplyOut, _ := env.run(directApply, "hook", "pre-tool")
+	if !strings.Contains(hookApplyOut, `"decision":"deny"`) {
+		t.Fatalf("expected PreToolUse to block direct hq rsi apply, got:\n%s", hookApplyOut)
+	}
+
+	// 5. Stage 4 (`hq rsi propose <id>`) -> PreToolUse canonical `ask_question` overwrite -> `hq approve <propId>`
+	propOut, err := env.run("", "rsi", "propose", targetHypID, "--conv=conv-main")
+	if err != nil || !strings.Contains(propOut, "Staged RSI proposal") {
+		t.Fatalf("hq rsi propose failed: %v\n%s", err, propOut)
+	}
+	pending, err := approvals.List(env.vaultDir)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("expected 1 pending RSI proposal, got %d (%v)", len(pending), err)
+	}
+	prop := pending[0]
+
+	askIn := fmt.Sprintf(`{"conversationId":"conv-main","toolCall":{"name":"ask_question","args":{"questions":[{"question":"Approve %s?","options":["Approve","Reject"]}]}}}`, prop.ID)
+	askOut, err := env.run(askIn, "hook", "pre-tool")
+	if err != nil || !strings.Contains(askOut, "Approve RSI Self-Improvement Patch") || !strings.Contains(askOut, "Verification Scorecard: Gate 1 (TCB/AST): PASS") {
+		t.Fatalf("expected PreToolUse to inject canonical RSI scorecard & diff into ask_question, got:\n%s (%v)", askOut, err)
+	}
+
+	appOut, err := env.run("", "approve", prop.ID, "--sha256="+prop.SHA256[:12])
+	if err != nil || !strings.Contains(appOut, "Applied RSI patch "+targetHypID) {
+		t.Fatalf("hq approve RSI proposal failed: %v\n%s", err, appOut)
+	}
+
+	// Verify SKILL.md in isolatedRoot was updated and canary archive was recorded
+	statusOut, err := env.run("", "rsi", "status")
+	if err != nil || !strings.Contains(statusOut, "1 active canary") || !strings.Contains(statusOut, "1 active rsi:rule block(s)") {
+		t.Fatalf("expected 1 active canary and 1 active rsi:rule block in hq rsi status, got:\n%s (%v)", statusOut, err)
+	}
+}
+
+func copyDirRecursive(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
+}
+
 
 

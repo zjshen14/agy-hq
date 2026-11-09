@@ -19,6 +19,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -217,14 +218,30 @@ func main() {
 
 	case "propose":
 		fs := flag.NewFlagSet("propose", flag.ExitOnError)
-		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, gchat_send, pr_merge, git_push)")
+		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, gchat_send, rsi_patch, rsi_skill_patch)")
 		summary := fs.String("summary", "", "Human-readable summary of the proposed action")
 		cmdStr := fs.String("cmd", "", "Exact deterministic shell command to execute upon approval")
 		draftID := fs.String("draft", "", "Optional Gmail or Google Chat draft ID when --type=gmail_send or --type=gchat_send")
+		rsiID := fs.String("rsi-id", "", "Optional verified RSI hypothesis ID when --type=rsi_patch or --type=rsi_skill_patch")
 		account := fs.String("account", "", "Optional account alias when --type=gmail_send or --type=gchat_send")
 		workDir := fs.String("workdir", "", "Optional working directory for command execution")
 		convID := fs.String("conv", "", "Optional conversation ID")
 		_ = fs.Parse(os.Args[2:])
+		if *rsiID != "" {
+			hqBin := "./bin/hq"
+			if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+				hqBin = exe
+			}
+			prop, _, err := rsi.Propose(rootDir, vaultDir, *rsiID, *convID, hqBin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq propose --rsi-id=%s failed: %v\n", *rsiID, err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
+			fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+			return
+		}
 		var meta map[string]string
 		if *draftID != "" {
 			if *actionType == "external_action" {
@@ -1352,6 +1369,9 @@ func main() {
 	case "tasks":
 		runTasksCLI(vaultDir, os.Args[2:])
 
+	case "rsi":
+		runRSICLI(rootDir, vaultDir, os.Args[2:])
+
 	default:
 		printUsage()
 		os.Exit(1)
@@ -1536,6 +1556,197 @@ func printTaskBoardLine(t kernel.ActiveTask, now time.Time) {
 	}
 }
 
+func runRSICLI(rootDir, vaultDir string, args []string) {
+	sub := "status"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+
+	switch sub {
+	case "mine":
+		fs := flag.NewFlagSet("rsi mine", flag.ExitOnError)
+		sinceStr := fs.String("since", "0s", "Lookback duration (e.g. 24h, 168h, or 0s for all)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		var since time.Duration
+		if *sinceStr != "" && *sinceStr != "0s" && *sinceStr != "0" {
+			if d, err := time.ParseDuration(*sinceStr); err == nil {
+				since = d
+			}
+		}
+		events, err := rsi.Mine(rootDir, vaultDir, since)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi mine failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(events)
+			return
+		}
+		fmt.Printf("RSI Stage 1 (Mine): %d deduplicated friction event(s) in local/memory/rsi/observations.jsonl\n", len(events))
+		for _, ev := range events {
+			fmt.Printf("  - [%s] %s (%s · fault:%s · count:%d · wasted:%d · status:%s)\n",
+				ev.ID, ev.SkillOrPkg, ev.Category, ev.FaultLayer, ev.OccurrenceCount, ev.WastedSteps, ev.Status)
+			fmt.Printf("      Excerpt: %s\n", ev.ErrorExcerpt)
+		}
+
+	case "hypothesize":
+		var targetObs string
+		var flagArgs []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") && targetObs == "" {
+				targetObs = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("rsi hypothesize", flag.ExitOnError)
+		obsFlag := fs.String("obs", "", "Optional observation ID or fingerprint")
+		force := fs.Bool("force", false, "Bypass Meta-ROI and 75% Quota Circuit Breaker thresholds")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if *obsFlag != "" {
+			targetObs = *obsFlag
+		}
+		hyps, err := rsi.Hypothesize(rootDir, vaultDir, targetObs, *force)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi hypothesize failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(hyps)
+			return
+		}
+		fmt.Printf("RSI Stage 2 (Hypothesize): synthesized %d hypothesis specification(s)\n", len(hyps))
+		for _, h := range hyps {
+			fmt.Printf("  - %s [%s · fault:%s · savedSteps:%d]: %s\n",
+				h.ID, h.Ring.Label(), h.FaultLayer, h.ExpectedSavedSteps, h.Title)
+		}
+
+	case "verify":
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq rsi verify <rsi-id> [--json]")
+			os.Exit(1)
+		}
+		rsiID := args[0]
+		fs := flag.NewFlagSet("rsi verify", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args[1:])
+		h, err := rsi.Verify(rootDir, vaultDir, rsiID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi verify failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(h)
+		} else {
+			v := h.Verification
+			fmt.Printf("RSI Stage 3 (4-Gate Sandboxed Verification) — %s [%s]\n", h.ID, strings.ToUpper(h.Status))
+			fmt.Printf("  Gate 1 (TCB & Anti-Goodhart AST): %v — %s\n", v.Gate1TCBPassed, v.Gate1Detail)
+			fmt.Printf("  Gate 2 (Counterfactual Repro):    %v — %s\n", v.Gate2ReproPassed, v.Gate2Detail)
+			fmt.Printf("  Gate 3 (Tests & PII Guard):       %v — %s\n", v.Gate3TestSuitePassed, v.Gate3Detail)
+			fmt.Printf("  Gate 4 (Budget & Contradiction):  %v — %s\n", v.Gate4BudgetPassed, v.Gate4Detail)
+		}
+		if h.Verification == nil || !h.Verification.AllPassed {
+			os.Exit(1)
+		}
+
+	case "propose":
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq rsi propose <rsi-id> [--conv=<conv-id>]")
+			os.Exit(1)
+		}
+		rsiID := args[0]
+		fs := flag.NewFlagSet("rsi propose", flag.ExitOnError)
+		convID := fs.String("conv", "", "Optional conversation ID")
+		_ = fs.Parse(args[1:])
+		hqBin := "./bin/hq"
+		if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+			hqBin = exe
+		}
+		prop, h, err := rsi.Propose(rootDir, vaultDir, rsiID, *convID, hqBin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi propose failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Printf("Staged RSI proposal %s for %s (type: %s, sha256: %s)\n", prop.ID, h.ID, prop.ActionType, prop.SHA256[:12])
+		fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+
+	case "apply":
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq rsi apply <rsi-id> --expect-diff-sha256=<prefix>")
+			os.Exit(1)
+		}
+		rsiID := args[0]
+		fs := flag.NewFlagSet("rsi apply", flag.ExitOnError)
+		expectSHA := fs.String("expect-diff-sha256", "", "Expected diff SHA-256 prefix from verified proposal")
+		_ = fs.Parse(args[1:])
+		out, err := rsi.Apply(rootDir, vaultDir, rsiID, *expectSHA)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi apply failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Print(out)
+
+	case "ablate":
+		fs := flag.NewFlagSet("rsi ablate", flag.ExitOnError)
+		model := fs.String("model", "", "Target upgraded model ID to ablate older model-scoped rules against")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		staged, err := rsi.Ablate(rootDir, vaultDir, *model)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi ablate failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(staged)
+			return
+		}
+		fmt.Printf("RSI Ablation Sweep: staged %d deprecation hypothesis(es)\n", len(staged))
+		for _, h := range staged {
+			fmt.Printf("  - %s: %s (%s)\n", h.ID, h.Title, h.RootCause)
+		}
+
+	case "status":
+		fs := flag.NewFlagSet("rsi status", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		st := rsi.GetStatus(rootDir, vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(st)
+			return
+		}
+		fmt.Printf("HQ Recursive Self-Improvement (RSI) Engine Status\n")
+		fmt.Printf("  Observations (observations.jsonl): %d total (%d open)\n", st.TotalObservations, st.OpenObservations)
+		fmt.Printf("  Hypotheses (hypotheses/*.json):    %d total (%d verified ready)\n", st.TotalHypotheses, st.VerifiedReady)
+		fmt.Printf("  Canary Archive (archive.jsonl):    %d active canary, %d promoted\n", st.ActiveCanaries, st.PromotedPatches)
+		fmt.Printf("  Skill Rule Budget:                 %d active rsi:rule block(s) across %d skill(s) (cap: %d skills)\n",
+			st.ActiveSkillRules, st.TotalSkills, rsi.MaxGlobalSkills)
+		if !st.QuotaAllowed {
+			fmt.Printf("  Quota Circuit Breaker:             PAUSED (%s)\n", st.QuotaMessage)
+		} else {
+			fmt.Printf("  Quota Circuit Breaker:             OK (<75%% rolling utilization)\n")
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown rsi subcommand: %s (expected mine, hypothesize, verify, propose, apply, ablate, status)\n", sub)
+		os.Exit(1)
+	}
+}
+
 func printUsage() {
 	fmt.Println(`Usage: hq <command> [args]
 
@@ -1548,6 +1759,7 @@ Commands:
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
   memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
+  rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
