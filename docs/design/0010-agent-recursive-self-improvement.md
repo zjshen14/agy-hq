@@ -325,26 +325,27 @@ When a new frontier model is adopted (e.g., upgrading the default model in `USER
 
 ---
 
-## 7. Phased Implementation Roadmap
+## 7. Phased Implementation Roadmap (Phases 1–4 Mapped 1:1 to RSI Stages 1–4)
 
-### Phase 1: Exhaustive Research, Live Telemetry Audit & Foundational RFC-0010 (Complete)
-- [x] Survey 30 authoritative academic works and 10 commercial/OSS harnesses in [`docs/research/07_agent_recursive_self_improvement.md`](../research/07_agent_recursive_self_improvement.md).
-- [x] Audit `agy-hq`'s first 24 hours of production journals and transcripts, isolating Defects A–D.
-- [x] Author [`docs/design/0010-agent-recursive-self-improvement.md`](./0010-agent-recursive-self-improvement.md).
+### Phase 1: Telemetry Hardening & Stage 1 DAG/Edit-Diff Trace Miner (`internal/hooks` + `internal/rsi/miner.go`)
+- [ ] **Fix Defect A (`read_file` False-Positive Errors):** Update [`isTranscriptStepError`](../../internal/hooks/hooks.go#L845-L859) so `"Command exited with code "` is checked only on `run_command` steps, never on `read_file` or `grep_search` outputs.
+- [ ] **Fix Defect B (Per-Turn Delta Watermarks):** Add `StepStartIdx`, `TurnStepCount`, `TurnErrorCount`, `TransientErrors`, and `TaintedSession` to `JournalEntry` in [`internal/hooks/hooks.go`](../../internal/hooks/hooks.go).
+- [ ] **Fix Defect C (Merged Worktree Path Resolution):** Update [`VerifyTranscript`](../../internal/hooks/hooks.go#L1135-L1140) to resolve `<vaultDir>/worktrees/<repo>-<slug>/<relPath>` against `<rootDir>/<relPath>` on `main` before emitting missing-file warnings.
+- [ ] **Implement Stage 1 Miner (`./bin/hq rsi mine` & `./bin/hq rsi status`):** Build `internal/rsi/miner.go` with `isTransientExternalError` filtering (ignoring HTTP `429`/`5xx`/timeout noise), error-recovery triplet extraction $(E_t \rightarrow A_{t+k} \rightarrow S_{t+m})$, `Who&When` parent-child `FaultLayer` attribution (`delegation_prompt`, `model_routing`, `worker_aci_or_skill`), and `PRELUDE` draft edit-diff extraction (`local/memory/rsi/observations.jsonl`).
 
-### Phase 2: Telemetry Fixes & Stage 1 DAG-Aware Trace Miner (`internal/hooks` + `internal/rsi/miner.go`)
-- [ ] Fix Defect A (`isTranscriptStepError` tool-type check so `read_file` never triggers false-positive command errors).
-- [ ] Fix Defect B (add `StepStartIdx`, `TurnStepCount`, `TurnErrorCount`, `TransientErrors`, and `TaintedSession` to `JournalEntry` in `internal/hooks/hooks.go`).
-- [ ] Fix Defect C (resolve merged worktree paths in `VerifyTranscript` against `<rootDir>/<relPath>`).
-- [ ] Implement `./bin/hq rsi mine` (`internal/rsi/miner.go`) with transient-fault filtering, `Who&When` parent-child `FaultLayer` attribution, and `PRELUDE` draft edit-diff extraction.
+### Phase 2: Stage 2 ROI-Gated Hypothesis Generator & ACE Skill Delta Engine (`internal/rsi/mutator.go`)
+- [ ] **Cold-Path Economic Gate & Quota Circuit Breaker:** Enforce the $\text{ExpectedSavedSteps} \ge 4$ threshold and the `75%` rolling 5-hour quota circuit breaker (`local/memory/quota_state.json`) before spawning any LLM hypothesis worker.
+- [ ] **0-Token Go Template Synthesis & 3-Tier Crystallization Ladder:** Implement deterministic Go rule synthesis for CLI/hook recovery pairs and `Tier A -> Tier B` (`SKILL.md` rule at $\ge 2$ runs) $\rightarrow$ `Tier B -> Tier C` (`./bin/hq` 0-token Go CLI promotion at $\ge 5$ runs).
+- [ ] **ACE Atomic Delta Applier (`ACEDeltaOp`):** Implement structured `<!-- rsi:rule id="..." model_scope="..." helpful="0" harmful="0" -->` insertion, patching, and deprecation across `.agents/plugins/agy-hq/skills/*/SKILL.md` (forbidding wholesale file rewrites).
+- [ ] **Implement `./bin/hq rsi hypothesize`:** Materialize candidate hypotheses (`local/memory/rsi/hypotheses/<id>.json`) and isolated git worktrees (`local/worktrees/headquarter-rsi-<id>/`).
 
-### Phase 3: Stage 2 Mutator & Stage 3 4-Gate Verification Oracle (`internal/rsi/{mutator,tcb,verifier}.go`)
-- [ ] Implement Meta-ROI threshold ($\ge 4$ saved steps), 75% quota circuit breaker, and 0-token Go rule template synthesis in `internal/rsi/mutator.go`.
-- [ ] Implement `internal/rsi/tcb.go` (`Gate 1`: Ring 0 path blocklist, Go `go/ast` test-deletion & `t.Skip` detector, backward-compatible schema check, taint exclusion, and wholesale-rewrite blocker).
-- [ ] Implement `ACEDeltaOp` parser/applier (`model_scope` aware) targeting `.agents/plugins/agy-hq/skills/*/SKILL.md`.
-- [ ] Implement `./bin/hq rsi verify <id>` executing `Gate 1` (TCB AST), `Gate 2A/2B` (Counterfactual `FAIL -> PASS` replay & non-code rubric), `Gate 3` (`go test -race ./...` + PII scan), and `Gate 4` (global skill catalog & contradiction check).
+### Phase 3: Stage 3 4-Gate Sandboxed Verification Oracle & Ring 0 TCB Guard (`internal/rsi/{tcb,verifier}.go`)
+- [ ] **Gate 1 (`internal/rsi/tcb.go`):** Implement the Ring 0 path blocklist (`internal/approvals/*`, `internal/rsi/{tcb,verifier}.go`, `.gitignore`), Go `go/ast` anti-Goodharting test integrity verifier (blocking deleted `Test*` functions or `t.Skip` injections), additive-only JSON schema checker, and taint provenance blocker (`Tainted == false`).
+- [ ] **Gate 2 (`internal/rsi/verifier.go`):** Implement **Gate 2A** Counterfactual Falsification Replay (proving `ReplayTestName` **fails** on unpatched `main` and **passes** on the candidate branch) and **Gate 2B** Non-Code Edit-Diff & Anti-Sycophancy Rubric verification (plus $K=5$ synthetic input perturbations for low-frequency skills).
+- [ ] **Gate 3 & Gate 4 (`./bin/hq rsi verify <id>`):** Run `go vet ./...`, `go test -race ./...` (`pass^3` on concurrent packages), `./bin/hq doctor` PII checks, global skill catalog caps (`<= 25` skills, `<= 150` lines/skill, `MEMORY.md <= 80` lines), and cross-rule contradiction checks against `AGENTS.md` and `local/USER.md`.
 
-### Phase 4: Stage 4 Approval Bridge, Adaptive Canary, Ablation & `CUJ-17` E2E Suite (`internal/approvals` + `internal/e2e`)
-- [ ] Extend `./bin/hq propose` and `PreToolUse` `ask_question` canonical preview in `internal/hooks/hooks.go` for `rsi_patch` and `rsi_skill_patch`.
-- [ ] Implement `./bin/hq rsi apply <id>` (with Dual-Repo snapshots), frequency-adaptive Canary Attribution (`local/memory/rsi/archive.jsonl`), and `./bin/hq rsi ablate`.
-- [ ] Upgrade `.agents/plugins/agy-hq/skills/sleep-consolidate/SKILL.md` Stage 4 and add **CUJ-17 (`TestCUJ17_AgentRSIMiningVerificationAndApproval`)** in `internal/e2e/cuj_e2e_test.go`.
+### Phase 4: Stage 4 Cryptographic Approval Bridge, Adaptive Canary, Ablation & `CUJ-17` E2E Suite
+- [ ] **Approval & `PreToolUse` Integration:** Wire `rsi_patch` and `rsi_skill_patch` into `./bin/hq propose` and [`internal/hooks/hooks.go`](../../internal/hooks/hooks.go) so `ask_question` mechanically displays the canonical Gate 1–4 scorecard, fault attribution layer, `diffSha256` prefix, and unified diff preview on Mobile Remote Control and Desktop.
+- [ ] **Dual-Repo Transactional Apply & Adaptive Canary Archive (`./bin/hq rsi apply`):** Snapshot both `root/.git` and `local/.git`, verify `DiffSHA256`, merge `hq/rsi-<id>`, recompile `./bin/hq`, auto-push `origin/main`, and track frequency-adaptive canary windows ($K=15$ for daily tools, $K=3$ live runs for rare skills) in `local/memory/rsi/archive.jsonl` with automatic revert staging on regression.
+- [ ] **Model-Upgrade Scaffolding Ablation (`./bin/hq rsi ablate`) & Skill Integration:** Implement replay ablation sweeps for `model_scope` rules and upgrade [`.agents/plugins/agy-hq/skills/sleep-consolidate/SKILL.md`](../../.agents/plugins/agy-hq/skills/sleep-consolidate/SKILL.md) Stage 4.
+- [ ] **End-to-End Acceptance Suite (`CUJ-17`):** Add `TestCUJ17_AgentRSIMiningVerificationAndApproval` in [`internal/e2e/cuj_e2e_test.go`](../../internal/e2e/cuj_e2e_test.go) verifying trace mining, Gate 1 anti-Goodharting & taint blocks, Gate 2 vacuous-test rejection, and full SHA-256 approved patch application.
