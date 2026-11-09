@@ -340,7 +340,7 @@ func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) {
 		applyCDPNetworkJail(t.WebSocketDebuggerURL)
 		locBytes, _ := cdpEvalJS(t.WebSocketDebuggerURL, "window.location.href")
 		if !strings.Contains(string(locBytes), cleanSpaceID) {
-			targetURL := fmt.Sprintf("https://chat.google.com/room/%s", cleanSpaceID)
+			targetURL := fmt.Sprintf("https://chat.google.com/app/chat/%s", cleanSpaceID)
 			targetURLJSON, _ := json.Marshal(targetURL)
 			_, _ = cdpEvalJS(t.WebSocketDebuggerURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
 		}
@@ -598,16 +598,19 @@ const jsExtractMessages = `(() => {
     try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
   }
   const out = [];
+  const seen = new Set();
   for (const doc of docs) {
-    const items = doc.querySelectorAll('[data-message-id], [data-topic-id], [role="listitem"]');
+    const items = doc.querySelectorAll('div[data-id][data-message-multiplat-item-id], [data-message-id], [data-topic-id]');
     let idx = 0;
     for (const el of items) {
-      const text = (el.innerText || '').trim();
-      if (!text || text.length < 2) continue;
-      idx++;
-      const msgId = el.getAttribute('data-message-id') || el.getAttribute('data-topic-id') || ('dom-msg-' + idx);
-      const senderEl = el.querySelector('[data-member-id], [data-name], [role="heading"]');
-      const sender = senderEl ? (senderEl.getAttribute('data-name') || senderEl.innerText || 'Chat User').trim() : 'Chat Participant';
+      const msgId = el.getAttribute('data-id') || el.getAttribute('data-message-id') || el.getAttribute('data-topic-id') || ('dom-msg-' + (++idx));
+      if (seen.has(msgId)) continue;
+      const bodyEl = el.querySelector('div[jsname="bgckF"], div.DTp27d.QIJiHb.Zc1Emd');
+      const text = (bodyEl ? bodyEl.innerText : (el.innerText || '')).trim();
+      if (!text) continue;
+      seen.add(msgId);
+      const senderEl = el.querySelector('span.ZTmjQb.Z4BnXb, span[jscontroller="AkvWld"], [data-member-id], [data-name], [role="heading"]');
+      const sender = senderEl ? (senderEl.getAttribute('data-name') || senderEl.innerText || 'Chat Participant').trim() : 'Chat Participant';
       out.push({
         id: msgId,
         sender: sender.split('\n')[0],
@@ -797,7 +800,7 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
     try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
   }
   for (const doc of docs) {
-    const btn = doc.querySelector('button[aria-label="Send message"], button[aria-label*="Send"], [data-tooltip*="Send"]');
+    const btn = doc.querySelector('button[aria-label="Send message"], div[role="button"][aria-label="Send message"], [data-tooltip="Send message"]');
     if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
       btn.click();
       return true;
@@ -865,12 +868,13 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 
 				locBytesAfter, _ := cdpEvalJS(wsURL, "window.location.href")
 				if !strings.Contains(string(locBytesAfter), cleanSpaceID) {
-					targetURL := fmt.Sprintf("https://chat.google.com/room/%s", cleanSpaceID)
+					targetURL := fmt.Sprintf("https://chat.google.com/app/chat/%s", cleanSpaceID)
 					if strings.Contains(curLoc, "mail.google.com") || strings.Contains(t.URL, "mail.google.com") {
 						targetURL = fmt.Sprintf("https://mail.google.com/mail/u/0/#chat/space/%s", cleanSpaceID)
 					}
 					targetURLJSON, _ := json.Marshal(targetURL)
 					_, _ = cdpEvalJS(wsURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
+					time.Sleep(800 * time.Millisecond)
 				}
 			}
 		}
