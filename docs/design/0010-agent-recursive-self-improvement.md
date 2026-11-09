@@ -1,6 +1,6 @@
-# RFC-0010: Bounded Agent Recursive Self-Improvement (RSI) — 4-Stage Trace Mining, Delta Hypothesis Synthesis, Sandboxed Verification & Human-Gated Harness Evolution (v2)
+# RFC-0010: Bounded Agent Recursive Self-Improvement (RSI) — 4-Stage Trace Mining, Delta Hypothesis Synthesis, Sandboxed Verification & Human-Gated Harness Evolution
 
-- **Status:** Draft v2 (Upgraded after Exhaustive Academic, Industry & Cross-Domain Prior-Art Review)
+- **Status:** Draft (Phase 1 Research & Architecture Complete — Ready for User Review)
 - **Author:** `[Task:agent] agent-rsi-framework` (`gemini-4-argon-high`)
 - **Created:** 2026-11-08
 - **Extends:** [RFC-0002 (Sleep-Time Memory Consolidation)](./0002-memory-and-consolidation.md), [RFC-0003 (Approval-Bound Execution)](./0003-approval-bound-execution.md), [RFC-0006 (4-Layer Memory & Ground-Truth Dreaming)](./0006-memory-engine-upgrade.md), [RFC-0009 (Scalable Task Board & Parent-Child Lineage)](./0009-task-board-redesign.md)
@@ -8,7 +8,7 @@
 
 ---
 
-## 1. Motivation, Empirical Problem Statement & v1 $\rightarrow$ v2 Critique
+## 1. Motivation & Empirical Problem Statement
 
 ### 1.1 The Missing Link in `agy-hq`: Declarative Memory vs. Procedural & Harness Evolution
 In [RFC-0006](./0006-memory-engine-upgrade.md), `agy-hq` established a 4-layer **declarative and episodic memory hierarchy** (`local/MEMORY.md` Roadmap Index $\rightarrow$ `local/memory/topics/*.md` Wiki $\rightarrow$ `facts.jsonl` & `journal/` $\rightarrow$ raw `transcript.jsonl`), verified nightly by `./bin/hq memory verify-transcript`.
@@ -31,19 +31,19 @@ As documented across 30 primary academic works and 10 commercial/OSS harnesses i
 2. **Wholesale Rewrites Cause Context Collapse (ACE, 2025):** Allowing an LLM to rewrite `AGENTS.md`, `MEMORY.md`, or `SKILL.md` wholesale causes progressive **brevity bias** and **context collapse**—erasing subtle edge-case rules. Updates must be expressed as **atomic, provenance-tagged delta operations** with post-deployment `helpful`/`harmful` attribution counters.
 3. **Safety Requires Architectural Ring-Fencing (Denison et al., Anthropic 2024):** Self-modifying agents subject to proxy optimization pressure generalize from mild specification gaming to **directly rewriting unit tests and reward scripts (`reward tampering`)**. The verification oracle and security kernel must reside in an **immutable Trusted Computing Base (Ring 0)** that the RSI loop is mechanically forbidden from editing.
 
-### 1.3 Self-Critique of RFC-0010 v1 Against Expanded Prior Art (The 8 v2 Architectural Upgrades)
-After expanding our literature and industry review to include **non-code preference learning (*PRELUDE/CIPHER*)**, **multi-agent failure attribution (*Who&When*, *TRUCE*)**, **cost-quality routing (*RouteLLM*)**, **tool-maker crystallization (*LATM*, *SkillWeaver*)**, and **commercial harness lessons (*Devin Knowledge*, *Cursor Memories/`.mdc`*, *Nous Hermes GEPA*, *OpenClaw*, *Braintrust Loop*)**, we identified **eight architectural flaws in our initial v1 draft** and redesigned RFC-0010 v2 to solve them:
+### 1.3 Eight Core Architectural Requirements Derived from Prior Art
+Synthesizing the academic frontier and commercial/open-source production harnesses ([`07_agent_recursive_self_improvement.md`](../research/07_agent_recursive_self_improvement.md)) establishes **eight architectural requirements** that a general-purpose Personal Agent OS must satisfy beyond naive SWE-only self-patching:
 
-| # | Flaw in Initial RFC-0010 v1 Draft | Prior-Art Grounding | Architectural Upgrade in RFC-0010 v2 |
+| # | Naive RSI Failure Mode | Prior-Art Grounding | Architectural Requirement in RFC-0010 |
 | :-: | :--- | :--- | :--- |
-| **1** | **SWE-Only Binary Oracle Bias:** Assumed every RSI target has a `go test` or non-zero exit code oracle, ignoring `agy-hq`'s non-code domains (email/chat drafting, investment research, writing). | *PRELUDE / CIPHER* (Gao et al., ACL 2024); *Process Supervision* (Lightman et al., ICLR 2024) | Added **Implicit Draft Edit-Diff Mining (`FrictionDraftEdited`)** ($\Delta = \text{Sent}_{\text{user}} - \text{Draft}_{\text{agent}}$) in Stage 1 and an **Anti-Sycophancy / Epistemic Calibration Rubric (`Gate 2B`)** for `thesis-check` and `filing-diff`. |
-| **2** | **Single-Transcript Linear Attribution:** Mined each `transcript.jsonl` in isolation, blinding RSI to whether a subagent failure was caused by the **parent's delegation prompt**, **wrong model tier**, or **worker skill**. | *Who&When* & *TRUCE* (Multi-Agent Credit Assignment, 2025–2026); *RouteLLM* (ICLR 2025) | Added **DAG-Aware Failure Attribution (`FaultLayer`)** in Stage 1 using `parentConversationId`, classifying friction into `delegation_prompt`, `model_routing`, vs. `worker_aci_skill`. |
-| **3** | **Missing Neural-to-Symbolic Promotion Ladder:** Treated `SKILL.md` rules (Ring 2) and Go CLI code (Ring 1) as disconnected buckets rather than a compilation pipeline. | *LATM: LLMs as Tool Makers* (DeepMind, ICLR 2024); *SkillWeaver* (2025) | Formalized the **3-Tier Crystallization Ladder**: $\text{Ad-hoc LLM Turn (10k tok)} \xrightarrow{\ge 2\times} \text{Ring 2 SKILL.md Rule (1k tok)} \xrightarrow{\ge 5\times} \text{Ring 1 0-Token Go CLI Subcommand}$. |
-| **4** | **Transient Fault Overfitting & Uniform 20-Run Canary Lag:** Failed to filter HTTP `429`/`5xx` noise; hardcoded a 20-session canary window that would take 6+ months for weekly/quarterly skills (`tax-prep`, `filing-diff`). | *Braintrust Loop* & *SkillsBench* ($N=1$ personal-agent regime) | Added a **Deterministic Transient-Fault Filter (`isTransientExternalError`)** in Stage 1, plus **Frequency-Adaptive Canary Graduation** ($K=15$ for daily tools; $K=3$ live + $K=5$ offline synthetic perturbations for rare skills). |
-| **5** | **Cross-Model Scaffolding Overfitting ("Base-Model Upgrade Shock"):** Assumed a rule learned on `Gemini 3.8 Flash` helps `Claude Opus 5.5` or `Gemini 4 Argon` forever. | *Cursor `.mdc`*, *Devin 2.0*, *ADAS* (Model-conditional scaffolding rot) | Added `model_scope` tags (`"all"`, `"flash-only"`, `"gemini-3.8-*"`) to `<!-- rsi:rule -->` blocks and added `./bin/hq rsi ablate` to prune obsolete rules when base models upgrade. |
-| **6** | **Skill Scaling Tax, Cross-Skill Contradictions & Plugin Path Drift:** Referenced legacy `.agents/skills/` path and checked only single-file line counts, ignoring global frontmatter bloat and contradictory rules across files. | *SkillsBench (2026)* Scaling Tax; *Skill-V* Contract Verification; commit `3b7c5ef` | Updated all skill paths to `.agents/plugins/agy-hq/skills/*/SKILL.md`; enforced a **Global Skill Catalog Budget (`<= 25` skills, `<= 2,500` frontmatter tokens)** and a **Cross-Rule Contradiction Check** in `Gate 4`. |
-| **7** | **Unbounded Cold-Path Meta-Quota Burn:** Allowed Stage 2 to spawn multi-worktree LLM searches without checking quota state or whether expected savings exceed synthesis cost. | *Sleep-Time Compute* (Lin et al., Letta/Berkeley 2025) | Added a **Meta-ROI Gate ($\text{ExpectedSavedSteps} \ge 4$)**, **0-Token Pure-Go Template Synthesis** for routine CLI/rule fixes, and a **75% Rolling Quota Circuit Breaker** before any LLM hypothesis call. |
-| **8** | **Uncoordinated Code vs. Vault State Rollback:** Assumed `git revert` on the root repo is always safe even if the patch touched `local/memory/` schemas. | *Letta MemFS* & Transactional Migration Safety | Added **Dual-Repo (`root/.git` + `local/.git`) Coordinated Snapshots** in `hq rsi apply` and a **Backward-Compatible Schema Invariant** in `Gate 1`. |
+| **1** | **SWE-Only Binary Oracle Bias:** Assuming every RSI target has a `go test` or non-zero exit code oracle ignores non-code domains (email/chat drafting, investment research, writing). | *PRELUDE / CIPHER* (Gao et al., ACL 2024); *Process Supervision* (Lightman et al., ICLR 2024) | **Implicit Draft Edit-Diff Mining (`FrictionDraftEdited`)** ($\Delta = \text{Sent}_{\text{user}} - \text{Draft}_{\text{agent}}$) in Stage 1 and an **Anti-Sycophancy / Epistemic Calibration Rubric (`Gate 2B`)** for `thesis-check` and `filing-diff`. |
+| **2** | **Single-Transcript Linear Attribution:** Mining each `transcript.jsonl` in isolation blinds RSI to whether a subagent failure was caused by the **parent's delegation prompt**, **wrong model tier**, or **worker skill**. | *Who&When* & *TRUCE* (Multi-Agent Credit Assignment, 2025–2026); *RouteLLM* (ICLR 2025) | **DAG-Aware Failure Attribution (`FaultLayer`)** in Stage 1 using `parentConversationId`, classifying friction into `delegation_prompt`, `model_routing`, vs. `worker_aci_or_skill`. |
+| **3** | **Disconnected Skill vs. Code Loops:** Treating `SKILL.md` rules (Ring 2) and Go CLI code (Ring 1) as static, separate buckets misses progressive tool compilation. | *LATM: LLMs as Tool Makers* (DeepMind, ICLR 2024); *SkillWeaver* (2025) | **3-Tier Crystallization Ladder:** $\text{Ad-hoc LLM Turn (10k tok)} \xrightarrow{\ge 2\times} \text{Ring 2 SKILL.md Rule (1k tok)} \xrightarrow{\ge 5\times} \text{Ring 1 0-Token Go CLI Subcommand}$. |
+| **4** | **Transient Fault Overfitting & Uniform 20-Run Canary Lag:** Failing to filter HTTP `429`/`5xx` noise causes one-shot overfitting; a fixed 20-session canary window takes 6+ months for weekly/quarterly skills (`tax-prep`, `filing-diff`). | *Braintrust Loop* & *SkillsBench* ($N=1$ personal-agent regime) | **Deterministic Transient-Fault Filter (`isTransientExternalError`)** in Stage 1, plus **Frequency-Adaptive Canary Graduation** ($K=15$ for daily tools; $K=3$ live + $K=5$ offline synthetic perturbations for rare skills). |
+| **5** | **Cross-Model Scaffolding Overfitting ("Base-Model Upgrade Shock"):** Assuming a workaround learned on `Gemini 3.8 Flash` helps `Claude Opus 5.5` or `Gemini 4 Argon` forever. | *Cursor `.mdc`*, *Devin 2.0*, *ADAS* (Model-conditional scaffolding rot) | `model_scope` tags (`"all"`, `"flash-only"`, `"gemini-3.8-*"`) on `<!-- rsi:rule -->` blocks and `./bin/hq rsi ablate` to prune obsolete rules when base models upgrade. |
+| **6** | **Skill Scaling Tax & Cross-Skill Contradictions:** Checking only single-file line counts ignores global frontmatter bloat and contradictory rules across files. | *SkillsBench (2026)* Scaling Tax; *Skill-V* Contract Verification | Target `.agents/plugins/agy-hq/skills/*/SKILL.md` with a **Global Skill Catalog Budget (`<= 25` skills, `<= 2,500` frontmatter tokens)** and a **Cross-Rule Contradiction Check** in `Gate 4`. |
+| **7** | **Unbounded Cold-Path Meta-Quota Burn:** Spawning multi-worktree LLM searches without checking quota state or whether expected savings exceed synthesis cost. | *Sleep-Time Compute* (Lin et al., Letta/Berkeley 2025) | **Meta-ROI Gate ($\text{ExpectedSavedSteps} \ge 4$)**, **0-Token Pure-Go Template Synthesis** for routine CLI/rule fixes, and a **75% Rolling Quota Circuit Breaker** before any LLM hypothesis call. |
+| **8** | **Uncoordinated Code vs. Vault State Rollback:** Reverting root repo commits without handling `local/memory/` schema state breaks workspace compatibility. | *Letta MemFS* & Transactional Migration Safety | **Dual-Repo (`root/.git` + `local/.git`) Coordinated Snapshots** in `hq rsi apply` and an **Additive-Only JSON Schema Invariant** in `Gate 1`. |
 
 ---
 
@@ -286,7 +286,7 @@ When a new frontier model is adopted (e.g., upgrading the default model in `USER
 
 ## 5. Safety Invariants & Alignment Architecture (Defense-in-Depth)
 
-| Safety Threat | Architectural Defense in `agy-hq` (RFC-0010 v2) | Enforcement Layer |
+| Safety Threat | Architectural Defense in `agy-hq` (RFC-0010) | Enforcement Layer |
 | :--- | :--- | :--- |
 | **1. Unbounded Self-Modification / Alignment Drift** | **Concentric Mutation Rings (Ring 0–3):** Ring 0 (`internal/approvals`, `internal/rsi/tcb.go`, `.gitignore`) is strictly immutable by RSI. Ring 1 (code/hooks) and Ring 2 (skills/triggers) require explicit 1-tap human SHA-256 approval via `./bin/hq approve`. | `Gate 1` Static Path Blocklist + `internal/approvals` SHA-256 Gate |
 | **2. Goodharting / Reward Tampering (Denison et al., 2024)** | **Evaluator-Mutator Separation & AST Ratchet:** The mutator cannot edit `internal/rsi/tcb.go` or `verifier.go`. `Gate 1` parses `*_test.go` ASTs to forbid deleting any `Test*` function or adding `t.Skip`. `Gate 2A` requires the new replay test to **fail** on unpatched `main` and **pass** on the candidate branch. | `Gate 1` Go `go/ast` Inspector + `Gate 2A` Counterfactual Falsification |
@@ -327,10 +327,10 @@ When a new frontier model is adopted (e.g., upgrading the default model in `USER
 
 ## 7. Phased Implementation Roadmap
 
-### Phase 1: Exhaustive Research, Live Telemetry Audit & Foundational RFC-0010 v2 (Complete)
+### Phase 1: Exhaustive Research, Live Telemetry Audit & Foundational RFC-0010 (Complete)
 - [x] Survey 30 authoritative academic works and 10 commercial/OSS harnesses in [`docs/research/07_agent_recursive_self_improvement.md`](../research/07_agent_recursive_self_improvement.md).
 - [x] Audit `agy-hq`'s first 24 hours of production journals and transcripts, isolating Defects A–D.
-- [x] Critique v1 against non-code, multi-agent, and economic prior art and author [`docs/design/0010-agent-recursive-self-improvement.md`](./0010-agent-recursive-self-improvement.md) (v2).
+- [x] Author [`docs/design/0010-agent-recursive-self-improvement.md`](./0010-agent-recursive-self-improvement.md).
 
 ### Phase 2: Telemetry Fixes & Stage 1 DAG-Aware Trace Miner (`internal/hooks` + `internal/rsi/miner.go`)
 - [ ] Fix Defect A (`isTranscriptStepError` tool-type check so `read_file` never triggers false-positive command errors).
