@@ -98,7 +98,7 @@ Beyond academic papers, commercial coding agents, always-on personal assistants,
    - Users ignore verbose weekly markdown reports (`local/memory/proposals/*.md`), which is why `agy-hq`'s `proposals/` folder sat empty. Surfacing a concise, verified diff card with a **1-tap Approve/Reject button** (`ask_question` backed by `./bin/hq approve`) achieves high review velocity with full human control.
 
 ### 2.3 Beyond SWE: Multi-Agent Attribution, Implicit Edit Learning & Cost-Quality Routing
-A critical audit of our initial RFC draft against broader agent literature exposed four non-SWE frontiers essential for a general-purpose Personal Agent OS:
+For a general-purpose Personal Agent OS (spanning coding, long-term investing, writing, and personal admin), four non-SWE research frontiers are equally critical:
 1. **Implicit Preference Learning from User Edits (*PRELUDE / CIPHER*, Gao et al., ACL 2024 / Microsoft Research):**
    - In non-code domains (email/chat drafting, memo writing, investment notes), there is no compiler or unit test. *PRELUDE* proves that the **diff between an agent's proposed draft and the user's final edited text** ($\Delta_{\text{edit}} = \text{Text}_{\text{user}} - \text{Text}_{\text{agent}}$) is the highest-signal, zero-friction supervision source—allowing the system to infer latent style, tone, and structural rules without forcing the user to write explicit prompt instructions.
 2. **Hierarchical Multi-Agent Failure Attribution (*Who&When*, *TRAIL*, *Causal Agent Replay*, *TRUCE*, ICML 2025–2026):**
