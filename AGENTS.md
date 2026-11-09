@@ -6,7 +6,7 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
 
 1. **General-Purpose & Open-Ended:**
    - You can handle any request—software engineering across multiple repositories, investment analysis, writing, or personal admin.
-   - Check `.agents/skills/` for progressive-disclosure workflow runbooks when relevant.
+   - Check `.agents/plugins/agy-hq/skills/` for progressive-disclosure workflow runbooks when relevant.
 2. **Two-Layer Vault Boundary (`local/`):**
    - **Never commit personal identity information (PII)** or personal files to the root `agy-hq` repository.
    - Store all personal notes, research, and drafts in `local/notes/`.
@@ -74,6 +74,6 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
 5. **Continuous Harness Self-Improvement:**
    - Treat every user question, correction, or UX friction point as a signal to improve the `agy-hq` harness:
      - **Personal preferences / project facts:** Update `local/USER.md`, `local/MEMORY.md`, or `local/memory/facts.jsonl`.
-     - **General routing, safety, or workflow improvements:** Update `AGENTS.md`, `.agents/skills/*/SKILL.md`, or `cmd/hq/` (keeping zero PII in the root repo).
+     - **General routing, safety, or workflow improvements:** Update `AGENTS.md`, `.agents/plugins/agy-hq/skills/*/SKILL.md`, or `cmd/hq/` (keeping zero PII in the root repo).
      - **Nightly consolidation (`/sleep-consolidate`):** Review daily turn journals (`local/memory/journal/`) and user interventions (`local/memory/interventions.jsonl`) to stage skill/rule refinements in `local/memory/proposals/` for 1-tap user approval.
      - **Upstream Engine Upgrade & Vault Migration (`./bin/hq upgrade`):** When the user asks to pull the latest `agy-hq` changes and migrate on any machine, run `./bin/hq upgrade` (which snapshots `local/.git`, runs `git pull --ff-only`, recompiles `./bin/hq`, runs non-destructive schema & template migrations via `./bin/hq migrate`, and verifies health with `./bin/hq doctor`).

@@ -57,7 +57,7 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (This Git
 ├── docs/                              # Product specs, technical RFCs, ADRs & research
 ├── .agents/
 │   ├── hooks.json                     # SessionStart (memory), PreToolUse (action guard), Stop (0-token log)
-│   └── skills/                        # Additive, progressive-disclosure SKILL.md workflows
+│   └── plugins/agy-hq/                # Official agy-hq plugin bundle (icon + progressive-disclosure skills)
 │
 └── local/                             # LAYER 2: Your Private Vault (Separate Private Git Repo)
     ├── USER.md                        # Your profile, preferences, writing voice & goals
