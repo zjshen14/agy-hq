@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 )
 
@@ -55,6 +56,14 @@ type FrontDeskLease struct {
 	ConsolePinned  bool                    `json:"consolePinned,omitempty"`
 	ArmedTriggers  map[string]ArmedTrigger `json:"armedTriggers,omitempty"`
 	UpdatedAt      string                  `json:"updatedAt"`
+}
+
+// FrontDeskPinTip is the standardized recommendation for users to pin the [HQ] Front Desk conversation to their Antigravity sidebar.
+const FrontDeskPinTip = "Pin the '[HQ] Front Desk' conversation to your Antigravity sidebar so it stays permanently anchored above ephemeral task threads."
+
+// FormatFrontDeskPinTip returns a user-facing formatted tip string.
+func FormatFrontDeskPinTip() string {
+	return "💡 Tip: " + FrontDeskPinTip
 }
 
 // SanitizeTaskTitle normalizes a task or subagent title into a clean, single-line string
@@ -1175,6 +1184,26 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 				inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (deferred: %v)", batch.BatchID, spawnErr))
 			} else {
 				inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (%s)", batch.BatchID, out))
+			}
+		}
+	}
+
+	if chatBatches, _, cErr := gchat.RunPrecheck(vaultDir, ""); cErr == nil && len(chatBatches) > 0 {
+		for _, batch := range chatBatches {
+			title := fmt.Sprintf("[Auto] GChat Triage (%s · %s)", batch.Account, batch.BatchID)
+			prompt := fmt.Sprintf(
+				"Activate the inbox-triage skill to process Google Chat triage batch %s (account=%s, spaces=%s). "+
+					"Read each space/thread via `./bin/hq gchat read-quarantined --account=%s --space=<spaceId>`, "+
+					"create a plain-text draft reply via `./bin/hq gchat draft` if a reply is needed, "+
+					"stage a send proposal via `./bin/hq propose --type=gchat_send --draft=<draftId>`, "+
+					"and save your structured summary via `./bin/hq gchat triage-result --batch=%s`.",
+				batch.BatchID, batch.Account, strings.Join(batch.SpaceIDs, ","), batch.Account, batch.BatchID,
+			)
+			out, spawnErr := SpawnFlashTask(vaultDir, "gchat-precheck:"+batch.BatchID, "inbox-triage", title, prompt, dryRun)
+			if spawnErr != nil {
+				inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (deferred: %v)", batch.BatchID, spawnErr))
+			} else {
+				inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (%s)", batch.BatchID, out))
 			}
 		}
 	}

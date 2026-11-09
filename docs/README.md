@@ -27,7 +27,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 |---|---|---|---|
 | [PRD-0001](product/0001-vision-and-ux.md) | **Core Product Vision & Day-in-the-Life UX** | The four user touchpoints: Mobile/Web Remote Control, Desktop + Aux Console, Drop Folder, and Sleep-Time Consolidation | Approved |
 | [PRD-0002](product/0002-open-workflows-and-skills.md) | **Open-Ended Workflows & Additive Skills** | How the agent handles any ad-hoc task out of the box (writing, coding, research, admin), boosted by progressive-disclosure `SKILL.md` skills | Approved |
-| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–15) & E2E Acceptance Criteria** | Deterministic expected behaviors across all 15 core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
+| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–16) & E2E Acceptance Criteria** | Deterministic expected behaviors across all 16 core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
 
 ---
 
@@ -42,6 +42,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 | [RFC-0005](design/0005-gmail-integration.md) | **Decoupled Native Gmail Integration (Layer 1 Infra & Layer 2 Workflows)** | Layer 1: extensible $N$-account registry, pluggable transport, pure Go `hq daemon` sidecar watcher, and safe CRUD primitives (`search`, `read-quarantined`, `draft`, `approve`). Layer 2: Daily Brief, Auto-Draft Triage, and Verified Attachment Routing | Approved |
 | [RFC-0006](design/0006-memory-engine-upgrade.md) | **4-Layer Memory Hierarchy, Ground-Truth Dreaming & Proactive Fact Pruning** | Anthropic-grounded memory hierarchy (Roadmap Index, Topic Wiki, Bi-Temporal Facts, Raw Transcripts), offline dreaming with transcript verification, and proactive pruning | Approved |
 | [RFC-0007](design/0007-front-desk-initialization-hardening.md) | **Front Desk Initialization Hardening, Trigger Arming & Shift Handover** | Non-blocking Front Desk state machine, deterministic Turn-1 initialization, `hq_console.md` UI artifact pinning, automated `triggers.yaml` schedule arming, and shift handover coordination | Approved |
+| [RFC-0008](design/0008-gchat-integration.md) | **Decoupled Google Chat Integration (Layer 1 Infra, Hybrid Transports & Layer 2 Workflows)** | Multi-transport adapter (`oauth` REST API v1 for Workspace, isolated Chrome `cdp` + `gmail-bridge` for personal `@gmail.com`, `webhook`), local immutable drafts, and 1-tap `gchat_send` approval | Approved |
 
 ---
 
@@ -64,3 +65,4 @@ To keep documentation maintainable as the project evolves, docs are organized in
 - [02 — Academic & Research Frontier](research/02_academic.md)
 - [03 — Technical Build Options & Integrations](research/03_technical.md)
 - [04 — Google Antigravity Capability Audit](research/04_antigravity_audit.md)
+- [05 — Google Chat Integration Pathways & Account Architecture Audit](research/05_gchat_integration.md)

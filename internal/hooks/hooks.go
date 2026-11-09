@@ -329,17 +329,20 @@ var (
 	reCmdFlagValue = regexp.MustCompile(`--cmd=(?:"(?:\\.|[^"\\])*"|'[^']*'|\S+)`)
 
 	outboundCommandPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post)\b`),
+		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post|patch|update|delete)\b`),
 		regexp.MustCompile(`(?i)\bgmail(?:-[0-9]+)?\b.*\b(send-message|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gmail\s+send-draft\b`),
+		regexp.MustCompile(`(?i)\bhq\s+gchat\s+(send|send-draft)\b`),
+		regexp.MustCompile(`(?i)\bchat\.googleapis\.com/v1/spaces/[^\s]*messages\b`),
 		regexp.MustCompile(`(?i)\bgh\s+pr\s+merge\b`),
 		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
 		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
 	}
 
-	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|propose|status)\b`)
+	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|propose|status)\b`)
 
 	reHeavyBuildTest = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
+	reGChatBrowserURL = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 )
 
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
@@ -368,6 +371,19 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				}
 				return json.NewEncoder(w).Encode(resp)
 			}
+		}
+	}
+
+	// Block direct LLM browser automation (chrome-devtools MCP) against chat.google.com to prevent bypassing hq gchat quarantine & approval gates
+	if strings.Contains(strings.ToLower(payload.ToolCall.Name), "chrome-devtools") ||
+		payload.ToolCall.Name == "navigate_page" || payload.ToolCall.Name == "new_page" ||
+		payload.ToolCall.Name == "evaluate_script" || payload.ToolCall.Name == "click" || payload.ToolCall.Name == "fill" {
+		rawArgs, _ := json.Marshal(payload.ToolCall.Args)
+		if reGChatBrowserURL.Match(rawArgs) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Google Chat safety policy: direct chrome-devtools interaction with chat.google.com is forbidden. Use `./bin/hq gchat <spaces|search|read-quarantined|draft>` and `./bin/hq propose --type=gchat_send --draft=<draftId>` instead.",
+			})
 		}
 	}
 
@@ -404,13 +420,13 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Canonical Gmail Draft Preview overwrite on ask_question for pending gmail_send proposals
+	// Canonical Gmail / Google Chat Draft Preview overwrite on ask_question for pending gmail_send / gchat_send proposals
 	if payload.ToolCall.Name == "ask_question" {
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
 			rawArgs, _ := json.Marshal(payload.ToolCall.Args)
 			rawStr := string(rawArgs)
 			for _, prop := range pending {
-				if prop.ActionType == "gmail_send" && prop.Metadata != nil && strings.Contains(rawStr, prop.ID) {
+				if (prop.ActionType == "gmail_send" || prop.ActionType == "gchat_send") && prop.Metadata != nil && strings.Contains(rawStr, prop.ID) {
 					hashShort := prop.Metadata["contentHash"]
 					if len(hashShort) > 12 {
 						hashShort = hashShort[:12]
@@ -419,15 +435,34 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					if len(shaShort) > 12 {
 						shaShort = shaShort[:12]
 					}
-					canonicalQ := fmt.Sprintf(
-						"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
-						prop.Metadata["draftId"],
-						prop.Metadata["from"],
-						prop.Metadata["to"],
-						prop.Metadata["subject"],
-						prop.Metadata["bodyPreview"],
-						hashShort,
-					)
+					var canonicalQ string
+					if prop.ActionType == "gchat_send" {
+						threadLabel := prop.Metadata["threadId"]
+						if threadLabel == "" {
+							threadLabel = "(new message)"
+						}
+						canonicalQ = fmt.Sprintf(
+							"Approve sending Google Chat Message %s?\n• Account: %s (%s)\n• Space: %s [%s]\n• Thread: %s\n• Message: %s\n• Draft Hash: %s",
+							prop.Metadata["draftId"],
+							prop.Metadata["account"],
+							prop.Metadata["from"],
+							prop.Metadata["spaceName"],
+							prop.Metadata["spaceId"],
+							threadLabel,
+							prop.Metadata["bodyPreview"],
+							hashShort,
+						)
+					} else {
+						canonicalQ = fmt.Sprintf(
+							"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
+							prop.Metadata["draftId"],
+							prop.Metadata["from"],
+							prop.Metadata["to"],
+							prop.Metadata["subject"],
+							prop.Metadata["bodyPreview"],
+							hashShort,
+						)
+					}
 					overwriteArgs := map[string]interface{}{
 						"questions": []map[string]interface{}{
 							{

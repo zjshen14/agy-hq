@@ -15,6 +15,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
@@ -59,6 +60,7 @@ func main() {
 		for _, item := range created {
 			fmt.Printf("  + %s\n", item)
 		}
+		fmt.Printf("\n%s\n", kernel.FormatFrontDeskPinTip())
 
 	case "console":
 		fs := flag.NewFlagSet("console", flag.ExitOnError)
@@ -212,54 +214,93 @@ func main() {
 
 	case "propose":
 		fs := flag.NewFlagSet("propose", flag.ExitOnError)
-		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, pr_merge, git_push)")
+		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, gchat_send, pr_merge, git_push)")
 		summary := fs.String("summary", "", "Human-readable summary of the proposed action")
 		cmdStr := fs.String("cmd", "", "Exact deterministic shell command to execute upon approval")
-		draftID := fs.String("draft", "", "Optional Gmail draft ID when --type=gmail_send")
-		account := fs.String("account", "", "Optional Gmail account alias when --type=gmail_send")
+		draftID := fs.String("draft", "", "Optional Gmail or Google Chat draft ID when --type=gmail_send or --type=gchat_send")
+		account := fs.String("account", "", "Optional account alias when --type=gmail_send or --type=gchat_send")
 		workDir := fs.String("workdir", "", "Optional working directory for command execution")
 		convID := fs.String("conv", "", "Optional conversation ID")
 		_ = fs.Parse(os.Args[2:])
 		var meta map[string]string
 		if *draftID != "" {
 			if *actionType == "external_action" {
-				*actionType = "gmail_send"
-			}
-			spec, err := gmail.GetDraft(vaultDir, *account, *draftID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hq propose: load draft %s failed: %v\n", *draftID, err)
-				os.Exit(1)
-			}
-			hashShort := spec.ContentHash
-			if len(hashShort) > 12 {
-				hashShort = hashShort[:12]
-			}
-			if *summary == "" {
-				*summary = fmt.Sprintf("Send Gmail Draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", spec.DraftID, spec.From, spec.To, spec.Subject, hashShort)
-			}
-			if *cmdStr == "" {
-				hqBin := "./bin/hq"
-				if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
-					hqBin = exe
+				if strings.HasPrefix(*draftID, "gchat-draft-") {
+					*actionType = "gchat_send"
+				} else {
+					*actionType = "gmail_send"
 				}
-				*cmdStr = fmt.Sprintf("%s gmail send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
 			}
-			if *workDir == "" {
-				*workDir = rootDir
+			hqBin := "./bin/hq"
+			if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+				hqBin = exe
 			}
-			preview := spec.Body
-			if len(preview) > 500 {
-				preview = preview[:500] + "..."
-			}
-			meta = map[string]string{
-				"draftId":     spec.DraftID,
-				"account":     spec.Account,
-				"from":        spec.From,
-				"to":          spec.To,
-				"cc":          spec.Cc,
-				"subject":     spec.Subject,
-				"bodyPreview": preview,
-				"contentHash": spec.ContentHash,
+			if *actionType == "gchat_send" {
+				spec, err := gchat.GetDraft(vaultDir, *account, *draftID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq propose: load gchat draft %s failed: %v\n", *draftID, err)
+					os.Exit(1)
+				}
+				hashShort := spec.ContentHash
+				if len(hashShort) > 12 {
+					hashShort = hashShort[:12]
+				}
+				if *summary == "" {
+					*summary = fmt.Sprintf("Send Google Chat Draft %s [Account: %s -> Space: %s (%s)] (hash:%s)", spec.DraftID, spec.Account, spec.SpaceName, spec.SpaceID, hashShort)
+				}
+				if *cmdStr == "" {
+					*cmdStr = fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
+				}
+				if *workDir == "" {
+					*workDir = rootDir
+				}
+				preview := spec.Body
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
+				}
+				meta = map[string]string{
+					"draftId":     spec.DraftID,
+					"account":     spec.Account,
+					"from":        spec.From,
+					"spaceId":     spec.SpaceID,
+					"spaceName":   spec.SpaceName,
+					"threadId":    spec.ThreadID,
+					"bodyPreview": preview,
+					"contentHash": spec.ContentHash,
+				}
+			} else {
+				spec, err := gmail.GetDraft(vaultDir, *account, *draftID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq propose: load draft %s failed: %v\n", *draftID, err)
+					os.Exit(1)
+				}
+				hashShort := spec.ContentHash
+				if len(hashShort) > 12 {
+					hashShort = hashShort[:12]
+				}
+				if *summary == "" {
+					*summary = fmt.Sprintf("Send Gmail Draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", spec.DraftID, spec.From, spec.To, spec.Subject, hashShort)
+				}
+				if *cmdStr == "" {
+					*cmdStr = fmt.Sprintf("%s gmail send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
+				}
+				if *workDir == "" {
+					*workDir = rootDir
+				}
+				preview := spec.Body
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
+				}
+				meta = map[string]string{
+					"draftId":     spec.DraftID,
+					"account":     spec.Account,
+					"from":        spec.From,
+					"to":          spec.To,
+					"cc":          spec.Cc,
+					"subject":     spec.Subject,
+					"bodyPreview": preview,
+					"contentHash": spec.ContentHash,
+				}
 			}
 		}
 		if *cmdStr == "" || *summary == "" {
@@ -418,6 +459,7 @@ func main() {
 				fmt.Printf("      * %s: schedule(CronExpression=%q, IsDaemon=true, Prompt=%q)\n", s.ID, s.FiveFieldCron(), s.DefaultPrompt())
 			}
 		}
+		fmt.Printf("  - Tip: %s\n", kernel.FrontDeskPinTip)
 
 	case "release-desk":
 		prev, hadPrev := kernel.GetFrontDesk(vaultDir)
@@ -824,6 +866,167 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "gchat":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: hq gchat <init|add-account|accounts|launch-chrome|spaces|search|read-quarantined|draft|send-draft|precheck|triage-result> [args]")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "init", "add-account":
+			fs := flag.NewFlagSet("gchat "+os.Args[2], flag.ExitOnError)
+			alias := fs.String("alias", "personal", "Account alias (e.g. personal, work)")
+			email := fs.String("email", "", "Google account address (e.g. you@gmail.com)")
+			transport := fs.String("transport", "", "Transport adapter (cdp, gmail-bridge, oauth, webhook, mock; defaults to cdp for @gmail.com)")
+			cdpEndpoint := fs.String("cdp-endpoint", gchat.DefaultCDPEndpoint, "Local Chrome DevTools Protocol HTTP endpoint")
+			chromeProfile := fs.String("chrome-profile", "", "Optional path to isolated Chrome user-data-dir")
+			gmailFallback := fs.String("gmail-fallback", "primary", "Gmail account alias for chat-noreply@google.com fallback")
+			readTokenFile := fs.String("read-token-file", "", "Optional Workspace read-only OAuth2 token file")
+			sendTokenFile := fs.String("send-token-file", "", "Optional Workspace chat.messages.create OAuth2 token file")
+			webhookFile := fs.String("webhook-file", "", "Optional Space Incoming Webhook URL file")
+			setDefault := fs.Bool("default", os.Args[2] == "init", "Set this account as the default Google Chat account")
+			_ = fs.Parse(os.Args[3:])
+			cfg, err := gchat.InitOrAddAccount(vaultDir, *alias, *email, *transport, *cdpEndpoint, *chromeProfile, *gmailFallback, *readTokenFile, *sendTokenFile, *webhookFile, *setDefault)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat %s failed: %v\n", os.Args[2], err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Configured Google Chat account %q (%s) [type=%s, transport=%s, fallback=gmail:%s]\n",
+				cfg.Alias, cfg.Email, cfg.AccountType, cfg.Transport, cfg.GmailFallbackAlias)
+
+		case "accounts", "status":
+			reg, err := gchat.LoadRegistry(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat accounts failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(reg, "", "  ")
+			fmt.Println(string(b))
+
+		case "launch-chrome":
+			fs := flag.NewFlagSet("gchat launch-chrome", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			headless := fs.Bool("headless", false, "Launch Chrome in headless mode (omit on first login)")
+			_ = fs.Parse(os.Args[3:])
+			_, msg, err := gchat.LaunchChromeProfile(vaultDir, *account, *headless)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat launch-chrome failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(msg)
+
+		case "spaces", "list-spaces":
+			fs := flag.NewFlagSet("gchat spaces", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			query := fs.String("query", "", "Optional filter query")
+			maxRes := fs.Int("max", 20, "Maximum spaces to return")
+			_ = fs.Parse(os.Args[3:])
+			spaces, err := gchat.ListSpaces(vaultDir, *account, *query, *maxRes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat spaces failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(spaces, "", "  ")
+			fmt.Println(string(b))
+
+		case "search", "list":
+			fs := flag.NewFlagSet("gchat search", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			spaceID := fs.String("space", "", "Optional space ID filter (e.g. spaces/AAAA123)")
+			query := fs.String("query", "", "Optional search query")
+			maxRes := fs.Int("max", 20, "Maximum messages to return")
+			_ = fs.Parse(os.Args[3:])
+			msgs, err := gchat.SearchMessages(vaultDir, *account, *spaceID, *query, *maxRes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat search failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(msgs, "", "  ")
+			fmt.Println(string(b))
+
+		case "read-quarantined", "read":
+			fs := flag.NewFlagSet("gchat read-quarantined", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			spaceID := fs.String("space", "", "Space ID to read in quarantined mode (e.g. spaces/AAAA123)")
+			threadID := fs.String("thread", "", "Optional thread ID filter")
+			maxRes := fs.Int("max", 20, "Maximum messages to read")
+			convID := fs.String("conv", "", "Optional conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
+			_ = fs.Parse(os.Args[3:])
+			_, formatted, err := gchat.ReadQuarantinedThread(vaultDir, *account, *spaceID, *threadID, *convID, *maxRes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat read-quarantined failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Print(formatted)
+
+		case "draft":
+			fs := flag.NewFlagSet("gchat draft", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			draftID := fs.String("draft", "", "Optional existing draft ID to update")
+			spaceID := fs.String("space", "", "Target space ID (e.g. spaces/AAAA123)")
+			spaceName := fs.String("space-name", "", "Optional display name of the target space")
+			threadID := fs.String("thread", "", "Optional thread ID being replied to")
+			body := fs.String("body", "", "Plain-text message body")
+			convID := fs.String("conv", "", "Optional conversation ID")
+			_ = fs.Parse(os.Args[3:])
+			spec, err := gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, *spaceID, *spaceName, *threadID, *body, *convID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat draft failed: %v\n", err)
+				os.Exit(1)
+			}
+			b, _ := json.MarshalIndent(spec, "", "  ")
+			fmt.Println(string(b))
+
+		case "send-draft", "send":
+			fs := flag.NewFlagSet("gchat send-draft", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email")
+			draftID := fs.String("draft", "", "Draft ID to verify and send")
+			hashPrefix := fs.String("hash", "", "Expected contentHash prefix from approved proposal")
+			_ = fs.Parse(os.Args[3:])
+			out, err := gchat.VerifyAndSendDraft(vaultDir, *account, *draftID, *hashPrefix)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat send-draft failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(out)
+
+		case "precheck", "triage":
+			fs := flag.NewFlagSet("gchat precheck", flag.ExitOnError)
+			account := fs.String("account", "", "Optional account alias filter")
+			_ = fs.Parse(os.Args[3:])
+			batches, status, err := gchat.RunPrecheck(vaultDir, *account)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat precheck failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(status)
+			if len(batches) > 0 {
+				b, _ := json.MarshalIndent(batches, "", "  ")
+				fmt.Println(string(b))
+			}
+
+		case "triage-result":
+			fs := flag.NewFlagSet("gchat triage-result", flag.ExitOnError)
+			batchID := fs.String("batch", "", "Batch ID being summarized")
+			rawJSON := fs.String("json", "", "JSON array of TriageItem objects")
+			_ = fs.Parse(os.Args[3:])
+			var items []gchat.TriageItem
+			if err := json.Unmarshal([]byte(*rawJSON), &items); err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat triage-result invalid JSON: %v\n", err)
+				os.Exit(1)
+			}
+			if err := gchat.RecordTriageResults(vaultDir, *batchID, items); err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat triage-result validation failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Recorded %d triaged Google Chat thread(s) for batch %s\n", len(items), *batchID)
+
+		default:
+			fmt.Fprintf(os.Stderr, "unknown gchat subcommand: %s\n", os.Args[2])
+			os.Exit(1)
+		}
+
 	case "daemon":
 		if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
 			switch os.Args[2] {
@@ -1047,6 +1250,7 @@ Commands:
   reject <id> [--reason=...]          Reject a pending proposal
   worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/
   gmail <init|status|list|read|draft|triage>  Layer 1 Gmail primitives & sidecar precheck
+  gchat <init|spaces|search|read|draft|triage> Layer 1 Google Chat primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
   subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation
   complete <task-slug-or-conv-id>     Mark an active task as completed

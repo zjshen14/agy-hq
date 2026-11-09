@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
@@ -219,6 +220,30 @@ func Run(vaultDir string) []CheckResult {
 				Detail: fmt.Sprintf("MEMORY.md %d/%d lines (~%d tokens), %d topic page(s), %d active fact(s)", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens, len(rep.Topics), rep.ActiveFactCount),
 			})
 		}
+	}
+
+	// 8. Check Google Chat Integration (if configured)
+	if gchatReg, err := gchat.LoadRegistry(vaultDir); err == nil && len(gchatReg.Accounts) > 0 {
+		defCfg, ok := gchatReg.Accounts[gchatReg.DefaultAccount]
+		if !ok {
+			for _, c := range gchatReg.Accounts {
+				defCfg = c
+				break
+			}
+		}
+		detail := fmt.Sprintf("%d account(s) configured (default=%s [%s], transport=%s)", len(gchatReg.Accounts), defCfg.Alias, defCfg.Email, defCfg.Transport)
+		if defCfg.Transport == "cdp" {
+			if cdpOK, cdpDetail := gchat.CheckCDPEndpoint(defCfg.CDPEndpoint); cdpOK {
+				detail += " · " + cdpDetail
+			} else {
+				detail += fmt.Sprintf(" · CDP standby (fallback=gmail-bridge:%s)", defCfg.GmailFallbackAlias)
+			}
+		}
+		results = append(results, CheckResult{
+			Name:   "Google Chat Integration",
+			Status: "PASS",
+			Detail: detail,
+		})
 	}
 
 	return results
