@@ -43,6 +43,8 @@ To keep documentation maintainable as the project evolves, docs are organized in
 | [RFC-0006](design/0006-memory-engine-upgrade.md) | **4-Layer Memory Hierarchy, Ground-Truth Dreaming & Proactive Fact Pruning** | Anthropic-grounded memory hierarchy (Roadmap Index, Topic Wiki, Bi-Temporal Facts, Raw Transcripts), offline dreaming with transcript verification, and proactive pruning | Approved |
 | [RFC-0007](design/0007-front-desk-initialization-hardening.md) | **Front Desk Initialization Hardening, Trigger Arming & Shift Handover** | Non-blocking Front Desk state machine, deterministic Turn-1 initialization, `hq_console.md` UI artifact pinning, automated `triggers.yaml` schedule arming, and shift handover coordination | Approved |
 | [RFC-0008](design/0008-gchat-integration.md) | **Decoupled Google Chat Integration (Layer 1 Infra, Hybrid Transports & Layer 2 Workflows)** | Multi-transport adapter (`oauth` REST API v1 for Workspace, isolated Chrome `cdp` + `gmail-bridge` for personal `@gmail.com`, `webhook`), local immutable drafts, and 1-tap `gchat_send` approval | Approved |
+| [RFC-0009](design/0009-task-board-redesign.md) | **Scalable Task Board, Live Console & Hot/Cold Lifecycle Redesign** | Per-tier console visibility (100% active shown, capped idle/completed), two-tier hot/cold storage (`tasks.json` + `tasks_archive.jsonl`), seamless cold recall (`hq reopen`), bounded `SessionStart`, and `hq tasks` CLI | Approved |
+| [RFC-0010](design/0010-agent-recursive-self-improvement.md) | **Bounded Agent Recursive Self-Improvement (RSI) — 4-Stage Trace Mining, Verification & Human-Gated Evolution** | 0-token friction trace mining, ACE-compliant skill/code delta hypotheses, 4-gate sandboxed verification oracle (Ring 0 TCB AST check + counterfactual replay + E2E suite), and 1-tap SHA-256 approval | Draft |
 
 ---
 
@@ -66,3 +68,5 @@ To keep documentation maintainable as the project evolves, docs are organized in
 - [03 — Technical Build Options & Integrations](research/03_technical.md)
 - [04 — Google Antigravity Capability Audit](research/04_antigravity_audit.md)
 - [05 — Google Chat Integration Pathways & Account Architecture Audit](research/05_gchat_integration.md)
+- [06 — Task Board, Console Layout & Conversation Lifecycle Audit](research/06_taskboard_and_console_audit.md)
+- [07 — Agent Recursive Self-Improvement (RSI): Literature Survey, Production Trace Loops & Safety Invariants](research/07_agent_recursive_self_improvement.md)

@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/gmail"
@@ -976,6 +977,7 @@ func LaunchChromeProfile(vaultDir, accountAlias string, headless bool) (int, str
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return 0, "", fmt.Errorf("launch chrome failed: %w", err)
 	}
@@ -1000,14 +1002,12 @@ func listSpacesViaCDP(cfg AccountConfig, query string, maxResults int) ([]SpaceS
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("CDP HTTP %d", resp.StatusCode)
 	}
-	var targets []struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-		URL   string `json:"url"`
-		Type  string `json:"type"`
-	}
+	var targets []cdpTarget
 	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
 		return nil, err
+	}
+	if wsSpaces, err := evalSpacesViaWebSocket(targets, cfg.Alias, query, maxResults); err == nil && len(wsSpaces) > 0 {
+		return wsSpaces, nil
 	}
 	qLower := strings.ToLower(strings.TrimSpace(query))
 	var spaces []SpaceSummary
@@ -1060,24 +1060,26 @@ func searchMessagesViaCDP(cfg AccountConfig, spaceID, query string, maxResults i
 	reqURL := fmt.Sprintf("%s/gchat/messages?space=%s&q=%s&max=%d",
 		base, url.QueryEscape(spaceID), url.QueryEscape(query), maxResults)
 	resp, err := client.Get(reqURL)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var msgs []MessageSummary
+			if err := json.NewDecoder(resp.Body).Decode(&msgs); err == nil {
+				for i := range msgs {
+					msgs[i].Account = cfg.Alias
+					if msgs[i].Source == "" {
+						msgs[i].Source = "cdp"
+					}
+				}
+				return msgs, nil
+			}
+		}
+	}
+	targets, err := fetchCDPTargets(base)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("CDP messages endpoint HTTP %d", resp.StatusCode)
-	}
-	var msgs []MessageSummary
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		return nil, err
-	}
-	for i := range msgs {
-		msgs[i].Account = cfg.Alias
-		if msgs[i].Source == "" {
-			msgs[i].Source = "cdp"
-		}
-	}
-	return msgs, nil
+	return evalMessagesViaWebSocket(targets, cfg.Alias, spaceID, query, maxResults)
 }
 
 func readThreadViaCDP(cfg AccountConfig, spaceID, threadID string, maxMessages int) (ThreadDetail, error) {
@@ -1089,20 +1091,22 @@ func readThreadViaCDP(cfg AccountConfig, spaceID, threadID string, maxMessages i
 	reqURL := fmt.Sprintf("%s/gchat/thread?space=%s&thread=%s&max=%d",
 		base, url.QueryEscape(spaceID), url.QueryEscape(threadID), maxMessages)
 	resp, err := client.Get(reqURL)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var td ThreadDetail
+			if err := json.NewDecoder(resp.Body).Decode(&td); err == nil {
+				td.Account = cfg.Alias
+				td.Source = "cdp"
+				return td, nil
+			}
+		}
+	}
+	targets, err := fetchCDPTargets(base)
 	if err != nil {
 		return ThreadDetail{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ThreadDetail{}, fmt.Errorf("CDP thread endpoint HTTP %d", resp.StatusCode)
-	}
-	var td ThreadDetail
-	if err := json.NewDecoder(resp.Body).Decode(&td); err != nil {
-		return ThreadDetail{}, err
-	}
-	td.Account = cfg.Alias
-	td.Source = "cdp"
-	return td, nil
+	return evalThreadViaWebSocket(targets, cfg.Alias, spaceID, threadID, maxMessages)
 }
 
 func sendDraftViaCDP(cfg AccountConfig, spec DraftSpec) (string, error) {
@@ -1120,15 +1124,23 @@ func sendDraftViaCDP(cfg AccountConfig, spec DraftSpec) (string, error) {
 	})
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(base+"/gchat/send", "application/json", bytes.NewReader(payload))
+	if err == nil {
+		defer resp.Body.Close()
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return fmt.Sprintf("delivered via CDP (%s)", strings.TrimSpace(string(bodyBytes))), nil
+		}
+	}
+	targets, wsErr := fetchCDPTargets(base)
+	if wsErr == nil && len(targets) > 0 {
+		if out, err := sendDraftViaWebSocket(targets, spec); err == nil {
+			return out, nil
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("CDP send failed (ensure Chrome CDP is running on %s): %w", base, err)
 	}
-	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("CDP send HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
-	}
-	return fmt.Sprintf("delivered via CDP (%s)", strings.TrimSpace(string(bodyBytes))), nil
+	return "", fmt.Errorf("CDP send failed on %s (no active chat.google.com composer box found)", base)
 }
 
 // --- Transport 3: Gmail `chat-noreply@google.com` Notification Bridge (Zero-Setup Fallback) ---
