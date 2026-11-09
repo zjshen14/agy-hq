@@ -213,3 +213,56 @@ func TestCDPTransportAndGmailNotificationBridgeFallback(t *testing.T) {
 		t.Fatalf("expected CDP send to deliver message, got res=%q sentText=%q err=%v", sendRes, sentText, err)
 	}
 }
+
+func TestPhase4_FuzzySpaceResolutionAndAuthURLDetection(t *testing.T) {
+	// 1. Verify strict host check in isAuthenticatedChatURL vs login redirect URLs
+	if isAuthenticatedChatURL("https://accounts.google.com/v3/signin/identifier?continue=https://chat.google.com/u/0/app/home") {
+		t.Fatalf("expected accounts.google.com continue=chat.google.com URL to NOT be treated as authenticated")
+	}
+	if !isGoogleLoginURL("https://accounts.google.com/v3/signin/identifier?continue=https://chat.google.com/u/0/app/home") {
+		t.Fatalf("expected accounts.google.com URL to be detected as login URL")
+	}
+	if !isAuthenticatedChatURL("https://chat.google.com/u/0/app/chat/AAAA_LAUNCH_01") {
+		t.Fatalf("expected chat.google.com room URL to be detected as authenticated")
+	}
+	if !isAuthenticatedChatURL("https://mail.google.com/chat/u/0/#chat/space/AAAA_LAUNCH_01") {
+		t.Fatalf("expected mail.google.com/chat URL to be detected as authenticated")
+	}
+
+	// 2. Verify fuzzy space name resolution (cached spaces + existing drafts)
+	vaultDir := t.TempDir()
+	if _, err := InitOrAddAccount(vaultDir, "personal", "user@gmail.com", "cdp", "http://127.0.0.1:19998", "", "primary", "", "", "", true); err != nil {
+		t.Fatalf("InitOrAddAccount: %v", err)
+	}
+	if err := saveCachedSpaces(vaultDir, "personal", []SpaceSummary{
+		{SpaceID: "spaces/AAAA_LAUNCH_01", Account: "personal", DisplayName: "Project Launch Space", SpaceType: "SPACE"},
+		{SpaceID: "spaces/AAAA_ENG_CORE", Account: "personal", DisplayName: "Engineering Core", SpaceType: "GROUP_CHAT"},
+	}); err != nil {
+		t.Fatalf("saveCachedSpaces: %v", err)
+	}
+
+	// Exact name match
+	spID, spName, err := ResolveSpaceTarget(vaultDir, "personal", "Project Launch Space")
+	if err != nil || spID != "spaces/AAAA_LAUNCH_01" || spName != "Project Launch Space" {
+		t.Fatalf("expected exact name match for Project Launch Space, got id=%q name=%q err=%v", spID, spName, err)
+	}
+	// Case-insensitive substring match
+	spID2, spName2, err := ResolveSpaceTarget(vaultDir, "personal", "project launch")
+	if err != nil || spID2 != "spaces/AAAA_LAUNCH_01" || spName2 != "Project Launch Space" {
+		t.Fatalf("expected substring match for project launch, got id=%q name=%q err=%v", spID2, spName2, err)
+	}
+	// Multi-word token match ("Project Launch Fair" -> matches "Project" + "Science")
+	spID3, spName3, err := ResolveSpaceTarget(vaultDir, "personal", "Project Launch Fair")
+	if err != nil || spID3 != "spaces/AAAA_LAUNCH_01" || spName3 != "Project Launch Space" {
+		t.Fatalf("expected token match for Project Launch Fair, got id=%q name=%q err=%v", spID3, spName3, err)
+	}
+	// CreateOrUpdateDraft using natural space name automatically populates SpaceID and SpaceName
+	spec, err := CreateOrUpdateDraft(vaultDir, "personal", "", "Project Launch Space", "", "", "Science fair schedule update", "conv-clean")
+	if err != nil {
+		t.Fatalf("CreateOrUpdateDraft by natural name failed: %v", err)
+	}
+	if spec.SpaceID != "spaces/AAAA_LAUNCH_01" || spec.SpaceName != "Project Launch Space" {
+		t.Fatalf("expected draft SpaceID=spaces/AAAA_LAUNCH_01 and SpaceName=Project Launch Space, got %+v", spec)
+	}
+}
+

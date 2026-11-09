@@ -876,7 +876,7 @@ func main() {
 
 	case "gchat":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: hq gchat <init|add-account|accounts|launch-chrome|spaces|search|read-quarantined|draft|send-draft|precheck|triage-result> [args]")
+			fmt.Fprintln(os.Stderr, "usage: hq gchat <init|add-account|accounts|login|launch-chrome|spaces|search|read-quarantined|draft|propose|send-draft|precheck|triage-result> [args]")
 			os.Exit(1)
 		}
 		switch os.Args[2] {
@@ -911,10 +911,23 @@ func main() {
 			b, _ := json.MarshalIndent(reg, "", "  ")
 			fmt.Println(string(b))
 
+		case "login":
+			fs := flag.NewFlagSet("gchat login", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			timeoutSec := fs.Int("timeout", 120, "Seconds to wait for interactive Google Sign-In")
+			_ = fs.Parse(os.Args[3:])
+			ep, err := gchat.InteractiveLogin(vaultDir, *account, time.Duration(*timeoutSec)*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat login failed: %v\n", err)
+				os.Exit(1)
+			}
+			spaces, _ := gchat.ListSpaces(vaultDir, *account, "", 50)
+			fmt.Printf("Authenticated Google Chat session active in background headless mode (%s, %d space(s) cached)\n", ep, len(spaces))
+
 		case "launch-chrome":
 			fs := flag.NewFlagSet("gchat launch-chrome", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
-			headless := fs.Bool("headless", false, "Launch Chrome in headless mode (omit on first login)")
+			headless := fs.Bool("headless", true, "Launch Chrome in headless background mode (use `hq gchat login` for first-time interactive sign-in)")
 			_ = fs.Parse(os.Args[3:])
 			_, msg, err := gchat.LaunchChromeProfile(vaultDir, *account, *headless)
 			if err != nil {
@@ -940,7 +953,7 @@ func main() {
 		case "search", "list":
 			fs := flag.NewFlagSet("gchat search", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
-			spaceID := fs.String("space", "", "Optional space ID filter (e.g. spaces/AAAA123)")
+			spaceID := fs.String("space", "", "Optional space name or ID filter (e.g. \"Project Launch Space\" or spaces/AAAA123)")
 			query := fs.String("query", "", "Optional search query")
 			maxRes := fs.Int("max", 20, "Maximum messages to return")
 			_ = fs.Parse(os.Args[3:])
@@ -955,7 +968,7 @@ func main() {
 		case "read-quarantined", "read":
 			fs := flag.NewFlagSet("gchat read-quarantined", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
-			spaceID := fs.String("space", "", "Space ID to read in quarantined mode (e.g. spaces/AAAA123)")
+			spaceID := fs.String("space", "", "Space name or ID to read in quarantined mode (e.g. spaces/AAAA123)")
 			threadID := fs.String("thread", "", "Optional thread ID filter")
 			maxRes := fs.Int("max", 20, "Maximum messages to read")
 			convID := fs.String("conv", "", "Optional conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
@@ -971,19 +984,86 @@ func main() {
 			fs := flag.NewFlagSet("gchat draft", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			draftID := fs.String("draft", "", "Optional existing draft ID to update")
-			spaceID := fs.String("space", "", "Target space ID (e.g. spaces/AAAA123)")
+			toSpace := fs.String("to", "", "Target space name or ID (e.g. \"Project Launch Space\" or spaces/AAAA123)")
+			spaceID := fs.String("space", "", "Alias for --to: target space name or ID")
 			spaceName := fs.String("space-name", "", "Optional display name of the target space")
 			threadID := fs.String("thread", "", "Optional thread ID being replied to")
 			body := fs.String("body", "", "Plain-text message body")
 			convID := fs.String("conv", "", "Optional conversation ID")
 			_ = fs.Parse(os.Args[3:])
-			spec, err := gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, *spaceID, *spaceName, *threadID, *body, *convID)
+			target := strings.TrimSpace(*toSpace)
+			if target == "" {
+				target = strings.TrimSpace(*spaceID)
+			}
+			spec, err := gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, target, *spaceName, *threadID, *body, *convID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gchat draft failed: %v\n", err)
 				os.Exit(1)
 			}
 			b, _ := json.MarshalIndent(spec, "", "  ")
 			fmt.Println(string(b))
+
+		case "propose", "stage-send":
+			fs := flag.NewFlagSet("gchat propose", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			draftID := fs.String("draft", "", "Optional existing draft ID to update or propose")
+			toSpace := fs.String("to", "", "Target space name or ID (e.g. \"Project Launch Space\" or spaces/AAAA123)")
+			spaceID := fs.String("space", "", "Alias for --to: target space name or ID")
+			spaceName := fs.String("space-name", "", "Optional display name of the target space")
+			threadID := fs.String("thread", "", "Optional thread ID being replied to")
+			body := fs.String("body", "", "Plain-text message body")
+			convID := fs.String("conv", "", "Optional conversation ID")
+			_ = fs.Parse(os.Args[3:])
+			target := strings.TrimSpace(*toSpace)
+			if target == "" {
+				target = strings.TrimSpace(*spaceID)
+			}
+			var spec gchat.DraftSpec
+			var err error
+			if target == "" && *body == "" && *draftID != "" {
+				spec, err = gchat.GetDraft(vaultDir, *account, *draftID)
+			} else {
+				spec, err = gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, target, *spaceName, *threadID, *body, *convID)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", err)
+				os.Exit(1)
+			}
+			hqBin := "./bin/hq"
+			if exe, eErr := os.Executable(); eErr == nil && strings.HasPrefix(exe, os.TempDir()) {
+				hqBin = exe
+			}
+			hashShort := spec.ContentHash
+			if len(hashShort) > 12 {
+				hashShort = hashShort[:12]
+			}
+			summary := fmt.Sprintf("Send Google Chat Draft %s [Account: %s -> Space: %s (%s)] (hash:%s)",
+				spec.DraftID, spec.Account, spec.SpaceName, spec.SpaceID, hashShort)
+			cmdStr := fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s",
+				hqBin, spec.Account, spec.DraftID, hashShort)
+			preview := spec.Body
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			meta := map[string]string{
+				"draftId":     spec.DraftID,
+				"account":     spec.Account,
+				"from":        spec.From,
+				"spaceId":     spec.SpaceID,
+				"spaceName":   spec.SpaceName,
+				"threadId":    spec.ThreadID,
+				"bodyPreview": preview,
+				"contentHash": spec.ContentHash,
+			}
+			prop, err := approvals.CreateWithMetadata(vaultDir, "gchat_send", summary, cmdStr, rootDir, *convID, meta)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Staged Google Chat proposal %s (draft: %s, space: %s [%s], sha256: %s)\n",
+				prop.ID, spec.DraftID, spec.SpaceName, spec.SpaceID, prop.SHA256[:12])
+			fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
 
 		case "send-draft", "send":
 			fs := flag.NewFlagSet("gchat send-draft", flag.ExitOnError)

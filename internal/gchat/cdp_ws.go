@@ -12,9 +12,26 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+// HostResolverJailRule restricts headless Chrome DNS resolution strictly to Google domains,
+// blocking third-party network egress / image beacon exfiltration at the browser network layer.
+const HostResolverJailRule = "MAP * 127.0.0.1, EXCLUDE chat.google.com, EXCLUDE *.chat.google.com, EXCLUDE mail.google.com, EXCLUDE *.google.com, EXCLUDE google.com, EXCLUDE *.gstatic.com, EXCLUDE gstatic.com, EXCLUDE *.googleapis.com, EXCLUDE googleapis.com, EXCLUDE *.googleusercontent.com"
+
+var blockedNonChatGoogleURLs = []string{
+	"*://myaccount.google.com/*",
+	"*://drive.google.com/*",
+	"*://docs.google.com/*",
+	"*://pay.google.com/*",
+	"*://takeout.google.com/*",
+	"*://myactivity.google.com/*",
+	"*://passwords.google.com/*",
+	"*://contacts.google.com/*",
+}
 
 type cdpTarget struct {
 	ID                   string `json:"id"`
@@ -24,7 +41,41 @@ type cdpTarget struct {
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
-func fetchCDPTargets(cdpEndpoint string) ([]cdpTarget, error) {
+// isAuthenticatedChatURL returns true ONLY when rawURL's host is actually chat.google.com
+// or mail.google.com/chat (never matching accounts.google.com/?continue=https://chat.google.com).
+func isAuthenticatedChatURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "chat.google.com" {
+		return true
+	}
+	if host == "mail.google.com" && (strings.HasPrefix(u.Path, "/chat") || strings.Contains(u.Fragment, "chat/")) {
+		return true
+	}
+	return false
+}
+
+// isGoogleLoginURL returns true when Chrome was redirected to Google Accounts sign-in
+// or the unauthenticated Google Workspace Chat marketing landing page.
+func isGoogleLoginURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "accounts.google.com" {
+		return true
+	}
+	if host == "workspace.google.com" && strings.Contains(u.Path, "/products/chat") {
+		return true
+	}
+	return false
+}
+
+func fetchAllCDPTargets(cdpEndpoint string) ([]cdpTarget, error) {
 	base := strings.TrimRight(cdpEndpoint, "/")
 	if base == "" {
 		base = DefaultCDPEndpoint
@@ -42,13 +93,259 @@ func fetchCDPTargets(cdpEndpoint string) ([]cdpTarget, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
 		return nil, err
 	}
+	return targets, nil
+}
+
+func fetchCDPTargets(cdpEndpoint string) ([]cdpTarget, error) {
+	targets, err := fetchAllCDPTargets(cdpEndpoint)
+	if err != nil {
+		return nil, err
+	}
 	var chatTargets []cdpTarget
 	for _, t := range targets {
-		if (strings.Contains(t.URL, "chat.google.com") || strings.Contains(t.URL, "mail.google.com/chat")) && t.WebSocketDebuggerURL != "" {
+		if isAuthenticatedChatURL(t.URL) && t.WebSocketDebuggerURL != "" {
 			chatTargets = append(chatTargets, t)
 		}
 	}
 	return chatTargets, nil
+}
+
+// resolveActiveCDPEndpoint checks the configured endpoint first, then falls back to reading
+// Chrome's DevToolsActivePort file inside local/private/gchat/chrome-profile.
+func resolveActiveCDPEndpoint(cfg AccountConfig) string {
+	ep := strings.TrimSpace(cfg.CDPEndpoint)
+	if ep == "" {
+		ep = DefaultCDPEndpoint
+	}
+	if ok, _ := CheckCDPEndpoint(ep); ok {
+		return ep
+	}
+	if cfg.ChromeProfileDir != "" {
+		activePortFile := filepath.Join(cfg.ChromeProfileDir, "DevToolsActivePort")
+		if data, err := os.ReadFile(activePortFile); err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+				cand := "http://127.0.0.1:" + strings.TrimSpace(lines[0])
+				if ok, _ := CheckCDPEndpoint(cand); ok {
+					return cand
+				}
+			}
+		}
+	}
+	return ep
+}
+
+func hasSavedProfileCookies(profileDir string) bool {
+	if strings.TrimSpace(profileDir) == "" {
+		return false
+	}
+	for _, rel := range []string{
+		filepath.Join("Default", "Cookies"),
+		filepath.Join("Default", "Network", "Cookies"),
+	} {
+		if info, err := os.Stat(filepath.Join(profileDir, rel)); err == nil && info.Size() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func closeCDPBrowser(cdpEndpoint string) {
+	targets, err := fetchAllCDPTargets(cdpEndpoint)
+	if err != nil {
+		return
+	}
+	for _, t := range targets {
+		if t.WebSocketDebuggerURL != "" {
+			_, _ = cdpCall(t.WebSocketDebuggerURL, "Browser.close", map[string]interface{}{})
+			time.Sleep(300 * time.Millisecond)
+			return
+		}
+	}
+}
+
+func applyCDPNetworkJail(wsURL string) {
+	_, _ = cdpCall(wsURL, "Network.enable", map[string]interface{}{})
+	_, _ = cdpCall(wsURL, "Network.setBlockedURLs", map[string]interface{}{
+		"urls": blockedNonChatGoogleURLs,
+	})
+}
+
+// EnsureCDPSession ensures that Chrome CDP is running and authenticated at chat.google.com.
+// - If saved cookies exist in local/private/gchat/chrome-profile, it auto-starts Chrome in
+//   invisible `--headless=new` mode (0 popup windows).
+// - If cookies are missing or expired (redirected to accounts.google.com) and allowInteractiveLogin
+//   is true, it runs the guided InteractiveLogin flow (visible sign-in -> cache spaces -> switch to headless).
+func EnsureCDPSession(vaultDir, accountAlias string, allowInteractiveLogin bool) (string, error) {
+	cfg, err := ResolveAccount(vaultDir, accountAlias)
+	if err != nil {
+		return "", err
+	}
+	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
+		return cfg.CDPEndpoint, nil
+	}
+	// If a custom non-default CDP endpoint is configured (e.g. unit test httptest server), do not spawn Chrome.
+	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
+		return cfg.CDPEndpoint, nil
+	}
+
+	ep := resolveActiveCDPEndpoint(cfg)
+	ok, _ := CheckCDPEndpoint(ep)
+	if !ok {
+		if hasSavedProfileCookies(cfg.ChromeProfileDir) {
+			if _, _, err := LaunchChromeProfile(vaultDir, cfg.Alias, true); err == nil {
+				for i := 0; i < 20; i++ {
+					time.Sleep(250 * time.Millisecond)
+					ep = resolveActiveCDPEndpoint(cfg)
+					if ok, _ = CheckCDPEndpoint(ep); ok {
+						break
+					}
+				}
+			}
+		} else if allowInteractiveLogin {
+			return InteractiveLogin(vaultDir, cfg.Alias, 120*time.Second)
+		} else {
+			return "", fmt.Errorf("Google Chat profile is not logged in yet; run `./bin/hq gchat login` once")
+		}
+	}
+
+	// Wait briefly for initial navigation to settle and verify auth state
+	var chatTargets []cdpTarget
+	needsLogin := false
+	for i := 0; i < 8; i++ {
+		all, err := fetchAllCDPTargets(ep)
+		if err != nil {
+			break
+		}
+		chatTargets = nil
+		loginTabs := 0
+		for _, t := range all {
+			if isAuthenticatedChatURL(t.URL) && t.WebSocketDebuggerURL != "" {
+				chatTargets = append(chatTargets, t)
+			} else if isGoogleLoginURL(t.URL) {
+				loginTabs++
+			}
+		}
+		if len(chatTargets) > 0 {
+			for _, ct := range chatTargets {
+				if ct.Type == "page" {
+					applyCDPNetworkJail(ct.WebSocketDebuggerURL)
+				}
+			}
+			return ep, nil
+		}
+		if loginTabs > 0 && i >= 2 {
+			needsLogin = true
+			break
+		}
+		time.Sleep(350 * time.Millisecond)
+	}
+
+	if needsLogin {
+		if allowInteractiveLogin {
+			return InteractiveLogin(vaultDir, cfg.Alias, 120*time.Second)
+		}
+		return "", fmt.Errorf("Google Chat session on %s requires sign-in (redirected to accounts.google.com); run `./bin/hq gchat login`", ep)
+	}
+	return ep, nil
+}
+
+// InteractiveLogin opens a visible Chrome window to Google Sign-In, polls until chat.google.com loads,
+// caches the user's space list, closes the visible window, and restarts in background `--headless=new` mode.
+func InteractiveLogin(vaultDir, accountAlias string, timeout time.Duration) (string, error) {
+	cfg, err := ResolveAccount(vaultDir, accountAlias)
+	if err != nil {
+		return "", err
+	}
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	ep := resolveActiveCDPEndpoint(cfg)
+	if ok, _ := CheckCDPEndpoint(ep); ok {
+		// Check if already authenticated
+		if chatTargets, err := fetchCDPTargets(ep); err == nil && len(chatTargets) > 0 {
+			return ep, nil
+		}
+		closeCDPBrowser(ep)
+		time.Sleep(400 * time.Millisecond)
+	}
+
+	if _, _, err := launchChromeWithURL(cfg, false, "https://accounts.google.com/ServiceLogin?continue=https://chat.google.com/u/0/app/home"); err != nil {
+		return "", err
+	}
+
+	deadline := time.Now().Add(timeout)
+	var authedTargets []cdpTarget
+	for time.Now().Before(deadline) {
+		time.Sleep(1 * time.Second)
+		ep = resolveActiveCDPEndpoint(cfg)
+		targets, err := fetchCDPTargets(ep)
+		if err == nil && len(targets) > 0 {
+			authedTargets = targets
+			break
+		}
+	}
+	if len(authedTargets) == 0 {
+		return "", fmt.Errorf("timed out after %s waiting for Google Chat sign-in in Chrome", timeout)
+	}
+
+	// Let sidebar render and cache spaces before switching to background headless mode
+	time.Sleep(2 * time.Second)
+	if spaces, err := evalSpacesViaWebSocket(authedTargets, cfg.Alias, "", 50); err == nil && len(spaces) > 0 {
+		_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
+	}
+
+	// Close visible login window so cookies flush to disk, then restart silently in --headless=new mode
+	closeCDPBrowser(ep)
+	time.Sleep(500 * time.Millisecond)
+	if _, _, err := LaunchChromeProfile(vaultDir, cfg.Alias, true); err == nil {
+		for i := 0; i < 20; i++ {
+			time.Sleep(250 * time.Millisecond)
+			ep = resolveActiveCDPEndpoint(cfg)
+			if ok, _ := CheckCDPEndpoint(ep); ok {
+				break
+			}
+		}
+	}
+	return ep, nil
+}
+
+// PreWarmSpace navigates the background headless Chrome tab to spaceID so that when the user taps
+// Approve on the 1-tap prompt seconds later, the composer box is already loaded and ready.
+func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) {
+	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
+		return
+	}
+	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
+		return
+	}
+	ep, err := EnsureCDPSession(vaultDir, cfg.Alias, false)
+	if err != nil {
+		return
+	}
+	targets, err := fetchCDPTargets(ep)
+	if err != nil || len(targets) == 0 {
+		return
+	}
+	cleanSpaceID := strings.TrimPrefix(strings.TrimSpace(spaceID), "spaces/")
+	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "space/")
+	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "dm/")
+	if cleanSpaceID == "" || strings.HasPrefix(cleanSpaceID, "gmail-chat-") {
+		return
+	}
+	for _, t := range targets {
+		if t.Type != "page" || t.WebSocketDebuggerURL == "" {
+			continue
+		}
+		applyCDPNetworkJail(t.WebSocketDebuggerURL)
+		locBytes, _ := cdpEvalJS(t.WebSocketDebuggerURL, "window.location.href")
+		if !strings.Contains(string(locBytes), cleanSpaceID) {
+			targetURL := fmt.Sprintf("https://chat.google.com/room/%s", cleanSpaceID)
+			targetURLJSON, _ := json.Marshal(targetURL)
+			_, _ = cdpEvalJS(t.WebSocketDebuggerURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
+		}
+		return
+	}
 }
 
 // cdpEvalJS connects to a Chrome DevTools WebSocket endpoint and runs Runtime.evaluate(expression),
@@ -261,19 +558,20 @@ const jsExtractSpaces = `(() => {
   const seen = new Set();
   const out = [];
   for (const doc of docs) {
-    const nodes = doc.querySelectorAll('[data-group-id], a[href*="/chat/"], a[href*="/dm/"], [role="listitem"][aria-label]');
+    const nodes = doc.querySelectorAll('[data-group-id], a[href*="/chat/"], a[href*="/room/"], a[href*="/dm/"], [role="listitem"][aria-label]');
     for (const el of nodes) {
       let id = el.getAttribute('data-group-id') || '';
       const href = el.getAttribute('href') || '';
       if (!id && href) {
-        const m = href.match(/(?:chat|dm|spaces)\/([A-Za-z0-9_\-]+)/);
+        const m = href.match(/(?:chat|room|dm|spaces)\/([A-Za-z0-9_\-]+)/);
         if (m) id = 'spaces/' + m[1];
       }
       if (!id) continue;
-      if (!id.startsWith('spaces/')) id = 'spaces/' + id.replace(/^(space|dm)\//, '');
+      if (!id.startsWith('spaces/')) id = 'spaces/' + id.replace(/^(space|room|dm)\//, '');
       if (seen.has(id)) continue;
       seen.add(id);
-      const name = (el.getAttribute('aria-label') || el.innerText || id).split('\n')[0].trim();
+      let name = (el.getAttribute('aria-label') || el.innerText || id).split('\n')[0].trim();
+      name = name.replace(/^(Unread\s+|Pinned\s+|Space\s+|Direct message\s+)/i, '').trim();
       out.push({ spaceId: id, displayName: name || id, spaceType: href.includes('/dm/') ? 'DIRECT_MESSAGE' : 'SPACE' });
     }
   }
@@ -316,6 +614,9 @@ func evalSpacesViaWebSocket(targets []cdpTarget, alias, query string, maxResults
 		if t.WebSocketDebuggerURL == "" {
 			continue
 		}
+		if t.Type == "page" {
+			applyCDPNetworkJail(t.WebSocketDebuggerURL)
+		}
 		raw, err := cdpEvalJS(t.WebSocketDebuggerURL, jsExtractSpaces)
 		if err != nil || len(raw) == 0 {
 			continue
@@ -352,6 +653,9 @@ func evalMessagesViaWebSocket(targets []cdpTarget, alias, spaceID, query string,
 	for _, t := range targets {
 		if t.WebSocketDebuggerURL == "" {
 			continue
+		}
+		if t.Type == "page" {
+			applyCDPNetworkJail(t.WebSocketDebuggerURL)
 		}
 		spID := spaceID
 		if spID == "" {
@@ -401,6 +705,9 @@ func evalThreadViaWebSocket(targets []cdpTarget, alias, spaceID, threadID string
 	for _, t := range targets {
 		if t.WebSocketDebuggerURL == "" {
 			continue
+		}
+		if t.Type == "page" {
+			applyCDPNetworkJail(t.WebSocketDebuggerURL)
 		}
 		raw, err := cdpEvalJS(t.WebSocketDebuggerURL, jsExtractMessages)
 		if err != nil || len(raw) == 0 {
@@ -499,6 +806,9 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 	var lastErr error
 	for _, t := range sortedTargets {
 		wsURL := t.WebSocketDebuggerURL
+		if t.Type == "page" {
+			applyCDPNetworkJail(wsURL)
+		}
 
 		// 1. Ensure tab is navigated to the target space
 		if cleanSpaceID != "" {
@@ -509,7 +819,6 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 			}
 
 			if !strings.Contains(curLoc, cleanSpaceID) {
-				// Try client-side routing via sidebar click first
 				cleanSpaceJSON, _ := json.Marshal(cleanSpaceID)
 				jsClickSidebar := fmt.Sprintf(`(() => {
   const id = %s;
@@ -532,7 +841,7 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 				clickedSidebar, _ := cdpEvalJS(wsURL, jsClickSidebar)
 				if string(clickedSidebar) == "true" {
 					for i := 0; i < 4; i++ {
-						time.Sleep(500 * time.Millisecond)
+						time.Sleep(400 * time.Millisecond)
 						ready, _ := cdpEvalJS(wsURL, jsCheckComposer)
 						if string(ready) == "true" {
 							break
@@ -540,7 +849,6 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 					}
 				}
 
-				// If not yet on space, navigate URL directly
 				locBytesAfter, _ := cdpEvalJS(wsURL, "window.location.href")
 				if !strings.Contains(string(locBytesAfter), cleanSpaceID) {
 					targetURL := fmt.Sprintf("https://chat.google.com/room/%s", cleanSpaceID)
@@ -568,8 +876,7 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 			continue
 		}
 
-		// Settle
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 
 		// 3. Inject the draft text into the composer
 		raw, err := cdpEvalJS(wsURL, jsFocusAndInsert)
@@ -578,13 +885,11 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 			continue
 		}
 
-		// Wait 300ms for send button to update state
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 
 		// 4. Click Send button or dispatch Enter
 		sendRes, err := cdpEvalJS(wsURL, jsClickSendBtn)
 		if err != nil || string(sendRes) != "true" {
-			// Fallback: Dispatch Enter key via CDP Input.dispatchKeyEvent
 			_, _ = cdpCall(wsURL, "Input.dispatchKeyEvent", map[string]interface{}{
 				"type":                  "keyDown",
 				"key":                   "Enter",
@@ -601,7 +906,7 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 			})
 		}
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(800 * time.Millisecond)
 		return fmt.Sprintf("delivered via Chrome CDP WebSocket (%s to %s)", t.ID, spec.SpaceID), nil
 	}
 
@@ -610,4 +915,3 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 	}
 	return "", fmt.Errorf("no active Google Chat message composer box found in Chrome CDP tabs")
 }
-

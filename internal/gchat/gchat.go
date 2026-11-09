@@ -350,6 +350,262 @@ func safeSpaceKey(spaceID string) string {
 	return regexp.MustCompile(`[^a-zA-Z0-9._\-]+`).ReplaceAllString(s, "_")
 }
 
+func normalizeSpaceID(spaceID string) string {
+	s := strings.TrimSpace(spaceID)
+	if s == "" {
+		return ""
+	}
+	if strings.HasPrefix(s, "spaces/") {
+		return s
+	}
+	s = strings.TrimPrefix(s, "space/")
+	s = strings.TrimPrefix(s, "room/")
+	s = strings.TrimPrefix(s, "dm/")
+	return "spaces/" + s
+}
+
+func spacesCachePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "gchat", "spaces_cache.json")
+}
+
+func saveCachedSpaces(vaultDir, account string, spaces []SpaceSummary) error {
+	if len(spaces) == 0 {
+		return nil
+	}
+	dir := filepath.Join(vaultDir, "memory", "gchat")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	existing := loadCachedSpaces(vaultDir, "")
+	byKey := make(map[string]SpaceSummary, len(existing))
+	var order []string
+	for _, s := range existing {
+		k := strings.ToLower(s.Account) + "|" + safeSpaceKey(s.SpaceID)
+		if _, ok := byKey[k]; !ok {
+			order = append(order, k)
+		}
+		byKey[k] = s
+	}
+	for _, s := range spaces {
+		acct := s.Account
+		if acct == "" {
+			acct = account
+		}
+		spID := strings.TrimSpace(s.SpaceID)
+		if spID == "" {
+			continue
+		}
+		name := strings.TrimSpace(s.DisplayName)
+		if name == "" || name == spID || name == strings.TrimPrefix(spID, "spaces/") {
+			continue
+		}
+		k := strings.ToLower(acct) + "|" + safeSpaceKey(spID)
+		if _, ok := byKey[k]; !ok {
+			order = append(order, k)
+		}
+		s.Account = acct
+		s.SpaceID = spID
+		s.DisplayName = name
+		byKey[k] = s
+	}
+	var merged []SpaceSummary
+	for _, k := range order {
+		merged = append(merged, byKey[k])
+	}
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(spacesCachePath(vaultDir), data, 0o644)
+}
+
+func loadCachedSpaces(vaultDir, account string) []SpaceSummary {
+	seen := make(map[string]bool)
+	var out []SpaceSummary
+	add := func(acct, spID, name, spType string) {
+		spID = strings.TrimSpace(spID)
+		name = strings.TrimSpace(name)
+		if spID == "" {
+			return
+		}
+		if account != "" && acct != "" && !strings.EqualFold(acct, account) {
+			return
+		}
+		k := strings.ToLower(acct) + "|" + safeSpaceKey(spID)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, SpaceSummary{
+			SpaceID:     spID,
+			Account:     acct,
+			DisplayName: name,
+			SpaceType:   spType,
+			Source:      "cache",
+		})
+	}
+
+	if data, err := os.ReadFile(spacesCachePath(vaultDir)); err == nil {
+		var cached []SpaceSummary
+		if json.Unmarshal(data, &cached) == nil {
+			for _, s := range cached {
+				add(s.Account, s.SpaceID, s.DisplayName, s.SpaceType)
+			}
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(vaultDir, "memory", "gchat", "spaces")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			if data, err := os.ReadFile(filepath.Join(vaultDir, "memory", "gchat", "spaces", e.Name())); err == nil {
+				var obj struct {
+					Account   string `json:"account"`
+					SpaceID   string `json:"spaceId"`
+					SpaceName string `json:"spaceName"`
+				}
+				if json.Unmarshal(data, &obj) == nil {
+					add(obj.Account, obj.SpaceID, obj.SpaceName, "SPACE")
+				}
+			}
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(vaultDir, "memory", "gchat", "drafts")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			if data, err := os.ReadFile(filepath.Join(vaultDir, "memory", "gchat", "drafts", e.Name())); err == nil {
+				var d DraftSpec
+				if json.Unmarshal(data, &d) == nil && d.SpaceName != "" && d.SpaceName != d.SpaceID {
+					add(d.Account, d.SpaceID, d.SpaceName, "SPACE")
+				}
+			}
+		}
+	}
+	if mDir := mockDir(vaultDir); mDir != "" {
+		if mockSpaces, err := listMockSpaces(mDir, account, "", 100); err == nil {
+			for _, s := range mockSpaces {
+				add(s.Account, s.SpaceID, s.DisplayName, s.SpaceType)
+			}
+		}
+	}
+	return out
+}
+
+func matchSpaceInList(spaces []SpaceSummary, target string) (SpaceSummary, bool) {
+	raw := strings.TrimSpace(target)
+	if raw == "" {
+		return SpaceSummary{}, false
+	}
+	rawKey := safeSpaceKey(raw)
+	qLower := strings.ToLower(raw)
+
+	// 1. Exact SpaceID match
+	for _, s := range spaces {
+		if strings.EqualFold(s.SpaceID, raw) || safeSpaceKey(s.SpaceID) == rawKey {
+			return s, true
+		}
+	}
+	// 2. Exact DisplayName match (case-insensitive)
+	for _, s := range spaces {
+		if s.DisplayName != "" && strings.EqualFold(s.DisplayName, raw) {
+			return s, true
+		}
+	}
+	// 3. Substring DisplayName match
+	for _, s := range spaces {
+		nameLower := strings.ToLower(strings.TrimSpace(s.DisplayName))
+		if nameLower == "" {
+			continue
+		}
+		if strings.Contains(nameLower, qLower) || (len(nameLower) >= 4 && strings.Contains(qLower, nameLower)) {
+			return s, true
+		}
+	}
+	// 4. Multi-word token match (e.g. "Project Launch Fair" matching "Project Launch Space" on shared tokens, or all tokens matching)
+	tokens := strings.Fields(qLower)
+	if len(tokens) > 1 {
+		bestIdx := -1
+		bestHits := 0
+		for i, s := range spaces {
+			nameLower := strings.ToLower(strings.TrimSpace(s.DisplayName))
+			if nameLower == "" {
+				continue
+			}
+			hits := 0
+			for _, tok := range tokens {
+				if len(tok) >= 2 && strings.Contains(nameLower, tok) {
+					hits++
+				}
+			}
+			if hits == len(tokens) {
+				return s, true
+			}
+			if hits >= 2 && hits > bestHits {
+				bestHits = hits
+				bestIdx = i
+			}
+		}
+		if bestIdx >= 0 {
+			return spaces[bestIdx], true
+		}
+	}
+	return SpaceSummary{}, false
+}
+
+// ResolveSpaceTarget resolves a human-friendly space or contact name (e.g. "Project Launch Space",
+// "Engineering Core", "Alice") or raw space ID (e.g. "AAAA_LAUNCH_01", "spaces/AAAA_LAUNCH_01") into a canonical
+// (spaceID, spaceName) pair using cached spaces and live ListSpaces discovery.
+func ResolveSpaceTarget(vaultDir, accountAlias, target string) (string, string, error) {
+	cfg, err := ResolveAccount(vaultDir, accountAlias)
+	if err != nil {
+		return "", "", err
+	}
+	raw := strings.TrimSpace(target)
+	if raw == "" {
+		return "", "", fmt.Errorf("target space name or ID is required")
+	}
+
+	known := loadCachedSpaces(vaultDir, cfg.Alias)
+	if matched, ok := matchSpaceInList(known, raw); ok {
+		name := matched.DisplayName
+		if name == "" {
+			name = matched.SpaceID
+		}
+		return matched.SpaceID, name, nil
+	}
+
+	// Refresh space list via ListSpaces when not in mock mode (or if cache missed)
+	if liveSpaces, lErr := ListSpaces(vaultDir, cfg.Alias, "", 50); lErr == nil && len(liveSpaces) > 0 {
+		_ = saveCachedSpaces(vaultDir, cfg.Alias, liveSpaces)
+		known = loadCachedSpaces(vaultDir, cfg.Alias)
+		if matched, ok := matchSpaceInList(known, raw); ok {
+			name := matched.DisplayName
+			if name == "" {
+				name = matched.SpaceID
+			}
+			return matched.SpaceID, name, nil
+		}
+	}
+
+	// If target looks like an explicit space ID (no whitespace), accept it directly
+	if strings.HasPrefix(raw, "spaces/") || !strings.Contains(raw, " ") {
+		return raw, raw, nil
+	}
+
+	var names []string
+	for _, s := range known {
+		if s.DisplayName != "" && s.DisplayName != s.SpaceID {
+			names = append(names, fmt.Sprintf("%q (%s)", s.DisplayName, s.SpaceID))
+		}
+	}
+	if len(names) > 0 {
+		return "", "", fmt.Errorf("could not resolve Google Chat space %q; known spaces: %s", raw, strings.Join(names, ", "))
+	}
+	return "", "", fmt.Errorf("could not resolve Google Chat space %q (run `./bin/hq gchat spaces` or `./bin/hq gchat login` first)", raw)
+}
+
 func saveSpaceAccess(vaultDir, account, spaceID, spaceName string, participants []string) error {
 	dir := filepath.Join(vaultDir, "memory", "gchat", "spaces")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -362,6 +618,14 @@ func saveSpaceAccess(vaultDir, account, spaceID, spaceName string, participants 
 		"participants": participants,
 		"updatedAt":    time.Now().Format(time.RFC3339),
 	}, "", "  ")
+	if spaceName != "" && spaceName != spaceID {
+		_ = saveCachedSpaces(vaultDir, account, []SpaceSummary{{
+			SpaceID:     spaceID,
+			Account:     account,
+			DisplayName: spaceName,
+			SpaceType:   "SPACE",
+		}})
+	}
 	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s-%s.json", account, safeSpaceKey(spaceID))), data, 0o644)
 }
 
@@ -397,20 +661,40 @@ func ListSpaces(vaultDir, accountAlias, query string, maxResults int) ([]SpaceSu
 	switch cfg.Transport {
 	case "oauth":
 		if spaces, err := listSpacesViaOAuth(cfg, query, maxResults); err == nil {
+			_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
 			return spaces, nil
 		}
 	case "cdp":
+		_, _ = EnsureCDPSession(vaultDir, cfg.Alias, false)
 		if spaces, err := listSpacesViaCDP(cfg, query, maxResults); err == nil {
+			_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
 			return spaces, nil
 		}
 		if spaces, err := listSpacesViaGmailBridge(vaultDir, cfg, query, maxResults); err == nil {
+			_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
 			return spaces, nil
 		}
+		if cached := loadCachedSpaces(vaultDir, cfg.Alias); len(cached) > 0 {
+			qLower := strings.ToLower(strings.TrimSpace(query))
+			var filtered []SpaceSummary
+			for _, s := range cached {
+				if qLower == "" || strings.Contains(strings.ToLower(s.DisplayName), qLower) || strings.Contains(strings.ToLower(s.SpaceID), qLower) {
+					filtered = append(filtered, s)
+				}
+			}
+			if len(filtered) > 0 {
+				return filtered, nil
+			}
+		}
 	case "gmail-bridge":
-		return listSpacesViaGmailBridge(vaultDir, cfg, query, maxResults)
+		spaces, err := listSpacesViaGmailBridge(vaultDir, cfg, query, maxResults)
+		if err == nil {
+			_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
+		}
+		return spaces, err
 	}
 
-	return nil, fmt.Errorf("unable to list Google Chat spaces for %q (%s, transport=%s): start Chrome CDP (`./bin/hq gchat launch-chrome`) or configure Gmail fallback", cfg.Alias, cfg.Email, cfg.Transport)
+	return nil, fmt.Errorf("unable to list Google Chat spaces for %q (%s, transport=%s): run `./bin/hq gchat login` or configure Gmail fallback", cfg.Alias, cfg.Email, cfg.Transport)
 }
 
 // SearchMessages returns lightweight message summaries matching query across spaces or within spaceID.
@@ -427,12 +711,19 @@ func SearchMessages(vaultDir, accountAlias, spaceID, query string, maxResults in
 		return searchMockMessages(mDir, cfg.Alias, spaceID, query, maxResults)
 	}
 
+	if strings.TrimSpace(spaceID) != "" {
+		if resolvedID, _, rErr := ResolveSpaceTarget(vaultDir, cfg.Alias, spaceID); rErr == nil {
+			spaceID = resolvedID
+		}
+	}
+
 	switch cfg.Transport {
 	case "oauth":
 		if msgs, err := searchMessagesViaOAuth(cfg, spaceID, query, maxResults); err == nil {
 			return msgs, nil
 		}
 	case "cdp":
+		_, _ = EnsureCDPSession(vaultDir, cfg.Alias, false)
 		if msgs, err := searchMessagesViaCDP(cfg, spaceID, query, maxResults); err == nil {
 			return msgs, nil
 		}
@@ -464,6 +755,11 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 	if convID == "" {
 		convID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
 	}
+	if _, alreadyTainted := gmail.IsSessionTainted(vaultDir, convID); !alreadyTainted {
+		if resolvedID, _, rErr := ResolveSpaceTarget(vaultDir, cfg.Alias, spaceID); rErr == nil && resolvedID != "" {
+			spaceID = resolvedID
+		}
+	}
 	_ = gmail.MarkSessionTainted(vaultDir, convID, "gchat:space:"+spaceID)
 
 	var td ThreadDetail
@@ -474,12 +770,13 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 		case "oauth":
 			td, err = readThreadViaOAuth(cfg, spaceID, threadID, maxMessages)
 		case "cdp":
+			_, _ = EnsureCDPSession(vaultDir, cfg.Alias, false)
 			td, err = readThreadViaCDP(cfg, spaceID, threadID, maxMessages)
 			if err != nil {
-				td, err = readThreadViaGmailBridge(vaultDir, cfg, spaceID, threadID)
+				td, err = readThreadViaGmailBridge(vaultDir, cfg, spaceID, threadID, convID)
 			}
 		case "gmail-bridge":
-			td, err = readThreadViaGmailBridge(vaultDir, cfg, spaceID, threadID)
+			td, err = readThreadViaGmailBridge(vaultDir, cfg, spaceID, threadID, convID)
 		default:
 			err = fmt.Errorf("transport %q does not support reading threads", cfg.Transport)
 		}
@@ -522,7 +819,7 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 	spaceID = strings.TrimSpace(spaceID)
 	body = strings.TrimSpace(body)
 	if spaceID == "" || body == "" {
-		return DraftSpec{}, fmt.Errorf("--space and --body are required to create a Google Chat draft")
+		return DraftSpec{}, fmt.Errorf("--space (or --to) and --body are required to create a Google Chat draft")
 	}
 	if convID == "" {
 		convID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
@@ -533,6 +830,15 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 		if !hasAccess {
 			return DraftSpec{}, fmt.Errorf("quarantined session cannot create a draft for space %q (only spaces read via read-quarantined may be replied to)", spaceID)
 		}
+	} else {
+		resolvedID, resolvedName, rErr := ResolveSpaceTarget(vaultDir, cfg.Alias, spaceID)
+		if rErr != nil {
+			return DraftSpec{}, rErr
+		}
+		spaceID = resolvedID
+		if strings.TrimSpace(spaceName) == "" && resolvedName != "" && resolvedName != resolvedID {
+			spaceName = resolvedName
+		}
 	}
 	if strings.TrimSpace(spaceName) == "" {
 		if knownName != "" {
@@ -541,6 +847,15 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 			spaceName = spaceID
 		}
 	}
+	if spaceName != "" && spaceName != spaceID {
+		_ = saveCachedSpaces(vaultDir, cfg.Alias, []SpaceSummary{{
+			SpaceID:     spaceID,
+			Account:     cfg.Alias,
+			DisplayName: strings.TrimSpace(spaceName),
+			SpaceType:   "SPACE",
+		}})
+	}
+	PreWarmSpace(vaultDir, cfg, spaceID)
 
 	if strings.TrimSpace(draftID) == "" {
 		b := make([]byte, 4)
@@ -621,9 +936,12 @@ func VerifyAndSendDraft(vaultDir, accountAlias, draftID, expectedHash string) (s
 	case "webhook":
 		out, err = sendDraftViaWebhook(cfg, spec)
 	case "cdp":
+		if _, sessErr := EnsureCDPSession(vaultDir, cfg.Alias, true); sessErr != nil {
+			return "", sessErr
+		}
 		out, err = sendDraftViaCDP(cfg, spec)
 	default:
-		err = fmt.Errorf("transport %q is read-only; start Chrome CDP (`./bin/hq gchat launch-chrome`) or configure oauth/webhook to send", cfg.Transport)
+		err = fmt.Errorf("transport %q is read-only; run `./bin/hq gchat login` or configure oauth/webhook to send", cfg.Transport)
 	}
 	if err != nil {
 		return "", err
@@ -919,10 +1237,16 @@ func CheckCDPEndpoint(cdpEndpoint string) (bool, string) {
 		return false, "invalid /json/list response"
 	}
 	chatTabs := 0
+	loginTabs := 0
 	for _, t := range targets {
-		if strings.Contains(t.URL, "chat.google.com") || strings.Contains(t.URL, "mail.google.com/chat") {
+		if isAuthenticatedChatURL(t.URL) {
 			chatTabs++
+		} else if isGoogleLoginURL(t.URL) {
+			loginTabs++
 		}
+	}
+	if chatTabs == 0 && loginTabs > 0 {
+		return true, fmt.Sprintf("CDP online at %s (%d target(s), awaiting Google sign-in at accounts.google.com — run `./bin/hq gchat login`)", cdpEndpoint, len(targets))
 	}
 	return true, fmt.Sprintf("CDP online at %s (%d target(s), %d chat.google.com tab(s))", cdpEndpoint, len(targets), chatTabs)
 }
@@ -944,15 +1268,20 @@ func resolveChromeBinary() string {
 }
 
 // LaunchChromeProfile starts an isolated Chrome instance with `--remote-debugging-port` and
-// `--user-data-dir=local/private/gchat/chrome-profile` pointed at https://chat.google.com.
+// `--user-data-dir=local/private/gchat/chrome-profile` pointed at https://chat.google.com/u/0/app/home.
 func LaunchChromeProfile(vaultDir, accountAlias string, headless bool) (int, string, error) {
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
 	if err != nil {
 		return 0, "", err
 	}
-	if ok, detail := CheckCDPEndpoint(cfg.CDPEndpoint); ok {
+	ep := resolveActiveCDPEndpoint(cfg)
+	if ok, detail := CheckCDPEndpoint(ep); ok {
 		return 0, "Already running: " + detail, nil
 	}
+	return launchChromeWithURL(cfg, headless, "https://chat.google.com/u/0/app/home")
+}
+
+func launchChromeWithURL(cfg AccountConfig, headless bool, targetURL string) (int, string, error) {
 	bin := resolveChromeBinary()
 	if bin == "" {
 		return 0, "", fmt.Errorf("google-chrome binary not found on PATH")
@@ -960,6 +1289,7 @@ func LaunchChromeProfile(vaultDir, accountAlias string, headless bool) (int, str
 	if err := os.MkdirAll(cfg.ChromeProfileDir, 0o700); err != nil {
 		return 0, "", err
 	}
+	_ = os.Chmod(cfg.ChromeProfileDir, 0o700)
 	port := "9222"
 	if u, err := url.Parse(cfg.CDPEndpoint); err == nil && u.Port() != "" {
 		port = u.Port()
@@ -969,11 +1299,23 @@ func LaunchChromeProfile(vaultDir, accountAlias string, headless bool) (int, str
 		"--user-data-dir=" + cfg.ChromeProfileDir,
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--disable-extensions",
+		"--disable-sync",
+		"--disable-background-networking",
+		"--mute-audio",
 	}
 	if headless {
-		args = append(args, "--headless=new")
+		args = append(args,
+			"--headless=new",
+			"--disable-gpu",
+			"--window-size=1280,900",
+			"--host-resolver-rules="+HostResolverJailRule,
+		)
 	}
-	args = append(args, "https://chat.google.com")
+	if strings.TrimSpace(targetURL) == "" {
+		targetURL = "https://chat.google.com/u/0/app/home"
+	}
+	args = append(args, targetURL)
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -985,11 +1327,15 @@ func LaunchChromeProfile(vaultDir, accountAlias string, headless bool) (int, str
 	if cmd.Process != nil {
 		pid = cmd.Process.Pid
 	}
-	return pid, fmt.Sprintf("Launched isolated Google Chat Chrome profile (PID %d, port %s, profile %s)", pid, port, cfg.ChromeProfileDir), nil
+	mode := "visible login"
+	if headless {
+		mode = "headless background"
+	}
+	return pid, fmt.Sprintf("Launched isolated Google Chat Chrome profile (%s, PID %d, port %s, profile %s)", mode, pid, port, cfg.ChromeProfileDir), nil
 }
 
 func listSpacesViaCDP(cfg AccountConfig, query string, maxResults int) ([]SpaceSummary, error) {
-	base := strings.TrimRight(cfg.CDPEndpoint, "/")
+	base := strings.TrimRight(resolveActiveCDPEndpoint(cfg), "/")
 	if base == "" {
 		base = DefaultCDPEndpoint
 	}
@@ -1012,7 +1358,7 @@ func listSpacesViaCDP(cfg AccountConfig, query string, maxResults int) ([]SpaceS
 	qLower := strings.ToLower(strings.TrimSpace(query))
 	var spaces []SpaceSummary
 	for _, t := range targets {
-		if !strings.Contains(t.URL, "chat.google.com") && !strings.Contains(t.URL, "mail.google.com/chat") {
+		if !isAuthenticatedChatURL(t.URL) {
 			continue
 		}
 		spaceID := extractSpaceIDFromURL(t.URL, t.ID)
@@ -1041,7 +1387,7 @@ func listSpacesViaCDP(cfg AccountConfig, query string, maxResults int) ([]SpaceS
 }
 
 func extractSpaceIDFromURL(rawURL, fallbackID string) string {
-	reSpace := regexp.MustCompile(`(?:spaces|chat|dm)/([A-Za-z0-9_\-]+)`)
+	reSpace := regexp.MustCompile(`(?:spaces|chat|room|dm)/([A-Za-z0-9_\-]+)`)
 	if m := reSpace.FindStringSubmatch(rawURL); len(m) == 2 {
 		return "spaces/" + m[1]
 	}
@@ -1052,7 +1398,7 @@ func extractSpaceIDFromURL(rawURL, fallbackID string) string {
 }
 
 func searchMessagesViaCDP(cfg AccountConfig, spaceID, query string, maxResults int) ([]MessageSummary, error) {
-	base := strings.TrimRight(cfg.CDPEndpoint, "/")
+	base := strings.TrimRight(resolveActiveCDPEndpoint(cfg), "/")
 	if base == "" {
 		base = DefaultCDPEndpoint
 	}
@@ -1083,7 +1429,7 @@ func searchMessagesViaCDP(cfg AccountConfig, spaceID, query string, maxResults i
 }
 
 func readThreadViaCDP(cfg AccountConfig, spaceID, threadID string, maxMessages int) (ThreadDetail, error) {
-	base := strings.TrimRight(cfg.CDPEndpoint, "/")
+	base := strings.TrimRight(resolveActiveCDPEndpoint(cfg), "/")
 	if base == "" {
 		base = DefaultCDPEndpoint
 	}
@@ -1110,7 +1456,7 @@ func readThreadViaCDP(cfg AccountConfig, spaceID, threadID string, maxMessages i
 }
 
 func sendDraftViaCDP(cfg AccountConfig, spec DraftSpec) (string, error) {
-	base := strings.TrimRight(cfg.CDPEndpoint, "/")
+	base := strings.TrimRight(resolveActiveCDPEndpoint(cfg), "/")
 	if base == "" {
 		base = DefaultCDPEndpoint
 	}
@@ -1231,7 +1577,7 @@ func searchMessagesViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, q
 	return out, nil
 }
 
-func readThreadViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, threadID string) (ThreadDetail, error) {
+func readThreadViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, threadID, convID string) (ThreadDetail, error) {
 	gmailAlias := cfg.GmailFallbackAlias
 	if gmailAlias == "" {
 		gmailAlias = "primary"
@@ -1240,7 +1586,7 @@ func readThreadViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, threa
 	if threadID != "" {
 		gmailThreadID = strings.TrimPrefix(strings.TrimSpace(threadID), "spaces/gmail-chat-")
 	}
-	gtd, _, err := gmail.ReadQuarantinedThread(vaultDir, gmailAlias, gmailThreadID, "")
+	gtd, _, err := gmail.ReadQuarantinedThread(vaultDir, gmailAlias, gmailThreadID, convID)
 	if err != nil {
 		return ThreadDetail{}, err
 	}
