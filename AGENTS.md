@@ -32,9 +32,10 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.
    - **Mandatory "Research -> RFC -> Approval -> Code" Gate for Large Projects:**
      - When the user asks for a major new capability, external integration (e.g., Gmail integration, database layer), or architectural subsystem, **NEVER jump straight into coding** (even in a subagent).
-     - Always start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/`)** using `deep` tier (`pro` / `gemini-4-argon-high`):
-       - Either spawn a **Separate Dedicated Task Conversation (`./bin/hq spawn --depth=high`)** in the sidebar for interactive multi-turn design exploration, OR
+     - Always start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/` + `docs/README.md` index row)** using `deep` tier (`pro` / `gemini-4-argon-high`):
+       - Either spawn a **Separate Dedicated Task Conversation (`./bin/hq spawn --repo=. --task=<slug> --depth=high`)** in the sidebar with an isolated worktree (`local/worktrees/headquarter-<slug>/`) for interactive multi-turn design exploration, OR
        - Dispatch a **`[deep] <Scope>: Research & RFC Architect` subagent (`invoke_subagent(Model="pro")`)** restricted strictly to researching alternatives and drafting the RFC/design artifact for user review.
+     - Always index new RFCs and research notes in `docs/README.md` and commit them (never leave Phase 1 RFC/research files untracked in the root checkout while pausing for review).
      - Only launch implementation after the user reviews and approves the design.
    - **Handover ("Shift Change") & Front Desk Initialization:**
      - To convert the current Front Desk into a regular Task Conversation and vacate the Front Desk lease, run `./bin/hq adopt --conv=<current-conv-id> --task=<slug> --title="[Task:<scope>] <Title>"` (or `./bin/hq release-desk`), and cancel any active standing cron jobs in the outgoing Front Desk via `manage_task(Action="kill")`.
@@ -65,11 +66,11 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
        ./bin/hq propose --type=<category> --summary="<description>" --cmd="<exact command>"
        ```
        To let the user approve or reject from **Mobile Remote Control** (or Desktop) with a single tap, immediately present each pending proposal using the **`ask_question`** tool (showing the proposal ID, summary, exact command, and `sha256` prefix in the options), then run `./bin/hq approve <id> --sha256=<prefix>` or `./bin/hq reject <id>` based on their selection. Never rely on `localhost` URLs for mobile users.
-     - **Auto-Push on Clean Merge (EXEMPT):** Routine git pushes to this repository (`git push origin main` or pushing topic branches `git push -u origin hq/<task>`) are explicitly **exempt** from manual approval once:
+     - **Auto-Push on Clean Merge & Turn End (EXEMPT):** Routine git commits and pushes to this repository (`git push origin main` or pushing topic branches `git push -u origin hq/<task>`) are explicitly **exempt** from manual approval once:
        1. All unit and E2E tests pass (`go test ./...` 100%).
        2. Pre-commit PII checks pass (no unencrypted personal data in tracked tree).
        3. The branch is cleanly rebased on `origin/main` and merged.
-   - **Subagent Auto-Push Instruction:** Subagents and task conversations must automatically run `git push origin main` immediately after merging cleanly into `main` so parallel worktrees, cloud backups, and other devices stay continuously synchronized without approval friction.
+   - **Zero-Dirty-Tree & Auto-Push Invariant (All Tasks & Subagents):** Every subagent and task conversation must ensure `git status -s` is completely clean and pushed to `origin` before ending a turn—including after merging a feature branch into `main`, after completing a follow-up bugfix turn, or after authoring Phase 1 RFC/research docs (`docs/design/`, `docs/research/`, `docs/README.md`). Never leave modified or untracked source/doc files sitting uncommitted in the root workspace at the end of a turn.
 5. **Continuous Harness Self-Improvement:**
    - Treat every user question, correction, or UX friction point as a signal to improve the `agy-hq` harness:
      - **Personal preferences / project facts:** Update `local/USER.md`, `local/MEMORY.md`, or `local/memory/facts.jsonl`.
