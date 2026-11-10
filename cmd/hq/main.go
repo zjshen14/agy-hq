@@ -611,6 +611,8 @@ func main() {
 		model := fs.String("model", "", "Optional model override (flash, argon, sonnet, opus, or full model ID)")
 		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high)")
 		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
+		titleOverride := fs.String("title", "", "Optional custom conversation title")
+		scopeOverride := fs.String("scope", "", "Optional custom task scope")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*taskName == "" && *role == "") {
@@ -640,10 +642,15 @@ func main() {
 			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
 		}
 		scope := "general"
-		if *repoSpec != "" {
+		if *scopeOverride != "" {
+			scope = *scopeOverride
+		} else if *repoSpec != "" {
 			scope = filepath.Base(strings.TrimSuffix(*repoSpec, ".git"))
 		} else if parts := strings.SplitN(*taskName, "-", 2); len(parts) > 0 && parts[0] != "" {
 			scope = parts[0]
+		}
+		if scope == "investment" {
+			scope = "investing"
 		}
 		if *asSubagent {
 			subRole := *role
@@ -664,6 +671,9 @@ func main() {
 			return
 		}
 		title := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
+		if *titleOverride != "" {
+			title = *titleOverride
+		}
 		createdAt := time.Now().Format(time.RFC3339)
 		// Pre-register before SpawnTask so child SessionStart/Stop hooks can link immediately without race conditions.
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
