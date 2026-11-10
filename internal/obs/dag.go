@@ -48,7 +48,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	addChildLink := func(parentID, childID string) {
 		parentID = strings.ToLower(strings.TrimSpace(parentID))
 		childID = strings.ToLower(strings.TrimSpace(childID))
-		if parentID == "" || childID == "" || parentID == childID {
+		if parentID == "" || childID == "" || parentID == childID || (fdID != "" && childID == fdID) {
 			return
 		}
 		if childSeen[parentID] == nil {

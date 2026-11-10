@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -396,40 +395,6 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 
 	if curTurn != nil {
 		finishTurn(len(steps)-1, steps[len(steps)-1].CreatedAt)
-	}
-
-	// Also inspect sibling .system_generated/messages/*.json if present to discover parent-child callbacks
-	sysGenDir := filepath.Dir(filepath.Dir(transcriptPath))
-	if filepath.Base(sysGenDir) == ".system_generated" {
-		msgDir := filepath.Join(sysGenDir, "messages")
-		if entries, mErr := os.ReadDir(msgDir); mErr == nil {
-			seenChild := make(map[string]bool)
-			for _, edge := range cm.SpawnEdges {
-				seenChild[edge.ChildConversationID] = true
-			}
-			for _, e := range entries {
-				if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-					continue
-				}
-				if b, rErr := os.ReadFile(filepath.Join(msgDir, e.Name())); rErr == nil {
-					var msg struct {
-						Sender    string `json:"sender"`
-						Recipient string `json:"recipient"`
-					}
-					if json.Unmarshal(b, &msg) == nil {
-						sender := strings.ToLower(strings.TrimSpace(msg.Sender))
-						recip := strings.ToLower(strings.TrimSpace(msg.Recipient))
-						if recip == strings.ToLower(convID) && sender != "" && sender != recip && !seenChild[sender] {
-							seenChild[sender] = true
-							cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
-								ChildConversationID:  sender,
-								ParentConversationID: convID,
-							})
-						}
-					}
-				}
-			}
-		}
 	}
 
 	cm.Turns = turns
