@@ -1962,8 +1962,15 @@ func runObsCLI(vaultDir string, args []string) {
 
 		if len(rep.Anomalies) > 0 {
 			fmt.Printf("\nActive Anomalies & Guard Alerts (%d):\n", len(rep.Anomalies))
-			for _, a := range rep.Anomalies {
+			maxShow := len(rep.Anomalies)
+			if maxShow > 8 {
+				maxShow = 8
+			}
+			for _, a := range rep.Anomalies[:maxShow] {
 				fmt.Printf("  - [%s][%s] %s\n", a.Severity, a.Code, a.Summary)
+			}
+			if len(rep.Anomalies) > maxShow {
+				fmt.Printf("  ... and %d more (run './bin/hq obs anomalies' for full list)\n", len(rep.Anomalies)-maxShow)
 			}
 		}
 

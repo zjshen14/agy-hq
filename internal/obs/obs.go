@@ -419,7 +419,7 @@ func ResolveBrainDir(vaultDir string) string {
 
 func loadCachedIndex(vaultDir string) *ObsIndex {
 	idx := &ObsIndex{
-		Version:       1,
+		Version:       2,
 		Conversations: make(map[string]ConversationMetrics),
 	}
 	data, err := os.ReadFile(obsIndexFilePath(vaultDir))
@@ -427,7 +427,7 @@ func loadCachedIndex(vaultDir string) *ObsIndex {
 		return idx
 	}
 	var parsed ObsIndex
-	if json.Unmarshal(data, &parsed) == nil && parsed.Version == 1 && parsed.Conversations != nil {
+	if json.Unmarshal(data, &parsed) == nil && parsed.Version == 2 && parsed.Conversations != nil {
 		return &parsed
 	}
 	return idx
@@ -438,7 +438,7 @@ func saveCachedIndex(vaultDir string, idx *ObsIndex) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	idx.Version = 1
+	idx.Version = 2
 	idx.UpdatedAt = time.Now().Format(time.RFC3339)
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {

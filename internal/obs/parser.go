@@ -331,11 +331,11 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 					pendingSpawns = append(pendingSpawns, pendingSpawnCall{
 						stepIdx:   i,
 						createdAt: st.CreatedAt,
-						role:      strings.TrimSpace(role),
-						model:     strings.TrimSpace(mArg),
-						typeName:  strings.TrimSpace(tName),
-						workspace: strings.TrimSpace(ws),
-						prompt:    cleanPromptPreview(pr),
+						role:      strings.Trim(strings.TrimSpace(role), "\"'"),
+						model:     strings.Trim(strings.TrimSpace(mArg), "\"'"),
+						typeName:  strings.Trim(strings.TrimSpace(tName), "\"'"),
+						workspace: strings.Trim(strings.TrimSpace(ws), "\"'"),
+						prompt:    cleanPromptPreview(strings.Trim(strings.TrimSpace(pr), "\"'")),
 					})
 				}
 			}

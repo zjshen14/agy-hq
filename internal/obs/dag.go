@@ -113,23 +113,25 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			// Ground-truth spawn edge overrides FIFO-drifted subagent role/parent
 			if edge, hasEdge := edgeByChild[cid]; hasEdge {
 				cm.ParentConversationID = edge.ParentConversationID
-				if edge.Role != "" {
-					eModel := edge.Model
+				cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
+				cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
+				if cleanRole != "" {
+					eModel := cleanModel
 					if eModel == "" || eModel == "inherit" {
 						eModel = cm.Model
 					}
-					tier, scope, _, title, slug := kernel.ParseSubagentRole(edge.Role, eModel)
+					tier, scope, _, title, slug := kernel.ParseSubagentRole(cleanRole, eModel)
 					cm.Title = title
 					cm.TaskSlug = slug
 					cm.Scope = scope
 					cm.Tier = tier
-					if cm.Model == "" && edge.Model != "" && edge.Model != "inherit" {
-						cm.Model = edge.Model
+					if cm.Model == "" && cleanModel != "" && cleanModel != "inherit" {
+						cm.Model = cleanModel
 					}
 				}
 				if fdID != "" && edge.ParentConversationID != fdID {
 					cm.Kind = "nested_subagent"
-				} else {
+				} else if cm.Kind != "task" || cleanRole != "" {
 					cm.Kind = "subagent"
 				}
 			} else if kernel.IsNestedSubagentConversation(vaultDir, cid) {
@@ -287,14 +289,16 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 	for i := range tasks {
 		cid := strings.ToLower(strings.TrimSpace(tasks[i].ConversationID))
 		edge, ok := edgeByChild[cid]
-		if !ok || edge.Role == "" {
+		cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
+		cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
+		if !ok || cleanRole == "" {
 			continue
 		}
 		model := tasks[i].Model
-		if edge.Model != "" && edge.Model != "inherit" {
-			model = edge.Model
+		if cleanModel != "" && cleanModel != "inherit" {
+			model = cleanModel
 		}
-		tier, scope, _, title, slug := kernel.ParseSubagentRole(edge.Role, model)
+		tier, scope, _, title, slug := kernel.ParseSubagentRole(cleanRole, model)
 		changed := false
 		if tasks[i].Title != title {
 			tasks[i].Title = title
