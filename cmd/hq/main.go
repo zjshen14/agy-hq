@@ -1175,8 +1175,8 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "daemon":
-		if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
+	case "daemon", "webui":
+		if os.Args[1] == "daemon" && len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
 			switch os.Args[2] {
 			case "install":
 				fs := flag.NewFlagSet("daemon install", flag.ExitOnError)
@@ -1218,7 +1218,7 @@ func main() {
 			}
 		}
 
-		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+		fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 		defaultAddr := "127.0.0.1:4242"
 		if p := os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT"); p != "" {
 			defaultAddr = "127.0.0.1:" + p
@@ -1881,6 +1881,7 @@ Commands:
   ci <check-pii|check-harness|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness contract verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
+  webui [--addr=127.0.0.1:4242]       Start interactive Web UI Console & Antigravity Sidecar
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal

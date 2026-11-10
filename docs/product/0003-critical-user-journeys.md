@@ -24,7 +24,8 @@
 | **CUJ-13** | Front Desk Init Hardening & Trigger Arming | `hq init`, `hq hook session-start`, `hq hook pre-tool` | `TestCUJ13_FrontDeskInitHardeningAndTriggerArming` |
 | **CUJ-14** | Decoupled Native Gmail Infrastructure & Workflows | `hq gmail`, `local/memory/gmail/` | `TestCUJ14_GmailLayer1AndLayer2Lifecycle` |
 | **CUJ-15** | 4-Layer Memory Engine & Dreaming Verification | `hq memory`, `local/memory/topics/`, `local/memory/facts.jsonl` | `TestCUJ15_MemoryEngineUpgradeAndDreamingVerification` |
-| **CUJ-16** | Google Chat Integration, Quarantine Lockdown & Approval-Bound Send | `hq gchat`, `local/memory/gchat/` | `TestCUJ16_GoogleChatQuarantineAndApproval` |
+| **CUJ-16A** | Google Chat Integration, Quarantine Lockdown & Approval-Bound Send | `hq gchat`, `local/memory/gchat/` | `TestCUJ16_GoogleChatQuarantineAndApproval` |
+| **CUJ-16B** | Scalable Task Board, Per-Tier Visibility & Cold Archive Recall | `hq tasks`, `local/memory/tasks.json` | `TestCUJ16_TaskBoardTieredConsoleAndColdArchive` |
 | **CUJ-17** | Bounded Agent Recursive Self-Improvement (RSI) | `hq rsi`, `internal/rsi` | `TestCUJ17_AgentRSIMiningVerificationAndApproval` |
 | **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
 
@@ -155,10 +156,18 @@
 
 ---
 
-## CUJ-16: Google Chat Integration, Quarantine Lockdown & Approval-Bound Send
+## CUJ-16A: Google Chat Integration, Quarantine Lockdown & Approval-Bound Send
 1. **Hybrid Transport & Fuzzy Space Resolution (`hq gchat`):** Supports Workspace `oauth` and personal `@gmail.com` `cdp` + `gmail-bridge` transports with fuzzy display-name/email resolution across spaces and DMs.
 2. **Quarantined Reader (`hq gchat read-quarantined`):** Strips HTML/scripts and taints the reading conversation (`conv-gchat-reader`), blocking outbound network tools and private Vault reads.
 3. **1-Step Outbound Staging (`hq gchat propose`):** Stages outbound Chat messages as SHA-256-bound `gchat_send` proposals requiring 1-tap `ask_question` approval before `hq approve` dispatches the message.
+
+---
+
+## CUJ-16B: Scalable Task Board, Per-Tier Console Visibility, Hot/Cold Archive & Recall
+1. **Per-Tier Console Visibility Budget (RFC-0009):** Active tasks are 100% visible on the Task Board in `hq_console.md`, while completed and dormant tasks are capped to prevent visual clutter and context bloat.
+2. **Two-Tier Storage (`tasks.json` + `tasks_archive.jsonl`):** Active and recent tasks remain hot in `local/memory/tasks.json`. Completed tasks (>24h) and dormant tasks (>48h) with clean worktrees are compacted via `hq tasks compact` into append-only cold archive (`local/memory/tasks_archive.jsonl`).
+3. **Seamless Cold Recall (`hq reopen`):** Running `hq reopen <slug-or-id>` transparently looks up tasks in `tasks_archive.jsonl`, recalls them back into `tasks.json`, and updates the Task Board.
+4. **CLI Telemetry & Pinning:** `hq tasks` filters by status (`--active`, `--all`, `--archive`), kind, and scope; `hq tasks stats` outputs slot allocation and hot/cold counts; `hq tasks pin <slug>` and `unpin <slug>` ensure critical initiatives remain prominently visible.
 
 ---
 

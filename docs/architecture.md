@@ -22,36 +22,47 @@ flowchart TB
   subgraph Touchpoints["1. User Touchpoints (PRD-0001)"]
     RC["Antigravity Remote Control (Web/PWA)\n1-Tap Proposals & Mobile Chat"]
     DESK["Antigravity Desktop App\nSingle Front Desk Coordinator + Task Sidebar"]
+    SIDECAR["Antigravity Aux Pane Sidecar\nsidecar://agy-hq-console/ (Live Dashboard)"]
     DROP["Zero-Prompt Drop Folder\nlocal/inbox/"]
   end
 
   subgraph DaemonLayer["2. Always-On Background Daemon (RFC-0004, systemd / launchd)"]
-    DAEMON["hq daemon (run / service)\n• 15s Drop Folder Router (fsnotify / polling)\n• 30m Zero-Token Heartbeat Gatekeeper & Dead-Man's Switch\n• Native Gmail Sidecar Watcher & Auth Check"]
-    WEBUI["HQ Console Web Server\nhttp://127.0.0.1:4747 (Aux Dashboard)"]
+    DAEMON["hq daemon (run / service)\n• 15s Drop Folder Router (fsnotify / polling)\n• 30m Zero-Token Heartbeat Gatekeeper & Dead-Man's Switch\n• Native Gmail & Google Chat Sidecar Watchers"]
+    WEBUI["HQ Console Web Server\nhttp://127.0.0.1:4242 (Aux Dashboard)"]
   end
 
   subgraph Microkernel["3. Go Microkernel Engine (bin/hq)"]
     HOOKS["Lifecycle Hooks (RFC-0002, RFC-0003, RFC-0007)\n• SessionStart: Injects USER.md, MEMORY.md, Topic Wiki Index\n• PreToolUse: Non-blocking Front Desk guard & SHA-256 action blocklist\n• Stop: 0-token transcript extraction & monotonic turn journaling"]
     EXEC["Approval-Bound Executor (RFC-0003)\n• Watches local/memory/pending/<id>.json\n• SHA-256 verification + 0-LLM deterministic execution"]
-    TASKS["Task Lifecycle Engine (RFC-0001, RFC-0007)\n• local/memory/tasks.json state machine\n• Isolated git worktrees (local/worktrees/<repo>-<task>/)"]
+    TASKS["Layer-1 Task Engine (RFC-0001, RFC-0007, RFC-0009)\n• local/memory/tasks.json (active) vs tasks_archive.jsonl (cold)\n• Isolated git worktrees (local/worktrees/<repo>-<task>/)"]
+    GCHAT["Google Chat CDP & Gmail Transports (RFC-0005, RFC-0008)\n• Headless Chrome CDP WebSocket (127.0.0.1:9222)\n• Quarantined readers & 1-step proposal staging"]
+    RSI["Recursive Self-Improvement Engine (RFC-0010)\n• 4-stage friction mining, hypothesis, 4-gate verification"]
+    CI["CI/CD & Harness Contracts (RFC-0011)\n• Mathematical PII guards (P1-P5) & Harness gates (H1-H4B)"]
   end
 
   subgraph AgentLayer["4. Antigravity Agent Sessions (PRD-0002)"]
     FD["[HQ] Front Desk Coordinator\n(Non-blocking intake, <=3 lookups, 0 source edits)"]
-    SUB["In-Session Subagents\n(invoke_subagent bounded tasks)"]
-    TASKCONV["Dedicated Task Conversations\n(hq spawn open-ended sidebar threads)"]
+    SUB["Direct In-Session Subagents\n(invoke_subagent bounded tasks -> tasks.json)"]
+    TASKCONV["Dedicated Task Conversations\n(hq spawn open-ended sidebar threads -> tasks.json)"]
+    CHILD["Ephemeral Child Subagents\n(nested subagents -> nested_conversations.json)"]
   end
 
   RC <--> DESK
   RC <--> DAEMON
+  DESK <--> SIDECAR
   DROP --> DAEMON
   DAEMON --> HOOKS
   DESK <--> HOOKS
   HOOKS --> FD
   FD --> SUB
   FD --> TASKCONV
+  SUB -.-> CHILD
+  TASKCONV -.-> CHILD
   HOOKS <--> EXEC
   HOOKS <--> TASKS
+  HOOKS <--> GCHAT
+  HOOKS <--> RSI
+  HOOKS <--> CI
 ```
 
 ---
@@ -66,7 +77,7 @@ To deliver genuine 24/7 proactive personal assistance without requiring open IDE
 - **Zero-Token Idle Pre-Checks (RFC-0004):** The daemon executes two high-frequency pure-Go timers in 0 LLM tokens:
   1. **15-Second Inbox Scanner:** Scans `local/inbox/`, routes incoming files (CSVs $\rightarrow$ `ledger-ingest`, tax PDFs $\rightarrow$ `tax-prep`, SEC filings $\rightarrow$ `thesis-check`, general $\rightarrow$ `inbox-triage`), moves them to `local/inbox/queued/`, and triggers quarantined execution.
   2. **30-Minute Heartbeat Gatekeeper & Dead-Man's Switch:** Evaluates daily quota caps, checks unread status, and monitors whether today's `brief-YYYY-MM-DD.md` has been compiled by 08:00 AM, firing a high-priority alert if missed.
-- **Embedded Aux Web UI:** Hosts the local HTTP server (`127.0.0.1:4747`) for the right-hand HQ Console dashboard.
+- **Embedded Aux Web UI:** Hosts the local HTTP server (`127.0.0.1:4242`) powering both the Antigravity Sidecar pane (`sidecar://agy-hq-console/`) and standalone browser dashboard.
 
 ---
 
@@ -114,9 +125,65 @@ stateDiagram-v2
 | **`🟢 active` (reopened)** | `hq reopen <slug-or-id>` | Restores archived task back to active state for further work. |
 | **`🛑 cancelled`** | `manage_subagents(Action: "kill")` | Subagent killed before normal turn completion; marked cancelled in `tasks.json`. |
 
+### 5.1 Layer-1 Taskboard & Quota Invariant (`tasks.json` vs. `nested_conversations.json`)
+
+To prevent hierarchical agent swarms from exhausting quota and flooding the UI task board with transient child workers, `agy-hq` enforces a strict **Layer-1 Taskboard Invariant**:
+
+- **Layer 1 Tasks (`local/memory/tasks.json` & `hq_console.md`):**
+  Only direct tasks orchestrated by the user or the Front Desk coordinator count toward the Task Board and daily background spawn quota (`maxDailySpawns: 15`):
+  1. Direct subagents dispatched from the Front Desk via `invoke_subagent` or `hq spawn --subagent`.
+  2. Dedicated sidebar Task Conversations spawned via `./bin/hq spawn --task=<slug>`.
+  3. Automated proactive triggers (`kind: auto`) defined in `local/triggers.yaml`.
+- **Ephemeral Child Processes (`local/memory/nested_conversations.json`):**
+  Nested subagents created by a subagent or secondary task conversation to handle complex sub-problems are NOT tasks. They are ephemeral child processes recorded in `nested_conversations.json`:
+  - They do **not** appear on the Task Board or in `tasks.json`.
+  - They do **not** consume or increment the top-level daily spawn quota.
+  - They do **not** generate standalone task status cards on the Front Desk.
+- **Hot/Cold Lifecycle & Compaction (RFC-0009):**
+  The Task Board maintains a fixed display budget in `hq_console.md` (100% active tasks shown, capped completed/dormant). The nightly consolidation workflow (`/sleep-consolidate`) runs `./bin/hq tasks compact` to rotate completed (>24h) and dormant (>48h) tasks from `tasks.json` into cold append-only storage (`local/memory/tasks_archive.jsonl`). If an archived task is revived via `./bin/hq reopen <slug>`, the microkernel transparently recalls it from cold storage back to `tasks.json`.
+
 ---
 
-## 6. Four-Layer Memory Hierarchy & Dreaming (RFC-0006)
+## 6. Google Chat Chrome CDP Transport & Quarantine Gate (RFC-0008)
+
+To support Google Chat across both Google Workspace and personal `@gmail.com` accounts without fragile third-party scrapers or unvetted browser extensions, `agy-hq` implements a dual-transport microkernel architecture:
+
+1. **Hybrid Transport Adapters (`internal/gchat/`):**
+   - **Workspace Accounts:** Native Google Chat REST API v1 (`chat.spaces`, `chat.messages`) using OAuth2 service/user credentials.
+   - **Personal `@gmail.com` Accounts:** Chrome DevTools Protocol (CDP) WebSocket transport (`http://127.0.0.1:9222`) driving an isolated `--headless=new` Chrome instance with network jail (DNS and URL allowlists restricted to Google Chat domains) and cookies stored exclusively in `local/private/gchat/chrome-profile`.
+2. **1-Step Outbound Staging (`./bin/hq gchat propose`):**
+   - Accepting human-friendly space names, email addresses, or handles:
+     ```sh
+     ./bin/hq gchat propose --to="Project Launch Space" --body="Hello team"
+     ```
+   - Automatically resolves names via fuzzy cache (`spaces_cache.json`) or PeopleKit search, pre-warms the target space tab in headless Chrome, drafts the message, and stages a SHA-256 bound `gchat_send` proposal (`local/memory/proposals/<id>.json`).
+3. **Quarantine Reader Gate (`hq gchat read-quarantined`):**
+   - Full message body inspection is restricted to quarantined subagents. Calling `read-quarantined` permanently flags the conversation ID in `local/memory/tainted_sessions.json`.
+   - Tainted sessions have `search_web` blocked and `run_command` restricted strictly to read/draft/propose operations, neutralizing prompt-injection exfiltration attacks from malicious chat messages.
+4. **1-Tap Mobile Approval:**
+   - Outbound messages are presented via `ask_question` with exact SHA-256 prefixes and recipient previews, executed deterministically by `./bin/hq approve <id> --sha256=<prefix>` with zero LLM intervention.
+
+---
+
+## 7. Interactive Web UI Console & Antigravity Sidecar (Port 4242)
+
+The HQ Console provides real-time visibility and control across both Desktop and Mobile Remote Control through an embedded Go HTTP microkernel (`internal/webui/webui.go`):
+
+1. **Dual-Mode Access:**
+   - **Antigravity Aux Pane Sidecar:** Registered in [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) via URI `sidecar://agy-hq-console/`. Automatically mounts alongside the chat conversation in the Antigravity desktop IDE.
+   - **Standalone Web UI:** Served directly by `./bin/hq daemon` and `./bin/hq webui` on `http://127.0.0.1:4242` for desktop browsers and mobile devices.
+2. **Deterministic Zero-Token Markdown Console Sync:**
+   - On every lifecycle hook event (`SessionStart`, `PreToolUse`, `Stop`) and background daemon heartbeat tick, `webui.SyncMarkdownConsole` regenerates `local/CONSOLE.md` and writes `<artifactDir>/hq_console.md` (and its `.metadata.json`) in 0 LLM tokens.
+   - The Front Desk thread automatically pins this live artifact on Turn 1 (`consolePinned: true` in `front_desk.json`), providing an always-updated task ledger without consuming conversation context.
+3. **Live Dashboard Telemetry:**
+   - **Pending Approvals Queue:** Displays staged outbound actions (`prop-*`) with 1-click deterministic execution buttons verified against SHA-256 hashes.
+   - **Tiered Task Board:** Displays active tasks, model tiers, worktrees, and elapsed time with hot/cold archive counters.
+   - **Active Git Worktrees:** Real-time visibility into isolated task workspaces (`local/worktrees/<repo>-<task>/`).
+   - **System Health & Daemon Telemetry:** Heartbeat status, daily spawn quota gauges (`spawnsToday / maxDailySpawns`), and service uptime.
+
+---
+
+## 8. Four-Layer Memory Hierarchy & Silent Dreaming (RFC-0006)
 
 To prevent long-running agents from suffering from memory bloat or compounding false self-reported summaries, `agy-hq` implements Anthropic-grounded four-layer memory architecture:
 
@@ -144,40 +211,53 @@ flowchart TD
 3. **Layer 3: Bi-Temporal Atomic Facts (`local/memory/facts.jsonl`):** Structured facts with provenance timestamps (`valid_from`, `valid_to`, `source_conv`, `superseded_by`). Managed via CLI commands: `hq memory add-fact`, `hq memory prune-fact`, and `hq memory compact`.
 4. **Layer 4: Immutable Raw Transcripts (`transcript.jsonl`):** The ground-truth log of every tool call, input, and response. Nightly consolidation ("dreaming" via `/sleep-consolidate`) runs `hq memory verify-transcript` to falsify self-reported claims against raw execution before promoting them into durable memory.
 
+### 8.1 Silent Night Consolidation Invariant (Zero-Output Background Dreaming)
+
+Automated nightly sleep consolidation (`sleep-consolidate` / `[Auto] Nightly Sleep Consolidation`, scheduled at 11:30 PM PT via `local/triggers.yaml`) executes under a strict **Zero-Output Invariant**:
+- **100% Silent Execution:** The consolidation workflow runs entirely in the background without posting status banners, mechanical checklists, progress updates, or completion announcements to the `[HQ] Front Desk` conversation.
+- **Vault & Ledger Confinement:** All memory audits, transcript verifications (`hq memory verify-transcript`), topic wiki distillations (`local/memory/topics/*.md`), bi-temporal fact prunings (`hq memory prune-fact`), and RSI proposal staging remain strictly confined to `local/`, `local/memory/journal/`, and the private Vault git repository.
+- **Morning Brief Roll-Forward:** Any distilled operational knowledge, system health warnings, or actionable proposals roll forward cleanly into the next day's 7:30 AM Morning Brief (`/morning-brief`), keeping the Front Desk conversation pristine.
+
 ---
 
-## 7. Repository & Vault Layout
+## 9. Repository & Vault Layout
 
 ```text
 agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git Repo)
 ├── .gitignore                         # Ignores /local/, /bin/, and *.secret*
 ├── AGENTS.md                          # General-purpose assistant rules (mounts ./local/)
 ├── go.mod                             # Go module for bin/hq
-├── cmd/hq/                            # CLI: init | hook | daemon | propose | notify | status | memory | gmail | spawn | subagent | complete
+├── cmd/hq/                            # CLI: init | hook | daemon | propose | notify | status | memory | gmail | gchat | spawn | subagent | tasks | rsi | ci
 ├── internal/                          # Go microkernel packages
 │   ├── kernel/                        # Trigger runner, worker pool, daemon installer, quota circuit breaker
 │   ├── hooks/                         # SessionStart, PreToolUse action/PII guard, Stop parser
 │   ├── approvals/                     # SHA-256 pending queue & deterministic CLI executor
-│   ├── channels/                      # Pluggable adapter (Remote Control default; GChat/Telegram ready)
-│   ├── gmail/                         # Decoupled Gmail Layer 1 primitives & sidecar engine
-│   ├── vault/                         # Memory auditing, 4-layer topics, bi-temporal fact engine
-│   ├── worktree/                      # Isolated git worktree lifecycle manager
+│   ├── ci/                            # CI/CD PII scanners, harness contracts & git hook installer
 │   ├── doctor/                        # Diagnostic checks for sandbox, CLI, and Vault health
-│   ├── e2e/                           # Black-box E2E tests for CUJ 1–15
-│   └── webui/                         # Single-page Aux Console (sidecar://hq/dashboard, http://127.0.0.1:4747)
+│   ├── e2e/                           # Black-box E2E tests for CUJ 1–18
+│   ├── gchat/                         # Decoupled Google Chat CDP WebSocket & REST transports
+│   ├── gmail/                         # Decoupled Gmail Layer 1 primitives & sidecar engine
+│   ├── rsi/                           # 4-stage recursive self-improvement engine
+│   ├── vault/                         # Memory auditing, 4-layer topics, bi-temporal fact engine
+│   ├── webui/                         # Interactive Aux Console (sidecar://agy-hq-console/, http://127.0.0.1:4242)
+│   └── worktree/                      # Isolated git worktree lifecycle manager
 ├── templates/                         # Starter blueprints copied into ./local/ by `hq init`
 ├── docs/                              # Documentation Hub (product/, design/, decisions/, research/)
 ├── .agents/
 │   ├── hooks.json                     # Connects Antigravity lifecycle hooks to ./bin/hq
-│   └── skills/                        # Additive, progressive-disclosure SKILL.md workflows:
-│       ├── morning-brief/
-│       ├── sleep-consolidate/
-│       ├── swe-pulse/
-│       ├── thesis-check/
-│       ├── inbox-triage/
-│       ├── ledger-ingest/
-│       ├── tax-prep/
-│       └── filing-diff/
+│   └── plugins/agy-hq/                # Official plugin bundle:
+│       ├── sidecars.json              # Sidecar manifest for agy-hq-console aux pane
+│       ├── sidecars/agy-hq-console/   # Aux Pane entrypoint and sidecar bridge
+│       └── skills/                    # Additive, progressive-disclosure SKILL.md workflows:
+│           ├── morning-brief/
+│           ├── sleep-consolidate/
+│           ├── swe-pulse/
+│           ├── thesis-check/
+│           ├── inbox-triage/
+│           ├── ledger-ingest/
+│           ├── tax-prep/
+│           ├── filing-diff/
+│           └── gchat/
 │
 └── local/                             # LAYER 2: Private User Vault (Independent Private Git Repo)
     ├── .git/                          # Backed up to private remote (never public)
@@ -191,15 +271,19 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
     ├── notes/                         # Open-ended non-repo work (posts, research, theses, plans)
     ├── worktrees/                     # Parallel git worktrees (<repo>-<task>/) across any GitHub repo
     ├── repos/                         # Optional bare git clones for external GitHub repos
-    ├── private/                       # High-PII records (ledger/, taxes/) with stricter context guard
+    ├── private/                       # High-PII records (ledger/, taxes/, gchat/) with strict context guard
     └── memory/                        # 4-layer memory store:
         ├── topics/                    # Topic wiki pages (RFC-0006)
         ├── facts.jsonl                # Bi-temporal atomic facts (RFC-0006)
         ├── journal/YYYY-MM-DD/        # Monotonic per-turn execution journals
-        ├── tasks.json                 # Tracked task conversations & lifecycle states
+        ├── tasks.json                 # Tracked Layer-1 task conversations & lifecycle states
+        ├── tasks_archive.jsonl        # Cold storage for archived tasks (RFC-0009)
+        ├── nested_conversations.json  # Ephemeral child subagent processes
         ├── front_desk.json            # Active Front Desk intake lease & armed triggers
         ├── gmail/                     # Gmail registry, drafts, and quarantine staging (RFC-0005)
+        ├── gchat/                     # Google Chat spaces cache, drafts, and session state (RFC-0008)
         ├── pending/                   # Staged proposals for 1-tap approval (RFC-0003)
+        ├── proposals/                 # Full proposal metadata and execution logs
         ├── outbox/                    # Executed proposals and delivery payloads
         └── interventions.jsonl        # Cryptographic execution and intervention audit trail
 ```

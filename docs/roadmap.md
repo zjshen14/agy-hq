@@ -11,9 +11,9 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ## 🎯 Up Next (Immediate Action Queue)
 
-1. **[M3.1]** Implement optional Google Chat adapter (`internal/channels/gchat.go`) behind `ChannelAdapter` using Desktop OAuth (`chat.spaces`, `chat.messages`) locked to `owner_space_id`.
-2. **[M3.2]** Implement optional Telegram adapter (`internal/channels/telegram.go`) using outbound HTTPS long-polling and inline approval buttons locked to `owner_chat_id`.
-3. **[M4.1 & M4.2]** Add `hq eval` task replay runner (`pass^3`) and SQLite FTS5 historical journal search index.
+1. **[M4.1]** Implement optional Telegram adapter (`internal/channels/telegram.go`) using outbound HTTPS long-polling and inline approval buttons locked to `owner_chat_id`.
+2. **[M4.2]** Add `hq eval` task replay runner (`pass^3`) to benchmark model and skill performance across synthetic scenarios.
+3. **[M4.3]** Add optional `local/memory/index.sqlite` SQLite FTS5 historical journal search index.
 
 ---
 
@@ -42,7 +42,7 @@ This file is the **single source of truth** for tracking what is done, what is i
   - Hard-deny direct outbound/irreversible commands (`gws gmail send`, `gh pr merge`, `gh release create`, `vercel --prod`) in `PreToolUse`, prompting the agent to stage them via `./bin/hq propose`.
   - Implement `./bin/hq propose`, `./bin/hq approve --sha256=<prefix>`, and `./bin/hq reject` with SHA-256 verification and `local/memory/interventions.jsonl` audit logging.
 - [x] **M1.5 (`hq daemon` & Right-Hand `HQ Console`):**
-  - Implement `internal/webui` HTTP server (`127.0.0.1:4747`) and `hq daemon`.
+  - Implement `internal/webui` HTTP server (`127.0.0.1:4242`) and `hq daemon` / `hq webui`.
   - Render the **Pending Approvals Queue** (`[Approve (sha256)]` / `[Reject]`) and execute approved commands deterministically in Go with zero LLM in the loop.
   - Render the **Active Worktrees**, **Today's Turn Journal**, and **System Health** views.
 - [x] **M1.6 (Starter `.agents/skills/`):** Author the public-safe starter skills in `.agents/skills/*/SKILL.md`:
@@ -81,23 +81,46 @@ This file is the **single source of truth** for tracking what is done, what is i
   - 4-layer stack: Roadmap Index (`MEMORY.md` < 2,500 tokens), Knowledge Wiki (`local/memory/topics/*.md`), bi-temporal facts (`local/memory/facts.jsonl`), and raw transcripts.
   - CLI fact management (`hq memory add-fact`, `prune-fact`, `compact`, `topics`).
   - Ground-truth dreaming verification (`hq memory verify-transcript`) preventing unverified or optimistic self-reports from compounding in long-term memory.
-- [x] **M2.8 (End-to-End Black-Box Test Suite — CUJs 1–15):**
-  - Full black-box regression suite in `internal/e2e/cuj_e2e_test.go` verifying all 15 Critical User Journeys against the compiled `bin/hq` binary (100% passing).
+- [x] **M2.8 (End-to-End Black-Box Test Suite — CUJs 1–18):**
+  - Full black-box regression suite in `internal/e2e/cuj_e2e_test.go` verifying all 18 Critical User Journeys against the compiled `bin/hq` binary (100% passing).
 
 ---
 
-### M3: External Chat Channel Adapters (Phase 2)
-*Goal: Mirror Morning Briefs and interactive `[Approve]` / `[Reject]` cards to external messaging apps without changing any core engine or skill logic.*
-- **Specs:** [ADR-0004](decisions/0004-remote-control-first-pluggable-channels.md), [RFC-0004](design/0004-heartbeat-and-channels.md)
+### M3: Production Integrations, Task Board Hierarchy & Self-Improvement
+*Goal: Scale `agy-hq` with hybrid Google Chat transport, tiered task board management, embedded sidecar console, automated pre-IPO deal flow monitoring, recursive self-improvement, and CI defense-in-depth.*
+- **Specs:** [RFC-0008](design/0008-gchat-integration.md), [RFC-0009](design/0009-task-board-redesign.md), [RFC-0010](design/0010-agent-recursive-self-improvement.md), [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md)
 
-- [ ] **M3.1 (Google Chat Adapter — `internal/channels/gchat.go`):** Implement Desktop OAuth user-level scopes (`chat.spaces`, `chat.messages`) and/or Workspace Cloud Pub/Sub listener with hardcoded owner Space ID exfiltration guard.
-- [ ] **M3.2 (Telegram Adapter — `internal/channels/telegram.go`):** Implement outbound HTTPS long-polling + inline approval buttons locked to the owner's `chat_id`.
+- [x] **M3.1 (Decoupled Google Chat Integration — RFC-0008):**
+  - Hybrid transport in `internal/gchat/`: Workspace OAuth REST API v1 + personal `@gmail.com` `--headless=new` Chrome CDP WebSocket transport (`127.0.0.1:9222`) with network jail and isolated profile in `local/private/gchat/chrome-profile`.
+  - 1-step outbound proposal staging: `./bin/hq gchat propose --to="..." --body="..."` with fuzzy name/space resolution and composer tab pre-warming.
+  - Quarantined reader gate (`hq gchat read-quarantined`) with session tainting (`local/memory/tainted_sessions.json`) to neutralize prompt injection.
+  - Guided 1-time Chrome login with remote phone prompt support (`hq gchat login --remote`).
+- [x] **M3.2 (Scalable Task Board & Layer-1 Hierarchy — RFC-0009):**
+  - Layer-1 invariant: only top-level tasks and direct Front Desk subagents tracked in `tasks.json` and `hq_console.md`; child subagents tracked ephemerally in `nested_conversations.json`.
+  - Two-tier hot/cold storage (`tasks.json` + `tasks_archive.jsonl`) with seamless cold recall via `hq reopen`.
+  - CLI management: `hq tasks`, `hq tasks stats`, `hq tasks compact`, `hq tasks pin/unpin`.
+- [x] **M3.3 (Interactive Web UI Console & Antigravity Sidecar):**
+  - Embedded Go HTTP server on `127.0.0.1:4242` serving both browser dashboard and Antigravity Aux Pane (`sidecar://agy-hq-console/`).
+  - Real-time Task Board, pending approval buttons with SHA-256 verification, git worktree status, and daemon health telemetry.
+  - Zero-token Markdown sync (`webui.SyncMarkdownConsole`) updating `CONSOLE.md` and `hq_console.md` on every hook and heartbeat tick.
+- [x] **M3.4 (Pre-IPO Secondary Watchdog & Master Retrospective Ledger):**
+  - Automated proactive trigger (`secondary-deal-watch`, 11:00 AM & 4:00 PM PT) monitoring inbound Secondary Market secondary deal flow.
+  - Persistent retrospective database in `local/notes/investing/opportunities/INDEX.md` logging valuations, discounts, scores, and review milestones.
+  - Autonomous prospectus and financial extraction rule without user prompting.
+- [x] **M3.5 (Bounded Agent Recursive Self-Improvement — RFC-0010):**
+  - 4-stage pipeline in `internal/rsi/`: 0-token friction trace mining (`hq rsi mine`), ACE delta hypotheses (`hq rsi hypothesize`), 4-gate sandboxed verification harness (`hq rsi verify`), and 1-tap approval staging (`hq rsi propose`).
+  - Multi-tier canary tracking and automatic rollback on post-merge friction regression.
+- [x] **M3.6 (Automated CI/CD Pipeline & Regression Harness — RFC-0011):**
+  - Two-tier defense-in-depth: local pre-commit/pre-push hooks (`hq ci install-hooks`) and GitHub Actions workflow (`.github/workflows/ci.yml`).
+  - Mathematical 5-invariant PII scanner (`hq ci check-pii`) and Harness contract verifier (`hq ci check-harness`).
+  - Accelerated CUJ E2E suite (`cuj_e2e_test.go`) running in ~1.8 seconds with 100% test coverage.
 
 ---
 
-### M4: Evaluation Harness & Historical Search Index
-*Goal: Measure reliability (`pass^k`) across model/skill changes and scale memory lookup over multi-year journals.*
-- **Specs:** [RFC-0002](design/0002-memory-and-consolidation.md)
+### M4: Future Extensions & Evaluation Harness
+*Goal: Measure reliability (`pass^k`) across model/skill changes, support alternative messaging channels, and scale memory lookup over multi-year journals.*
+- **Specs:** [ADR-0004](decisions/0004-remote-control-first-pluggable-channels.md), [RFC-0002](design/0002-memory-and-consolidation.md)
 
-- [ ] **M4.1 (Private Eval Suite):** Add `hq eval` runner to replay representative tasks (`pass^3`) before promoting proposed `SKILL.md` updates.
-- [ ] **M4.2 (SQLite FTS5 Index):** Add optional `local/memory/index.sqlite` FTS5 index rebuilt from `journal/` and `facts.jsonl` once markdown/JSONL files exceed ~5,000 lines.
+- [ ] **M4.1 (Telegram Adapter — `internal/channels/telegram.go`):** Implement outbound HTTPS long-polling + inline approval buttons locked to the owner's `chat_id`.
+- [ ] **M4.2 (Private Eval Suite):** Add `hq eval` runner to replay representative tasks (`pass^3`) before promoting proposed `SKILL.md` updates.
+- [ ] **M4.3 (SQLite FTS5 Index):** Add optional `local/memory/index.sqlite` FTS5 index rebuilt from `journal/` and `facts.jsonl` once markdown/JSONL files exceed ~5,000 lines.
