@@ -2253,6 +2253,136 @@ func TestCUJ18_CIPipelinePIIGuardAndHarnessContract(t *testing.T) {
 	}
 }
 
+// CUJ-19: End-to-End Token & Context Observability, Subagent DAG Attribution, Anomaly Detection & Daily Budget Circuit Breaker (RFC-0012)
+func TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v\n%s", err, out)
+	}
+	if out, err := env.run("", "claim-desk", "--conv=conv-fd-obs"); err != nil {
+		t.Fatalf("hq claim-desk failed: %v\n%s", err, out)
+	}
+
+	now := time.Now().UTC()
+	t0 := now.Add(-4 * time.Minute).Format(time.RFC3339)
+	t1 := now.Add(-3 * time.Minute).Format(time.RFC3339)
+	t2 := now.Add(-2 * time.Minute).Format(time.RFC3339)
+	t3 := now.Add(-1 * time.Minute).Format(time.RFC3339)
+
+	brainDir := filepath.Join(filepath.Dir(env.vaultDir), ".brain")
+	fdLogsDir := filepath.Join(brainDir, "conv-fd-obs", ".system_generated", "logs")
+	subLogsDir := filepath.Join(brainDir, "conv-sub-obs", ".system_generated", "logs")
+	if err := os.MkdirAll(fdLogsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subLogsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fdTranscriptPath := filepath.Join(fdLogsDir, "transcript.jsonl")
+	fdTranscript := strings.Join([]string{
+		fmt.Sprintf(`{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":%q,"content":"Audit token burn"}`, t0),
+		fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":%q,"completed_at":%q,"token_usage":{"input_tokens":40000,"output_tokens":3000,"cache_read_tokens":130000},"tool_calls":[{"id":"call-1","name":"invoke_subagent","arguments_json":"{\"Model\":\"pro\",\"Role\":\"[deep] obs: Telemetry Auditor\",\"Prompt\":\"Audit telemetry\",\"TypeName\":\"research\"}"}]}`, t1, t2),
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","status":"DONE","created_at":%q,"completed_at":%q,"content":"Created the following subagent:\n{\n  \"conversationId\": \"conv-sub-obs\"\n}"}`, t2, t2),
+		fmt.Sprintf(`{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","created_at":%q,"completed_at":%q,"content":"Dispatched telemetry auditor.","token_usage":{"input_tokens":5000,"output_tokens":1000,"cache_read_tokens":165000}}`, t2, t3),
+	}, "\n") + "\n"
+	if err := os.WriteFile(fdTranscriptPath, []byte(fdTranscript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	subTranscriptPath := filepath.Join(subLogsDir, "transcript.jsonl")
+	subTranscript := strings.Join([]string{
+		fmt.Sprintf(`{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":%q,"content":"Audit telemetry"}`, t1),
+		fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":%q,"completed_at":%q,"content":"Completed deep audit.","token_usage":{"input_tokens":350000,"output_tokens":60000,"cache_read_tokens":2600000}}`, t2, t3),
+	}, "\n") + "\n"
+	if err := os.WriteFile(subTranscriptPath, []byte(subTranscript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register a FIFO-drifted subagent task in tasks.json to verify ground-truth reconciliation
+	if err := kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "subagent-conv-sub-obs",
+		Title:          "[Subagent:stale] Wrong FIFO Title",
+		Kind:           "subagent",
+		Scope:          "stale",
+		ConversationID: "conv-sub-obs",
+		LastUpdatedAt:  t3,
+		Status:         "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Trigger `hq hook stop` on conv-fd-obs and verify B1 duplicate-invocation deduplication
+	stopPayload := fmt.Sprintf(`{"conversationId":"conv-fd-obs","executionId":"exec-1","executionNumber":1,"modelName":"gemini-3.8-flash-high","stepCount":4,"transcriptPath":%q,"finalResponseText":"Dispatched telemetry auditor."}`, fdTranscriptPath)
+	if out, err := env.run(stopPayload, "hook", "stop"); err != nil {
+		t.Fatalf("hq hook stop failed: %v\n%s", err, out)
+	}
+	// Second invocation (simulating plugin + workspace dual-hook fire) must be deduplicated
+	if out, err := env.run(stopPayload, "hook", "stop"); err != nil {
+		t.Fatalf("duplicate hq hook stop failed: %v\n%s", err, out)
+	}
+
+	// 2. Verify SessionStart injects the 160k Front Desk context /compact nudge (since current_context = 170k >= 160k)
+	sessPayload := `{"conversationId":"conv-fd-obs","modelName":"gemini-3.8-flash-high"}`
+	sessOut, err := env.run(sessPayload, "hook", "session-start")
+	if err != nil || !strings.Contains(sessOut, "Front Desk Context Health") || !strings.Contains(sessOut, "170k tokens") || !strings.Contains(sessOut, "/compact") {
+		t.Fatalf("expected SessionStart 160k /compact nudge, got:\n%s (%v)", sessOut, err)
+	}
+
+	// 3. Verify `hq obs tokens`, `hq obs top --tree`, `hq obs inspect`, and `hq obs anomalies`
+	tokOut, err := env.run("", "obs", "tokens")
+	if err != nil || !strings.Contains(tokOut, "HQ Token & Context Observability") || !strings.Contains(tokOut, "459k") {
+		t.Fatalf("expected 459k total uncached burn in hq obs tokens, got:\n%s (%v)", tokOut, err)
+	}
+
+	topTreeOut, err := env.run("", "obs", "top", "--tree")
+	if err != nil || !strings.Contains(topTreeOut, "conv-fd-") || !strings.Contains(topTreeOut, "459k") {
+		t.Fatalf("expected conv-fd-obs Tree rollup (459k uncached) in hq obs top --tree, got:\n%s (%v)", topTreeOut, err)
+	}
+
+	inspOut, err := env.run("", "obs", "inspect", "conv-fd-obs")
+	if err != nil || !strings.Contains(inspOut, "Tree Burn: Uncached 459k") || !strings.Contains(inspOut, "Telemetry Auditor") {
+		t.Fatalf("expected Tree Burn and reconciled child subagent title in hq obs inspect, got:\n%s (%v)", inspOut, err)
+	}
+
+	anomOut, err := env.run("", "obs", "anomalies")
+	if err != nil || !strings.Contains(anomOut, "[A1]") || !strings.Contains(anomOut, "[A3]") || !strings.Contains(anomOut, "[A4]") {
+		t.Fatalf("expected A1, A3, and A4 anomalies in hq obs anomalies, got:\n%s (%v)", anomOut, err)
+	}
+
+	// 4. Test Daily Token Budget Guard (A5) tripping the QuotaState circuit breaker for kind:auto at 100%
+	budgetOut, err := env.run("", "obs", "budget", "--set-daily-uncached=400000")
+	if err != nil || !strings.Contains(budgetOut, "400k tokens") {
+		t.Fatalf("hq obs budget failed: %v\n%s", err, budgetOut)
+	}
+
+	// Verify QuotaState circuit breaker is now tripped
+	qs := kernel.LoadQuota(env.vaultDir)
+	if !qs.CircuitOpen || !strings.Contains(qs.CircuitReason, "daily uncached token budget reached") {
+		t.Fatalf("expected QuotaState circuit breaker to be tripped by daily budget guard, got: %+v", qs)
+	}
+
+	// Verify hq doctor Check #10 surfaces the budget & context warning
+	docOut, err := env.run("", "doctor")
+	if err != nil || !strings.Contains(docOut, "Token Budget & Context Health") {
+		t.Fatalf("expected Token Budget & Context Health in hq doctor, got:\n%s (%v)", docOut, err)
+	}
+
+	// Verify local/CONSOLE.md includes the Token Burn Today & Front Desk Context Watermark telemetry
+	consoleBytes, err := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
+	if err != nil || !strings.Contains(string(consoleBytes), "Token Burn Today (Uncached / Budget)") || !strings.Contains(string(consoleBytes), "Front Desk Context Watermark") {
+		t.Fatalf("expected Token Burn Today and Front Desk Context Watermark in CONSOLE.md, got:\n%s (%v)", string(consoleBytes), err)
+	}
+
+	// Reset budget circuit breaker
+	if out, err := env.run("", "obs", "budget", "--set-daily-uncached=15000000", "--reset-circuit"); err != nil {
+		t.Fatalf("hq obs budget --reset-circuit failed: %v\n%s", err, out)
+	}
+	if kernel.LoadQuota(env.vaultDir).CircuitOpen {
+		t.Fatalf("expected QuotaState circuit breaker to be cleared after --reset-circuit")
+	}
+}
+
 func copyDirRecursive(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

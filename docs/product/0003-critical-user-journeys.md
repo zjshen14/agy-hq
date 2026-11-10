@@ -28,6 +28,7 @@
 | **CUJ-16B** | Scalable Task Board, Per-Tier Visibility & Cold Archive Recall | `hq tasks`, `local/memory/tasks.json` | `TestCUJ16_TaskBoardTieredConsoleAndColdArchive` |
 | **CUJ-17** | Bounded Agent Recursive Self-Improvement (RSI) | `hq rsi`, `internal/rsi` | `TestCUJ17_AgentRSIMiningVerificationAndApproval` |
 | **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
+| **CUJ-19** | End-to-End Token & Context Observability, Subagent DAG Attribution & Budget Circuit Breaker | `hq obs`, `internal/obs`, `hq hook stop`, `hq doctor` | `TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards` |
 
 ---
 
@@ -182,3 +183,10 @@
 1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 5 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist) across both staged diffs (`--staged`) and the full tracked tree.
 2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B (`.agents/hooks.json` == `.agents/plugins/agy-hq/hooks.json` byte parity + 18-probe `PreToolUse` security/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
 3. **Local Git Hook Enforcement (`hq ci install-hooks` / `pre-commit` / `pre-push`):** Automatically installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` and rejects commits containing leaked PII/credentials, unformatted Go files, or broken Markdown links before they leave the developer workstation.
+
+---
+
+## CUJ-19: End-to-End Token & Context Observability, Subagent DAG Attribution & Budget Circuit Breaker
+1. **Transcript Telemetry Ingestion & DAG Attribution (`hq obs` / `hq hook stop`):** Extracts per-turn `input_tokens`, `cache_read_tokens`, `output_tokens`, `uncached_tokens`, `gross_tokens`, `cache_hit_ratio`, `peak_context_tokens`, `current_context_tokens`, `compaction_count`, and 3-part latency (`LLMLatencyMs`, `ToolLatencyMs`, `HumanWaitMs`) from `transcript.jsonl`, and reconciles parent-child `invoke_subagent` edges in `local/memory/tasks.json` while deduplicating dual-hook invocations (`B1`–`B3`).
+2. **CLI & Console Observability (`hq obs tokens|top|inspect|anomalies|budget|reconcile`):** Ranks conversations/tasks by **Self** vs. **Tree (`--tree`)** uncached token burn, Quota Burn Units (`QBU`), gross tokens, context watermark, or latency; renders live token burn and Front Desk context watermark in `local/CONSOLE.md`, `hq_console.md`, and the Web UI (`/api/obs`).
+3. **Context & Daily Budget Guards (`A1–A5`):** Injects a 1-line `/compact` nudge in `SessionStart` when Front Desk context exceeds `160k` tokens (`A1`), flags cold-cache thrash (`A2`), runaway turns (`A3`), and deep-tier subagent misrouting (`A4`), and trips the `QuotaState` circuit breaker for `kind: auto` background triggers when daily uncached/deep token burn reaches `100%` (`A5`) until midnight or `hq obs budget --reset-circuit`.

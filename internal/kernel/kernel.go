@@ -1878,14 +1878,23 @@ func SaveQuota(vaultDir string, state QuotaState) error {
 // RecordSubagentSpawn increments the daily background spawn quota when a subagent is invoked.
 func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
 	state := LoadQuota(vaultDir)
-	state.SpawnsToday++
-	state.LastStatus = fmt.Sprintf("Subagent spawned: %s (%s)", role, time.Now().Format("15:04:05"))
 	summary := prompt
 	if runes := []rune(summary); len(runes) > 200 {
 		summary = string(runes[:200]) + "..."
 	}
+	now := time.Now()
+	if n := len(state.Events); n > 0 {
+		last := state.Events[n-1]
+		if last.Trigger == "invoke_subagent" && last.Skill == role && last.Model == model && last.Outcome == summary {
+			if ts, err := time.Parse(time.RFC3339, last.Timestamp); err == nil && now.Sub(ts) >= 0 && now.Sub(ts) < 2*time.Second {
+				return nil
+			}
+		}
+	}
+	state.SpawnsToday++
+	state.LastStatus = fmt.Sprintf("Subagent spawned: %s (%s)", role, now.Format("15:04:05"))
 	state.Events = append(state.Events, SpawnEvent{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: now.Format(time.RFC3339),
 		Trigger:   "invoke_subagent",
 		Skill:     role,
 		Model:     model,
@@ -2226,6 +2235,14 @@ func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt 
 			active = append(active, q)
 		}
 	}
+	if n := len(active); n > 0 {
+		last := active[n-1]
+		if last.ParentConversationID == item.ParentConversationID && last.Role == item.Role &&
+			last.Model == item.Model && last.PromptPrefix == item.PromptPrefix &&
+			item.CreatedAt.Sub(last.CreatedAt) >= 0 && item.CreatedAt.Sub(last.CreatedAt) < 2*time.Second {
+			return last, nil
+		}
+	}
 	active = append(active, item)
 	err := savePendingSubagents(vaultDir, active)
 	return item, err
@@ -2327,6 +2344,14 @@ func QueuePendingNestedSubagent(vaultDir, parentConvID, role, model, prompt stri
 	for _, q := range queue {
 		if q.CreatedAt.After(cutoff) {
 			active = append(active, q)
+		}
+	}
+	if n := len(active); n > 0 {
+		last := active[n-1]
+		if last.ParentConversationID == item.ParentConversationID && last.Role == item.Role &&
+			last.Model == item.Model && last.PromptPrefix == item.PromptPrefix &&
+			item.CreatedAt.Sub(last.CreatedAt) >= 0 && item.CreatedAt.Sub(last.CreatedAt) < 2*time.Second {
+			return last, nil
 		}
 	}
 	active = append(active, item)

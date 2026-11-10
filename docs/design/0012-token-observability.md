@@ -1,6 +1,6 @@
 # RFC-0012: End-to-End Token Usage, Latency & Cost/Quota Observability
 
-- **Status:** Draft (Phase 1 — Pending User Review)
+- **Status:** Implemented (Verified in CUJ-19)
 - **Author:** `[Task:obs] Token Usage & Observability` (`gemini-4-argon-high`)
 - **Created:** 2026-11-10
 - **Note on Numbering:** Assigned sequential ID `RFC-0012` (`docs/design/0012-token-observability.md`) because `RFC-0001` through `RFC-0011` (including [RFC-0004: Silent Gatekeeper & Channels](./0004-heartbeat-and-channels.md)) are already allocated and implemented in `docs/design/`.

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/gmail"
@@ -146,5 +147,69 @@ func TestGmailPreToolUseGuardrailsAndAskOverwrite(t *testing.T) {
 	_ = HandlePreToolUse(bytes.NewReader(askPayload), &out, vaultDir)
 	if !strings.Contains(out.String(), `"overwrite"`) || !strings.Contains(out.String(), "alice@example.com") || !strings.Contains(out.String(), "Tuesday at 2pm works!") {
 		t.Fatalf("expected canonical overwrite on ask_question, got: %s", out.String())
+	}
+}
+
+func TestCrossMidnightPriorJournalStepsAndDuplicateStopGuard(t *testing.T) {
+	vaultDir := t.TempDir()
+	convID := "conv-cross-midnight"
+
+	// 1. Write a prior-day journal entry (2026-11-09) with executionNum=5 and StepCount=42
+	prevDayDir := filepath.Join(vaultDir, "memory", "journal", "2026-11-09")
+	_ = os.MkdirAll(prevDayDir, 0o755)
+	prevJE := JournalEntry{
+		ConversationID: convID,
+		ExecutionNum:   5,
+		StepCount:      42,
+	}
+	if b, err := json.Marshal(prevJE); err == nil {
+		_ = os.WriteFile(filepath.Join(prevDayDir, convID+"-5.json"), b, 0o644)
+	}
+
+	// Verify that on a new day (2026-11-10) when currentExecNum resets to 1, priorJournalStepCountWithDate returns 42 (not 0!)
+	gotStart := priorJournalStepCountWithDate(vaultDir, convID, "2026-11-10", 1)
+	if gotStart != 42 {
+		t.Fatalf("expected priorJournalStepCountWithDate across midnight to return 42, got %d", gotStart)
+	}
+
+	// 2. Test B1 duplicate Stop hook guard + enriched token metrics on JournalEntry
+	tPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	tLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-10T09:00:00Z","content":"Hello"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-10T09:00:02Z","input_tokens":15000,"cache_read_tokens":85000,"output_tokens":500,"content":"Done"}`,
+	}
+	_ = os.WriteFile(tPath, []byte(strings.Join(tLines, "\n")+"\n"), 0o644)
+
+	stopJSON, _ := json.Marshal(map[string]interface{}{
+		"conversationId":    "conv-b1-test",
+		"transcriptPath":    tPath,
+		"modelName":         "gemini-3.8-flash-high",
+		"terminationReason": "NO_TOOL_CALL",
+	})
+
+	var out1, out2 bytes.Buffer
+	if err := HandleStop(bytes.NewReader(stopJSON), &out1, vaultDir); err != nil {
+		t.Fatalf("first HandleStop: %v", err)
+	}
+	// Second immediate invocation with identical transcript (simulating workspace + plugin hooks.json) must be deduplicated
+	if err := HandleStop(bytes.NewReader(stopJSON), &out2, vaultDir); err != nil {
+		t.Fatalf("second HandleStop: %v", err)
+	}
+
+	todayDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
+	entries, err := os.ReadDir(todayDir)
+	if err != nil {
+		t.Fatalf("ReadDir todayDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal file (duplicate Stop hook skipped), got %d", len(entries))
+	}
+	jBytes, _ := os.ReadFile(filepath.Join(todayDir, entries[0].Name()))
+	var saved JournalEntry
+	if err := json.Unmarshal(jBytes, &saved); err != nil {
+		t.Fatalf("unmarshal saved journal: %v", err)
+	}
+	if saved.TurnInputTokens != 15000 || saved.TurnCacheReadTokens != 85000 || saved.TurnOutputTokens != 500 || saved.CurrentContextTokens != 100000 {
+		t.Fatalf("unexpected enriched token metrics in JournalEntry: %+v", saved)
 	}
 }

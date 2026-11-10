@@ -20,6 +20,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
@@ -1393,6 +1394,9 @@ func main() {
 	case "tasks":
 		runTasksCLI(vaultDir, os.Args[2:])
 
+	case "obs":
+		runObsCLI(vaultDir, os.Args[2:])
+
 	case "rsi":
 		runRSICLI(rootDir, vaultDir, os.Args[2:])
 
@@ -1867,6 +1871,411 @@ func runCICLI(rootDir string, args []string) {
 	}
 }
 
+func runObsCLI(vaultDir string, args []string) {
+	sub := "tokens"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+	now := time.Now()
+
+	switch sub {
+	case "tokens", "summary":
+		fs := flag.NewFlagSet("obs tokens", flag.ExitOnError)
+		since := fs.String("since", "7d", "Time window (today, 24h, 7d, 30d, all)")
+		groupBy := fs.String("by", "day", "Group by dimension (day, hour, model, tier, kind, scope)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+
+		rep, err := obs.BuildSummaryReport(vaultDir, *since, *groupBy, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq obs tokens failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+
+		fmt.Printf("HQ Token & Context Observability (Window: %s | GroupBy: %s)\n", rep.Since, rep.GroupBy)
+		fmt.Printf("════════════════════════════════════════════════════════════════════════════════════════\n")
+		fmt.Printf("  Uncached Burn (In+Out): %s  (Input: %s | Output: %s | QBU: %.0f | Est: $%.2f)\n",
+			obs.FormatTokensCompact(rep.Totals.UncachedTokens),
+			obs.FormatTokensCompact(rep.Totals.InputTokens),
+			obs.FormatTokensCompact(rep.Totals.OutputTokens),
+			rep.Totals.QuotaUnits,
+			rep.Totals.EstCostUSD)
+		fmt.Printf("  Gross Billed (w/Cache): %s  (Cache Read: %s | Prefix Cache Hit Ratio: %.1f%%)\n",
+			obs.FormatTokensCompact(rep.Totals.GrossTokens),
+			obs.FormatTokensCompact(rep.Totals.CacheReadTokens),
+			rep.Totals.CacheHitRatio*100.0)
+		fmt.Printf("  Activity Volume:        %d conversations | %d turns | %d steps | Active Latency: %s\n",
+			rep.ConversationCount,
+			rep.Totals.TurnCount,
+			rep.Totals.StepCount,
+			obs.FormatDurationCompact(rep.Totals.ActiveLatencyMs))
+		dailyPct := 0.0
+		if rep.Budget.DailyUncachedBudget > 0 {
+			dailyPct = (float64(rep.TodayUncached) / float64(rep.Budget.DailyUncachedBudget)) * 100.0
+		}
+		deepPct := 0.0
+		if rep.Budget.DailyDeepUncachedBudget > 0 {
+			deepPct = (float64(rep.TodayDeepUncached) / float64(rep.Budget.DailyDeepUncachedBudget)) * 100.0
+		}
+		fmt.Printf("  Today vs Daily Budget:  %s / %s uncached (%.1f%%) | Deep: %s / %s (%.1f%%)\n",
+			obs.FormatTokensCompact(rep.TodayUncached),
+			obs.FormatTokensCompact(rep.Budget.DailyUncachedBudget),
+			dailyPct,
+			obs.FormatTokensCompact(rep.TodayDeepUncached),
+			obs.FormatTokensCompact(rep.Budget.DailyDeepUncachedBudget),
+			deepPct)
+		if rep.FrontDesk != nil {
+			fdID := rep.FrontDeskConvID
+			if len(fdID) > 8 {
+				fdID = fdID[:8]
+			}
+			fmt.Printf("  [HQ] Front Desk (%s): Context %s / 256k (Peak: %s | Compactions: %d | CHR: %.1f%%)\n",
+				fdID,
+				obs.FormatTokensCompact(rep.FrontDeskContext),
+				obs.FormatTokensCompact(rep.FrontDesk.PeakContextTokens),
+				rep.FrontDesk.CompactionCount,
+				rep.FrontDesk.CacheHitRatio*100.0)
+		}
+
+		fmt.Printf("\nBreakdown by %s:\n", strings.ToUpper(rep.GroupBy))
+		fmt.Printf("  %-22s %6s %6s %10s %10s %10s %7s %8s %8s\n",
+			"KEY", "CONVS", "TURNS", "UNCACHED", "CACHE_RD", "GROSS", "CHR%", "QBU", "LATENCY")
+		for _, b := range rep.Buckets {
+			fmt.Printf("  %-22s %6d %6d %10s %10s %10s %6.1f%% %8.0f %8s\n",
+				truncateDisplay(b.Key, 22),
+				b.ConvCount,
+				b.Rollup.TurnCount,
+				obs.FormatTokensCompact(b.Rollup.UncachedTokens),
+				obs.FormatTokensCompact(b.Rollup.CacheReadTokens),
+				obs.FormatTokensCompact(b.Rollup.GrossTokens),
+				b.Rollup.CacheHitRatio*100.0,
+				b.Rollup.QuotaUnits,
+				obs.FormatDurationCompact(b.Rollup.ActiveLatencyMs))
+		}
+
+		if len(rep.Anomalies) > 0 {
+			fmt.Printf("\nActive Anomalies & Guard Alerts (%d):\n", len(rep.Anomalies))
+			for _, a := range rep.Anomalies {
+				fmt.Printf("  - [%s][%s] %s\n", a.Severity, a.Code, a.Summary)
+			}
+		}
+
+	case "top":
+		fs := flag.NewFlagSet("obs top", flag.ExitOnError)
+		sortBy := fs.String("by", "uncached", "Sort metric (uncached, qbu, gross, context, latency)")
+		kind := fs.String("kind", "all", "Filter by kind (all, task, subagent, front_desk)")
+		treeMode := fs.Bool("tree", false, "Rank by full DAG tree rollup (Self + Descendant Subagents)")
+		turnsMode := fs.Bool("turns", false, "Rank individual expensive turns across all transcripts")
+		limit := fs.Int("limit", 10, "Maximum rows to display")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+
+		rep, err := obs.BuildTopReport(vaultDir, *sortBy, *kind, *treeMode, *turnsMode, *limit, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq obs top failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+
+		if *turnsMode {
+			fmt.Printf("Top %d Individual Turns (Sorted by: %s | Kind: %s)\n", len(rep.TurnItems), rep.SortBy, rep.KindFilter)
+			fmt.Printf("  %-4s %-10s %-6s %-26s %6s %10s %10s %7s %9s %8s\n",
+				"RANK", "CONV", "TURN", "TITLE", "STEPS", "UNCACHED", "GROSS", "CHR%", "PEAK_CTX", "LATENCY")
+			for _, item := range rep.TurnItems {
+				cid := item.ConversationID
+				if len(cid) > 8 {
+					cid = cid[:8]
+				}
+				fmt.Printf("  #%-3d %-10s T#%-4d %-26s %6d %10s %10s %6.1f%% %9s %8s\n",
+					item.Rank,
+					cid,
+					item.Turn.TurnIndex,
+					truncateDisplay(item.Title, 26),
+					item.Turn.StepCount,
+					obs.FormatTokensCompact(item.Turn.UncachedTokens),
+					obs.FormatTokensCompact(item.Turn.GrossTokens),
+					item.Turn.CacheHitRatio*100.0,
+					obs.FormatTokensCompact(item.Turn.PeakContextTokens),
+					obs.FormatDurationCompact(item.Turn.ActiveLatencyMs))
+			}
+			return
+		}
+
+		modeLabel := "Self"
+		if *treeMode {
+			modeLabel = "Tree (Self + Children)"
+		}
+		fmt.Printf("Top %d Conversations — %s (Sorted by: %s | Kind: %s)\n", len(rep.Items), modeLabel, rep.SortBy, rep.KindFilter)
+		fmt.Printf("  %-4s %-10s %-11s %-6s %-28s %5s %5s %10s %10s %7s %8s %9s\n",
+			"RANK", "CONV", "KIND", "TIER", "TITLE", "TURNS", "CHILD", "UNCACHED", "GROSS", "CHR%", "QBU", "PEAK_CTX")
+		for _, item := range rep.Items {
+			cid := item.ConversationID
+			if len(cid) > 8 {
+				cid = cid[:8]
+			}
+			fmt.Printf("  #%-3d %-10s %-11s %-6s %-28s %5d %5d %10s %10s %6.1f%% %8.0f %9s\n",
+				item.Rank,
+				cid,
+				truncateDisplay(item.Kind, 11),
+				item.Tier,
+				truncateDisplay(item.Title, 28),
+				item.Metrics.TurnCount,
+				item.ChildCount,
+				obs.FormatTokensCompact(item.Metrics.UncachedTokens),
+				obs.FormatTokensCompact(item.Metrics.GrossTokens),
+				item.Metrics.CacheHitRatio*100.0,
+				item.Metrics.QuotaUnits,
+				obs.FormatTokensCompact(item.Metrics.PeakContextTokens))
+		}
+
+	case "inspect":
+		var target string
+		var flagArgs []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") && target == "" {
+				target = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("obs inspect", flag.ExitOnError)
+		showTurns := fs.Bool("turns", true, "Show turn-by-turn breakdown")
+		showChildren := fs.Bool("children", true, "Show child subagent DAG")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+
+		if target == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq obs inspect <conv-id-or-task-slug> [--turns] [--children] [--json]")
+			os.Exit(1)
+		}
+		rep, err := obs.BuildInspectReport(vaultDir, target, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq obs inspect failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+
+		cm := rep.Conversation
+		fmt.Printf("Inspect: %s (%s)\n", cm.Title, cm.ConversationID)
+		fmt.Printf("  Task Slug: %s | Kind: %s | Scope: %s | Tier: %s | Model: %s\n",
+			cm.TaskSlug, cm.Kind, cm.Scope, cm.Tier, cm.Model)
+		if cm.ParentConversationID != "" {
+			fmt.Printf("  Parent Conversation: %s\n", cm.ParentConversationID)
+		}
+		fmt.Printf("  Current Context: %s | Peak Context: %s | Compactions: %d\n",
+			obs.FormatTokensCompact(cm.CurrentContextTokens),
+			obs.FormatTokensCompact(cm.Self.PeakContextTokens),
+			cm.Self.CompactionCount)
+		fmt.Printf("  Self Burn: Uncached %s (In: %s, Out: %s) | Gross %s | CHR %.1f%% | QBU %.0f | Latency %s\n",
+			obs.FormatTokensCompact(cm.Self.UncachedTokens),
+			obs.FormatTokensCompact(cm.Self.InputTokens),
+			obs.FormatTokensCompact(cm.Self.OutputTokens),
+			obs.FormatTokensCompact(cm.Self.GrossTokens),
+			cm.Self.CacheHitRatio*100.0,
+			cm.Self.QuotaUnits,
+			obs.FormatDurationCompact(cm.Self.ActiveLatencyMs))
+		if len(cm.ChildConversationIDs) > 0 {
+			fmt.Printf("  Tree Burn: Uncached %s | Gross %s | CHR %.1f%% | QBU %.0f (%d direct child subagent(s))\n",
+				obs.FormatTokensCompact(cm.Tree.UncachedTokens),
+				obs.FormatTokensCompact(cm.Tree.GrossTokens),
+				cm.Tree.CacheHitRatio*100.0,
+				cm.Tree.QuotaUnits,
+				len(cm.ChildConversationIDs))
+		}
+
+		if *showChildren && len(rep.Children) > 0 {
+			fmt.Printf("\nChild Subagents (%d):\n", len(rep.Children))
+			for _, ch := range rep.Children {
+				cid := ch.ConversationID
+				if len(cid) > 8 {
+					cid = cid[:8]
+				}
+				fmt.Printf("  - [%s] %s (%s | %s): Uncached %s, Gross %s, CHR %.1f%%, Turns %d\n",
+					cid,
+					ch.Title,
+					ch.Tier,
+					ch.Model,
+					obs.FormatTokensCompact(ch.Self.UncachedTokens),
+					obs.FormatTokensCompact(ch.Self.GrossTokens),
+					ch.Self.CacheHitRatio*100.0,
+					ch.Self.TurnCount)
+			}
+		}
+
+		if *showTurns && len(cm.Turns) > 0 {
+			fmt.Printf("\nTurn-by-Turn Telemetry (%d turns):\n", len(cm.Turns))
+			fmt.Printf("  %-6s %-20s %6s %10s %10s %10s %7s %9s %8s\n",
+				"TURN", "STARTED_AT", "STEPS", "UNCACHED", "CACHE_RD", "GROSS", "CHR%", "PEAK_CTX", "LATENCY")
+			for _, t := range cm.Turns {
+				fmt.Printf("  T#%-4d %-20s %6d %10s %10s %10s %6.1f%% %9s %8s\n",
+					t.TurnIndex,
+					truncateDisplay(t.StartedAt, 20),
+					t.StepCount,
+					obs.FormatTokensCompact(t.UncachedTokens),
+					obs.FormatTokensCompact(t.CacheReadTokens),
+					obs.FormatTokensCompact(t.GrossTokens),
+					t.CacheHitRatio*100.0,
+					obs.FormatTokensCompact(t.PeakContextTokens),
+					obs.FormatDurationCompact(t.ActiveLatencyMs))
+			}
+		}
+
+		if len(rep.Anomalies) > 0 {
+			fmt.Printf("\nAnomalies on Conversation (%d):\n", len(rep.Anomalies))
+			for _, a := range rep.Anomalies {
+				fmt.Printf("  - [%s][%s] %s\n", a.Severity, a.Code, a.Summary)
+			}
+		}
+
+	case "anomalies":
+		fs := flag.NewFlagSet("obs anomalies", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+
+		idx, err := obs.LoadOrRefreshIndex(vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq obs anomalies failed: %v\n", err)
+			os.Exit(1)
+		}
+		budget := obs.LoadBudgetConfig(vaultDir)
+		anomalies := obs.EvaluateAnomalies(vaultDir, idx, budget, now)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(anomalies)
+			return
+		}
+		if len(anomalies) == 0 {
+			fmt.Println("Zero token, prefix-cache, context, or budget anomalies detected.")
+			return
+		}
+		fmt.Printf("Detected %d Token & Context Anomaly Alert(s):\n", len(anomalies))
+		for _, a := range anomalies {
+			fmt.Printf("  - [%s][%s] %s (%s)\n", a.Severity, a.Code, a.Kind, a.ID)
+			fmt.Printf("      Summary:     %s\n", a.Summary)
+			fmt.Printf("      Remediation: %s\n", a.Remediation)
+		}
+
+	case "budget":
+		fs := flag.NewFlagSet("obs budget", flag.ExitOnError)
+		setDailyUncached := fs.Int64("set-daily-uncached", 0, "Set daily uncached token budget (e.g. 15000000)")
+		setDailyDeep := fs.Int64("set-daily-deep", 0, "Set daily deep-tier uncached token budget (e.g. 5000000)")
+		setWarnCtx := fs.Int64("set-warn-context", 0, "Set Front Desk context warning threshold (default 120000)")
+		setNudgeCtx := fs.Int64("set-nudge-context", 0, "Set Front Desk SessionStart /compact nudge threshold (default 160000)")
+		setCritCtx := fs.Int64("set-crit-context", 0, "Set Front Desk critical context threshold (default 180000)")
+		resetCircuit := fs.Bool("reset-circuit", false, "Clear daily token budget circuit breaker for kind:auto triggers")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+
+		cfg := obs.LoadBudgetConfig(vaultDir)
+		updated := false
+		if *setDailyUncached > 0 {
+			cfg.DailyUncachedBudget = *setDailyUncached
+			updated = true
+		}
+		if *setDailyDeep > 0 {
+			cfg.DailyDeepUncachedBudget = *setDailyDeep
+			updated = true
+		}
+		if *setWarnCtx > 0 {
+			cfg.WarnContextTokens = *setWarnCtx
+			updated = true
+		}
+		if *setNudgeCtx > 0 {
+			cfg.NudgeContextTokens = *setNudgeCtx
+			updated = true
+		}
+		if *setCritCtx > 0 {
+			cfg.CritContextTokens = *setCritCtx
+			updated = true
+		}
+		if updated {
+			if err := obs.SaveBudgetConfig(vaultDir, cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "hq obs budget save failed: %v\n", err)
+				os.Exit(1)
+			}
+			obs.SyncDailyBudgetCircuitBreaker(vaultDir, now)
+		}
+		if *resetCircuit {
+			if err := obs.ResetBudgetCircuitBreaker(vaultDir); err != nil {
+				fmt.Fprintf(os.Stderr, "hq obs budget --reset-circuit failed: %v\n", err)
+				os.Exit(1)
+			}
+		} else if !updated {
+			obs.SyncDailyBudgetCircuitBreaker(vaultDir, now)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(cfg)
+			return
+		}
+		fmt.Printf("HQ Token Budget & Context Guard Configuration (local/memory/obs/budget.json)\n")
+		fmt.Printf("  Daily Uncached Budget:      %s tokens\n", obs.FormatTokensCompact(cfg.DailyUncachedBudget))
+		fmt.Printf("  Daily Deep Uncached Budget: %s tokens\n", obs.FormatTokensCompact(cfg.DailyDeepUncachedBudget))
+		fmt.Printf("  Front Desk Context Guards:  WARN=%s | NUDGE=%s | CRITICAL=%s\n",
+			obs.FormatTokensCompact(cfg.WarnContextTokens),
+			obs.FormatTokensCompact(cfg.NudgeContextTokens),
+			obs.FormatTokensCompact(cfg.CritContextTokens))
+		fmt.Printf("  Runaway Turn Guards (A3):   MaxSteps=%d | MaxUncached=%s | MaxOutput=%s\n",
+			cfg.MaxTurnSteps,
+			obs.FormatTokensCompact(cfg.MaxTurnUncachedTokens),
+			obs.FormatTokensCompact(cfg.MaxTurnOutputTokens))
+
+	case "reconcile":
+		fs := flag.NewFlagSet("obs reconcile", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		repaired, err := obs.ReconcileSubagentAttribution(vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq obs reconcile failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]int{"repairedTasks": repaired})
+			return
+		}
+		fmt.Printf("Reconciled subagent DAG attribution against ground-truth transcripts (%d task(s) updated)\n", repaired)
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown obs subcommand: %s (expected tokens, top, inspect, anomalies, budget, reconcile)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func truncateDisplay(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
+}
+
 func printUsage() {
 	fmt.Println(`Usage: hq <command> [args]
 
@@ -1878,6 +2287,7 @@ Commands:
   status [--quiet]                    Show pending approvals and active worktrees
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
+  obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability
   memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
   rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
   ci <check-pii|check-harness|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness contract verification

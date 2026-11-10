@@ -14,6 +14,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
 )
 
 // FrictionCategory classifies the type of agentic friction observed in ground-truth telemetry.
@@ -472,6 +473,37 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 					)
 				}
 			}
+		}
+	}
+
+	// 3b. Scan token anomalies (A3 RunawayTurnBurn & A4 TierMisroutingBurn) as FrictionQuotaAnomaly
+	if obsIdx, err := obs.LoadOrRefreshIndex(vaultDir); err == nil && obsIdx != nil {
+		budget := obs.LoadBudgetConfig(vaultDir)
+		for _, anom := range obs.EvaluateAnomalies(vaultDir, obsIdx, budget, now) {
+			if anom.Code != "A3" && anom.Code != "A4" {
+				continue
+			}
+			if !cutoff.IsZero() && anom.Timestamp != "" {
+				if ts, tErr := time.Parse(time.RFC3339, anom.Timestamp); tErr == nil && ts.Before(cutoff) {
+					continue
+				}
+			}
+			cm := obsIdx.Conversations[anom.ConversationID]
+			upsert(
+				FrictionQuotaAnomaly,
+				FaultModelRouting,
+				"swe-pulse",
+				anom.Kind,
+				anom.Code+":"+anom.TaskSlug,
+				anom.Summary,
+				anom.Remediation,
+				3,
+				anom.ConversationID,
+				cm.ParentConversationID,
+				cm.Model,
+				anom.Timestamp,
+				false,
+			)
 		}
 	}
 

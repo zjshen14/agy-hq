@@ -15,6 +15,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
@@ -50,26 +51,37 @@ type StopPayload struct {
 
 // JournalEntry is the immutable per-turn summary written by hq hook stop (0 LLM tokens).
 type JournalEntry struct {
-	Timestamp         string   `json:"timestamp"`
-	ConversationID    string   `json:"conversationId"`
-	ParentConvID      string   `json:"parentConversationId,omitempty"`
-	ExecutionNum      int      `json:"executionNum"`
-	TranscriptPath    string   `json:"transcriptPath,omitempty"`
-	WorkspacePaths    []string `json:"workspacePaths,omitempty"`
-	ModelName         string   `json:"modelName,omitempty"`
-	StepCount         int      `json:"stepCount,omitempty"`
-	ToolErrorCount    int      `json:"toolErrorCount,omitempty"`
-	StepStartIdx      int      `json:"stepStartIdx,omitempty"`
-	TurnStepCount     int      `json:"turnStepCount,omitempty"`
-	TurnErrorCount    int      `json:"turnErrorCount,omitempty"`
-	TransientErrors   int      `json:"transientErrors,omitempty"`
-	PreToolDenials    int      `json:"preToolDenials,omitempty"`
-	TaintedSession    bool     `json:"taintedSession,omitempty"`
-	UserPrompt        string   `json:"userPrompt,omitempty"`
-	ToolsUsed         []string `json:"toolsUsed,omitempty"`
-	FilesModified     []string `json:"filesModified,omitempty"`
-	TerminationReason string   `json:"terminationReason"`
-	ResponseSummary   string   `json:"responseSummary,omitempty"`
+	Timestamp            string   `json:"timestamp"`
+	ConversationID       string   `json:"conversationId"`
+	ParentConvID         string   `json:"parentConversationId,omitempty"`
+	ExecutionNum         int      `json:"executionNum"`
+	TranscriptPath       string   `json:"transcriptPath,omitempty"`
+	WorkspacePaths       []string `json:"workspacePaths,omitempty"`
+	ModelName            string   `json:"modelName,omitempty"`
+	StepCount            int      `json:"stepCount,omitempty"`
+	ToolErrorCount       int      `json:"toolErrorCount,omitempty"`
+	StepStartIdx         int      `json:"stepStartIdx,omitempty"`
+	TurnStepCount        int      `json:"turnStepCount,omitempty"`
+	TurnErrorCount       int      `json:"turnErrorCount,omitempty"`
+	TransientErrors      int      `json:"transientErrors,omitempty"`
+	PreToolDenials       int      `json:"preToolDenials,omitempty"`
+	TaintedSession       bool     `json:"taintedSession,omitempty"`
+	TurnInputTokens      int64    `json:"turnInputTokens,omitempty"`
+	TurnCacheReadTokens  int64    `json:"turnCacheReadTokens,omitempty"`
+	TurnOutputTokens     int64    `json:"turnOutputTokens,omitempty"`
+	TurnUncachedTokens   int64    `json:"turnUncachedTokens,omitempty"`
+	TurnGrossTokens      int64    `json:"turnGrossTokens,omitempty"`
+	TurnCacheHitRatio    float64  `json:"turnCacheHitRatio,omitempty"`
+	PeakContextTokens    int64    `json:"peakContextTokens,omitempty"`
+	CurrentContextTokens int64    `json:"currentContextTokens,omitempty"`
+	CompactionCount      int      `json:"compactionCount,omitempty"`
+	ActiveLatencyMs      int64    `json:"activeLatencyMs,omitempty"`
+	HumanWaitMs          int64    `json:"humanWaitMs,omitempty"`
+	UserPrompt           string   `json:"userPrompt,omitempty"`
+	ToolsUsed            []string `json:"toolsUsed,omitempty"`
+	FilesModified        []string `json:"filesModified,omitempty"`
+	TerminationReason    string   `json:"terminationReason"`
+	ResponseSummary      string   `json:"responseSummary,omitempty"`
 }
 
 // TranscriptStepError captures a single failed tool or command execution step from transcript.jsonl.
@@ -192,6 +204,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					artPath,
 				))
 				sections = append(sections, strings.Join(initLines, "\n"))
+			}
+			if _, _, nudgeBanner := obs.GetFrontDeskContextStatus(vaultDir, payload.TranscriptPath); nudgeBanner != "" {
+				sections = append(sections, nudgeBanner)
 			}
 		} else {
 			// Subagent or secondary conversation: check if already tracked or waiting in pending queue / spawn list
@@ -734,14 +749,28 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 		}
 
-		dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
+		todayDateStr := time.Now().Format("2006-01-02")
+		dateDir := filepath.Join(vaultDir, "memory", "journal", todayDateStr)
 		_ = os.MkdirAll(dateDir, 0o755)
 		execNum := payload.ExecutionNum
 		if execNum <= 0 {
 			execNum = nextExecutionNum(dateDir, payload.ConversationID)
 		}
-		stepStartIdx := priorJournalStepCount(vaultDir, payload.ConversationID, execNum)
+		stepStartIdx := priorJournalStepCountWithDate(vaultDir, payload.ConversationID, todayDateStr, execNum)
 		tm := parseTranscriptTurnMetrics(payload.TranscriptPath, stepStartIdx)
+
+		// B1 Duplicate Stop Hook Guard: When both workspace and plugin hooks.json invoke `hq hook stop`
+		// back-to-back on the same turn completion (ExecutionNum == 0, 0 new steps since the entry written <3s ago),
+		// skip writing a duplicate 0-step journal file and skip double-incrementing TurnCount.
+		if payload.ExecutionNum <= 0 && execNum > 1 && payload.TranscriptPath != "" && tm.StepCount > 0 && tm.StepCount <= stepStartIdx {
+			prevFile := filepath.Join(dateDir, fmt.Sprintf("%s-%d.json", payload.ConversationID, execNum-1))
+			if info, stErr := os.Stat(prevFile); stErr == nil && time.Since(info.ModTime()) < 3*time.Second {
+				_, wErr := w.Write([]byte(`{"decision":"stop"}` + "\n"))
+				return wErr
+			}
+		}
+
+		obsTurn := obs.ParseSingleTurnSlice(payload.TranscriptPath, stepStartIdx)
 		toolsUsed := tm.ToolsUsed
 		filesModified := tm.FilesModified
 		summary := tm.LastResponse
@@ -757,26 +786,37 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 
 		if _, err := os.Stat(dateDir); err == nil {
 			entry := JournalEntry{
-				Timestamp:         time.Now().Format(time.RFC3339),
-				ConversationID:    payload.ConversationID,
-				ParentConvID:      parentConvID,
-				ExecutionNum:      execNum,
-				TranscriptPath:    payload.TranscriptPath,
-				WorkspacePaths:    payload.WorkspacePaths,
-				ModelName:         payload.ModelName,
-				StepCount:         stepCount,
-				ToolErrorCount:    toolErrorCount,
-				StepStartIdx:      stepStartIdx,
-				TurnStepCount:     tm.TurnStepCount,
-				TurnErrorCount:    tm.TurnErrorCount,
-				TransientErrors:   tm.TransientErrors,
-				PreToolDenials:    tm.PreToolDenials,
-				TaintedSession:    isTainted || tm.TaintedCmdSeen,
-				UserPrompt:        userPrompt,
-				ToolsUsed:         toolsUsed,
-				FilesModified:     filesModified,
-				TerminationReason: payload.TerminationReason,
-				ResponseSummary:   summary,
+				Timestamp:            time.Now().Format(time.RFC3339),
+				ConversationID:       payload.ConversationID,
+				ParentConvID:         parentConvID,
+				ExecutionNum:         execNum,
+				TranscriptPath:       payload.TranscriptPath,
+				WorkspacePaths:       payload.WorkspacePaths,
+				ModelName:            payload.ModelName,
+				StepCount:            stepCount,
+				ToolErrorCount:       toolErrorCount,
+				StepStartIdx:         stepStartIdx,
+				TurnStepCount:        tm.TurnStepCount,
+				TurnErrorCount:       tm.TurnErrorCount,
+				TransientErrors:      tm.TransientErrors,
+				PreToolDenials:       tm.PreToolDenials,
+				TaintedSession:       isTainted || tm.TaintedCmdSeen,
+				TurnInputTokens:      obsTurn.InputTokens,
+				TurnCacheReadTokens:  obsTurn.CacheReadTokens,
+				TurnOutputTokens:     obsTurn.OutputTokens,
+				TurnUncachedTokens:   obsTurn.UncachedTokens,
+				TurnGrossTokens:      obsTurn.GrossTokens,
+				TurnCacheHitRatio:    obsTurn.CacheHitRatio,
+				PeakContextTokens:    obsTurn.PeakContextTokens,
+				CurrentContextTokens: obsTurn.CurrentContextTokens,
+				CompactionCount:      obsTurn.CompactionCount,
+				ActiveLatencyMs:      obsTurn.ActiveLatencyMs,
+				HumanWaitMs:          obsTurn.HumanWaitMs,
+				UserPrompt:           userPrompt,
+				ToolsUsed:            toolsUsed,
+				FilesModified:        filesModified,
+				TerminationReason:    payload.TerminationReason,
+				ResponseSummary:      summary,
 			}
 			if data, err := json.MarshalIndent(entry, "", "  "); err == nil {
 				fileName := fmt.Sprintf("%s-%d.json", payload.ConversationID, execNum)
@@ -908,6 +948,11 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 				}
 			}
+
+			if payload.TranscriptPath != "" {
+				_, _ = obs.ReconcileSubagentAttribution(vaultDir)
+				_, _ = obs.SyncDailyBudgetCircuitBreaker(vaultDir, time.Now())
+			}
 		}
 	}
 
@@ -935,6 +980,10 @@ func nextExecutionNum(dateDir, convID string) int {
 }
 
 func priorJournalStepCount(vaultDir, convID string, currentExecNum int) int {
+	return priorJournalStepCountWithDate(vaultDir, convID, time.Now().Format("2006-01-02"), currentExecNum)
+}
+
+func priorJournalStepCountWithDate(vaultDir, convID, todayDateStr string, currentExecNum int) int {
 	if convID == "" {
 		return 0
 	}
@@ -956,7 +1005,7 @@ func priorJournalStepCount(vaultDir, convID string, currentExecNum int) int {
 				continue
 			}
 			numStr := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".json")
-			if n, err := strconv.Atoi(numStr); err == nil && currentExecNum > 0 && n >= currentExecNum {
+			if n, err := strconv.Atoi(numStr); err == nil && d.Name() == todayDateStr && currentExecNum > 0 && n >= currentExecNum {
 				continue
 			}
 			if b, err := os.ReadFile(filepath.Join(journalRoot, d.Name(), name)); err == nil {

@@ -109,6 +109,9 @@ func ResolveArtifactDir(convID string) string {
 	}
 	appDataDir := os.Getenv("ANTIGRAVITY_APP_DATA_DIR")
 	if appDataDir == "" {
+		if envVault := os.Getenv("HQ_VAULT_DIR"); envVault != "" && IsTempPath(envVault) {
+			return filepath.Join(filepath.Dir(filepath.Clean(envVault)), ".brain", convID)
+		}
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			appDataDir = filepath.Join(home, ".gemini", "antigravity")
 		}

@@ -7,10 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -264,6 +266,48 @@ func Run(vaultDir string) []CheckResult {
 				})
 			}
 		}
+	}
+
+	// 10. Check Token Budget & Front Desk Context Health (RFC-0012)
+	obsSum := obs.BuildDashboardSummary(vaultDir, time.Time{})
+	if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100 {
+		results = append(results, CheckResult{
+			Name:   "Token Budget & Context Health",
+			Status: "WARN",
+			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), Front Desk context %s / 256k (%s); run './bin/hq obs anomalies' or '/compact'",
+				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
+				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
+				obsSum.DailyBudgetPct,
+				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
+				obsSum.FrontDeskContextStatus,
+			),
+		})
+	} else if obsSum.FrontDeskContextStatus == "WARN" || obsSum.DailyBudgetPct >= 80 || obsSum.DeepBudgetPct >= 80 {
+		results = append(results, CheckResult{
+			Name:   "Token Budget & Context Health",
+			Status: "WARN",
+			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), CHR %.1f%%, Front Desk context %s / 256k (%s)",
+				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
+				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
+				obsSum.DailyBudgetPct,
+				obsSum.TodayCacheHitRatio*100.0,
+				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
+				obsSum.FrontDeskContextStatus,
+			),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Token Budget & Context Health",
+			Status: "PASS",
+			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), CHR %.1f%%, Front Desk context %s / 256k (%s)",
+				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
+				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
+				obsSum.DailyBudgetPct,
+				obsSum.TodayCacheHitRatio*100.0,
+				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
+				obsSum.FrontDeskContextStatus,
+			),
+		})
 	}
 
 	return results

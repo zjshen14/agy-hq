@@ -17,20 +17,22 @@ import (
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
-// DashboardState aggregates live Vault, approval, worktree, task, journal, quota, and doctor state.
+// DashboardState aggregates live Vault, approval, worktree, task, journal, quota, observability, and doctor state.
 type DashboardState struct {
-	VaultDir    string               `json:"vaultDir"`
-	UpdatedAt   string               `json:"updatedAt"`
-	Quota       kernel.QuotaState    `json:"quota"`
-	Pending     []approvals.Proposal `json:"pending"`
-	Worktrees   []string             `json:"worktrees"`
-	Tasks       []kernel.ActiveTask  `json:"tasks"`
-	TodayTurns  []hooks.JournalEntry `json:"todayTurns"`
-	Health      []doctor.CheckResult `json:"health"`
-	FlashResult string               `json:"flashResult,omitempty"`
+	VaultDir      string               `json:"vaultDir"`
+	UpdatedAt     string               `json:"updatedAt"`
+	Quota         kernel.QuotaState    `json:"quota"`
+	Observability obs.DashboardSummary `json:"observability"`
+	Pending       []approvals.Proposal `json:"pending"`
+	Worktrees     []string             `json:"worktrees"`
+	Tasks         []kernel.ActiveTask  `json:"tasks"`
+	TodayTurns    []hooks.JournalEntry `json:"todayTurns"`
+	Health        []doctor.CheckResult `json:"health"`
+	FlashResult   string               `json:"flashResult,omitempty"`
 }
 
 // NewHandler creates the HTTP mux for the HQ Console side pane and API.
@@ -51,6 +53,12 @@ func NewHandler(vaultDir string) http.Handler {
 		state := loadState(vaultDir, "")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(state)
+	})
+
+	mux.HandleFunc("/api/obs", func(w http.ResponseWriter, r *http.Request) {
+		sum := obs.BuildDashboardSummary(vaultDir, time.Now())
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sum)
 	})
 
 	mux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
@@ -364,16 +372,18 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	turns := loadTodayJournals(vaultDir)
 	health := doctor.Run(vaultDir)
 	quota := kernel.LoadQuota(vaultDir)
+	obsSum := obs.BuildDashboardSummary(vaultDir, now)
 	return DashboardState{
-		VaultDir:    vaultDir,
-		UpdatedAt:   now.Format("15:04:05"),
-		Quota:       quota,
-		Pending:     pending,
-		Worktrees:   wts,
-		Tasks:       sel.VisibleRows,
-		TodayTurns:  turns,
-		Health:      health,
-		FlashResult: flashMsg,
+		VaultDir:      vaultDir,
+		UpdatedAt:     now.Format("15:04:05"),
+		Quota:         quota,
+		Observability: obsSum,
+		Pending:       pending,
+		Worktrees:     wts,
+		Tasks:         sel.VisibleRows,
+		TodayTurns:    turns,
+		Health:        health,
+		FlashResult:   flashMsg,
 	}
 }
 
@@ -430,6 +440,32 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 			return 0
 		}
 		return float64(a) / float64(b)
+	},
+	"fmtTokens": obs.FormatTokensCompact,
+	"pctClamp": func(p float64) float64 {
+		if p < 0 {
+			return 0
+		}
+		if p > 100 {
+			return 100
+		}
+		return p
+	},
+	"ctxPct": func(cur int64) float64 {
+		p := (float64(cur) / 256000.0) * 100.0
+		if p > 100 {
+			return 100
+		}
+		return p
+	},
+	"taskBadge": func(badges map[string]obs.TaskTokenBadge, convID string) string {
+		if badges == nil {
+			return ""
+		}
+		if b, ok := badges[strings.ToLower(strings.TrimSpace(convID))]; ok && b.GrossTokens > 0 {
+			return b.CompactLabel
+		}
+		return ""
 	},
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
@@ -662,6 +698,35 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     background: linear-gradient(90deg, #38bdf8 0%, #22c55e 100%);
     border-radius: 3px;
   }
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .kpi-tile {
+    background: #0c111d;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .kpi-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+  .kpi-val {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .kpi-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 </style>
@@ -761,6 +826,52 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 </div>
 
 <h2>
+  <span>Token &amp; Context Observability</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">RFC-0012 Telemetry</span>
+</h2>
+<div class="card" id="obs-card">
+  <div class="kpi-grid">
+    <div class="kpi-tile">
+      <div class="kpi-label">Today Uncached Burn</div>
+      <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyUncachedBudget}}</div>
+      <div class="kpi-sub">{{printf "%.1f" .Observability.DailyBudgetPct}}% of daily budget ({{.Observability.TodayTurnCount}} turns)</div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-label">Prefix Cache Hit Ratio</div>
+      <div class="kpi-val" id="obs-chr">{{printf "%.1f" (mulf .Observability.TodayCacheHitRatio 100.0)}}%</div>
+      <div class="kpi-sub">All-time: {{printf "%.1f" (mulf .Observability.AllTimeCacheHitRatio 100.0)}}% ({{fmtTokens .Observability.AllTimeGrossTokens}} gross)</div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-label">Front Desk Context (256k Cap)</div>
+      <div class="kpi-val" id="obs-fd-ctx">{{fmtTokens .Observability.FrontDeskContextTokens}} / 256k</div>
+      <div class="kpi-sub">Status: {{.Observability.FrontDeskContextStatus}} · Compactions: {{.Observability.FrontDeskCompactions}}</div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-label">Deep Tier Burn Today</div>
+      <div class="kpi-val" id="obs-deep-burn">{{fmtTokens .Observability.TodayDeepUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyDeepUncachedBudget}}</div>
+      <div class="kpi-sub">{{printf "%.0f" .Observability.TodayQuotaUnits}} QBU today</div>
+    </div>
+  </div>
+  <div class="meta-row" style="margin-top:4px">
+    <span class="muted">Front Desk Context Fill ({{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens)}}% of ~256k auto-compaction ceiling)</span>
+    <span class="badge {{if eq .Observability.FrontDeskContextStatus "OK"}}badge-pass{{else if eq .Observability.FrontDeskContextStatus "WARN"}}badge-warn{{else}}badge-danger{{end}}">{{.Observability.FrontDeskContextStatus}}</span>
+  </div>
+  <div class="progress-bar">
+    <div class="progress-fill" style="width: {{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens)}}%;"></div>
+  </div>
+  {{if .Observability.Anomalies}}
+  <div style="margin-top:8px" id="obs-anomalies">
+    {{range .Observability.Anomalies}}
+    <div style="margin-top:4px;font-size:11px">
+      <span class="badge {{if eq .Severity "CRITICAL"}}badge-danger{{else}}badge-warn{{end}}">{{.Code}} · {{.Severity}}</span>
+      <span>{{.Summary}}</span>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+
+<h2>
   <span>Live Task Board (<span id="task-count">{{len .Tasks}}</span>)</span>
   <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Layer-1 Coordinated Tasks</span>
 </h2>
@@ -773,7 +884,7 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
       <span class="badge {{if eq .Status "active"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
     </div>
     <div class="muted" style="margin:4px 0">
-      Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a>
+      Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a>{{if taskBadge $.Observability.TaskBadges .ConversationID}} · Tokens: <code>{{taskBadge $.Observability.TaskBadges .ConversationID}}</code>{{end}}
     </div>
     {{if .LastSummary}}<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">{{.LastSummary}}</div>{{end}}
     <div class="actions">
@@ -1067,6 +1178,21 @@ func SyncMarkdownConsole(vaultDir string) error {
 		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
 	}
 	fmt.Fprintf(&b, "- **Background Flash Spawns Today:** `%d / %d` (`%s`)\n", state.Quota.SpawnsToday, state.Quota.MaxDailySpawns, circuitBadge)
+	fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
+		obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+		obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
+		state.Observability.DailyBudgetPct,
+		obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+		state.Observability.TodayCacheHitRatio*100.0,
+		obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+		obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
+	)
+	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s / 256k` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
+		obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens),
+		state.Observability.FrontDeskContextStatus,
+		state.Observability.FrontDeskCompactions,
+		state.Observability.FrontDeskCacheHitRatio*100.0,
+	)
 	lastHB := state.Quota.LastStatus
 	if lastHB == "" {
 		lastHB = "Not run yet today"
@@ -1122,6 +1248,9 @@ func SyncMarkdownConsole(vaultDir string) error {
 					if info, sErr := os.Stat(t.WorktreeDir); sErr == nil && info.IsDir() {
 						metaParts = append(metaParts, "🌿 wt")
 					}
+				}
+				if tb, ok := state.Observability.TaskBadges[strings.ToLower(strings.TrimSpace(t.ConversationID))]; ok && tb.GrossTokens > 0 {
+					metaParts = append(metaParts, "🪙 "+obs.FormatTokensCompact(tb.TreeUncachedTokens))
 				}
 				if len(metaParts) > 0 {
 					slugCell += fmt.Sprintf(" · *%s*", strings.Join(metaParts, " · "))
