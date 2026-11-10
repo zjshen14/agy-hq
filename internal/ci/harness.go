@@ -660,7 +660,7 @@ func extractRelativeLinkTargets(line string) []string {
 }
 
 func listMarkdownFiles(rootDir string) ([]string, error) {
-	if st, err := os.Stat(filepath.Join(rootDir, ".git")); err == nil && st.IsDir() {
+	if _, err := os.Stat(filepath.Join(rootDir, ".git")); err == nil {
 		cmd := exec.Command("git", "ls-files", "*.md")
 		cmd.Dir = rootDir
 		if out, gErr := cmd.Output(); gErr == nil {
@@ -706,8 +706,7 @@ func listMarkdownFiles(rootDir string) ([]string, error) {
 }
 
 func loadGitTrackedAndStagedPaths(rootDir string) map[string]bool {
-	st, err := os.Stat(filepath.Join(rootDir, ".git"))
-	if err != nil || !st.IsDir() {
+	if _, err := os.Stat(filepath.Join(rootDir, ".git")); err != nil {
 		return nil
 	}
 	set := make(map[string]bool)
