@@ -28,7 +28,16 @@ if [ -n "$USER_EMAIL" ] && git diff --cached -U0 | grep -E '^\+' | grep -qFi "$U
   exit 1
 fi
 
-# 2. Full 5-invariant staged PII & hooks.json parity check via ./bin/hq
+# 2. Auto-rebuild ./bin/hq if missing or older than cmd/ or internal/ .go sources
+export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
+if command -v go >/dev/null 2>&1 && [ -d "./cmd/hq" ]; then
+  if [ ! -x "./bin/hq" ] || [ -n "$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null | head -n 1)" ]; then
+    mkdir -p ./bin
+    go build -o ./bin/hq ./cmd/hq
+  fi
+fi
+
+# 3. Full 5-invariant staged PII, hooks.json parity, gofmt & Markdown check via ./bin/hq
 if [ -x "./bin/hq" ]; then
   ./bin/hq ci pre-commit
 fi
@@ -44,9 +53,11 @@ fi
 export HQ_IN_PRE_PUSH=1
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
-if [ ! -x "./bin/hq" ] && command -v go >/dev/null 2>&1 && [ -d "./cmd/hq" ]; then
-  mkdir -p ./bin
-  go build -o ./bin/hq ./cmd/hq
+if command -v go >/dev/null 2>&1 && [ -d "./cmd/hq" ]; then
+  if [ ! -x "./bin/hq" ] || [ -n "$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null | head -n 1)" ]; then
+    mkdir -p ./bin
+    go build -o ./bin/hq ./cmd/hq
+  fi
 fi
 
 if [ -x "./bin/hq" ]; then

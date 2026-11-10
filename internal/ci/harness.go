@@ -501,6 +501,8 @@ func checkGateH4BMarkdownAndDocsIntegrity(rootDir string) (bool, string) {
 		return false, "no tracked Markdown (.md) files found in repository"
 	}
 
+	trackedPaths := loadGitTrackedAndStagedPaths(rootDir)
+
 	checkedLinks := 0
 	for _, relPath := range mdFiles {
 		absPath := filepath.Join(rootDir, filepath.FromSlash(relPath))
@@ -556,6 +558,9 @@ func checkGateH4BMarkdownAndDocsIntegrity(rootDir string) (bool, string) {
 				}
 				if _, statErr := os.Stat(resolved); statErr != nil {
 					return false, fmt.Sprintf("%s:%d has broken relative link target %q", relPath, lineNum, target)
+				}
+				if rErr == nil && len(trackedPaths) > 0 && !trackedPaths[filepath.ToSlash(relTarget)] {
+					return false, fmt.Sprintf("%s:%d has relative link target %q (%s) that is not tracked in git (would fail in clean CI checkout)", relPath, lineNum, target, filepath.ToSlash(relTarget))
 				}
 			}
 		}
@@ -698,4 +703,37 @@ func listMarkdownFiles(rootDir string) ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+func loadGitTrackedAndStagedPaths(rootDir string) map[string]bool {
+	st, err := os.Stat(filepath.Join(rootDir, ".git"))
+	if err != nil || !st.IsDir() {
+		return nil
+	}
+	set := make(map[string]bool)
+	addPath := func(p string) {
+		p = strings.TrimSpace(filepath.ToSlash(p))
+		if p == "" {
+			return
+		}
+		set[p] = true
+		dir := filepath.ToSlash(filepath.Dir(p))
+		for dir != "" && dir != "." && dir != "/" {
+			set[dir] = true
+			dir = filepath.ToSlash(filepath.Dir(dir))
+		}
+		set["."] = true
+	}
+
+	if out, err := gitOutput(rootDir, "ls-files"); err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			addPath(line)
+		}
+	}
+	if out, err := gitOutput(rootDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR"); err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			addPath(line)
+		}
+	}
+	return set
 }
