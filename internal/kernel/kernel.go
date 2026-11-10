@@ -670,11 +670,16 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.CreatedAt == "" {
 				task.CreatedAt = tasks[i].CreatedAt
 			}
-			if task.CompletedAt == "" {
-				task.CompletedAt = tasks[i].CompletedAt
-			}
-			if task.ArchivedAt == "" {
-				task.ArchivedAt = tasks[i].ArchivedAt
+			if task.Status == "active" {
+				task.ArchivedAt = ""
+				task.CompletedAt = ""
+			} else {
+				if task.CompletedAt == "" {
+					task.CompletedAt = tasks[i].CompletedAt
+				}
+				if task.ArchivedAt == "" {
+					task.ArchivedAt = tasks[i].ArchivedAt
+				}
 			}
 			if task.Status == "" {
 				task.Status = tasks[i].Status
