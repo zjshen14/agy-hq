@@ -56,11 +56,17 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	if m, tier, sub := ResolveModel("Implement the CSV parser for bank statements", "", "", ""); m != "gemini-3.8-flash-high" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected standard tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
-	if m, tier, sub := ResolveModel("Perform a security audit and architecture review", "", "", ""); m != "gemini-4-argon-high" || tier != "deep" || sub != "pro" {
+	if m, tier, sub := ResolveModel("Perform a security audit and architecture review", "", "", ""); m != "gemini-4-carbon-high" || tier != "deep" || sub != "pro" {
 		t.Fatalf("unexpected deep tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, _, _ := ResolveModel("Fix a bug", "opus", "medium", ""); m != "claude-opus-5-5-medium" {
 		t.Fatalf("unexpected explicit user override: got %s", m)
+	}
+	if m, _, _ := ResolveModel("Architecture design", "carbon", "high", ""); m != "gemini-4-carbon-high" {
+		t.Fatalf("unexpected carbon override: got %s", m)
+	}
+	if m, _, _ := ResolveModel("Architecture design", "argon", "high", ""); m != "gemini-4-carbon-high" {
+		t.Fatalf("unexpected argon alias override: got %s", m)
 	}
 }
 

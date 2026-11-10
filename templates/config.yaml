@@ -26,7 +26,7 @@ routing:
       model: gemini-3.8-flash-high
       subagent_model: flash
     deep:
-      model: gemini-4-argon-high
+      model: gemini-4-carbon-high
       subagent_model: pro
   fallback_on_429: gemini-3.8-flash-medium
 

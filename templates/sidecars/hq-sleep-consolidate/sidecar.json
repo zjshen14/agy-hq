@@ -4,7 +4,7 @@
     "CRON_TZ=America/Los_Angeles 30 23 * * *",
     "agentapi",
     "new-conversation",
-    "--model=gemini-4-argon-high",
+    "--model=gemini-4-carbon-high",
     "--title=[Auto] Sleep-Time Consolidation",
     "--",
     "Activate the sleep-consolidate skill (RFC-0006 Nightly Dreaming): run ./bin/hq memory status, review today's turn journals in local/memory/journal/ and verify non-trivial or error turns with ./bin/hq memory verify-transcript <convId>, prune stale facts via ./bin/hq memory prune-fact, distill deep domain lessons into local/memory/topics/<slug>.md while keeping local/MEMORY.md <= 80 lines as a Roadmap Index, stage any skill proposals in local/memory/proposals/, and commit the private local/ Vault git repo."

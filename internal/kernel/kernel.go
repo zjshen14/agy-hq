@@ -1696,7 +1696,7 @@ var (
 	reDeepTask        = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|complex|deep|hard)\b`)
 	reQuickTask       = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|brief|consolidate|list|format|lint|typo|quick)\b`)
 	reUUID            = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	rePromptModelHint = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|argon|flash_lite|flash-lite|flash)\b`)
+	rePromptModelHint = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|flash_lite|flash-lite|flash)\b`)
 )
 
 // ExtractUUID returns the first UUID v4 found in s (e.g., from agentapi stdout), or "".
@@ -1709,6 +1709,7 @@ func ExtractUUID(s string) string {
 //
 // Verified Antigravity model IDs (`agy models`):
 //   - gemini-3.8-flash-{low,medium,high}
+//   - gemini-4-carbon-{low,medium,high}
 //   - gemini-4-argon-{low,medium,high}
 //   - claude-sonnet-5-5-{low,medium,high}
 //   - claude-opus-5-5-{low,medium,high}
@@ -1752,7 +1753,7 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 			depth = "high"
 		}
 		if model == "" {
-			model = "gemini-4-argon"
+			model = "gemini-4-carbon"
 		}
 		subagentModel = "pro"
 	default: // "standard"
@@ -1775,8 +1776,11 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 		model = "gemini-3.8-flash"
 		depth = "low"
 		subagentModel = "flash_lite"
+	case "carbon":
+		model = "gemini-4-carbon"
+		subagentModel = "pro"
 	case "argon", "pro":
-		model = "gemini-4-argon"
+		model = "gemini-4-carbon"
 		subagentModel = "pro"
 	case "sonnet", "claude-sonnet":
 		model = "claude-sonnet-5-5"
@@ -2110,7 +2114,7 @@ func slugify(s string) string {
 
 func inferTierFromModel(model string) string {
 	m := strings.ToLower(model)
-	if strings.Contains(m, "pro") || strings.Contains(m, "argon") || strings.Contains(m, "opus") {
+	if strings.Contains(m, "pro") || strings.Contains(m, "carbon") || strings.Contains(m, "argon") || strings.Contains(m, "opus") {
 		return "deep"
 	}
 	if strings.Contains(m, "flash_lite") || strings.Contains(m, "flash-lite") || strings.Contains(m, "low") {
@@ -2612,6 +2616,9 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 }
 
 var staticModelEnumMap = map[string]string{
+	"gemini-4-carbon-high":     "MODEL_PLACEHOLDER_M420",
+	"gemini-4-carbon-medium":   "MODEL_PLACEHOLDER_M421",
+	"gemini-4-carbon-low":      "MODEL_PLACEHOLDER_M422",
 	"gemini-4-argon-high":      "MODEL_PLACEHOLDER_M417",
 	"gemini-4-argon-medium":    "MODEL_PLACEHOLDER_M418",
 	"gemini-4-argon-low":       "MODEL_PLACEHOLDER_M419",

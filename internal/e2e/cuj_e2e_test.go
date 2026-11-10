@@ -512,7 +512,7 @@ func TestCUJ4_SmartModelRoutingAndQuotaFallback(t *testing.T) {
 		},
 		{
 			prompt:    "Investigate root cause of race condition in auth architecture",
-			wantModel: "gemini-4-argon-high",
+			wantModel: "gemini-4-carbon-high",
 			wantTier:  "deep",
 			wantSub:   "pro",
 		},
@@ -1089,7 +1089,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 
 	subArtDir2 := filepath.Join(t.TempDir(), "brain-sub-456")
 	_ = os.MkdirAll(subArtDir2, 0o755)
-	ssSub2 := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-argon-high"}`, subConv2, subArtDir2)
+	ssSub2 := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-carbon-high"}`, subConv2, subArtDir2)
 	_, _ = env.run(ssSub2, "hook", "session-start")
 
 	// Front Desk calls manage_subagents Action="kill"
@@ -1465,7 +1465,7 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 		_ = json.NewEncoder(stopPayload).Encode(map[string]interface{}{
 			"conversationId":    "conv-multiline-task",
 			"executionNum":      0, // omitted by live Antigravity payload
-			"modelName":         "gemini-4-argon-high",
+			"modelName":         "gemini-4-carbon-high",
 			"lastUserInput":     multiLinePrompt,
 			"terminationReason": "NO_TOOL_CALL",
 		})
@@ -1883,7 +1883,7 @@ func TestCUJ16_TaskBoardTieredConsoleAndColdArchive(t *testing.T) {
 			Kind:           "task",
 			Scope:          "core",
 			Tier:           "deep",
-			Model:          "gemini-4-argon-high",
+			Model:          "gemini-4-carbon-high",
 			ConversationID: fmt.Sprintf("conv-act-%02d", i),
 			Status:         "active",
 			CreatedAt:      ts,

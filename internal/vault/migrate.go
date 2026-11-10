@@ -117,13 +117,13 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 		recordStep("v3_task_titles_and_console", fmt.Sprintf("Normalized %d task title(s) to [Task:<scope>] convention; cleaned legacy mobile console=%v", normalized, removedLegacy))
 	}
 
-	// Migration v3 -> v4: Seed Knowledge Wiki topic page, append Knowledge Map section to MEMORY.md, upgrade sleep-consolidate to gemini-4-argon-high, and deduplicate facts.jsonl
+	// Migration v3 -> v4: Seed Knowledge Wiki topic page, append Knowledge Map section to MEMORY.md, upgrade sleep-consolidate to gemini-4-carbon-high, and deduplicate facts.jsonl
 	if prev.Version < 4 {
 		seededTopic := ensureStarterTopicPage(vaultDir)
 		addedMap := ensureMemoryKnowledgeMapSection(vaultDir)
 		upgradedTrigger := upgradeSleepConsolidateTriggerModel(vaultDir)
 		beforeFacts, afterFacts, _ := CompactFacts(vaultDir)
-		recordStep("v4_memory_wiki_and_fact_dedup", fmt.Sprintf("Upgraded 4-layer Memory Engine (seededTopic=%v, addedKnowledgeMap=%v, sleepModelArgon=%v, compactedFacts=%d->%d)", seededTopic, addedMap, upgradedTrigger, beforeFacts, afterFacts))
+		recordStep("v4_memory_wiki_and_fact_dedup", fmt.Sprintf("Upgraded 4-layer Memory Engine (seededTopic=%v, addedKnowledgeMap=%v, sleepModelCarbon=%v, compactedFacts=%d->%d)", seededTopic, addedMap, upgradedTrigger, beforeFacts, afterFacts))
 	}
 
 	// Migration v4 -> v5: Backfill task hierarchy (kind, scope) in tasks.json and compact historical subagents/archived tasks into tasks_archive.jsonl
@@ -337,17 +337,18 @@ func upgradeSleepConsolidateTriggerModel(vaultDir string) bool {
 	if err != nil {
 		return false
 	}
-	oldBlock := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: flash\n    skill: sleep-consolidate"
-	newBlock := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: gemini-4-argon-high\n    skill: sleep-consolidate"
 	s := string(b)
-	if !strings.Contains(s, oldBlock) {
-		return false
+	newBlock := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: gemini-4-carbon-high\n    skill: sleep-consolidate"
+	for _, oldModel := range []string{"flash", "gemini-4-argon-high"} {
+		oldBlock := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: " + oldModel + "\n    skill: sleep-consolidate"
+		if strings.Contains(s, oldBlock) {
+			updated := strings.Replace(s, oldBlock, newBlock, 1)
+			if err := os.WriteFile(trigPath, []byte(updated), 0o644); err == nil {
+				return true
+			}
+		}
 	}
-	updated := strings.Replace(s, oldBlock, newBlock, 1)
-	if err := os.WriteFile(trigPath, []byte(updated), 0o644); err != nil {
-		return false
-	}
-	return true
+	return false
 }
 
 func migrateV5TaskBoardHierarchy(vaultDir string) (int, int) {

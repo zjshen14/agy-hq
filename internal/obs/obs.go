@@ -254,7 +254,7 @@ func NormalizeTier(tier, model string) string {
 		return t
 	}
 	m := strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(m, "pro") || strings.Contains(m, "argon") || strings.Contains(m, "opus") || strings.Contains(m, "sonnet") {
+	if strings.Contains(m, "pro") || strings.Contains(m, "carbon") || strings.Contains(m, "argon") || strings.Contains(m, "opus") || strings.Contains(m, "sonnet") {
 		return "deep"
 	}
 	if strings.Contains(m, "flash_lite") || strings.Contains(m, "flash-lite") || strings.HasSuffix(m, "-low") {

@@ -43,7 +43,7 @@ func TestParseTranscriptTurnsLatencyAndCheckpoint(t *testing.T) {
 	}
 	tPath := writeTranscriptFixture(t, brainDir, convID, lines)
 
-	cm, err := ParseTranscriptFile(convID, tPath, "gemini-4-argon-high", "deep")
+	cm, err := ParseTranscriptFile(convID, tPath, "gemini-4-carbon-high", "deep")
 	if err != nil {
 		t.Fatalf("ParseTranscriptFile failed: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestAnomaliesBudgetCircuitBreakerAndFrontDeskNudge(t *testing.T) {
 		Title:                "[Subagent:general] Heavy Worker [deep]",
 		Kind:                 "subagent",
 		Tier:                 "deep",
-		Model:                "gemini-4-argon-high",
+		Model:                "gemini-4-carbon-high",
 		ParentConversationID: fdID,
 		ConversationID:       subID,
 		Status:               "completed",

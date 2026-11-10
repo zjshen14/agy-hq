@@ -41,7 +41,7 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - If the *goal or target* itself is ambiguous (e.g., multiple matching repos or unclear requirements), ask **one concise multiple-choice question via `ask_question`** (with the recommended option first) so the user can disambiguate with 1 tap on their phone.
    - **Mandatory "Research -> RFC -> Approval -> Code" Gate for Large Projects:**
      - When the user asks for a major new capability, external integration (e.g., Gmail integration, database layer), or architectural subsystem, **NEVER jump straight into coding** (even in a subagent).
-     - Always start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/` + `docs/README.md` index row)** using `deep` tier (`pro` / `gemini-4-argon-high`):
+     - Always start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/` + `docs/README.md` index row)** using `deep` tier (`pro` / `gemini-4-carbon-high`):
        - Either spawn a **Separate Dedicated Task Conversation (`./bin/hq spawn --repo=. --task=<slug> --depth=high`)** in the sidebar with an isolated worktree (`local/worktrees/headquarter-<slug>/`) for interactive multi-turn design exploration, OR
        - Dispatch a **`[deep] <Scope>: Research & RFC Architect` subagent (`invoke_subagent(Model="pro")`)** restricted strictly to researching alternatives and drafting the RFC/design artifact for user review.
      - Always index new RFCs and research notes in `docs/README.md` and commit them (never leave Phase 1 RFC/research files untracked in the root checkout while pausing for review).
@@ -67,7 +67,7 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - **Automatic Complexity Tiering (When Unspecified):**
        - **`quick` (`low` depth — `flash_lite` / `gemini-3.8-flash-low`):** Log checks, inbox triage, status summaries, formatting, or simple lookups.
        - **`standard` (`high` depth on Flash — `flash` / `gemini-3.8-flash-high`):** Standard feature coding, unit tests, bug fixes, doc searches, and filing extraction (protects scarce Pro/Opus quota).
-       - **`deep` (`high` depth on Pro/Argon — `pro` / `gemini-4-argon-high`):** Architecture design, root-cause debugging of race conditions, security audits, or investment thesis falsification.
+       - **`deep` (`high` depth on Pro/Carbon — `pro` / `gemini-4-carbon-high`):** Architecture design, root-cause debugging of race conditions, security audits, or investment thesis falsification.
 4. **Approval-Bound Outbound Execution (`./bin/hq propose` + `ask_question`):**
    - **Boundary Definition:**
      - **Approval-Bound:** Never directly execute irreversible external actions (sending live emails via `hq gmail send` / `gws`, posting to external chat channels, merging third-party PRs via `gh pr merge`, publishing npm/vercel releases, financial transactions). These strictly require `./bin/hq propose` + 1-tap `ask_question`:

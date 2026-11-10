@@ -88,7 +88,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			cm.Title = "[HQ] Front Desk"
 			cm.Scope = "hq"
 			if cm.Model == "" {
-				cm.Model = "gemini-4-argon-high"
+				cm.Model = "gemini-4-carbon-high"
 			}
 			cm.Tier = NormalizeTier("deep", cm.Model)
 			cm.Status = "active"
@@ -179,7 +179,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 		if cm.Model == "" {
 			switch cm.Tier {
 			case "deep":
-				cm.Model = "gemini-4-argon-high"
+				cm.Model = "gemini-4-carbon-high"
 			case "quick":
 				cm.Model = "gemini-3.8-flash-low"
 			default:

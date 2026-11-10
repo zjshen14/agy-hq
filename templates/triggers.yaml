@@ -11,7 +11,7 @@ schedules:
     skill: thesis-check
   - id: sleep-consolidate
     cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
-    model: gemini-4-argon-high
+    model: gemini-4-carbon-high
     skill: sleep-consolidate
 
 inbox_rules:
