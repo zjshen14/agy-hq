@@ -545,6 +545,15 @@ func checkGateH4BMarkdownAndDocsIntegrity(rootDir string) (bool, string) {
 			for _, target := range targets {
 				checkedLinks++
 				resolved := filepath.Clean(filepath.Join(filepath.Dir(absPath), filepath.FromSlash(target)))
+				relTarget, rErr := filepath.Rel(rootDir, resolved)
+				if rErr == nil {
+					relSlash := filepath.ToSlash(relTarget)
+					if relSlash == ".git" || strings.HasPrefix(relSlash, ".git/") ||
+						relSlash == "local" || strings.HasPrefix(relSlash, "local/") ||
+						relSlash == "vault" || strings.HasPrefix(relSlash, "vault/") {
+						return false, fmt.Sprintf("%s:%d has relative link to untracked/private directory %q (%s)", relPath, lineNum, target, relSlash)
+					}
+				}
 				if _, statErr := os.Stat(resolved); statErr != nil {
 					return false, fmt.Sprintf("%s:%d has broken relative link target %q", relPath, lineNum, target)
 				}
