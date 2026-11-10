@@ -31,7 +31,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 |---|---|---|---|
 | [PRD-0001](product/0001-vision-and-ux.md) | **Core Product Vision & Day-in-the-Life UX** | The four user touchpoints: Mobile/Web Remote Control, Desktop + Aux Console, Drop Folder, and Sleep-Time Consolidation | Approved |
 | [PRD-0002](product/0002-open-workflows-and-skills.md) | **Open-Ended Workflows & Additive Skills** | How the agent handles any ad-hoc task out of the box (writing, coding, research, admin), boosted by progressive-disclosure `SKILL.md` skills | Approved |
-| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–16) & E2E Acceptance Criteria** | Deterministic expected behaviors across all 16 core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
+| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–18) & E2E Acceptance Criteria** | Deterministic expected behaviors across all 18 core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
 
 ---
 

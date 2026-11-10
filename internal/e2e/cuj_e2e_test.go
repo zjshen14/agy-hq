@@ -2177,12 +2177,12 @@ func TestCUJ18_CIPipelinePIIGuardAndHarnessContract(t *testing.T) {
 		t.Fatalf("hq ci check-pii failed on real repo: %v\n%s", err, piiOut)
 	}
 
-	// 2. Verify `./bin/hq ci check-harness` passes Gates H1, H2-A, H2-B, and H3 on the real repository
+	// 2. Verify `./bin/hq ci check-harness` passes Gates H1, H2-A, H2-B, H3, H4-A, and H4-B on the real repository
 	harnessOut, err := env.run("", "ci", "check-harness")
 	if err != nil {
 		t.Fatalf("hq ci check-harness failed on real repo: %v\n%s", err, harnessOut)
 	}
-	for _, gate := range []string{"[PASS] H1", "[PASS] H2-A", "[PASS] H2-B", "[PASS] H3"} {
+	for _, gate := range []string{"[PASS] H1", "[PASS] H2-A", "[PASS] H2-B", "[PASS] H3", "[PASS] H4-A", "[PASS] H4-B"} {
 		if !strings.Contains(harnessOut, gate) {
 			t.Fatalf("expected %s in check-harness output, got:\n%s", gate, harnessOut)
 		}
@@ -2211,17 +2211,37 @@ func TestCUJ18_CIPipelinePIIGuardAndHarnessContract(t *testing.T) {
 		t.Fatalf("hq ci install-hooks failed: %v\n%s", err, hookOut)
 	}
 
-	// Stage a clean file -> `hq ci pre-commit` passes
-	_ = os.WriteFile(filepath.Join(isolatedRepo, "clean.go"), []byte("package main\nconst email = \"alice@example.com\"\n"), 0o644)
-	runGit("add", "clean.go", ".gitignore")
+	// Stage a clean Go file and valid Markdown file -> `hq ci pre-commit` passes
+	_ = os.WriteFile(filepath.Join(isolatedRepo, "clean.go"), []byte("package main\n\nconst email = \"alice@example.com\"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(isolatedRepo, "README.md"), []byte("# Clean Repo\n\n```go\npackage main\n```\n"), 0o644)
+	runGit("add", "clean.go", "README.md", ".gitignore")
 	if preOut, err := env.run("", "ci", "pre-commit"); err != nil {
 		t.Fatalf("expected clean staged diff to pass hq ci pre-commit: %v (%s)", err, preOut)
 	}
+	runGit("commit", "-m", "initial clean commit")
+
+	// Stage an unformatted Go file -> `hq ci pre-commit` fails deterministically
+	_ = os.WriteFile(filepath.Join(isolatedRepo, "clean.go"), []byte("package main\nfunc   badFmt( )  { }\n"), 0o644)
+	runGit("add", "clean.go")
+	badGoOut, err := env.run("", "ci", "pre-commit")
+	if err == nil || !strings.Contains(badGoOut, "Go formatting check failed") {
+		t.Fatalf("expected unformatted Go file to fail hq ci pre-commit, got:\n%s (%v)", badGoOut, err)
+	}
+	runGit("checkout", "HEAD", "--", "clean.go")
+
+	// Stage a Markdown file with a broken relative link -> `hq ci pre-commit` fails deterministically
+	_ = os.WriteFile(filepath.Join(isolatedRepo, "README.md"), []byte("# Broken Doc\n\nSee [missing RFC](docs/design/9999-missing.md).\n"), 0o644)
+	runGit("add", "README.md")
+	badMdOut, err := env.run("", "ci", "pre-commit")
+	if err == nil || !strings.Contains(badMdOut, "broken relative link target") {
+		t.Fatalf("expected broken Markdown link to fail hq ci pre-commit, got:\n%s (%v)", badMdOut, err)
+	}
+	runGit("checkout", "HEAD", "--", "README.md")
 
 	// Stage a file with a leaked personal email and OAuth token -> `hq ci pre-commit` fails deterministically
 	tokPrefix := "ya" + "29"
 	emailDom := "g" + "mail.com"
-	leakedContent := fmt.Sprintf("package main\nconst tok = \"%s.a0AfH6SMBx1234567890abcdefghijklmnop\"\nconst who = \"leaked.personal@%s\"\n", tokPrefix, emailDom)
+	leakedContent := fmt.Sprintf("package main\n\nconst tok = \"%s.a0AfH6SMBx1234567890abcdefghijklmnop\"\nconst who = \"leaked.personal@%s\"\n", tokPrefix, emailDom)
 	_ = os.WriteFile(filepath.Join(isolatedRepo, "leaked.go"), []byte(leakedContent), 0o644)
 	runGit("add", "leaked.go")
 	badPreOut, err := env.run("", "ci", "pre-commit")

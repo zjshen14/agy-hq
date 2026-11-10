@@ -142,6 +142,10 @@ Scans every `.agents/plugins/agy-hq/skills/<slug>/SKILL.md` and verifies:
 2. **Inbox Drop Classifier (`kernel.ClassifyInboxFile`):** Verifies `statement.csv` / `bank.ofx` $\rightarrow$ `ledger-ingest`, `2026-W2.pdf` / `1099-INT.pdf` $\rightarrow$ `tax-prep`, `NVDA-10-Q.pdf` / `earnings-8-k.html` $\rightarrow$ `thesis-check`, `receipt.png` $\rightarrow$ `inbox-triage`.
 3. **Trigger & Template Integrity (`templates/triggers.yaml`):** Parses `templates/triggers.yaml` via `kernel.LoadTriggers` and verifies every declared schedule has a valid 5-field cron expression (`s.FiveFieldCron()`) and maps to an existing skill file `.agents/plugins/agy-hq/skills/<s.Skill>/SKILL.md`.
 
+### 5.4 Gate H4: Go Formatting / Zero-Dep Module Contract (`H4-A`) & Markdown / Docs Index Integrity (`H4-B`)
+1. **Gate H4-A (`checkGateH4AGoContract`):** Verifies that `go.mod` declares `module github.com/zjshen14/agy-hq`, contains **zero** external `require` directives (enforcing [ADR-0002](../decisions/0002-go-microkernel-binary.md) pure Go stdlib microkernel), has no `go.sum`, and that all `.go` files under `cmd/` and `internal/` pass `gofmt -s -l`.
+2. **Gate H4-B (`checkGateH4BMarkdownAndDocsIntegrity`):** Scans every tracked `.md` file in the repository to verify: (a) balanced fenced code blocks (` ``` ` / ` ```` ` / `~~~`), (b) zero git merge conflict markers (`<<<<<<<` / `>>>>>>>`), (c) valid relative links and HTML `<img src="...">` targets on disk, and (d) 100% index coverage of `docs/{design,product,decisions,research}/*.md` inside [docs/README.md](../README.md).
+
 ---
 
 ## 6. Workflow Triggers, Job Topologies, Caching & Developer Experience

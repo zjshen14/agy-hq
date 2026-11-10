@@ -132,6 +132,14 @@ func TestCheckHarness_RealRepositoryAndMutations(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(badRoot, "templates", "triggers.yaml"),
 		[]byte("schedules:\n  - id: test-job\n    cron: \"30 7 * * *\"\n    skill: non-existent-skill\n"), 0o644)
 
+	// Write go.mod with a forbidden external require directive -> triggers H4-A
+	_ = os.WriteFile(filepath.Join(badRoot, "go.mod"),
+		[]byte("module github.com/zjshen14/agy-hq\n\ngo 1.25.0\n\nrequire github.com/pkg/errors v0.9.1\n"), 0o644)
+
+	// Write a Markdown file with a broken relative link -> triggers H4-B
+	_ = os.WriteFile(filepath.Join(badRoot, "README.md"),
+		[]byte("# Test\nSee [missing doc](docs/does-not-exist.md).\n"), 0o644)
+
 	badResults, badOK := CheckHarness(badRoot)
 	if badOK {
 		t.Fatalf("expected CheckHarness to fail on mutated badRoot, got pass")
@@ -142,7 +150,7 @@ func TestCheckHarness_RealRepositoryAndMutations(t *testing.T) {
 			failedGates[r.Gate] = true
 		}
 	}
-	for _, wantFail := range []string{"H1", "H2-A", "H3"} {
+	for _, wantFail := range []string{"H1", "H2-A", "H3", "H4-A", "H4-B"} {
 		if !failedGates[wantFail] {
 			t.Errorf("expected gate %s to fail on mutated workspace, got results: %+v", wantFail, badResults)
 		}

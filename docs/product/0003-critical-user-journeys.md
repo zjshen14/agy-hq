@@ -24,6 +24,9 @@
 | **CUJ-13** | Front Desk Init Hardening & Trigger Arming | `hq init`, `hq hook session-start`, `hq hook pre-tool` | `TestCUJ13_FrontDeskInitHardeningAndTriggerArming` |
 | **CUJ-14** | Decoupled Native Gmail Infrastructure & Workflows | `hq gmail`, `local/memory/gmail/` | `TestCUJ14_GmailLayer1AndLayer2Lifecycle` |
 | **CUJ-15** | 4-Layer Memory Engine & Dreaming Verification | `hq memory`, `local/memory/topics/`, `local/memory/facts.jsonl` | `TestCUJ15_MemoryEngineUpgradeAndDreamingVerification` |
+| **CUJ-16** | Google Chat Integration, Quarantine Lockdown & Approval-Bound Send | `hq gchat`, `local/memory/gchat/` | `TestCUJ16_GoogleChatQuarantineAndApproval` |
+| **CUJ-17** | Bounded Agent Recursive Self-Improvement (RSI) | `hq rsi`, `internal/rsi` | `TestCUJ17_AgentRSIMiningVerificationAndApproval` |
+| **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
 
 ---
 
@@ -149,3 +152,24 @@
 1. **Four-Layer Hierarchy:** Separates memory into (1) Injected Context / Roadmap Index (`local/MEMORY.md`), (2) Knowledge Wiki / Topic Pages (`local/memory/topics/*.md`), (3) Bi-temporal Facts (`local/memory/facts.jsonl`), and (4) Immutable Raw Transcripts (`transcript.jsonl`).
 2. **CLI Fact Management:** `hq memory add-fact` adds atomic facts with provenance; `hq memory prune-fact` soft-prunes or supersedes facts with timestamps; `hq memory topics` indexes topic wiki pages.
 3. **Ground-Truth Dreaming Verification:** `hq memory verify-transcript` audits claims against session transcripts, preventing hallucinated milestones or false bug-fix memories from polluting long-term memory.
+
+---
+
+## CUJ-16: Google Chat Integration, Quarantine Lockdown & Approval-Bound Send
+1. **Hybrid Transport & Fuzzy Space Resolution (`hq gchat`):** Supports Workspace `oauth` and personal `@gmail.com` `cdp` + `gmail-bridge` transports with fuzzy display-name/email resolution across spaces and DMs.
+2. **Quarantined Reader (`hq gchat read-quarantined`):** Strips HTML/scripts and taints the reading conversation (`conv-gchat-reader`), blocking outbound network tools and private Vault reads.
+3. **1-Step Outbound Staging (`hq gchat propose`):** Stages outbound Chat messages as SHA-256-bound `gchat_send` proposals requiring 1-tap `ask_question` approval before `hq approve` dispatches the message.
+
+---
+
+## CUJ-17: Bounded Agent Recursive Self-Improvement (RSI)
+1. **0-Token Friction Trace Mining (`hq rsi mine`):** Scans `local/memory/journal/` and `interventions.jsonl` to cluster recurring tool errors, hook denials, and user corrections.
+2. **4-Gate Sandboxed Verification (`hq rsi run`):** Synthesizes bounded `<!-- rsi:rule -->` deltas and verifies them against Gate 1 (Ring 0 TCB AST & token budget), Gate 2 (counterfactual trace replay), Gate 3 (`go vet` + unit tests), and Gate 4 (CUJ E2E suite).
+3. **1-Tap Approval & Canary Rollback (`hq approve` / `hq rsi rollback`):** Stages verified patches via `hq propose --type=rsi_patch`, injects the canonical scorecard into `ask_question`, applies on `hq approve`, and supports automatic canary rollback on post-merge friction regression.
+
+---
+
+## CUJ-18: Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate
+1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 5 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist) across both staged diffs (`--staged`) and the full tracked tree.
+2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B (`.agents/hooks.json` == `.agents/plugins/agy-hq/hooks.json` byte parity + 18-probe `PreToolUse` security/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
+3. **Local Git Hook Enforcement (`hq ci install-hooks` / `pre-commit` / `pre-push`):** Automatically installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` and rejects commits containing leaked PII/credentials, unformatted Go files, or broken Markdown links before they leave the developer workstation.

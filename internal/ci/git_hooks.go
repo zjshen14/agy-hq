@@ -112,7 +112,8 @@ func CheckGitHooksInstalled(rootDir string) (bool, string) {
 	return true, "pre-commit & pre-push installed and executable (.git/hooks/)"
 }
 
-// RunPreCommit executes the fast (<150ms) staged PII scan and hooks.json parity check.
+// RunPreCommit executes the fast (<150ms) staged PII scan, hooks.json parity check,
+// and Go formatting / Markdown integrity checks on staged files.
 func RunPreCommit(rootDir string) error {
 	violations, err := CheckPII(rootDir, true)
 	if err != nil {
@@ -130,6 +131,35 @@ func RunPreCommit(rootDir string) error {
 	if _, err := os.Stat(filepath.Join(rootDir, ".agents", "hooks.json")); err == nil {
 		if ok, detail := checkGateH2HooksJSONParity(rootDir); !ok {
 			return fmt.Errorf("pre-commit hook parity check failed: %s", detail)
+		}
+	}
+
+	// Check staged .go files with `gofmt -s` and staged .md files for Markdown/Docs integrity
+	namesOut, sErr := gitOutput(rootDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	if sErr == nil && strings.TrimSpace(namesOut) != "" {
+		var stagedGo []string
+		hasMd := false
+		for _, f := range strings.Split(namesOut, "\n") {
+			f = strings.TrimSpace(filepath.ToSlash(f))
+			if f == "" {
+				continue
+			}
+			if strings.HasSuffix(f, ".go") {
+				stagedGo = append(stagedGo, f)
+			}
+			if strings.HasSuffix(strings.ToLower(f), ".md") {
+				hasMd = true
+			}
+		}
+		if len(stagedGo) > 0 {
+			if ok, detail := CheckGoFormatting(rootDir, stagedGo...); !ok {
+				return fmt.Errorf("pre-commit Go formatting check failed: %s", detail)
+			}
+		}
+		if hasMd {
+			if ok, detail := checkGateH4BMarkdownAndDocsIntegrity(rootDir); !ok {
+				return fmt.Errorf("pre-commit Markdown & Docs integrity check failed: %s", detail)
+			}
 		}
 	}
 	return nil

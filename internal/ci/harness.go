@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -57,6 +60,14 @@ func CheckHarness(rootDir string) ([]HarnessCheckResult, bool) {
 	// Gate H3: Model Routing, Inbox Classification & Proactive Trigger Matrix
 	h3RouteOK, h3RouteDetail := checkGateH3RoutingAndTriggers(rootDir)
 	add("H3", "Model Routing, Inbox Classifier & Trigger Integrity", h3RouteOK, h3RouteDetail)
+
+	// Gate H4-A: Go Formatting (gofmt -s) & Pure-Stdlib Module Contract (ADR-0002)
+	h4aOK, h4aDetail := checkGateH4AGoContract(rootDir)
+	add("H4-A", "Go Formatting (gofmt -s) & Zero-Dep Module Contract", h4aOK, h4aDetail)
+
+	// Gate H4-B: Markdown Syntax, Relative Links & Docs Hub Index Integrity
+	h4bOK, h4bDetail := checkGateH4BMarkdownAndDocsIntegrity(rootDir)
+	add("H4-B", "Markdown Code Fences, Relative Links & Docs Index", h4bOK, h4bDetail)
 
 	return results, allOK
 }
@@ -402,4 +413,280 @@ func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {
 	}
 
 	return true, fmt.Sprintf("%d routing cases, %d inbox rules, and %d proactive trigger schedules verified", len(routingCases), len(inboxCases), len(cfg.Schedules))
+}
+
+// CheckGoFormatting runs `gofmt -s -l` on the provided paths (or cmd/ and internal/ in rootDir if paths is empty).
+func CheckGoFormatting(rootDir string, relPaths ...string) (bool, string) {
+	if _, err := exec.LookPath("gofmt"); err != nil {
+		return true, "gofmt not in PATH (skipped)"
+	}
+	var targets []string
+	if len(relPaths) > 0 {
+		for _, p := range relPaths {
+			if strings.HasSuffix(p, ".go") {
+				abs := filepath.Join(rootDir, filepath.FromSlash(p))
+				if st, err := os.Stat(abs); err == nil && !st.IsDir() {
+					targets = append(targets, p)
+				}
+			}
+		}
+	} else {
+		for _, dir := range []string{"cmd", "internal"} {
+			if st, err := os.Stat(filepath.Join(rootDir, dir)); err == nil && st.IsDir() {
+				targets = append(targets, dir)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return true, "0 Go targets to format-check"
+	}
+
+	args := append([]string{"-s", "-l"}, targets...)
+	cmd := exec.Command("gofmt", args...)
+	cmd.Dir = rootDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Sprintf("gofmt -s -l failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	unformatted := strings.TrimSpace(string(out))
+	if unformatted != "" {
+		files := strings.Join(strings.Fields(unformatted), ", ")
+		return false, fmt.Sprintf("Go file(s) not formatted with 'gofmt -s': %s", files)
+	}
+	return true, fmt.Sprintf("gofmt -s clean across %s", strings.Join(targets, ", "))
+}
+
+func checkGateH4AGoContract(rootDir string) (bool, string) {
+	goModPath := filepath.Join(rootDir, "go.mod")
+	modBytes, err := os.ReadFile(goModPath)
+	if err != nil {
+		return false, fmt.Sprintf("missing go.mod: %v", err)
+	}
+	modContent := string(modBytes)
+	if !strings.Contains(modContent, "module github.com/zjshen14/agy-hq") {
+		return false, "go.mod must declare 'module github.com/zjshen14/agy-hq'"
+	}
+	for _, line := range strings.Split(modContent, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "require ") || strings.HasPrefix(trimmed, "require(") {
+			return false, "go.mod contains external 'require' directive (violates ADR-0002 zero-external-dependency Go stdlib microkernel contract)"
+		}
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, "go.sum")); err == nil {
+		return false, "unexpected go.sum present in rootDir (agy-hq must remain a zero-dependency stdlib module)"
+	}
+
+	ok, detail := CheckGoFormatting(rootDir)
+	if !ok {
+		return false, detail
+	}
+	return true, fmt.Sprintf("go.mod pure-stdlib verified (0 external deps) & %s", detail)
+}
+
+var (
+	reInlineCodeSpan = regexp.MustCompile("`+[^`]*`+")
+	reMarkdownLink   = regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`)
+	reHTMLImgSrc     = regexp.MustCompile(`<img[^>]+src="([^"]+)"`)
+)
+
+func checkGateH4BMarkdownAndDocsIntegrity(rootDir string) (bool, string) {
+	mdFiles, err := listMarkdownFiles(rootDir)
+	if err != nil {
+		return false, fmt.Sprintf("discover markdown files: %v", err)
+	}
+	if len(mdFiles) == 0 {
+		return false, "no tracked Markdown (.md) files found in repository"
+	}
+
+	checkedLinks := 0
+	for _, relPath := range mdFiles {
+		absPath := filepath.Join(rootDir, filepath.FromSlash(relPath))
+		rawBytes, err := os.ReadFile(absPath)
+		if err != nil {
+			return false, fmt.Sprintf("read %s: %v", relPath, err)
+		}
+		lines := strings.Split(string(rawBytes), "\n")
+		inFence := false
+		fenceChar := byte(0)
+		fenceLen := 0
+
+		for lineIdx, line := range lines {
+			lineNum := lineIdx + 1
+			trimmed := strings.TrimLeft(line, " \t>")
+			if mChar, mLen := parseFencePrefix(trimmed); mLen >= 3 {
+				if !inFence {
+					inFence = true
+					fenceChar = mChar
+					fenceLen = mLen
+					continue
+				} else if mChar == fenceChar && mLen >= fenceLen && strings.TrimSpace(trimmed[mLen:]) == "" {
+					inFence = false
+					fenceChar = 0
+					fenceLen = 0
+					continue
+				}
+			}
+
+			if inFence {
+				continue
+			}
+
+			// 1. Check for git merge conflict markers outside code blocks
+			if strings.HasPrefix(line, "<<<<<<< ") || strings.HasPrefix(line, ">>>>>>> ") {
+				return false, fmt.Sprintf("%s:%d contains unresolved git merge conflict marker", relPath, lineNum)
+			}
+
+			// 2. Strip inline backtick code spans before extracting Markdown links and HTML <img> tags
+			scrubbed := reInlineCodeSpan.ReplaceAllString(line, "")
+			targets := extractRelativeLinkTargets(scrubbed)
+			for _, target := range targets {
+				checkedLinks++
+				resolved := filepath.Clean(filepath.Join(filepath.Dir(absPath), filepath.FromSlash(target)))
+				if _, statErr := os.Stat(resolved); statErr != nil {
+					return false, fmt.Sprintf("%s:%d has broken relative link target %q", relPath, lineNum, target)
+				}
+			}
+		}
+
+		if inFence {
+			return false, fmt.Sprintf("%s has an unclosed fenced code block (opened with %d %q characters)", relPath, fenceLen, fenceChar)
+		}
+	}
+
+	// 3. Enforce docs/README.md Documentation Hub Index completeness across design/, product/, decisions/, research/
+	docsDir := filepath.Join(rootDir, "docs")
+	indexedCount := 0
+	if st, err := os.Stat(docsDir); err == nil && st.IsDir() {
+		docsReadmeBytes, err := os.ReadFile(filepath.Join(docsDir, "README.md"))
+		if err != nil {
+			return false, "missing docs/README.md index file"
+		}
+		docsReadme := string(docsReadmeBytes)
+		for _, sub := range []string{"design", "product", "decisions", "research"} {
+			subDir := filepath.Join(docsDir, sub)
+			entries, err := os.ReadDir(subDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+					continue
+				}
+				relToDocs := sub + "/" + e.Name()
+				if !strings.Contains(docsReadme, relToDocs) {
+					return false, fmt.Sprintf("docs/%s is not indexed in docs/README.md (violates AGENTS.md documentation index rule)", relToDocs)
+				}
+				indexedCount++
+			}
+		}
+	}
+
+	return true, fmt.Sprintf("%d Markdown files, %d relative links, and %d docs/README.md index entries verified", len(mdFiles), checkedLinks, indexedCount)
+}
+
+func parseFencePrefix(s string) (byte, int) {
+	if len(s) < 3 {
+		return 0, 0
+	}
+	ch := s[0]
+	if ch != '`' && ch != '~' {
+		return 0, 0
+	}
+	n := 0
+	for n < len(s) && s[n] == ch {
+		n++
+	}
+	return ch, n
+}
+
+func extractRelativeLinkTargets(line string) []string {
+	var out []string
+	collect := func(raw string) {
+		t := strings.TrimSpace(raw)
+		// Strip optional Markdown link title: (path/to/file.md "Title")
+		if idx := strings.IndexAny(t, " \t"); idx > 0 {
+			t = t[:idx]
+		}
+		t = strings.Trim(t, "<>")
+		if idx := strings.IndexByte(t, '#'); idx >= 0 {
+			t = t[:idx]
+		}
+		if idx := strings.IndexByte(t, '?'); idx >= 0 {
+			t = t[:idx]
+		}
+		t = strings.TrimSpace(t)
+		if t == "" {
+			return
+		}
+		lower := strings.ToLower(t)
+		if strings.Contains(lower, "://") ||
+			strings.HasPrefix(lower, "mailto:") ||
+			strings.HasPrefix(lower, "javascript:") ||
+			strings.HasPrefix(lower, "data:") ||
+			strings.HasPrefix(lower, "/") {
+			return
+		}
+		out = append(out, t)
+	}
+
+	for _, m := range reMarkdownLink.FindAllStringSubmatch(line, -1) {
+		if len(m) > 1 {
+			collect(m[1])
+		}
+	}
+	for _, m := range reHTMLImgSrc.FindAllStringSubmatch(line, -1) {
+		if len(m) > 1 {
+			collect(m[1])
+		}
+	}
+	return out
+}
+
+func listMarkdownFiles(rootDir string) ([]string, error) {
+	if st, err := os.Stat(filepath.Join(rootDir, ".git")); err == nil && st.IsDir() {
+		cmd := exec.Command("git", "ls-files", "*.md")
+		cmd.Dir = rootDir
+		if out, gErr := cmd.Output(); gErr == nil {
+			var files []string
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				if _, sErr := os.Stat(filepath.Join(rootDir, filepath.FromSlash(line))); sErr == nil {
+					files = append(files, filepath.ToSlash(line))
+				}
+			}
+			if len(files) > 0 {
+				return files, nil
+			}
+		}
+	}
+
+	var files []string
+	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rErr := filepath.Rel(rootDir, path)
+		if rErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			switch rel {
+			case ".git", "local", "vault", "bin", "dist":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(strings.ToLower(rel), ".md") {
+			files = append(files, rel)
+		}
+		return nil
+	})
+	return files, err
 }
