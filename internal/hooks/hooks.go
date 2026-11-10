@@ -126,7 +126,44 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var sections []string
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
-		isFrontDesk := !ok || existing.ConversationID == payload.ConversationID
+
+		isSubagent := kernel.IsSubagentConversation(vaultDir, payload.ConversationID)
+		if !isSubagent {
+			if _, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); !alreadyTracked {
+				if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
+					// Known nested descendant subagent: do NOT register into tasks.json!
+					isSubagent = true
+				} else if nestedSub, isNested := kernel.PopPendingNestedSubagent(vaultDir, 60*time.Minute); isNested {
+					_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
+					// Nested descendant subagent: do NOT register into tasks.json!
+					isSubagent = true
+				} else if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
+					isSubagent = true
+					modelName := sub.Model
+					if modelName == "" {
+						modelName = payload.ModelName
+					}
+					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+						TaskSlug:             sub.TaskSlug,
+						Title:                sub.Title,
+						Kind:                 "subagent",
+						Scope:                sub.Scope,
+						ParentConversationID: sub.ParentConversationID,
+						Tier:                 sub.Tier,
+						Model:                modelName,
+						ConversationID:       payload.ConversationID,
+						Status:               "active",
+						LastSummary:          "Running in background...",
+						CreatedAt:            time.Now().Format(time.RFC3339),
+						LastUpdatedAt:        time.Now().Format(time.RFC3339),
+					})
+				} else {
+					_, _ = kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName)
+				}
+			}
+		}
+
+		isFrontDesk := !isSubagent && (!ok || existing.ConversationID == payload.ConversationID)
 
 		if isFrontDesk {
 			turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
@@ -209,43 +246,14 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				sections = append(sections, nudgeBanner)
 			}
 		} else {
-			// Subagent or secondary conversation: check if already tracked or waiting in pending queue / spawn list
-			_, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID)
-			if !alreadyTracked {
-				if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
-					// Known nested descendant subagent: do NOT register into tasks.json!
-				} else if nestedSub, isNested := kernel.PopPendingNestedSubagent(vaultDir, 60*time.Minute); isNested {
-					_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
-					// Nested descendant subagent: do NOT register into tasks.json!
-				} else if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
-					modelName := sub.Model
-					if modelName == "" {
-						modelName = payload.ModelName
-					}
-					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-						TaskSlug:             sub.TaskSlug,
-						Title:                sub.Title,
-						Kind:                 "subagent",
-						Scope:                sub.Scope,
-						ParentConversationID: sub.ParentConversationID,
-						Tier:                 sub.Tier,
-						Model:                modelName,
-						ConversationID:       payload.ConversationID,
-						Status:               "active",
-						LastSummary:          "Running in background...",
-						CreatedAt:            time.Now().Format(time.RFC3339),
-						LastUpdatedAt:        time.Now().Format(time.RFC3339),
-					})
-				} else {
-					_, _ = kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName)
-				}
+			// Subagent or secondary conversation: never inject Front Desk notice or claim-desk instructions for subagents
+			if !isSubagent && existing.ConversationID != "" {
+				sections = append(sections, fmt.Sprintf(
+					"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.\n- **Tip:** %s",
+					existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
+					kernel.FrontDeskPinTip,
+				))
 			}
-
-			sections = append(sections, fmt.Sprintf(
-				"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.\n- **Tip:** %s",
-				existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
-				kernel.FrontDeskPinTip,
-			))
 		}
 	} else if payload.ArtifactDirectoryPath != "" {
 		if _, ok := kernel.GetFrontDesk(vaultDir); !ok {
@@ -386,6 +394,7 @@ var (
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail|gchat)\s+read-quarantined\b`)
+	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\./)?bin/hq|hq)\s+claim-desk\b`)
 )
 
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
@@ -399,6 +408,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 
 	if payload.ToolCall.Name == "run_command" {
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+		if reHQClaimDesk.MatchString(cmdLine) && kernel.IsSubagentConversation(vaultDir, payload.ConversationID) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by Front Desk Lease Subagent Invariant: subagents are ephemeral worker processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).",
+			})
+		}
 		checkLine := cmdLine
 		if reHQPropose.MatchString(cmdLine) {
 			checkLine = reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)

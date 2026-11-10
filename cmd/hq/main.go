@@ -450,6 +450,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: hq claim-desk --conv=<conversation-id> [--artifact-dir=...]")
 			os.Exit(1)
 		}
+		if kernel.IsSubagentConversation(vaultDir, *convID) {
+			fmt.Fprintln(os.Stderr, "error: cannot claim Front Desk lease for a child subagent")
+			os.Exit(1)
+		}
+		currentConv := vault.ResolveConversationID()
+		if currentConv != "" && kernel.IsSubagentConversation(vaultDir, currentConv) {
+			fmt.Fprintln(os.Stderr, "error: cannot claim Front Desk lease for a child subagent")
+			os.Exit(1)
+		}
 		if *artDir == "" {
 			*artDir = vault.ResolveArtifactDir(*convID)
 		}

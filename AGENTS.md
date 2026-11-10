@@ -26,6 +26,7 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
        2. Top-level dedicated Task Conversations (`./bin/hq spawn --task=<slug>`) spawned to tackle complex initiatives.
        3. Automated proactive daemon triggers (`kind: auto`).
      - Nested child subagents created by a subagent or secondary task conversation to handle complex sub-problems are NOT tasks. They are ephemeral child processes: they must NOT be added to `tasks.json`, must NOT appear on the Task Board, and must NOT increment or consume the top-level task spawn quota.
+   - **Front Desk Lease Subagent Invariant:** Subagents are ephemeral worker processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (`claim-desk` is strictly prohibited for subagents).
    - **Mechanical Non-Blocking Front Desk Guardrails (Hook Enforced):**
      - The Front Desk thread is mechanically enforced by `PreToolUse` hooks: direct source/worktree file edits (`edit_file`/`write_file`) and build/test suites (`run_command` with `go test`, `npm test`, etc.) are hard-blocked on this thread, and inline lookup tools (`read_file`, `grep_search`, `find_by_name`, shell lookups) are capped at **3 tool calls per turn**.
      - Never block the Front Desk thread with inline coding, debugging, test runs, or open-ended research.

@@ -1015,6 +1015,18 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session-start subagent: %v (%s)", err, subSSOut)
 	}
+	if strings.Contains(subSSOut, "Front Desk Notice") || strings.Contains(subSSOut, "claim-desk") {
+		t.Fatalf("regression: subagent received Front Desk Notice or claim-desk in SessionStart:\n%s", subSSOut)
+	}
+
+	// Verify claim-desk fails immediately if attempted by a subagent
+	claimSubOut, err := env.run("", "claim-desk", "--conv="+subConv)
+	if err == nil {
+		t.Fatalf("expected claim-desk for subagent %s to fail, but succeeded:\n%s", subConv, claimSubOut)
+	}
+	if !strings.Contains(claimSubOut, "error: cannot claim Front Desk lease for a child subagent") {
+		t.Fatalf("expected error: cannot claim Front Desk lease for a child subagent, got:\n%s", claimSubOut)
+	}
 
 	// Verify tasks.json has conv-sub-123 registered with clean role & active status
 	tasks, err := kernel.ListTasks(env.vaultDir)
@@ -1127,8 +1139,21 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	childArtDir := filepath.Join(t.TempDir(), "brain-child-789")
 	_ = os.MkdirAll(childArtDir, 0o755)
 	ssChild := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-low"}`, nestedConv, childArtDir)
-	if _, err := env.run(ssChild, "hook", "session-start"); err != nil {
+	childSSOut, err := env.run(ssChild, "hook", "session-start")
+	if err != nil {
 		t.Fatalf("child session-start failed: %v", err)
+	}
+	if strings.Contains(childSSOut, "Front Desk Notice") || strings.Contains(childSSOut, "claim-desk") {
+		t.Fatalf("regression: nested child subagent received Front Desk Notice or claim-desk in SessionStart:\n%s", childSSOut)
+	}
+
+	// Verify claim-desk fails for nested subagent as well
+	claimChildOut, err := env.run("", "claim-desk", "--conv="+nestedConv)
+	if err == nil {
+		t.Fatalf("expected claim-desk for nested subagent %s to fail, but succeeded:\n%s", nestedConv, claimChildOut)
+	}
+	if !strings.Contains(claimChildOut, "error: cannot claim Front Desk lease for a child subagent") {
+		t.Fatalf("expected error: cannot claim Front Desk lease for a child subagent, got:\n%s", claimChildOut)
 	}
 
 	// Verify tasks.json DOES NOT contain conv-sub-child-789!

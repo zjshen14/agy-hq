@@ -1438,6 +1438,9 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if convID == "" {
 		return nil
 	}
+	if IsSubagentConversation(vaultDir, convID) {
+		return fmt.Errorf("cannot claim Front Desk lease for a child subagent")
+	}
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
 		return err
 	}
@@ -2463,6 +2466,27 @@ func IsNestedSubagentConversation(vaultDir, convID string) bool {
 	m, err := loadNestedConversations(vaultDir)
 	if err == nil && m != nil {
 		if _, ok := m[convID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSubagentConversation returns true if convID belongs to an ephemeral child subagent
+// (Layer-1 subagent or nested descendant subagent), and should never be treated as a Front Desk conversation.
+func IsSubagentConversation(vaultDir, convID string) bool {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return false
+	}
+	if IsNestedSubagentConversation(vaultDir, convID) {
+		return true
+	}
+	if task, _, found := FindTaskAnywhere(vaultDir, convID); found {
+		if strings.EqualFold(task.Kind, "subagent") || task.EffectiveKind() == "subagent" ||
+			task.ParentConversationID != "" ||
+			strings.HasPrefix(task.TaskSlug, "subagent-") ||
+			strings.HasPrefix(task.Title, "[Subagent:") {
 			return true
 		}
 	}

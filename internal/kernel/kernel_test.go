@@ -458,3 +458,61 @@ func TestCleanNestedTasks(t *testing.T) {
 		t.Fatalf("expected cold archive to have sub-nested-child, got count=%d, list=%+v", coldCount, cold)
 	}
 }
+
+func TestIsSubagentConversationAndSetFrontDeskGuard(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	// 1. Unregistered conversation is NOT a subagent
+	if IsSubagentConversation(vaultDir, "conv-user-1") {
+		t.Fatalf("expected conv-user-1 to NOT be a subagent")
+	}
+
+	// 2. Normal task is NOT a subagent
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "headquarter-normal-task",
+		Title:          "[Task:headquarter] Normal Task",
+		Kind:           "task",
+		ConversationID: "conv-task-1",
+		Status:         "active",
+	})
+	if IsSubagentConversation(vaultDir, "conv-task-1") {
+		t.Fatalf("expected conv-task-1 to NOT be a subagent")
+	}
+
+	// 3. Layer-1 subagent in tasks.json IS a subagent
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:             "subagent-agy-hq-fixer",
+		Title:                "[Subagent:agy-hq] Fixer [standard]",
+		Kind:                 "subagent",
+		ParentConversationID: "conv-desk-1",
+		ConversationID:       "conv-sub-1",
+		Status:               "active",
+	})
+	if !IsSubagentConversation(vaultDir, "conv-sub-1") {
+		t.Fatalf("expected conv-sub-1 to be recognized as a subagent")
+	}
+
+	// 4. Nested subagent in nested_conversations.json IS a subagent
+	_ = RecordNestedConversation(vaultDir, "conv-nested-sub-2", "conv-sub-1")
+	if !IsSubagentConversation(vaultDir, "conv-nested-sub-2") {
+		t.Fatalf("expected conv-nested-sub-2 to be recognized as a subagent")
+	}
+
+	// 5. SetFrontDesk must reject child subagents
+	if err := SetFrontDesk(vaultDir, "conv-sub-1", ""); err == nil {
+		t.Fatalf("expected SetFrontDesk for conv-sub-1 to fail, got nil")
+	} else if !strings.Contains(err.Error(), "cannot claim Front Desk lease for a child subagent") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := SetFrontDesk(vaultDir, "conv-nested-sub-2", ""); err == nil {
+		t.Fatalf("expected SetFrontDesk for conv-nested-sub-2 to fail, got nil")
+	} else if !strings.Contains(err.Error(), "cannot claim Front Desk lease for a child subagent") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 6. Normal conversation CAN claim Front Desk lease
+	if err := SetFrontDesk(vaultDir, "conv-desk-1", ""); err != nil {
+		t.Fatalf("expected SetFrontDesk for conv-desk-1 to succeed, got %v", err)
+	}
+}

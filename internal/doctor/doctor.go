@@ -148,11 +148,19 @@ func Run(vaultDir string) []CheckResult {
 			}
 		}
 	} else if convID := vault.ResolveConversationID(); convID != "" {
-		results = append(results, CheckResult{
-			Name:   "Front Desk Intake Lease",
-			Status: "WARN",
-			Detail: fmt.Sprintf("Vacant while in active conversation %s; run './bin/hq claim-desk --conv=%s'", convID, convID),
-		})
+		if !kernel.IsSubagentConversation(vaultDir, convID) {
+			results = append(results, CheckResult{
+				Name:   "Front Desk Intake Lease",
+				Status: "WARN",
+				Detail: fmt.Sprintf("Vacant while in active conversation %s; run './bin/hq claim-desk --conv=%s'", convID, convID),
+			})
+		} else {
+			results = append(results, CheckResult{
+				Name:   "Front Desk Intake Lease",
+				Status: "PASS",
+				Detail: "Vacant (subagent active; will auto-claim on Turn 1 of next Front Desk conversation)",
+			})
+		}
 	} else {
 		results = append(results, CheckResult{
 			Name:   "Front Desk Intake Lease",

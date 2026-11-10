@@ -11,6 +11,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
 func TestHandleSessionStartAndPreToolUseAndStop(t *testing.T) {
@@ -211,5 +212,48 @@ func TestCrossMidnightPriorJournalStepsAndDuplicateStopGuard(t *testing.T) {
 	}
 	if saved.TurnInputTokens != 15000 || saved.TurnCacheReadTokens != 85000 || saved.TurnOutputTokens != 500 || saved.CurrentContextTokens != 100000 {
 		t.Fatalf("unexpected enriched token metrics in JournalEntry: %+v", saved)
+	}
+}
+
+func TestSubagentFrontDeskGuardHooks(t *testing.T) {
+	vaultDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(vaultDir, "USER.md"), []byte("User profile"), 0o644)
+	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("Memory context"), 0o644)
+
+	// Claim Front Desk for conv-desk-main
+	_ = kernel.SetFrontDesk(vaultDir, "conv-desk-main", "")
+
+	// 1. Front Desk spawns a subagent via PreToolUse
+	var preOut bytes.Buffer
+	invokePayload := `{"conversationId":"conv-desk-main","toolCall":{"name":"invoke_subagent","args":{"Role":"[standard] test: Lease Guard Tester","Model":"flash","Prompt":"Verify guard"}}}`
+	if err := HandlePreToolUse(strings.NewReader(invokePayload), &preOut, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse invoke_subagent: %v", err)
+	}
+
+	// 2. Subagent starts up SessionStart
+	var ssOut bytes.Buffer
+	subStartPayload := `{"conversationId":"conv-sub-child-999","modelName":"gemini-3.8-flash-high"}`
+	if err := HandleSessionStart(strings.NewReader(subStartPayload), &ssOut, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart subagent: %v", err)
+	}
+	ssStr := ssOut.String()
+	if strings.Contains(ssStr, "Front Desk Notice") || strings.Contains(ssStr, "claim-desk") {
+		t.Fatalf("regression: subagent SessionStart received Front Desk Notice or claim-desk prompt:\n%s", ssStr)
+	}
+
+	// Verify Front Desk was not clobbered
+	fd, ok := kernel.GetFrontDesk(vaultDir)
+	if !ok || fd.ConversationID != "conv-desk-main" {
+		t.Fatalf("expected Front Desk to remain conv-desk-main, got %+v", fd)
+	}
+
+	// 3. Subagent attempts to run claim-desk via run_command in PreToolUse
+	var toolOut bytes.Buffer
+	claimPayload := `{"conversationId":"conv-sub-child-999","toolCall":{"name":"run_command","args":{"CommandLine":"./bin/hq claim-desk --conv=conv-sub-child-999"}}}`
+	if err := HandlePreToolUse(strings.NewReader(claimPayload), &toolOut, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse claim-desk: %v", err)
+	}
+	if !strings.Contains(toolOut.String(), `"decision":"deny"`) || !strings.Contains(toolOut.String(), "Front Desk Lease Subagent Invariant") {
+		t.Fatalf("expected PreToolUse to deny subagent claim-desk, got: %s", toolOut.String())
 	}
 }
