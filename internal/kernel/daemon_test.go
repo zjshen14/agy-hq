@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -204,7 +205,7 @@ func TestInstallAndUninstallDaemon_Mock(t *testing.T) {
 
 	// Verify file was written
 	var expectedPath string
-	if filepath.Separator == '/' && strings.Contains(strings.ToLower(os.Getenv("GOOS")), "darwin") {
+	if runtime.GOOS == "darwin" {
 		expectedPath = filepath.Join(launchDir, "com.antigravity.agy-hq.plist")
 	} else {
 		expectedPath = filepath.Join(sysDir, "agy-hq.service")

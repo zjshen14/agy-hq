@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 // PIIViolation describes a deterministic PII, Vault boundary, or credential leak detected by CheckPII.
@@ -136,7 +138,7 @@ func CheckPII(rootDir string, stagedOnly bool) ([]PIIViolation, error) {
 
 	userEmail := strings.ToLower(strings.TrimSpace(gitConfigEmail(rootDir)))
 	runtimeHome := strings.TrimSpace(os.Getenv("HOME"))
-	checkRuntimeHome := runtimeHome != "" && len(runtimeHome) > 5 && !isAllowedHomePrefix(runtimeHome+"/") && !strings.HasPrefix(rootDir, os.TempDir())
+	checkRuntimeHome := runtimeHome != "" && len(runtimeHome) > 5 && !isAllowedHomePrefix(runtimeHome+"/") && !vault.IsTempPath(rootDir)
 
 	if stagedOnly {
 		namesOut, err := gitOutput(rootDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")

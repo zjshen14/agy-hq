@@ -30,7 +30,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Check Go formatting (gofmt -s)
         run: |
@@ -72,7 +72,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Configure synthetic git identity for test worktrees
         run: |
@@ -110,7 +110,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Build static binaries across Linux/macOS (amd64 & arm64)
         run: |

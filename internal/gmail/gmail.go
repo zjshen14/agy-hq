@@ -273,8 +273,23 @@ func ResolveAccount(vaultDir, aliasOrEmail string) (AccountConfig, error) {
 	return AccountConfig{}, fmt.Errorf("gmail account %q not found in local/private/gmail/accounts.json", aliasOrEmail)
 }
 
+func isGmailTempPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	tmp := filepath.Clean(os.TempDir())
+	cleanP := filepath.Clean(p)
+	if strings.HasPrefix(cleanP, tmp) || strings.HasPrefix(cleanP, "/private"+tmp) || strings.HasPrefix(cleanP, "/tmp/") || strings.HasPrefix(cleanP, "/private/tmp/") {
+		return true
+	}
+	if evalTmp, err := filepath.EvalSymlinks(tmp); err == nil && evalTmp != "" && strings.HasPrefix(cleanP, filepath.Clean(evalTmp)) {
+		return true
+	}
+	return false
+}
+
 func ensureAntigravityGmailPlugin() error {
-	if env := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); env != "" && strings.HasPrefix(env, os.TempDir()) {
+	if env := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); env != "" && isGmailTempPath(env) {
 		// Skip network plugin download during isolated unit/E2E tests
 		return nil
 	}

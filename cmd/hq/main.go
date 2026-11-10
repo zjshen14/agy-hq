@@ -131,7 +131,7 @@ func main() {
 
 		// 3. Recompile ./bin/hq from the updated Go source
 		targetBin := filepath.Join(rootDir, "bin", "hq")
-		if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+		if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
 			targetBin = exe
 		}
 		fmt.Printf("==> [3/5] Rebuilding hq microkernel (%s)...\n", targetBin)
@@ -142,7 +142,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq upgrade: go build failed (%v):\n%s\n", err, string(out))
 			os.Exit(1)
 		}
-		if !strings.HasPrefix(targetBin, os.TempDir()) {
+		if !vault.IsTempPath(targetBin) {
 			_ = exec.Command("systemctl", "--user", "try-restart", "agy-hq.service").Run()
 		}
 
@@ -232,7 +232,7 @@ func main() {
 		_ = fs.Parse(os.Args[2:])
 		if *rsiID != "" {
 			hqBin := "./bin/hq"
-			if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+			if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
 				hqBin = exe
 			}
 			prop, _, err := rsi.Propose(rootDir, vaultDir, *rsiID, *convID, hqBin)
@@ -255,7 +255,7 @@ func main() {
 				}
 			}
 			hqBin := "./bin/hq"
-			if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+			if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
 				hqBin = exe
 			}
 			if *actionType == "gchat_send" {
@@ -1080,7 +1080,7 @@ func main() {
 				os.Exit(1)
 			}
 			hqBin := "./bin/hq"
-			if exe, eErr := os.Executable(); eErr == nil && strings.HasPrefix(exe, os.TempDir()) {
+			if exe, eErr := os.Executable(); eErr == nil && vault.IsTempPath(exe) {
 				hqBin = exe
 			}
 			hashShort := spec.ContentHash
@@ -1683,7 +1683,7 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 		convID := fs.String("conv", "", "Optional conversation ID")
 		_ = fs.Parse(args[1:])
 		hqBin := "./bin/hq"
-		if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, os.TempDir()) {
+		if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
 			hqBin = exe
 		}
 		prop, h, err := rsi.Propose(rootDir, vaultDir, rsiID, *convID, hqBin)

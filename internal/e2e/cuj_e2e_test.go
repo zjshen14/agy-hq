@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1204,22 +1205,28 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 		t.Fatalf("expected schedules listed in daemon status, got:\n%s", statOut)
 	}
 
-	// 4. Test daemon install with mock systemd directory
+	// 4. Test daemon install with mock systemd / launchd directory
 	mockSysDir := filepath.Join(t.TempDir(), "systemd", "user")
+	mockLaunchDir := filepath.Join(t.TempDir(), "LaunchAgents")
 	mockEnv := []string{
 		"HQ_SYSTEMD_DIR=" + mockSysDir,
+		"HQ_LAUNCHD_DIR=" + mockLaunchDir,
 		"HQ_SKIP_SYSTEMCTL=1",
+		"HQ_SKIP_LAUNCHCTL=1",
 	}
 	installOut, err := env.runWithEnv("", mockEnv, "daemon", "install")
 	if err != nil {
 		t.Fatalf("hq daemon install failed: %v (%s)", err, installOut)
 	}
 	servicePath := filepath.Join(mockSysDir, "agy-hq.service")
+	if runtime.GOOS == "darwin" {
+		servicePath = filepath.Join(mockLaunchDir, "com.antigravity.agy-hq.plist")
+	}
 	svcData, err := os.ReadFile(servicePath)
 	if err != nil {
-		t.Fatalf("expected systemd service file to exist at %s: %v", servicePath, err)
+		t.Fatalf("expected daemon service file to exist at %s: %v", servicePath, err)
 	}
-	if !strings.Contains(string(svcData), "ExecStart=") || !strings.Contains(string(svcData), "daemon") {
+	if !strings.Contains(string(svcData), "daemon") {
 		t.Fatalf("invalid service file content:\n%s", string(svcData))
 	}
 

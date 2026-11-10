@@ -21,6 +21,22 @@ type Fact struct {
 	SupersededBy string  `json:"superseded_by,omitempty"`
 }
 
+// IsTempPath returns true if p resides inside os.TempDir() (handling macOS /private/var symlink resolution).
+func IsTempPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	tmp := filepath.Clean(os.TempDir())
+	cleanP := filepath.Clean(p)
+	if strings.HasPrefix(cleanP, tmp) || strings.HasPrefix(cleanP, "/private"+tmp) || strings.HasPrefix(cleanP, "/tmp/") || strings.HasPrefix(cleanP, "/private/tmp/") {
+		return true
+	}
+	if evalTmp, err := filepath.EvalSymlinks(tmp); err == nil && evalTmp != "" && strings.HasPrefix(cleanP, filepath.Clean(evalTmp)) {
+		return true
+	}
+	return false
+}
+
 // ResolveRoot finds the agy-hq repository root directory.
 func ResolveRoot() (string, error) {
 	if envRoot := os.Getenv("HQ_ROOT_DIR"); envRoot != "" {
