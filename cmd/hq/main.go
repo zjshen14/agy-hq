@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
@@ -56,6 +57,7 @@ func main() {
 				_ = kernel.SetFrontDesk(vaultDir, convID, artDir)
 			}
 		}
+		_, _ = ci.InstallGitHooks(rootDir)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
 		for _, item := range created {
@@ -83,6 +85,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq migrate failed: %v\n", err)
 			os.Exit(1)
 		}
+		_, _ = ci.InstallGitHooks(rootDir)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if !*quiet {
 			fmt.Printf("Vault Schema Migration: v%d -> v%d (snapshotCommitted=%v)\n", rep.PreviousVersion, rep.CurrentVersion, rep.SnapshotCommitted)
@@ -1206,8 +1209,10 @@ func main() {
 		}
 
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-		defaultAddr := "127.0.0.1:4747"
-		if p := os.Getenv("PORT"); p != "" {
+		defaultAddr := "127.0.0.1:4242"
+		if p := os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT"); p != "" {
+			defaultAddr = "127.0.0.1:" + p
+		} else if p := os.Getenv("PORT"); p != "" {
 			defaultAddr = "127.0.0.1:" + p
 		}
 		addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server")
@@ -1249,8 +1254,15 @@ func main() {
 			}
 		}()
 
+		handler := webui.NewHandler(vaultDir)
+		if *addr != "127.0.0.1:4242" && !strings.HasSuffix(*addr, ":4242") {
+			go func() {
+				_ = http.ListenAndServe("127.0.0.1:4242", handler)
+			}()
+		}
+
 		fmt.Printf("Starting agy-hq Console & Daemon on http://%s (Vault: %s)\n", *addr, vaultDir)
-		if err := http.ListenAndServe(*addr, webui.NewHandler(vaultDir)); err != nil {
+		if err := http.ListenAndServe(*addr, handler); err != nil {
 			fmt.Fprintf(os.Stderr, "hq daemon server error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1371,6 +1383,9 @@ func main() {
 
 	case "rsi":
 		runRSICLI(rootDir, vaultDir, os.Args[2:])
+
+	case "ci":
+		runCICLI(rootDir, os.Args[2:])
 
 	default:
 		printUsage()
@@ -1747,6 +1762,99 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 	}
 }
 
+func runCICLI(rootDir string, args []string) {
+	sub := "check-all"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+
+	switch sub {
+	case "check-pii":
+		fs := flag.NewFlagSet("ci check-pii", flag.ExitOnError)
+		staged := fs.Bool("staged", false, "Audit only staged git index changes")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		violations, err := ci.CheckPII(rootDir, *staged)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq ci check-pii error: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(violations)
+		} else if len(violations) == 0 {
+			mode := "tracked repository tree"
+			if *staged {
+				mode = "staged git index"
+			}
+			fmt.Printf("[PASS] Zero PII, Vault boundary, or credential leaks in %s (Invariants P1-P5 clean)\n", mode)
+		} else {
+			fmt.Fprintf(os.Stderr, "[FAIL] %d PII / Vault boundary violation(s) detected:\n", len(violations))
+			for _, v := range violations {
+				fmt.Fprintf(os.Stderr, "  - %s\n", v.String())
+			}
+		}
+		if len(violations) > 0 {
+			os.Exit(1)
+		}
+
+	case "check-harness":
+		fs := flag.NewFlagSet("ci check-harness", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		results, allOK := ci.CheckHarness(rootDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(results)
+		} else {
+			for _, r := range results {
+				status := "PASS"
+				if !r.Passed {
+					status = "FAIL"
+				}
+				fmt.Printf("[%s] %-4s %-52s %s\n", status, r.Gate, r.Name, r.Detail)
+			}
+		}
+		if !allOK {
+			os.Exit(1)
+		}
+
+	case "pre-commit":
+		if err := ci.RunPreCommit(rootDir); err != nil {
+			fmt.Fprintf(os.Stderr, "hq ci pre-commit failed: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "pre-push", "check-all":
+		fs := flag.NewFlagSet("ci pre-push", flag.ExitOnError)
+		skipTests := fs.Bool("skip-tests", false, "Skip `go test ./...` and run only PII + harness contract checks")
+		_ = fs.Parse(args)
+		if err := ci.RunPrePush(rootDir, *skipTests); err != nil {
+			fmt.Fprintf(os.Stderr, "hq ci pre-push failed: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "install-hooks":
+		updated, err := ci.InstallGitHooks(rootDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq ci install-hooks failed: %v\n", err)
+			os.Exit(1)
+		}
+		if len(updated) == 0 {
+			fmt.Println("Git hooks (.git/hooks/pre-commit & .git/hooks/pre-push) are already up to date.")
+		} else {
+			fmt.Printf("Installed/updated %d git hook(s): %s\n", len(updated), strings.Join(updated, ", "))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown ci subcommand: %s (expected check-pii, check-harness, pre-commit, pre-push, install-hooks)\n", sub)
+		os.Exit(1)
+	}
+}
+
 func printUsage() {
 	fmt.Println(`Usage: hq <command> [args]
 
@@ -1760,6 +1868,7 @@ Commands:
   tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
   memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
   rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
+  ci <check-pii|check-harness|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness contract verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers

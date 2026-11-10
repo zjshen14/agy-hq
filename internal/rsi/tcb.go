@@ -15,11 +15,14 @@ import (
 // that no RSI hypothesis or self-patch is ever permitted to modify.
 var Ring0ProtectedPaths = []string{
 	"internal/approvals/",
+	"internal/ci/",
 	"internal/rsi/tcb.go",
 	"internal/rsi/verifier.go",
+	".github/",
 	".gitignore",
 	".git/hooks/",
 	"local/.gitignore",
+	"scripts/bootstrap.sh",
 	"templates/gitignore.tmpl",
 }
 

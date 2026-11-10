@@ -21,30 +21,9 @@ echo "==> [2/5] Building ./bin/hq microkernel..."
 mkdir -p bin
 go build -o ./bin/hq ./cmd/hq
 
-echo "==> [3/5] Initializing private Vault (./local/) & PII pre-commit guard..."
+echo "==> [3/5] Initializing private Vault (./local/) & CI git hooks (pre-commit + pre-push)..."
 ./bin/hq init
-
-if [ -d ".git/hooks" ]; then
-  cat > .git/hooks/pre-commit <<'EOF'
-#!/bin/sh
-# Block any staged files inside local/ or containing the local user's home path / git email
-if git diff --cached --name-only | grep -qE '^(local|vault)/'; then
-  echo "ERROR: Refusing to commit files inside private local/ Vault."
-  exit 1
-fi
-USER_EMAIL="$(git config user.email 2>/dev/null || true)"
-HOME_DIR="$HOME"
-if [ -n "$HOME_DIR" ] && git diff --cached -U0 | grep -E '^\+' | grep -qF "$HOME_DIR"; then
-  echo "ERROR: Staged diff contains your local HOME path ($HOME_DIR). Keep personal paths in local/."
-  exit 1
-fi
-if [ -n "$USER_EMAIL" ] && git diff --cached -U0 | grep -E '^\+' | grep -qFi "$USER_EMAIL"; then
-  echo "ERROR: Staged diff contains your personal email ($USER_EMAIL). Keep personal state in local/."
-  exit 1
-fi
-EOF
-  chmod +x .git/hooks/pre-commit
-fi
+./bin/hq ci install-hooks 2>/dev/null || true
 
 echo "==> [4/5] Auto-arming background daemon & scheduled triggers..."
 ./bin/hq daemon install 2>/dev/null || true

@@ -282,4 +282,3 @@ func TestPhase4_FuzzySpaceResolutionAndAuthURLDetection(t *testing.T) {
 		t.Fatalf("expected TEST_DM_AAAAE to be recognized as an explicit space ID")
 	}
 }
-

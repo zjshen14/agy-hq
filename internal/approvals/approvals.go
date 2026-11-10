@@ -117,6 +117,12 @@ func List(vaultDir string) ([]Proposal, error) {
 // Approve verifies the SHA-256 prefix, executes the staged command deterministically in Go,
 // removes the pending file, and appends an audit entry to local/memory/interventions.jsonl.
 func Approve(vaultDir, id, shaPrefix string) (string, error) {
+	return ApproveProposal(vaultDir, id, shaPrefix)
+}
+
+// ApproveProposal verifies the SHA-256 prefix, executes the staged command deterministically in Go,
+// removes the pending file, and appends an audit entry to local/memory/interventions.jsonl.
+func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	pendingPath := filepath.Join(vaultDir, "memory", "pending", id+".json")
 	data, err := os.ReadFile(pendingPath)
 	if err != nil {
@@ -159,6 +165,11 @@ func Approve(vaultDir, id, shaPrefix string) (string, error) {
 
 // Reject removes the proposal from pending/ and logs the rejection to interventions.jsonl.
 func Reject(vaultDir, id, reason string) error {
+	return RejectProposal(vaultDir, id, reason)
+}
+
+// RejectProposal removes the proposal from pending/ and logs the rejection to interventions.jsonl.
+func RejectProposal(vaultDir, id, reason string) error {
 	pendingPath := filepath.Join(vaultDir, "memory", "pending", id+".json")
 	data, err := os.ReadFile(pendingPath)
 	if err != nil {

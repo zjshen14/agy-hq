@@ -197,29 +197,56 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		created = append(created, ".git (initialized private Vault repository)")
 	}
 
-	// Ensure root repository .git/hooks/pre-commit PII guard is installed
+	// Ensure root repository .git/hooks/pre-commit and pre-push guards are installed
 	rootHooksDir := filepath.Join(filepath.Dir(templateDir), ".git", "hooks")
 	if info, err := os.Stat(rootHooksDir); err == nil && info.IsDir() {
 		preCommitPath := filepath.Join(rootHooksDir, "pre-commit")
 		if _, err := os.Stat(preCommitPath); os.IsNotExist(err) {
 			hookScript := "#!/bin/sh\n" +
-				"# Block any staged files inside local/ or containing the local user's home path / git email\n" +
+				"# agy-hq managed pre-commit hook (Ring 0 TCB — RFC-0011)\n" +
+				"set -e\n\n" +
+				"# 1. Fast shell fallback guard on local/ and vault/ paths\n" +
 				"if git diff --cached --name-only | grep -qE '^(local|vault)/'; then\n" +
-				"  echo \"ERROR: Refusing to commit files inside private local/ Vault.\"\n" +
+				"  echo \"ERROR: Refusing to commit files inside private local/ Vault.\" >&2\n" +
 				"  exit 1\n" +
 				"fi\n" +
 				"USER_EMAIL=\"$(git config user.email 2>/dev/null || true)\"\n" +
 				"HOME_DIR=\"$HOME\"\n" +
 				"if [ -n \"$HOME_DIR\" ] && git diff --cached -U0 | grep -E '^\\+' | grep -qF \"$HOME_DIR\"; then\n" +
-				"  echo \"ERROR: Staged diff contains your local HOME path ($HOME_DIR). Keep personal paths in local/.\"\n" +
+				"  echo \"ERROR: Staged diff contains your local HOME path ($HOME_DIR). Keep personal paths in local/.\" >&2\n" +
 				"  exit 1\n" +
 				"fi\n" +
 				"if [ -n \"$USER_EMAIL\" ] && git diff --cached -U0 | grep -E '^\\+' | grep -qFi \"$USER_EMAIL\"; then\n" +
-				"  echo \"ERROR: Staged diff contains your personal email ($USER_EMAIL). Keep personal state in local/.\"\n" +
+				"  echo \"ERROR: Staged diff contains your personal email ($USER_EMAIL). Keep personal state in local/.\" >&2\n" +
 				"  exit 1\n" +
+				"fi\n\n" +
+				"# 2. Full 5-invariant staged PII & hooks.json parity check via ./bin/hq\n" +
+				"if [ -x \"./bin/hq\" ]; then\n" +
+				"  ./bin/hq ci pre-commit\n" +
 				"fi\n"
 			if err := os.WriteFile(preCommitPath, []byte(hookScript), 0o755); err == nil {
 				created = append(created, "../.git/hooks/pre-commit (PII guard)")
+			}
+		}
+		prePushPath := filepath.Join(rootHooksDir, "pre-push")
+		if _, err := os.Stat(prePushPath); os.IsNotExist(err) {
+			pushScript := "#!/bin/sh\n" +
+				"# agy-hq managed pre-push hook (Ring 0 TCB — RFC-0011)\n" +
+				"set -e\n\n" +
+				"if [ \"${HQ_IN_PRE_PUSH:-0}\" = \"1\" ]; then\n" +
+				"  exit 0\n" +
+				"fi\n" +
+				"export HQ_IN_PRE_PUSH=1\n" +
+				"export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"\n\n" +
+				"if [ ! -x \"./bin/hq\" ] && command -v go >/dev/null 2>&1 && [ -d \"./cmd/hq\" ]; then\n" +
+				"  mkdir -p ./bin\n" +
+				"  go build -o ./bin/hq ./cmd/hq\n" +
+				"fi\n\n" +
+				"if [ -x \"./bin/hq\" ]; then\n" +
+				"  exec ./bin/hq ci pre-push\n" +
+				"fi\n"
+			if err := os.WriteFile(prePushPath, []byte(pushScript), 0o755); err == nil {
+				created = append(created, "../.git/hooks/pre-push (CI & regression guard)")
 			}
 		}
 	}

@@ -1,6 +1,6 @@
 # RFC-0011: Automated CI/CD Pipeline, Mathematical PII/Vault Boundary Verification & Agent Harness Regression Gate
 
-- **Status:** Draft (Phase 1 — Interactive Architecture Review)
+- **Status:** Approved & Implemented (Phases 1–3 Complete, Verified by `CUJ-18`)
 - **Author:** `[Task:ci] ci-pipeline` (`gemini-4-argon-high`)
 - **Created:** 2026-11-09
 - **Related Documents:** [RFC-0001 (Two-Layer Vault Split)](./0001-vault-and-task-isolation.md), [RFC-0003 (Approval-Bound Execution)](./0003-approval-bound-execution.md), [RFC-0007 (Front Desk Initialization Hardening)](./0007-front-desk-initialization-hardening.md), [RFC-0010 (Bounded Agent RSI)](./0010-agent-recursive-self-improvement.md), [PRD-0003 (Critical User Journeys)](../product/0003-critical-user-journeys.md)

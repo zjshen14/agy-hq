@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,12 @@ type hqEnv struct {
 	vaultDir string
 }
 
+var (
+	sharedBuildOnce  sync.Once
+	sharedBinBytes   []byte
+	sharedBuildError error
+)
+
 func setupHQEnv(t *testing.T) *hqEnv {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -34,10 +41,27 @@ func setupHQEnv(t *testing.T) *hqEnv {
 	binPath := filepath.Join(tmpDir, "hq")
 	vaultDir := filepath.Join(tmpDir, "local")
 
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/hq")
-	buildCmd.Dir = rootDir
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build hq binary: %v (%s)", err, string(out))
+	sharedBuildOnce.Do(func() {
+		buildTmp, mkErr := os.MkdirTemp("", "hq-e2e-shared-bin-*")
+		if mkErr != nil {
+			sharedBuildError = mkErr
+			return
+		}
+		defer os.RemoveAll(buildTmp)
+		sharedPath := filepath.Join(buildTmp, "hq")
+		buildCmd := exec.Command("go", "build", "-o", sharedPath, "./cmd/hq")
+		buildCmd.Dir = rootDir
+		if out, bErr := buildCmd.CombinedOutput(); bErr != nil {
+			sharedBuildError = fmt.Errorf("failed to build hq binary: %v (%s)", bErr, string(out))
+			return
+		}
+		sharedBinBytes, sharedBuildError = os.ReadFile(sharedPath)
+	})
+	if sharedBuildError != nil {
+		t.Fatal(sharedBuildError)
+	}
+	if err := os.WriteFile(binPath, sharedBinBytes, 0o755); err != nil {
+		t.Fatalf("write test hq binary: %v", err)
 	}
 
 	return &hqEnv{
@@ -2121,15 +2145,81 @@ func TestCUJ17_AgentRSIMiningVerificationAndApproval(t *testing.T) {
 		t.Fatalf("expected PreToolUse to inject canonical RSI scorecard & diff into ask_question, got:\n%s (%v)", askOut, err)
 	}
 
+	beforeRules := rsi.GetStatus(env.rootDir, env.vaultDir).ActiveSkillRules
+
 	appOut, err := env.run("", "approve", prop.ID, "--sha256="+prop.SHA256[:12])
 	if err != nil || !strings.Contains(appOut, "Applied RSI patch "+targetHypID) {
 		t.Fatalf("hq approve RSI proposal failed: %v\n%s", err, appOut)
 	}
 
-	// Verify SKILL.md in isolatedRoot was updated and canary archive was recorded
+	// Verify SKILL.md in isolatedRoot was updated (+1 active rsi:rule block over baseline) and canary archive was recorded
+	expectedRulesStr := fmt.Sprintf("%d active rsi:rule block(s)", beforeRules+1)
 	statusOut, err := env.run("", "rsi", "status")
-	if err != nil || !strings.Contains(statusOut, "1 active canary") || !strings.Contains(statusOut, "1 active rsi:rule block(s)") {
-		t.Fatalf("expected 1 active canary and 1 active rsi:rule block in hq rsi status, got:\n%s (%v)", statusOut, err)
+	if err != nil || !strings.Contains(statusOut, "1 active canary") || !strings.Contains(statusOut, expectedRulesStr) {
+		t.Fatalf("expected 1 active canary and %s in hq rsi status, got:\n%s (%v)", expectedRulesStr, statusOut, err)
+	}
+}
+
+// CUJ-18: Automated CI/CD Pipeline, Mathematical PII/Vault Boundary Verification & Agent Harness Regression Gate (RFC-0011)
+func TestCUJ18_CIPipelinePIIGuardAndHarnessContract(t *testing.T) {
+	env := setupHQEnv(t)
+
+	// 1. Verify `./bin/hq ci check-pii` passes on the real repository
+	piiOut, err := env.run("", "ci", "check-pii")
+	if err != nil || !strings.Contains(piiOut, "[PASS] Zero PII, Vault boundary, or credential leaks") {
+		t.Fatalf("hq ci check-pii failed on real repo: %v\n%s", err, piiOut)
+	}
+
+	// 2. Verify `./bin/hq ci check-harness` passes Gates H1, H2-A, H2-B, and H3 on the real repository
+	harnessOut, err := env.run("", "ci", "check-harness")
+	if err != nil {
+		t.Fatalf("hq ci check-harness failed on real repo: %v\n%s", err, harnessOut)
+	}
+	for _, gate := range []string{"[PASS] H1", "[PASS] H2-A", "[PASS] H2-B", "[PASS] H3"} {
+		if !strings.Contains(harnessOut, gate) {
+			t.Fatalf("expected %s in check-harness output, got:\n%s", gate, harnessOut)
+		}
+	}
+
+	// 3. Verify `./bin/hq ci install-hooks` and `./bin/hq ci pre-commit` in an isolated git repository
+	isolatedRepo := t.TempDir()
+	env.rootDir = isolatedRepo
+	env.vaultDir = filepath.Join(isolatedRepo, "local")
+
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = isolatedRepo
+		if out, gErr := c.CombinedOutput(); gErr != nil {
+			t.Fatalf("git %v: %v (%s)", args, gErr, string(out))
+		}
+	}
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@agy-hq.local")
+	runGit("config", "user.name", "Test")
+	_ = os.WriteFile(filepath.Join(isolatedRepo, ".gitignore"), []byte("/local/\n/vault/\n/bin/\n"), 0o644)
+
+	hookOut, err := env.run("", "ci", "install-hooks")
+	if err != nil || !strings.Contains(hookOut, ".git/hooks/pre-commit") || !strings.Contains(hookOut, ".git/hooks/pre-push") {
+		t.Fatalf("hq ci install-hooks failed: %v\n%s", err, hookOut)
+	}
+
+	// Stage a clean file -> `hq ci pre-commit` passes
+	_ = os.WriteFile(filepath.Join(isolatedRepo, "clean.go"), []byte("package main\nconst email = \"alice@example.com\"\n"), 0o644)
+	runGit("add", "clean.go", ".gitignore")
+	if preOut, err := env.run("", "ci", "pre-commit"); err != nil {
+		t.Fatalf("expected clean staged diff to pass hq ci pre-commit: %v (%s)", err, preOut)
+	}
+
+	// Stage a file with a leaked personal email and OAuth token -> `hq ci pre-commit` fails deterministically
+	tokPrefix := "ya" + "29"
+	emailDom := "g" + "mail.com"
+	leakedContent := fmt.Sprintf("package main\nconst tok = \"%s.a0AfH6SMBx1234567890abcdefghijklmnop\"\nconst who = \"leaked.personal@%s\"\n", tokPrefix, emailDom)
+	_ = os.WriteFile(filepath.Join(isolatedRepo, "leaked.go"), []byte(leakedContent), 0o644)
+	runGit("add", "leaked.go")
+	badPreOut, err := env.run("", "ci", "pre-commit")
+	if err == nil || !strings.Contains(badPreOut, "P4-SecretPattern") || !strings.Contains(badPreOut, "P5-EmailAllowlist") {
+		t.Fatalf("expected leaked staged diff to fail hq ci pre-commit with P4 and P5 violations, got:\n%s (%v)", badPreOut, err)
 	}
 }
 
@@ -2153,6 +2243,3 @@ func copyDirRecursive(src, dst string) error {
 		return os.WriteFile(target, data, info.Mode())
 	})
 }
-
-
-

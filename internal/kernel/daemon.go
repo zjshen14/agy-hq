@@ -439,7 +439,7 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 	}
 
 	// Fallback: check if standard daemon port is listening and serving this vaultDir
-	defaultAddr := "127.0.0.1:4747"
+	defaultAddr := "127.0.0.1:4242"
 	if port := os.Getenv("PORT"); port != "" {
 		defaultAddr = "127.0.0.1:" + port
 	}
@@ -447,6 +447,15 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 		info.Running = true
 		info.Addr = defaultAddr
 		pid := findDaemonPID(defaultAddr)
+		if pid > 0 {
+			info.PID = pid
+		}
+		return info
+	}
+	if defaultAddr != "127.0.0.1:4747" && checkHTTPHealth("127.0.0.1:4747", vaultDir) {
+		info.Running = true
+		info.Addr = "127.0.0.1:4747"
+		pid := findDaemonPID("127.0.0.1:4747")
 		if pid > 0 {
 			info.PID = pid
 		}

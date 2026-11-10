@@ -157,7 +157,7 @@ func registryPath(vaultDir string) string {
 func LoadRegistry(vaultDir string) (AccountRegistry, error) {
 	reg := AccountRegistry{
 		TrustedDomains: append([]string(nil), DefaultTrustedDomains...),
-		Accounts:        make(map[string]AccountConfig),
+		Accounts:       make(map[string]AccountConfig),
 	}
 	data, err := os.ReadFile(registryPath(vaultDir))
 	if err != nil {

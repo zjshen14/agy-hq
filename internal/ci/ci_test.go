@@ -1,0 +1,177 @@
+package ci
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func resolveRepoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	return filepath.Clean(filepath.Join(wd, "..", ".."))
+}
+
+func TestCheckPII_RealRepositoryClean(t *testing.T) {
+	rootDir := resolveRepoRoot(t)
+	violations, err := CheckPII(rootDir, false)
+	if err != nil {
+		t.Fatalf("CheckPII failed: %v", err)
+	}
+	if len(violations) > 0 {
+		for _, v := range violations {
+			t.Errorf("unexpected PII violation in repo: %s", v.String())
+		}
+		t.Fatalf("expected 0 PII violations in tracked repo, got %d", len(violations))
+	}
+}
+
+func TestCheckPII_AllFiveInvariantsDetected(t *testing.T) {
+	tmpRepo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpRepo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@agy-hq.local")
+	runGit("config", "user.name", "Test")
+
+	// Missing /local/ in .gitignore -> triggers P2-VaultIgnore
+	_ = os.WriteFile(filepath.Join(tmpRepo, ".gitignore"), []byte("/bin/\n"), 0o644)
+
+	// Forbidden tracked path in local/ -> triggers P1-ForbiddenPath
+	_ = os.MkdirAll(filepath.Join(tmpRepo, "local"), 0o755)
+	_ = os.WriteFile(filepath.Join(tmpRepo, "local", "notes.md"), []byte("secret vault note\n"), 0o644)
+
+	// Tracked file containing P3 (workstation home path), P4 (OAuth token + GitHub PAT + SSN), and P5 (non-allowlisted personal email).
+	// Concatenated at runtime so ci_test.go itself remains 100% free of literal PII/secret patterns when tracked by git.
+	leakedSrc := strings.Join([]string{
+		"package sample",
+		`const wsPath = "/Users/"` + ` + "johndoe/Workspaces/secret"`,
+		`const wsLiteral = "` + "/Users/" + "johndoe/Workspaces/secret" + `"`,
+		`const oauthTok = "` + "ya29." + "a0AfH6SMBx1234567890abcdefghijklmnop" + `"`,
+		`const ghPat = "` + "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCD" + `"`,
+		`const ssnVal = "` + "987-" + "65-4321" + `"`,
+		`const personalEmail = "` + "johndoe.personal" + "@gmail.com" + `"`,
+		`const allowedEmail = "alice@example.com"`,
+	}, "\n") + "\n"
+	_ = os.WriteFile(filepath.Join(tmpRepo, "leak.go"), []byte(leakedSrc), 0o644)
+
+	runGit("add", "-f", ".gitignore", "local/notes.md", "leak.go")
+
+	// 1. Test staged mode (`--staged`)
+	stagedViolations, err := CheckPII(tmpRepo, true)
+	if err != nil {
+		t.Fatalf("CheckPII staged failed: %v", err)
+	}
+	if len(stagedViolations) < 5 {
+		t.Fatalf("expected at least 5 staged PII violations, got %d: %+v", len(stagedViolations), stagedViolations)
+	}
+
+	// 2. Commit and test full tracked-tree mode
+	runGit("commit", "-m", "seed violations")
+	treeViolations, err := CheckPII(tmpRepo, false)
+	if err != nil {
+		t.Fatalf("CheckPII full tree failed: %v", err)
+	}
+
+	seenInvariants := make(map[string]bool)
+	for _, v := range treeViolations {
+		seenInvariants[v.Invariant] = true
+	}
+	for _, want := range []string{
+		"P1-ForbiddenPath",
+		"P2-VaultIgnore",
+		"P3-WorkstationPath",
+		"P4-SecretPattern",
+		"P4-SSNPattern",
+		"P5-EmailAllowlist",
+	} {
+		if !seenInvariants[want] {
+			t.Errorf("expected invariant %s to be triggered, got violations: %+v", want, treeViolations)
+		}
+	}
+}
+
+func TestCheckHarness_RealRepositoryAndMutations(t *testing.T) {
+	rootDir := resolveRepoRoot(t)
+
+	// 1. Real repository must pass all harness gates (H1, H2-A, H2-B, H3)
+	results, ok := CheckHarness(rootDir)
+	if !ok {
+		for _, r := range results {
+			t.Logf("[%s] %s: passed=%v (%s)", r.Gate, r.Name, r.Passed, r.Detail)
+		}
+		t.Fatalf("expected CheckHarness to pass on real repository")
+	}
+
+	// 2. Test negative mutations in an isolated workspace copy
+	badRoot := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(badRoot, ".agents", "plugins", "agy-hq", "skills", "bad-skill"), 0o755)
+	_ = os.MkdirAll(filepath.Join(badRoot, "templates"), 0o755)
+
+	// Write drifted hooks.json files
+	_ = os.WriteFile(filepath.Join(badRoot, ".agents", "hooks.json"), []byte(`{"hq-kernel":{}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(badRoot, ".agents", "plugins", "agy-hq", "hooks.json"), []byte(`{"drifted":true}`), 0o644)
+
+	// Write SKILL.md with mismatched name in YAML frontmatter
+	_ = os.WriteFile(filepath.Join(badRoot, ".agents", "plugins", "agy-hq", "skills", "bad-skill", "SKILL.md"),
+		[]byte("---\nname: wrong-slug\ndescription: test\n---\n# Bad Skill\n"), 0o644)
+
+	// Write triggers.yaml referencing a missing skill
+	_ = os.WriteFile(filepath.Join(badRoot, "templates", "triggers.yaml"),
+		[]byte("schedules:\n  - id: test-job\n    cron: \"30 7 * * *\"\n    skill: non-existent-skill\n"), 0o644)
+
+	badResults, badOK := CheckHarness(badRoot)
+	if badOK {
+		t.Fatalf("expected CheckHarness to fail on mutated badRoot, got pass")
+	}
+	failedGates := make(map[string]bool)
+	for _, r := range badResults {
+		if !r.Passed {
+			failedGates[r.Gate] = true
+		}
+	}
+	for _, wantFail := range []string{"H1", "H2-A", "H3"} {
+		if !failedGates[wantFail] {
+			t.Errorf("expected gate %s to fail on mutated workspace, got results: %+v", wantFail, badResults)
+		}
+	}
+}
+
+func TestInstallAndCheckGitHooks(t *testing.T) {
+	tmpRepo := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpRepo, ".git", "hooks"), 0o755)
+
+	if ok, _ := CheckGitHooksInstalled(tmpRepo); ok {
+		t.Fatalf("expected CheckGitHooksInstalled to be false before installation")
+	}
+
+	installed, err := InstallGitHooks(tmpRepo)
+	if err != nil {
+		t.Fatalf("InstallGitHooks failed: %v", err)
+	}
+	if len(installed) != 2 {
+		t.Fatalf("expected 2 hooks installed (pre-commit, pre-push), got %v", installed)
+	}
+
+	if ok, detail := CheckGitHooksInstalled(tmpRepo); !ok {
+		t.Fatalf("expected CheckGitHooksInstalled to pass after installation, got: %s", detail)
+	}
+
+	// Second run should be idempotent (0 files rewritten)
+	installedAgain, err := InstallGitHooks(tmpRepo)
+	if err != nil || len(installedAgain) != 0 {
+		t.Fatalf("expected idempotent InstallGitHooks to rewrite 0 files, got %v (%v)", installedAgain, err)
+	}
+}

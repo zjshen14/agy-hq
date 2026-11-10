@@ -144,9 +144,9 @@ const (
 type ActiveTask struct {
 	TaskSlug             string `json:"taskSlug"`
 	Title                string `json:"title"`
-	Kind                 string `json:"kind,omitempty"`                 // "task" | "subagent" | "auto"
-	Scope                string `json:"scope,omitempty"`                // e.g. "agy-hq", "brand", "NVDA", "personal"
-	Tier                 string `json:"tier"`                           // "quick" | "standard" | "deep"
+	Kind                 string `json:"kind,omitempty"`  // "task" | "subagent" | "auto"
+	Scope                string `json:"scope,omitempty"` // e.g. "agy-hq", "brand", "NVDA", "personal"
+	Tier                 string `json:"tier"`            // "quick" | "standard" | "deep"
 	Model                string `json:"model"`
 	ParentConversationID string `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
 	WorktreeDir          string `json:"worktreeDir,omitempty"`
@@ -810,9 +810,10 @@ func SetTaskPinned(vaultDir, slugOrConvID string, pinned bool) error {
 
 // ArchiveTask archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID).
 // If WorktreeDir exists on disk:
-// - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !force, returns:
-//   refusing to archive %q: uncommitted changes in worktree (pass --force to override)
-// - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if force is true).
+//   - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !force, returns:
+//     refusing to archive %q: uncommitted changes in worktree (pass --force to override)
+//   - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if force is true).
+//
 // Sets task status to "archived", sets LastUpdatedAt to now, and saves tasks.json.
 func ArchiveTask(vaultDir, target string, force bool) error {
 	tasks, err := ListTasks(vaultDir)
@@ -1008,10 +1009,10 @@ func isWorktreeCleanOrAbsent(wtDir string) bool {
 }
 
 // CompactTasks executes the RFC-0009 rolling lifecycle compaction:
-// 1. Auto-archives completed/cancelled top-level tasks older than TaskAutoArchiveAfter (24h) if their worktree is clean.
-// 2. Auto-archives unpinned idle top-level tasks untouched for > IdleDormantArchiveAfter (48h) if their worktree is clean.
-// 3. Flushes completed/cancelled subagents (>24h or beyond MaxHotCompletedSubagents) and archived tasks (>48h)
-//    from local/memory/tasks.json into append-only local/memory/tasks_archive.jsonl.
+//  1. Auto-archives completed/cancelled top-level tasks older than TaskAutoArchiveAfter (24h) if their worktree is clean.
+//  2. Auto-archives unpinned idle top-level tasks untouched for > IdleDormantArchiveAfter (48h) if their worktree is clean.
+//  3. Flushes completed/cancelled subagents (>24h or beyond MaxHotCompletedSubagents) and archived tasks (>48h)
+//     from local/memory/tasks.json into append-only local/memory/tasks_archive.jsonl.
 func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksReport, error) {
 	if opts.Now.IsZero() {
 		opts.Now = time.Now()
@@ -1160,12 +1161,12 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 
 // TaskStats summarizes task counts across status, kind, tier, and storage layer for `./bin/hq tasks stats`.
 type TaskStats struct {
-	HotTotal       int            `json:"hotTotal"`
-	ColdTotal      int            `json:"coldTotal"`
-	ByStatus       map[string]int `json:"byStatus"`
-	ByKind         map[string]int `json:"byKind"`
-	ByTier         map[string]int `json:"byTier"`
-	ByScope        map[string]int `json:"byScope"`
+	HotTotal  int            `json:"hotTotal"`
+	ColdTotal int            `json:"coldTotal"`
+	ByStatus  map[string]int `json:"byStatus"`
+	ByKind    map[string]int `json:"byKind"`
+	ByTier    map[string]int `json:"byTier"`
+	ByScope   map[string]int `json:"byScope"`
 }
 
 // ComputeTaskStats aggregates counts across hot tasks.json and cold tasks_archive.jsonl.
@@ -2442,8 +2443,9 @@ func IsNestedSubagentConversation(vaultDir, convID string) bool {
 // 1. Top-level task conversation (EffectiveKind == "task").
 // 2. Automated daemon trigger (EffectiveKind == "auto").
 // 3. Direct subagent of the Front Desk (EffectiveKind == "subagent"), where:
-//    - ParentConversationID matches frontDeskConvID, OR
-//    - ParentConversationID is empty (legacy subagents created from Front Desk).
+//   - ParentConversationID matches frontDeskConvID, OR
+//   - ParentConversationID is empty (legacy subagents created from Front Desk).
+//
 // Returns false if Kind is "subagent" and ParentConversationID points to another task/subagent (not Front Desk).
 func IsLayer1Task(task ActiveTask, frontDeskConvID string) bool {
 	kind := task.EffectiveKind()

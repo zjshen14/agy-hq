@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
@@ -244,6 +245,25 @@ func Run(vaultDir string) []CheckResult {
 			Status: "PASS",
 			Detail: detail,
 		})
+	}
+
+	// 9. Check Local CI & Git Hook Guards (.git/hooks/pre-commit & pre-push)
+	if rootDir, err := vault.ResolveRoot(); err == nil {
+		if _, sErr := os.Stat(filepath.Join(rootDir, ".git", "hooks")); sErr == nil {
+			if hooksOK, hooksDetail := ci.CheckGitHooksInstalled(rootDir); hooksOK {
+				results = append(results, CheckResult{
+					Name:   "CI & Git Hook Guards",
+					Status: "PASS",
+					Detail: hooksDetail,
+				})
+			} else {
+				results = append(results, CheckResult{
+					Name:   "CI & Git Hook Guards",
+					Status: "WARN",
+					Detail: hooksDetail,
+				})
+			}
+		}
 	}
 
 	return results

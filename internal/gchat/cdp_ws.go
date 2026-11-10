@@ -176,10 +176,10 @@ func applyCDPNetworkJail(wsURL string) {
 }
 
 // EnsureCDPSession ensures that Chrome CDP is running and authenticated at chat.google.com.
-// - If saved cookies exist in local/private/gchat/chrome-profile, it auto-starts Chrome in
-//   invisible `--headless=new` mode (0 popup windows).
-// - If cookies are missing or expired (redirected to accounts.google.com) and allowInteractiveLogin
-//   is true, it runs the guided InteractiveLogin flow (visible sign-in -> cache spaces -> switch to headless).
+//   - If saved cookies exist in local/private/gchat/chrome-profile, it auto-starts Chrome in
+//     invisible `--headless=new` mode (0 popup windows).
+//   - If cookies are missing or expired (redirected to accounts.google.com) and allowInteractiveLogin
+//     is true, it runs the guided InteractiveLogin flow (visible sign-in -> cache spaces -> switch to headless).
 func EnsureCDPSession(vaultDir, accountAlias string, allowInteractiveLogin bool) (string, error) {
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
 	if err != nil {

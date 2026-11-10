@@ -147,7 +147,7 @@ func TestDaemonStateAndInfo(t *testing.T) {
 	}
 
 	// Start daemon
-	if err := RecordDaemonStart(vaultDir, "127.0.0.1:4747"); err != nil {
+	if err := RecordDaemonStart(vaultDir, "127.0.0.1:4242"); err != nil {
 		t.Fatalf("RecordDaemonStart failed: %v", err)
 	}
 
@@ -159,8 +159,8 @@ func TestDaemonStateAndInfo(t *testing.T) {
 	if infoRunning.PID != os.Getpid() {
 		t.Errorf("expected PID %d, got %d", os.Getpid(), infoRunning.PID)
 	}
-	if infoRunning.Addr != "127.0.0.1:4747" {
-		t.Errorf("expected addr 127.0.0.1:4747, got %s", infoRunning.Addr)
+	if infoRunning.Addr != "127.0.0.1:4242" {
+		t.Errorf("expected addr 127.0.0.1:4242, got %s", infoRunning.Addr)
 	}
 	statusRunning := FormatDaemonStatus(infoRunning)
 	if !strings.Contains(statusRunning, "RUNNING") || !strings.Contains(statusRunning, "PID:") {

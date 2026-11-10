@@ -627,7 +627,7 @@ func ResolveSpaceTarget(vaultDir, accountAlias, target string) (string, string, 
 	}
 
 	// If target was not in the 20 visible sidebar spaces (e.g. a new email address like "alice@gmail.com"
-	// or a username handle like "alex_dev"), use Google Chat's "New chat" PeopleKit search via CDP to resolve/create the DM
+	// or a username handle like "alice77"), use Google Chat's "New chat" PeopleKit search via CDP to resolve/create the DM
 	if dm, dmErr := resolveOrCreateDMViaCDP(vaultDir, cfg, raw); dmErr == nil && dm.SpaceID != "" {
 		return dm.SpaceID, dm.DisplayName, nil
 	}

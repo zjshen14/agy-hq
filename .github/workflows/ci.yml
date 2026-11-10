@@ -1,0 +1,126 @@
+name: agy-hq CI & Regression Gate
+
+on:
+  push:
+    branches:
+      - main
+      - "hq/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  guard:
+    name: PII Boundary & Agent Harness Contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check Go formatting (gofmt -s)
+        run: |
+          UNFORMATTED="$(gofmt -s -l cmd internal)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "ERROR: The following Go files are not formatted with 'gofmt -s':" >&2
+            echo "$UNFORMATTED" >&2
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Build hq microkernel
+        run: |
+          mkdir -p ./bin
+          go build -o ./bin/hq ./cmd/hq
+
+      - name: Verify Mathematical PII & Vault Boundary Invariants (P1-P5)
+        run: ./bin/hq ci check-pii
+
+      - name: Verify Agent Skills, Hook Parity, Security Matrix & Routing Contracts (H1-H3)
+        run: ./bin/hq ci check-harness
+
+  test:
+    name: Unit (-race) & CUJ E2E (${{ matrix.os }})
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure synthetic git identity for test worktrees
+        run: |
+          git config --global user.email "test@agy-hq.local"
+          git config --global user.name "agy-hq CI"
+
+      - name: Run unit & concurrency tests with race detector
+        run: >
+          go test -race -count=1
+          ./internal/approvals
+          ./internal/ci
+          ./internal/doctor
+          ./internal/gchat
+          ./internal/gmail
+          ./internal/hooks
+          ./internal/kernel
+          ./internal/rsi
+          ./internal/vault
+          ./internal/webui
+          ./internal/worktree
+
+      - name: Run Critical User Journeys (CUJ 1-18) E2E Acceptance Suite
+        run: go test -v -count=1 ./internal/e2e -run "^TestCUJ"
+
+  cross-build:
+    name: Multi-Platform Static Binary Matrix (Linux & macOS)
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build static binaries across Linux/macOS (amd64 & arm64)
+        run: |
+          mkdir -p dist
+          for target in "linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64"; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            OUT="dist/hq-${GOOS}-${GOARCH}"
+            echo "==> Building ${OUT} (CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH})..."
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "$OUT" ./cmd/hq
+            test -s "$OUT"
+          done
+          ls -lh dist/
