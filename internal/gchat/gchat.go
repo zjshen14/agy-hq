@@ -934,6 +934,20 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 	return spec, nil
 }
 
+// ProposalSummary formats a user-facing proposal summary for sending a Google Chat draft,
+// including target recipient/space and a truncated preview of the message body.
+func ProposalSummary(spec DraftSpec) string {
+	target := strings.TrimSpace(spec.SpaceName)
+	if target == "" {
+		target = strings.TrimSpace(spec.SpaceID)
+	}
+	preview := strings.Join(strings.Fields(strings.TrimSpace(spec.Body)), " ")
+	if runes := []rune(preview); len(runes) > 120 {
+		preview = string(runes[:120]) + "..."
+	}
+	return fmt.Sprintf("Send Google Chat to %s: %q", target, preview)
+}
+
 // GetDraft loads a DraftSpec from local/memory/gchat/drafts/<draftID>.json and recomputes its ContentHash.
 func GetDraft(vaultDir, accountAlias, draftID string) (DraftSpec, error) {
 	p := filepath.Join(vaultDir, "memory", "gchat", "drafts", strings.TrimSpace(draftID)+".json")

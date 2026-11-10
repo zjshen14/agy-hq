@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -128,5 +129,94 @@ func TestSyncMarkdownConsoleHeaderPill(t *testing.T) {
 	}
 	if !strings.Contains(string(artContent), expectedPill) {
 		t.Fatalf("expected hq_console.md to contain sidecar header pill %q", expectedPill)
+	}
+}
+
+func TestWebUIDraftPayloadAndMessagePreview(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	// 1. Seed a Google Chat draft file in memory/gchat/drafts/
+	gchatDraftDir := filepath.Join(vaultDir, "memory", "gchat", "drafts")
+	if err := os.MkdirAll(gchatDraftDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	draftBody := "Hey Alice, let's review the proposal together!"
+	draftJSON := `{
+		"draftId": "gchat-draft-test1234",
+		"account": "personal",
+		"spaceId": "spaces/AAAA_DM_ALICE",
+		"spaceName": "Alice",
+		"body": "` + draftBody + `"
+	}`
+	if err := os.WriteFile(filepath.Join(gchatDraftDir, "gchat-draft-test1234.json"), []byte(draftJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Create a pending proposal referencing the draft
+	summary := `Send Google Chat to Alice: "Hey Alice, let's review the proposal together!"`
+	cmd := `./bin/hq gchat send-draft --account=personal --draft=gchat-draft-test1234 --hash=1234567890ab`
+	meta := map[string]string{
+		"draftId":   "gchat-draft-test1234",
+		"account":   "personal",
+		"spaceId":   "spaces/AAAA_DM_ALICE",
+		"spaceName": "Alice",
+	}
+	prop, err := approvals.CreateWithMetadata(vaultDir, "gchat_send", summary, cmd, vaultDir, "conv-preview-test", meta)
+	if err != nil {
+		t.Fatalf("CreateWithMetadata failed: %v", err)
+	}
+
+	h := NewHandler(vaultDir)
+
+	// 3. GET / should render proposal summary AND the formatted Message Preview blockquote
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected GET / status (%d)", rec.Code)
+	}
+	bodyStr := rec.Body.String()
+	if !strings.Contains(bodyStr, template.HTMLEscapeString(summary)) {
+		t.Fatalf("expected GET / to contain summary %q, got body:\n%s", summary, bodyStr)
+	}
+	if !strings.Contains(bodyStr, "💬 Message Preview") {
+		t.Fatalf("expected GET / to render '💬 Message Preview' header")
+	}
+	if !strings.Contains(bodyStr, template.HTMLEscapeString(draftBody)) {
+		t.Fatalf("expected GET / to render draft body %q", draftBody)
+	}
+
+	// 4. GET /api/state should return draftPayload in proposal metadata
+	reqState := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+	recState := httptest.NewRecorder()
+	h.ServeHTTP(recState, reqState)
+	if recState.Code != http.StatusOK {
+		t.Fatalf("unexpected GET /api/state status (%d)", recState.Code)
+	}
+	var state DashboardState
+	if err := json.Unmarshal(recState.Body.Bytes(), &state); err != nil {
+		t.Fatalf("failed to unmarshal state: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("expected 1 pending proposal, got %d", len(state.Pending))
+	}
+	if state.Pending[0].Metadata["draftPayload"] != draftBody {
+		t.Fatalf("expected draftPayload=%q, got %q", draftBody, state.Pending[0].Metadata["draftPayload"])
+	}
+
+	// 5. SyncMarkdownConsole should render summary and formatted blockquote in CONSOLE.md
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole: %v", err)
+	}
+	consoleData, err := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	if err != nil {
+		t.Fatalf("read CONSOLE.md: %v", err)
+	}
+	consoleStr := string(consoleData)
+	if !strings.Contains(consoleStr, prop.ID) || !strings.Contains(consoleStr, summary) {
+		t.Fatalf("expected CONSOLE.md to contain proposal ID and summary, got:\n%s", consoleStr)
+	}
+	if !strings.Contains(consoleStr, "**Message Preview:**") || !strings.Contains(consoleStr, draftBody) {
+		t.Fatalf("expected CONSOLE.md to contain '**Message Preview:**' and body, got:\n%s", consoleStr)
 	}
 }

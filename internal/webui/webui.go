@@ -13,6 +13,8 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/gchat"
+	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -262,8 +264,98 @@ const preloadBridgeJS = `/**
 
 const faviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="64" height="64"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1C202B"/><stop offset="100%" stop-color="#0E1017"/></linearGradient><radialGradient id="wl" cx="286" cy="398" r="240" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#8AE05C" stop-opacity="0.95"/><stop offset="60%" stop-color="#8AE05C" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="wc" cx="764" cy="462" r="230" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F85852" stop-opacity="0.95"/><stop offset="65%" stop-color="#F85852" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="wo" cx="672" cy="344" r="210" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#FF9A26" stop-opacity="0.98"/><stop offset="60%" stop-color="#FF9A26" stop-opacity="0.40"/><stop offset="100%" stop-color="#F85852" stop-opacity="0"/></radialGradient><radialGradient id="ol" cx="383" cy="347" r="135" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#9CD64A" stop-opacity="0.95"/><stop offset="65%" stop-color="#9CD64A" stop-opacity="0.30"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="oc" cx="553" cy="341" r="135" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F65A4C" stop-opacity="0.95"/><stop offset="65%" stop-color="#F65A4C" stop-opacity="0.30"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="oo" cx="468" cy="290" r="140" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#FC8E26" stop-opacity="1"/><stop offset="58%" stop-color="#FC8E26" stop-opacity="0.45"/><stop offset="100%" stop-color="#F65A4C" stop-opacity="0"/></radialGradient></defs><rect x="94" y="94" width="836" height="836" rx="192" fill="url(#bg)"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="#378DFC"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wl)"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wc)"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wo)"/><circle cx="468" cy="398" r="142" fill="#378DFC"/><circle cx="468" cy="398" r="142" fill="url(#ol)"/><circle cx="468" cy="398" r="142" fill="url(#oc)"/><circle cx="468" cy="398" r="142" fill="url(#oo)"/></svg>`
 
+func extractFlagValue(cmd, flag string) string {
+	parts := strings.Fields(cmd)
+	prefix := flag + "="
+	for _, p := range parts {
+		if strings.HasPrefix(p, prefix) {
+			val := strings.TrimPrefix(p, prefix)
+			return strings.Trim(val, `"'`)
+		}
+	}
+	for i, p := range parts {
+		if p == flag && i+1 < len(parts) {
+			return strings.Trim(parts[i+1], `"'`)
+		}
+	}
+	return ""
+}
+
+func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
+	if p == nil {
+		return
+	}
+	if p.Metadata == nil {
+		p.Metadata = make(map[string]string)
+	}
+
+	draftID := p.Metadata["draftId"]
+	account := p.Metadata["account"]
+	if draftID == "" {
+		draftID = extractFlagValue(p.Command, "--draft")
+	}
+	if account == "" {
+		account = extractFlagValue(p.Command, "--account")
+	}
+
+	isGChat := p.ActionType == "gchat_send" || strings.Contains(p.Command, "gchat") || strings.HasPrefix(draftID, "gchat-draft-")
+	isGmail := p.ActionType == "gmail_send" || strings.Contains(p.Command, "gmail") || strings.HasPrefix(draftID, "draft-")
+
+	var payload string
+	if isGChat && draftID != "" {
+		if spec, err := gchat.GetDraft(vaultDir, account, draftID); err == nil && spec.Body != "" {
+			payload = spec.Body
+			if p.Metadata["spaceName"] == "" {
+				p.Metadata["spaceName"] = spec.SpaceName
+			}
+			if p.Metadata["spaceId"] == "" {
+				p.Metadata["spaceId"] = spec.SpaceID
+			}
+		}
+	} else if isGmail && draftID != "" {
+		if spec, err := gmail.GetDraft(vaultDir, account, draftID); err == nil && (spec.Body != "" || spec.Subject != "") {
+			if spec.Subject != "" && !strings.Contains(spec.Body, spec.Subject) {
+				payload = fmt.Sprintf("Subject: %s\n\n%s", spec.Subject, spec.Body)
+			} else {
+				payload = spec.Body
+			}
+		}
+	}
+
+	if payload == "" {
+		if dp := p.Metadata["draftPayload"]; dp != "" {
+			payload = dp
+		} else if bp := p.Metadata["bodyPreview"]; bp != "" {
+			payload = bp
+		}
+	}
+
+	if payload != "" {
+		p.Metadata["draftPayload"] = payload
+		if p.Metadata["bodyPreview"] == "" {
+			p.Metadata["bodyPreview"] = payload
+		}
+		if isGChat && strings.HasPrefix(p.Summary, "Send Google Chat Draft ") {
+			target := p.Metadata["spaceName"]
+			if target == "" {
+				target = p.Metadata["spaceId"]
+			}
+			if target != "" {
+				prev := strings.Join(strings.Fields(strings.TrimSpace(payload)), " ")
+				if runes := []rune(prev); len(runes) > 120 {
+					prev = string(runes[:120]) + "..."
+				}
+				p.Summary = fmt.Sprintf("Send Google Chat to %s: %q", target, prev)
+			}
+		}
+	}
+}
+
 func loadState(vaultDir, flashMsg string) DashboardState {
 	pending, _ := approvals.List(vaultDir)
+	for i := range pending {
+		enrichPendingDraftPayload(vaultDir, &pending[i])
+	}
 	wts, _ := worktree.List(vaultDir)
 	tasks, _ := kernel.ListTasks(vaultDir)
 	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
@@ -317,6 +409,17 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 			return s[:12]
 		}
 		return s
+	},
+	"draftPayload": func(p approvals.Proposal) string {
+		if p.Metadata != nil {
+			if dp := p.Metadata["draftPayload"]; dp != "" {
+				return dp
+			}
+			if bp := p.Metadata["bodyPreview"]; bp != "" {
+				return bp
+			}
+		}
+		return ""
 	},
 	"base": filepath.Base,
 	"mulf": func(a, b float64) float64 {
@@ -465,6 +568,33 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
   .badge-info { background: var(--accent-glow); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
   .badge-danger { background: var(--danger-glow); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
   
+  .preview-box {
+    margin: 8px 0;
+  }
+  .preview-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #38bdf8;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .preview-quote {
+    background: #06080e;
+    border-left: 3px solid #38bdf8;
+    color: #f1f5f9;
+    margin: 0;
+    padding: 8px 12px;
+    border-radius: 0 6px 6px 0;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font);
+  }
   pre.code-block {
     background: #06080e;
     border: 1px solid rgba(30, 41, 59, 0.8);
@@ -590,6 +720,12 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     <div class="muted" style="margin:4px 0">
       ID: <code>{{.ID}}</code> · SHA-256: <code title="{{.SHA256}}">{{shortSHA .SHA256}}</code>
     </div>
+    {{if draftPayload .}}
+    <div class="preview-box">
+      <div class="preview-title">💬 Message Preview</div>
+      <blockquote class="preview-quote">{{draftPayload .}}</blockquote>
+    </div>
+    {{end}}
     <pre class="code-block">{{.Command}}</pre>
     <div class="actions">
       <button type="button" class="btn btn-approve" onclick="approveProposal('{{.ID}}', '{{shortSHA .SHA256}}')">
@@ -790,10 +926,18 @@ async function refreshState() {
       let html = '';
       for (const p of state.pending) {
         const shortSha = p.sha256 ? p.sha256.substring(0, 12) : '';
+        const preview = (p.metadata && (p.metadata.draftPayload || p.metadata.bodyPreview)) ? (p.metadata.draftPayload || p.metadata.bodyPreview) : '';
+        const previewHtml = preview ?
+          '<div class="preview-box">' +
+          '<div class="preview-title">💬 Message Preview</div>' +
+          '<blockquote class="preview-quote">' + escapeHTML(preview) + '</blockquote>' +
+          '</div>' : '';
+
         html += '<div class="card pending-hero" id="proposal-' + p.id + '">' +
           '<div class="meta-row"><div><strong style="font-size:13px">' + escapeHTML(p.summary) + '</strong></div>' +
           '<span class="badge badge-warn">' + escapeHTML(p.actionType) + '</span></div>' +
           '<div class="muted" style="margin:4px 0">ID: <code>' + escapeHTML(p.id) + '</code> · SHA-256: <code title="' + escapeHTML(p.sha256) + '">' + escapeHTML(shortSha) + '</code></div>' +
+          previewHtml +
           '<pre class="code-block">' + escapeHTML(p.command) + '</pre>' +
           '<div class="actions">' +
           '<button type="button" class="btn btn-approve" onclick="approveProposal(\'' + p.id + '\', \'' + shortSha + '\')">✓ Approve (' + escapeHTML(shortSha) + ')</button>' +
@@ -877,6 +1021,25 @@ func SyncMarkdownConsole(vaultDir string) error {
 				short = short[:12]
 			}
 			fmt.Fprintf(&b, "> - **`%s`** (`%s` · `sha256:%s`): %s — `%s`\n", p.ID, p.ActionType, short, p.Summary, p.Command)
+			payload := ""
+			if p.Metadata != nil {
+				if dp := p.Metadata["draftPayload"]; dp != "" {
+					payload = dp
+				} else if bp := p.Metadata["bodyPreview"]; bp != "" {
+					payload = bp
+				}
+			}
+			if payload != "" {
+				previewText := payload
+				if runes := []rune(previewText); len(runes) > 600 {
+					previewText = string(runes[:600]) + "..."
+				}
+				b.WriteString(">   > **Message Preview:**\n")
+				lines := strings.Split(strings.TrimSpace(previewText), "\n")
+				for _, line := range lines {
+					fmt.Fprintf(&b, ">   > %s\n", line)
+				}
+			}
 		}
 		b.WriteString("\n---\n\n")
 	} else {

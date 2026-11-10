@@ -30,8 +30,9 @@ When the user asks to send a message to a Google Chat space or DM (even from `[H
      2. Fuzzy-resolves `--to` against cached/live spaces (`local/memory/gchat/spaces_cache.json`),
      3. Pre-warms the target space tab in headless Chrome so the composer is ready, and
      4. Creates the SHA-256 draft (`gchat-draft-*`) and stages a `gchat_send` proposal (`prop-*`).
-2. **Present 1-Tap Approval via `ask_question`:**
-   - Immediately call `ask_question` referencing the staged Proposal ID (`prop-...`) and `sha256` prefix (`PreToolUse` automatically injects the ground-truth recipient space and message body preview).
+2. **Present 1-Tap Approval via `ask_question` with In-Prompt Payload Preview:**
+   - Always render the full message content as a clear markdown blockquote directly in the conversation turn BEFORE or WITH the approval prompt.
+   - In `ask_question`, explicitly include the recipient and message preview in the question title or option text (e.g., `Approve sending Google Chat to <Recipient>: "..."?`) alongside the Proposal ID and `sha256` prefix (`PreToolUse` also injects the ground-truth recipient space and message body preview).
 3. **Execute on Approval:**
    - Once the user selects Approve, run:
      ```sh

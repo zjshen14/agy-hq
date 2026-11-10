@@ -2,6 +2,7 @@ package gchat
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -280,5 +281,41 @@ func TestPhase4_FuzzySpaceResolutionAndAuthURLDetection(t *testing.T) {
 	}
 	if !looksLikeExplicitSpaceID("spaces/TEST_DM_AAAAE") || !looksLikeExplicitSpaceID("TEST_DM_AAAAE") {
 		t.Fatalf("expected TEST_DM_AAAAE to be recognized as an explicit space ID")
+	}
+}
+
+func TestProposalSummary(t *testing.T) {
+	spec := DraftSpec{
+		SpaceName: "Alice",
+		SpaceID:   "spaces/AAAA_DM_ALICE",
+		Body:      "Hello Alice, let's coordinate on the schedule tomorrow!",
+	}
+	sum := ProposalSummary(spec)
+	expected := `Send Google Chat to Alice: "Hello Alice, let's coordinate on the schedule tomorrow!"`
+	if sum != expected {
+		t.Fatalf("expected summary %q, got %q", expected, sum)
+	}
+
+	// Fallback to spaceId when SpaceName is empty
+	specNoName := DraftSpec{
+		SpaceID: "spaces/TEST_DM_AAAAE",
+		Body:    "Testing fallback",
+	}
+	sumNoName := ProposalSummary(specNoName)
+	expectedNoName := `Send Google Chat to spaces/TEST_DM_AAAAE: "Testing fallback"`
+	if sumNoName != expectedNoName {
+		t.Fatalf("expected summary %q, got %q", expectedNoName, sumNoName)
+	}
+
+	// Long message body truncated at 120 chars
+	longBody := strings.Repeat("A", 150)
+	specLong := DraftSpec{
+		SpaceName: "Project Launch Space",
+		Body:      longBody,
+	}
+	sumLong := ProposalSummary(specLong)
+	expectedPrefix := fmt.Sprintf(`Send Google Chat to Project Launch Space: "%s..."`, strings.Repeat("A", 120))
+	if sumLong != expectedPrefix {
+		t.Fatalf("expected truncated summary %q, got %q", expectedPrefix, sumLong)
 	}
 }

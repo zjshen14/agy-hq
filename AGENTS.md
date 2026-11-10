@@ -79,6 +79,10 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
        1. Local CI gate passes 100% before submitting (`go build -o ./bin/hq ./cmd/hq && ./bin/hq ci pre-push`, which verifies P1–P5 PII/Vault invariants, H1–H4B Skill/Hook/Routing/Go/Markdown contracts, `go vet ./...`, and all unit + CUJ E2E tests).
        2. Pre-commit PII, `gofmt -s`, and Markdown link/index checks pass (`./bin/hq ci pre-commit` enforced via `.git/hooks/pre-commit` and `.git/hooks/pre-push`).
        3. The branch is cleanly rebased on `origin/main` and merged.
+   - **Mandatory Outbound Payload & In-Prompt Preview Invariant:**
+     - Whenever proposing an outbound action (Google Chat, email, PR merge, tweet, external API write), the Front Desk or subagent **must always render the full message content or command payload as a clear markdown blockquote directly in the conversation turn BEFORE or WITH the approval prompt**.
+     - In `ask_question`, the question title or option text must explicitly include the recipient and a clear preview/quote of the payload (e.g., `Approve sending Google Chat to Alice: "..."?`) so mobile popup modals disclose the full message before tapping.
+     - Never prompt the user with an opaque proposal ID, draft ID, or hash without showing the exact message body.
    - **Zero-Dirty-Tree & Auto-Push Invariant (All Tasks & Subagents):** Every subagent and task conversation must run `./bin/hq ci pre-push` locally before pushing and ensure `git status -s` is completely clean and pushed to `origin` before ending a turn—including after merging a feature branch into `main`, after completing a follow-up bugfix turn, or after authoring Phase 1 RFC/research docs (`docs/design/`, `docs/research/`, `docs/README.md`). Never leave modified or untracked source/doc files sitting uncommitted in the root workspace at the end of a turn.
 5. **Continuous Harness Self-Improvement:**
    - Treat every user question, correction, or UX friction point as a signal to improve the `agy-hq` harness:

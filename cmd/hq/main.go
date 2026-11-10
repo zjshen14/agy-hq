@@ -269,7 +269,7 @@ func main() {
 					hashShort = hashShort[:12]
 				}
 				if *summary == "" {
-					*summary = fmt.Sprintf("Send Google Chat Draft %s [Account: %s -> Space: %s (%s)] (hash:%s)", spec.DraftID, spec.Account, spec.SpaceName, spec.SpaceID, hashShort)
+					*summary = gchat.ProposalSummary(spec)
 				}
 				if *cmdStr == "" {
 					*cmdStr = fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
@@ -282,14 +282,15 @@ func main() {
 					preview = preview[:500] + "..."
 				}
 				meta = map[string]string{
-					"draftId":     spec.DraftID,
-					"account":     spec.Account,
-					"from":        spec.From,
-					"spaceId":     spec.SpaceID,
-					"spaceName":   spec.SpaceName,
-					"threadId":    spec.ThreadID,
-					"bodyPreview": preview,
-					"contentHash": spec.ContentHash,
+					"draftId":      spec.DraftID,
+					"account":      spec.Account,
+					"from":         spec.From,
+					"spaceId":      spec.SpaceID,
+					"spaceName":    spec.SpaceName,
+					"threadId":     spec.ThreadID,
+					"bodyPreview":  preview,
+					"draftPayload": spec.Body,
+					"contentHash":  spec.ContentHash,
 				}
 			} else {
 				spec, err := gmail.GetDraft(vaultDir, *account, *draftID)
@@ -315,14 +316,15 @@ func main() {
 					preview = preview[:500] + "..."
 				}
 				meta = map[string]string{
-					"draftId":     spec.DraftID,
-					"account":     spec.Account,
-					"from":        spec.From,
-					"to":          spec.To,
-					"cc":          spec.Cc,
-					"subject":     spec.Subject,
-					"bodyPreview": preview,
-					"contentHash": spec.ContentHash,
+					"draftId":      spec.DraftID,
+					"account":      spec.Account,
+					"from":         spec.From,
+					"to":           spec.To,
+					"cc":           spec.Cc,
+					"subject":      spec.Subject,
+					"bodyPreview":  preview,
+					"draftPayload": spec.Body,
+					"contentHash":  spec.ContentHash,
 				}
 			}
 		}
@@ -1097,8 +1099,7 @@ func main() {
 			if len(hashShort) > 12 {
 				hashShort = hashShort[:12]
 			}
-			summary := fmt.Sprintf("Send Google Chat Draft %s [Account: %s -> Space: %s (%s)] (hash:%s)",
-				spec.DraftID, spec.Account, spec.SpaceName, spec.SpaceID, hashShort)
+			summary := gchat.ProposalSummary(spec)
 			cmdStr := fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s",
 				hqBin, spec.Account, spec.DraftID, hashShort)
 			preview := spec.Body
@@ -1106,14 +1107,15 @@ func main() {
 				preview = preview[:500] + "..."
 			}
 			meta := map[string]string{
-				"draftId":     spec.DraftID,
-				"account":     spec.Account,
-				"from":        spec.From,
-				"spaceId":     spec.SpaceID,
-				"spaceName":   spec.SpaceName,
-				"threadId":    spec.ThreadID,
-				"bodyPreview": preview,
-				"contentHash": spec.ContentHash,
+				"draftId":      spec.DraftID,
+				"account":      spec.Account,
+				"from":         spec.From,
+				"spaceId":      spec.SpaceID,
+				"spaceName":    spec.SpaceName,
+				"threadId":     spec.ThreadID,
+				"bodyPreview":  preview,
+				"draftPayload": spec.Body,
+				"contentHash":  spec.ContentHash,
 			}
 			prop, err := approvals.CreateWithMetadata(vaultDir, "gchat_send", summary, cmdStr, rootDir, *convID, meta)
 			if err != nil {
