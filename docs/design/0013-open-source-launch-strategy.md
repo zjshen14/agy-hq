@@ -1,6 +1,6 @@
 # RFC-0013: Open-Source Readiness, Forensic Privacy Sanitization, Governance & Launch Architecture
 
-- **Status:** Draft (Phase 1 — Awaiting User Review & Architectural Decisions)
+- **Status:** Approved (Phase 1 Complete — Ready for Phase 2 & 3 Implementation)
 - **Author:** `[Task:oss] Open Source Strategy & Launch Plan` (`gemini-4-argon-high`)
 - **Created:** 2026-11-10
 - **Note on Numbering:** Assigned `RFC-0013` (`docs/design/0013-open-source-launch-strategy.md`) and companion research [`09_open_source_agent_os_strategy.md`](../research/09_open_source_agent_os_strategy.md) because `RFC-0005` ([`0005-gmail-integration.md`](./0005-gmail-integration.md)) through `RFC-0012` are already allocated.
@@ -262,16 +262,11 @@ We enhance `./bin/hq doctor` (`internal/doctor/doctor.go`) with:
 
 ---
 
-## 8. Open Architectural Decisions for User Review
+## 8. Resolved Architectural Decisions
 
-Before we proceed to **Phase 2 & Phase 3 implementation**, please review and confirm the following three decisions:
 1. **Git History Sanitization Strategy (Section 2.2):**
-   - **Option A (`git filter-repo` History Scrub — Recommended):** Rewrite the existing ~55 commits on `main` using a deterministic replacement map so all historical diffs (personal email, family names, real space IDs) are replaced with synthetic equivalents while preserving the full commit timeline and RFC evolution.
-   - **Option B (Clean Genesis Commit for `v0.1.0`):** Squash pre-release history into a single clean initial commit (or curated epoch commits) when publishing to the public repository.
+   - **Decision:** **Option A (`git filter-repo` / Deterministic History Scrub)** — Rewrite the existing commits on `main` using a deterministic replacement map so all historical diffs (personal email, family names, real space IDs) are replaced with synthetic equivalents while preserving the full commit timeline and RFC evolution.
 2. **Open-Source License Selection (Section 3.1):**
-   - **Option A (`Apache-2.0` — Recommended):** Explicit patent grant, defensive patent termination clause, and trademark protection for `agy-hq` branding.
-   - **Option B (`MIT`):** Ultra-concise permissive license.
-   - **Option C (`MIT OR Apache-2.0` Dual License):** Dual licensing standard.
-3. **5-Minute Onboarding Demo Flag (`./bin/hq init --demo` vs. Default):**
-   - **Option A (Explicit `--demo` flag on `hq init --demo` & `bootstrap.sh --demo` — Recommended):** Keeps bare `./bin/hq init` completely clean while allowing 1-line demo evaluation via `./scripts/bootstrap.sh --demo`.
-   - **Option B (Seed sample data by default on `hq init`, with `--clean` to skip):** Every new `hq init` starts with sample tasks/inbox items unless `--clean` is passed.
+   - **Decision:** **Option A (`Apache-2.0`)** — Adopt the **Apache License 2.0** for explicit patent grant/retaliation protection (§3) and trademark protection (§6) covering `agy-hq` branding.
+3. **5-Minute Onboarding Demo Flag (`./bin/hq init --demo`):**
+   - **Decision:** **Option A (Opt-in `--demo` flag on `./bin/hq init --demo` & `./scripts/bootstrap.sh --demo`)** — Keep bare `./bin/hq init` completely clean while allowing 1-line demo evaluation with synthetic sample data via `--demo`.
