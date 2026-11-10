@@ -12,6 +12,9 @@ description: >-
 
 > **Architectural Purpose (RFC-0006):** Do not treat `local/MEMORY.md` as an append-only dump or blindly trust self-reported 1-line turn summaries. Your role during nightly dreaming is to **verify what actually happened against ground-truth transcripts**, **prune obsolete tasks and contradicted assumptions**, **distill deep technical/domain knowledge into Topic Wiki pages (`local/memory/topics/<slug>.md`)**, and **maintain `local/MEMORY.md` strictly as a concise Roadmap Index ($\le 80$ lines)** loaded at `SessionStart`.
 
+> [!IMPORTANT]
+> **Silent Execution Invariant:** Automated nightly sleep consolidation (`sleep-consolidate` / `[Auto] Nightly Sleep Consolidation`) runs **100% silently in the background**. Never emit chat messages, checklists, progress updates, or completion banners into the Front Desk conversation. All background audits, transcript verification findings, pruned facts, topic wiki updates, and RSI proposals remain strictly confined to the private Vault (`local/`), ledger, and turn journals. Any critical health issues, distilled insights, or pending approvals roll forward into the next morning's 7:30 AM Morning Brief (`/morning-brief`).
+
 ## Four-Stage Dreaming Workflow
 
 ### Stage 1: Baseline Memory Audit & Stale Reference Check
@@ -76,9 +79,10 @@ description: >-
 2. **Task Lifecycle Consolidation & Hot/Cold Archive Rotation (`./bin/hq tasks compact`):**
    - Run `./bin/hq tasks compact` to automatically archive eligible completed (`>24h`) and dormant (`>48h`) tasks with clean worktrees and rotate historical subagents and archived tasks from `local/memory/tasks.json` into `local/memory/tasks_archive.jsonl`.
    - For any remaining `completed` task that needs explicit worktree cleanup, run `./bin/hq archive <slug>`.
-3. **Verify Budget & Commit Vault:**
+3. **Verify Budget, Commit Vault & Silent Completion:**
    - Run `./bin/hq memory compact`, `./bin/hq memory status`, and `./bin/hq rsi status` to confirm `local/MEMORY.md` is $\le 80$ lines (`[OK]`), `facts.jsonl` is deduplicated, and `tasks.json` is compacted.
    - Commit changes to the private Vault repository:
      ```sh
      git -C local add -A && git -C local commit -m "chore(memory): nightly dreaming consolidation YYYY-MM-DD"
      ```
+   - **Silent Turn Finish:** End the turn cleanly without emitting chat responses, status banners, or completion summaries into the Front Desk thread.
