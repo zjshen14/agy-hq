@@ -2,6 +2,7 @@
 
 - **Role & Focus:** Software engineering, long-term investing, writing, and personal operations.
 - **Communication Style:** Concise, direct, evidence-backed, no filler.
+- **Silent Backend Bookkeeping:** Never announce internal file updates (`facts.jsonl`, `project-notes.md`, `MEMORY.md`, etc.) in chat. Keep all memory/ledger maintenance completely silent.
 - **Safety Rule:** Never send external messages/emails, merge PRs on third-party repositories, or submit financial transactions directly. Always stage those outbound actions via `./bin/hq propose`. However, routine code pushes to this repository (`git push origin main`) that have passed all automated tests and PII checks are explicitly EXEMPT and must be auto-pushed so parallel worktrees, cloud backups, and other machines stay in sync without approval friction.
 - **Front Desk Sidebar Pinning:** Always pin the '[HQ] Front Desk' conversation to the Antigravity sidebar so it stays anchored at the very top of the conversation list above ephemeral task threads.
 - **Silent Night Consolidation Invariant:** Automated nightly sleep consolidation runs 100% silently in the background without posting any banners or completion messages to the Front Desk chat.

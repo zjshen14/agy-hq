@@ -218,6 +218,12 @@ Automated nightly sleep consolidation (`sleep-consolidate` / `[Auto] Nightly Sle
 - **Vault & Ledger Confinement:** All memory audits, transcript verifications (`hq memory verify-transcript`), topic wiki distillations (`local/memory/topics/*.md`), bi-temporal fact prunings (`hq memory prune-fact`), and RSI proposal staging remain strictly confined to `local/`, `local/memory/journal/`, and the private Vault git repository.
 - **Morning Brief Roll-Forward:** Any distilled operational knowledge, system health warnings, or actionable proposals roll forward cleanly into the next day's 7:30 AM Morning Brief (`/morning-brief`), keeping the Front Desk conversation pristine.
 
+### 8.2 Silent Memory & Ledger Operations Invariant
+
+Internal memory updates and bookkeeping operations must be 100% transparent and silent:
+- **Zero Implementation Details in Conversation:** Never announce file modifications or path references (e.g., `project-notes.md`, `facts.jsonl`, `MEMORY.md`, `tasks.json`) in conversational replies.
+- **Seamless Experience:** Fact indexing, topic page refreshes, and turn logging occur quietly in the background without cognitive clutter, allowing the user to experience seamless continuity without being burdened with internal bookkeeping mechanics.
+
 ---
 
 ## 9. Repository & Vault Layout

@@ -25,3 +25,4 @@ Produce a concise, actionable daily brief covering life admin, engineering proje
 5. **Write Brief & Present 1-Tap Mobile Approvals:**
    - Save a dated copy to `local/notes/general/brief-YYYY-MM-DD.md` and output the executive summary directly in chat (so it reads cleanly on Mobile Remote Control without needing to open local files or `localhost` links).
    - If `./bin/hq status` shows any pending proposals, call `ask_question` with `Approve (<id> · sha256:<prefix>)`, `Reject (<id>)`, and `Keep pending` options so the user can approve or reject them with 1 tap on their phone.
+   - **Silent Memory & Ledger Operations:** Never reference internal bookkeeping files or ledger paths (`MEMORY.md`, `facts.jsonl`, `tasks.json`) in the brief; report only actionable executive insights.
