@@ -40,6 +40,11 @@ func NewHandler(vaultDir string) http.Handler {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	mux.HandleFunc("/preload.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write([]byte(preloadBridgeJS))
+	})
+
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		state := loadState(vaultDir, "")
 		w.Header().Set("Content-Type", "application/json")
@@ -51,10 +56,25 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = r.ParseForm()
-		id := strings.TrimSpace(r.FormValue("id"))
-		sha := strings.TrimSpace(r.FormValue("sha256"))
-		out, err := approvals.Approve(vaultDir, id, sha)
+
+		var id, sha string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				ID     string `json:"id"`
+				SHA256 string `json:"sha256"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id = strings.TrimSpace(body.ID)
+			sha = strings.TrimSpace(body.SHA256)
+		} else {
+			_ = r.ParseForm()
+			id = strings.TrimSpace(r.FormValue("id"))
+			sha = strings.TrimSpace(r.FormValue("sha256"))
+		}
+
+		out, err := approvals.ApproveProposal(vaultDir, id, sha)
+		_ = SyncMarkdownConsole(vaultDir)
+
 		msg := fmt.Sprintf("Approved %s", id)
 		if out != "" {
 			msg += ": " + strings.TrimSpace(out)
@@ -62,11 +82,13 @@ func NewHandler(vaultDir string) http.Handler {
 		if err != nil {
 			msg = fmt.Sprintf("Error approving %s: %v (%s)", id, err, strings.TrimSpace(out))
 		}
-		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+
+		if strings.Contains(r.Header.Get("Accept"), "application/json") || strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"ok":      err == nil,
 				"message": msg,
+				"output":  out,
 			})
 			return
 		}
@@ -79,18 +101,34 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = r.ParseForm()
-		id := strings.TrimSpace(r.FormValue("id"))
-		reason := strings.TrimSpace(r.FormValue("reason"))
+
+		var id, reason string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				ID     string `json:"id"`
+				Reason string `json:"reason"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id = strings.TrimSpace(body.ID)
+			reason = strings.TrimSpace(body.Reason)
+		} else {
+			_ = r.ParseForm()
+			id = strings.TrimSpace(r.FormValue("id"))
+			reason = strings.TrimSpace(r.FormValue("reason"))
+		}
 		if reason == "" {
 			reason = "Rejected via HQ Console"
 		}
-		err := approvals.Reject(vaultDir, id, reason)
+
+		err := approvals.RejectProposal(vaultDir, id, reason)
+		_ = SyncMarkdownConsole(vaultDir)
+
 		msg := fmt.Sprintf("Rejected %s", id)
 		if err != nil {
 			msg = fmt.Sprintf("Error rejecting %s: %v", id, err)
 		}
-		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+
+		if strings.Contains(r.Header.Get("Accept"), "application/json") || strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"ok":      err == nil,
@@ -107,13 +145,33 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = r.ParseForm()
-		slug := strings.TrimSpace(r.FormValue("slug"))
+
+		var slug string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				Slug string `json:"slug"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			slug = strings.TrimSpace(body.Slug)
+		} else {
+			_ = r.ParseForm()
+			slug = strings.TrimSpace(r.FormValue("slug"))
+		}
+
 		err := kernel.CompleteTask(vaultDir, slug, "")
 		_ = SyncMarkdownConsole(vaultDir)
 		msg := fmt.Sprintf("Completed task %s", slug)
 		if err != nil {
 			msg = fmt.Sprintf("Error completing %s: %v", slug, err)
+		}
+
+		if strings.Contains(r.Header.Get("Accept"), "application/json") || strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok":      err == nil,
+				"message": msg,
+			})
+			return
 		}
 		state := loadState(vaultDir, msg)
 		renderHTML(w, state)
@@ -124,13 +182,33 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = r.ParseForm()
-		slug := strings.TrimSpace(r.FormValue("slug"))
+
+		var slug string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				Slug string `json:"slug"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			slug = strings.TrimSpace(body.Slug)
+		} else {
+			_ = r.ParseForm()
+			slug = strings.TrimSpace(r.FormValue("slug"))
+		}
+
 		err := kernel.ArchiveTask(vaultDir, slug, false)
 		_ = SyncMarkdownConsole(vaultDir)
 		msg := fmt.Sprintf("Archived task %s", slug)
 		if err != nil {
 			msg = fmt.Sprintf("Error archiving %s: %v", slug, err)
+		}
+
+		if strings.Contains(r.Header.Get("Accept"), "application/json") || strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok":      err == nil,
+				"message": msg,
+			})
+			return
 		}
 		state := loadState(vaultDir, msg)
 		renderHTML(w, state)
@@ -148,6 +226,39 @@ func NewHandler(vaultDir string) http.Handler {
 
 	return mux
 }
+
+const preloadBridgeJS = `/**
+ * Frontend bridge for Antigravity Sidecar & Standalone agy-hq Web UI.
+ */
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token') || '';
+  const conversationId = params.get('conversationId') || '';
+
+  window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'theme-change') {
+      const vars = event.data.payload && event.data.payload.cssVariables;
+      if (vars) {
+        for (const [key, value] of Object.entries(vars)) {
+          document.documentElement.style.setProperty(key, value);
+        }
+      }
+    }
+  });
+
+  window.sidecar = {
+    token: token,
+    conversationId: conversationId,
+    fetch: function(url, options) {
+      options = options || {};
+      options.headers = options.headers || {};
+      if (token && !options.headers['x-sidecar-token']) {
+        options.headers['x-sidecar-token'] = token;
+      }
+      return fetch(url, options);
+    }
+  };
+})();`
 
 const faviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="64" height="64"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1C202B"/><stop offset="100%" stop-color="#0E1017"/></linearGradient><radialGradient id="wl" cx="286" cy="398" r="240" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#8AE05C" stop-opacity="0.95"/><stop offset="60%" stop-color="#8AE05C" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="wc" cx="764" cy="462" r="230" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F85852" stop-opacity="0.95"/><stop offset="65%" stop-color="#F85852" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="wo" cx="672" cy="344" r="210" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#FF9A26" stop-opacity="0.98"/><stop offset="60%" stop-color="#FF9A26" stop-opacity="0.40"/><stop offset="100%" stop-color="#F85852" stop-opacity="0"/></radialGradient><radialGradient id="ol" cx="383" cy="347" r="135" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#9CD64A" stop-opacity="0.95"/><stop offset="65%" stop-color="#9CD64A" stop-opacity="0.30"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="oc" cx="553" cy="341" r="135" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F65A4C" stop-opacity="0.95"/><stop offset="65%" stop-color="#F65A4C" stop-opacity="0.30"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient><radialGradient id="oo" cx="468" cy="290" r="140" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#FC8E26" stop-opacity="1"/><stop offset="58%" stop-color="#FC8E26" stop-opacity="0.45"/><stop offset="100%" stop-color="#F65A4C" stop-opacity="0"/></radialGradient></defs><rect x="94" y="94" width="836" height="836" rx="192" fill="url(#bg)"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="#378DFC"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wl)"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wc)"/><path d="M 455 768 C 625 768, 745 535, 816 312 C 828 274, 790 262, 770 298 C 700 435, 605 616, 465 616 C 365 616, 295 578, 242 518 C 218 492, 186 518, 210 552 C 268 668, 345 768, 455 768 Z" fill="url(#wo)"/><circle cx="468" cy="398" r="142" fill="#378DFC"/><circle cx="468" cy="398" r="142" fill="url(#ol)"/><circle cx="468" cy="398" r="142" fill="url(#oc)"/><circle cx="468" cy="398" r="142" fill="url(#oo)"/></svg>`
 
@@ -208,6 +319,15 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 		return s
 	},
 	"base": filepath.Base,
+	"mulf": func(a, b float64) float64 {
+		return a * b
+	},
+	"divf": func(a, b int) float64 {
+		if b == 0 {
+			return 0
+		}
+		return float64(a) / float64(b)
+	},
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -215,24 +335,32 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>agy-hq Console</title>
+<script src="/preload.js"></script>
 <style>
   :root {
-    --bg: #0f1117;
-    --card: #181b24;
-    --border: #2a2f3d;
-    --text: #e6edf3;
-    --muted: #8b949e;
-    --accent: #58a6ff;
-    --ok: #2ea043;
-    --warn: #d29922;
-    --danger: #f85149;
+    --bg: var(--background, #0b0f19);
+    --card: var(--card-bg, #111625);
+    --card-hover: #161e31;
+    --border: var(--border-color, #1e293b);
+    --text: var(--foreground, #f1f5f9);
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-glow: rgba(56, 189, 248, 0.15);
+    --ok: #22c55e;
+    --ok-glow: rgba(34, 197, 94, 0.18);
+    --warn: #f59e0b;
+    --warn-glow: rgba(245, 158, 11, 0.18);
+    --danger: #ef4444;
+    --danger-glow: rgba(239, 68, 68, 0.18);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "JetBrains Mono", monospace;
   }
+  * { box-sizing: border-box; }
   body {
     margin: 0;
     padding: 16px;
     background: var(--bg);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    font-family: var(--font);
     font-size: 13px;
     line-height: 1.45;
   }
@@ -241,60 +369,177 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid var(--border);
-    padding-bottom: 10px;
-    margin-bottom: 14px;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
   }
-  h1 { font-size: 15px; margin: 0; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 16px 0 8px; }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand h1 {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0;
+    color: var(--text);
+  }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .live-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+    color: #4ade80;
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 8px #22c55e;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+  }
+  h2 {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 18px 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    transition: border-color 0.15s ease, background 0.15s ease;
   }
-  .flash {
-    background: #1f2d1f;
-    border: 1px solid var(--ok);
-    border-radius: 6px;
-    padding: 8px 12px;
-    margin-bottom: 12px;
+  .card:hover {
+    border-color: rgba(56, 189, 248, 0.35);
+  }
+  .card.pending-hero {
+    border-color: rgba(245, 158, 11, 0.45);
+    background: linear-gradient(180deg, rgba(245, 158, 11, 0.04) 0%, var(--card) 100%);
+  }
+  .flash-banner {
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.4);
+    color: #86efac;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
   .badge {
-    display: inline-block;
-    padding: 2px 6px;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
     border-radius: 4px;
     font-size: 11px;
     font-weight: 600;
+    letter-spacing: 0.02em;
   }
-  .PASS { background: rgba(46,160,67,0.2); color: #56d364; }
-  .WARN { background: rgba(210,153,34,0.2); color: #e3b341; }
-  pre {
-    background: #090b0f;
-    padding: 6px 8px;
-    border-radius: 4px;
+  .badge-warn { background: var(--warn-glow); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+  .badge-pass { background: var(--ok-glow); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+  .badge-info { background: var(--accent-glow); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+  .badge-danger { background: var(--danger-glow); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+  
+  pre.code-block {
+    background: #06080e;
+    border: 1px solid rgba(30, 41, 59, 0.8);
+    color: #38bdf8;
+    padding: 8px 10px;
+    border-radius: 6px;
     overflow-x: auto;
-    margin: 6px 0;
+    margin: 8px 0;
+    font-family: "JetBrains Mono", Consolas, monospace;
     font-size: 12px;
+    line-height: 1.4;
   }
-  .actions { display: flex; gap: 8px; margin-top: 8px; }
-  button {
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  button, .btn {
     cursor: pointer;
     border: none;
-    border-radius: 4px;
-    padding: 5px 10px;
+    border-radius: 6px;
+    padding: 6px 12px;
     font-size: 12px;
     font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: transform 0.08s ease, opacity 0.15s ease, background 0.15s ease;
+    text-decoration: none;
   }
-  .btn-approve { background: var(--ok); color: #fff; }
-  .btn-reject { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+  button:active, .btn:active {
+    transform: scale(0.97);
+  }
+  .btn-approve {
+    background: #16a34a;
+    color: #ffffff;
+    box-shadow: 0 0 10px rgba(34, 197, 94, 0.25);
+  }
+  .btn-approve:hover { background: #22c55e; }
+  .btn-reject {
+    background: transparent;
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    color: #f87171;
+  }
+  .btn-reject:hover { background: rgba(239, 68, 68, 0.15); border-color: #ef4444; }
+  .btn-secondary {
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #cbd5e1;
+  }
+  .btn-secondary:hover { background: #334155; color: #ffffff; }
   .muted { color: var(--muted); font-size: 12px; }
+  .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: #1e293b;
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 8px 0 4px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #38bdf8 0%, #22c55e 100%);
+    border-radius: 3px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 <header>
-  <h1 style="display:flex;align-items:center;gap:8px;">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="22" height="22" style="flex-shrink:0">
+  <div class="brand">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="24" height="24" style="flex-shrink:0">
       <defs>
         <radialGradient id="hq-wl" cx="286" cy="398" r="240" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#8AE05C" stop-opacity="0.95"/><stop offset="60%" stop-color="#8AE05C" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient>
         <radialGradient id="hq-wc" cx="764" cy="462" r="230" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#F85852" stop-opacity="0.95"/><stop offset="65%" stop-color="#F85852" stop-opacity="0.35"/><stop offset="100%" stop-color="#378DFC" stop-opacity="0"/></radialGradient>
@@ -312,108 +557,289 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
       <circle cx="468" cy="398" r="142" fill="url(#hq-oc)"/>
       <circle cx="468" cy="398" r="142" fill="url(#hq-oo)"/>
     </svg>
-    agy-hq Console
-  </h1>
-  <span class="muted">Updated {{.UpdatedAt}} · <a href="/" style="color:var(--accent)">Refresh</a></span>
+    <h1>agy-hq Console</h1>
+  </div>
+  <div class="header-actions">
+    <span class="live-pill"><span class="live-dot"></span>LIVE</span>
+    <span class="muted" id="last-updated">Updated {{.UpdatedAt}}</span>
+    <button type="button" class="btn btn-secondary" onclick="refreshState()" style="padding:4px 8px;font-size:11px">🔄 Refresh</button>
+  </div>
 </header>
 
-{{if .FlashResult}}
-<div class="flash">{{.FlashResult}}</div>
-{{end}}
-
-<h2>Proactive Gatekeeper & Daily Quota</h2>
-<div class="card">
-  <div>
-    <strong>Background Flash Spawns Today:</strong> {{.Quota.SpawnsToday}} / {{.Quota.MaxDailySpawns}}
-    {{if .Quota.CircuitOpen}}
-      <span class="badge WARN">CIRCUIT OPEN ({{.Quota.CircuitReason}})</span>
-    {{else}}
-      <span class="badge PASS">BUDGET OK</span>
-    {{end}}
+<div id="flash-container">
+  {{if .FlashResult}}
+  <div class="flash-banner" id="flash-banner">
+    <span>{{.FlashResult}}</span>
+    <button type="button" class="btn" onclick="this.parentElement.remove()" style="background:none;color:inherit;padding:0 4px">✕</button>
   </div>
-  <div class="muted">Last Heartbeat: {{if .Quota.LastStatus}}{{.Quota.LastStatus}}{{else}}Not run yet today{{end}}</div>
+  {{end}}
 </div>
 
-<h2>Pending Approvals ({{len .Pending}})</h2>
+<h2>
+  <span>Pending Approvals (<span id="pending-count">{{len .Pending}}</span>)</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">1-Tap Remote Authorization</span>
+</h2>
+<div id="pending-list">
 {{if .Pending}}
   {{range .Pending}}
-  <div class="card">
-    <div><strong>{{.Summary}}</strong> <span class="badge WARN">{{.ActionType}}</span></div>
-    <div class="muted">ID: {{.ID}} · SHA-256: {{shortSHA .SHA256}}</div>
-    <pre>{{.Command}}</pre>
+  <div class="card pending-hero" id="proposal-{{.ID}}">
+    <div class="meta-row">
+      <div><strong style="font-size:13px">{{.Summary}}</strong></div>
+      <span class="badge badge-warn">{{.ActionType}}</span>
+    </div>
+    <div class="muted" style="margin:4px 0">
+      ID: <code>{{.ID}}</code> · SHA-256: <code title="{{.SHA256}}">{{shortSHA .SHA256}}</code>
+    </div>
+    <pre class="code-block">{{.Command}}</pre>
     <div class="actions">
-      <form method="POST" action="/api/approve">
-        <input type="hidden" name="id" value="{{.ID}}">
-        <input type="hidden" name="sha256" value="{{shortSHA .SHA256}}">
-        <button type="submit" class="btn-approve">Approve ({{shortSHA .SHA256}})</button>
-      </form>
-      <form method="POST" action="/api/reject">
-        <input type="hidden" name="id" value="{{.ID}}">
-        <button type="submit" class="btn-reject">Reject</button>
-      </form>
+      <button type="button" class="btn btn-approve" onclick="approveProposal('{{.ID}}', '{{shortSHA .SHA256}}')">
+        ✓ Approve ({{shortSHA .SHA256}})
+      </button>
+      <button type="button" class="btn btn-reject" onclick="rejectProposal('{{.ID}}')">
+        ✕ Reject
+      </button>
     </div>
   </div>
   {{end}}
 {{else}}
-  <div class="card muted">No pending outbound actions.</div>
+  <div class="card muted" id="no-pending">No pending outbound actions requiring authorization.</div>
 {{end}}
+</div>
 
-<h2>Live Task Board ({{len .Tasks}})</h2>
+<h2>Proactive Gatekeeper & Daily Quota</h2>
+<div class="card" id="quota-card">
+  <div class="meta-row">
+    <div><strong>Background Flash Spawns Today:</strong> <span id="quota-spawns">{{.Quota.SpawnsToday}}</span> / {{.Quota.MaxDailySpawns}}</div>
+    <div>
+      {{if .Quota.CircuitOpen}}
+        <span class="badge badge-warn">CIRCUIT OPEN ({{.Quota.CircuitReason}})</span>
+      {{else}}
+        <span class="badge badge-pass">BUDGET OK</span>
+      {{end}}
+    </div>
+  </div>
+  <div class="progress-bar">
+    <div class="progress-fill" style="width: {{if gt .Quota.MaxDailySpawns 0}}{{printf "%.1f" (mulf (divf .Quota.SpawnsToday .Quota.MaxDailySpawns) 100.0)}}{{else}}0{{end}}%;"></div>
+  </div>
+  <div class="muted" style="margin-top:6px">Last Heartbeat: {{if .Quota.LastStatus}}{{.Quota.LastStatus}}{{else}}Not run yet today{{end}}</div>
+</div>
+
+<h2>
+  <span>Live Task Board (<span id="task-count">{{len .Tasks}}</span>)</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Layer-1 Coordinated Tasks</span>
+</h2>
+<div id="tasks-list">
 {{if .Tasks}}
   {{range .Tasks}}
-  <div class="card">
-    <div><strong>{{.Title}}</strong> <span class="badge {{if eq .Status "active"}}PASS{{else}}WARN{{end}}">{{.Status}}</span></div>
-    <div class="muted">Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: {{.ConversationID}}</div>
-    {{if .LastSummary}}<div class="muted" style="margin-top:4px">{{.LastSummary}}</div>{{end}}
+  <div class="card" id="task-{{.TaskSlug}}">
+    <div class="meta-row">
+      <strong>{{.Title}}</strong>
+      <span class="badge {{if eq .Status "active"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
+    </div>
+    <div class="muted" style="margin:4px 0">
+      Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a>
+    </div>
+    {{if .LastSummary}}<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">{{.LastSummary}}</div>{{end}}
     <div class="actions">
       {{if eq .Status "active"}}
-      <form method="POST" action="/api/tasks/complete">
-        <input type="hidden" name="slug" value="{{.TaskSlug}}">
-        <button type="submit" class="btn-approve">Complete</button>
-      </form>
+      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" onclick="completeTask('{{.TaskSlug}}')">Complete</button>
       {{end}}
       {{if ne .Status "archived"}}
-      <form method="POST" action="/api/tasks/archive">
-        <input type="hidden" name="slug" value="{{.TaskSlug}}">
-        <button type="submit" class="btn-reject">Archive</button>
-      </form>
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" onclick="archiveTask('{{.TaskSlug}}')">Archive</button>
       {{end}}
     </div>
   </div>
   {{end}}
 {{else}}
-  <div class="card muted">No active tasks on the board.</div>
+  <div class="card muted">No active tasks on the live board.</div>
 {{end}}
+</div>
 
-<h2>Active Worktrees ({{len .Worktrees}})</h2>
+<h2>Active Parallel Git Worktrees ({{len .Worktrees}})</h2>
+<div id="worktrees-list">
 {{if .Worktrees}}
   {{range .Worktrees}}
-  <div class="card"><code>{{base .}}</code> <span class="muted">({{.}})</span></div>
+  <div class="card"><code style="color:var(--accent)">{{base .}}</code> <span class="muted">({{.}})</span></div>
   {{end}}
 {{else}}
   <div class="card muted">No active git worktrees in local/worktrees/.</div>
 {{end}}
+</div>
 
 <h2>Today's Turn Journal ({{len .TodayTurns}})</h2>
+<div id="journal-list">
 {{if .TodayTurns}}
   {{range .TodayTurns}}
   <div class="card">
     <div><strong>{{.UserPrompt}}</strong></div>
-    <div class="muted">{{.Timestamp}} · conv: {{.ConversationID}}</div>
+    <div class="muted">{{.Timestamp}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a> · {{.ModelName}}</div>
   </div>
   {{end}}
 {{else}}
   <div class="card muted">No turns logged today yet.</div>
 {{end}}
+</div>
 
-<h2>System Health</h2>
+<h2>System Health (Doctor)</h2>
+<div id="health-grid">
 {{range .Health}}
-<div class="card">
-  <span class="badge {{.Status}}">{{.Status}}</span>
-  <strong>{{.Name}}</strong>
-  <div class="muted">{{.Detail}}</div>
+<div class="card" style="margin-bottom:6px">
+  <div class="meta-row">
+    <strong>{{.Name}}</strong>
+    <span class="badge {{if eq .Status "PASS"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
+  </div>
+  <div class="muted" style="margin-top:2px">{{.Detail}}</div>
 </div>
 {{end}}
+</div>
+
+<script>
+function showFlash(message, isError) {
+  const container = document.getElementById('flash-container');
+  const banner = document.createElement('div');
+  banner.className = 'flash-banner';
+  if (isError) {
+    banner.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+    banner.style.background = 'rgba(239, 68, 68, 0.12)';
+    banner.style.color = '#fca5a5';
+  }
+  banner.innerHTML = '<span>' + escapeHTML(message) + '</span><button type="button" class="btn" onclick="this.parentElement.remove()" style="background:none;color:inherit;padding:0 4px">✕</button>';
+  container.innerHTML = '';
+  container.appendChild(banner);
+  setTimeout(() => { if (banner.parentElement) banner.remove(); }, 5000);
+}
+
+function escapeHTML(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function approveProposal(id, sha) {
+  if (!confirm('Execute approved action for proposal ' + id + ' (sha256: ' + sha + ')?')) return;
+  try {
+    const res = await fetch('/api/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ id: id, sha256: sha })
+    });
+    const data = await res.json();
+    showFlash(data.message || ('Approved ' + id), !data.ok);
+    await refreshState();
+  } catch (err) {
+    showFlash('Error approving ' + id + ': ' + err.message, true);
+  }
+}
+
+async function rejectProposal(id) {
+  const reason = prompt('Reason for rejecting ' + id + ' (optional):', 'Rejected via HQ Console');
+  if (reason === null) return;
+  try {
+    const res = await fetch('/api/reject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ id: id, reason: reason })
+    });
+    const data = await res.json();
+    showFlash(data.message || ('Rejected ' + id), !data.ok);
+    await refreshState();
+  } catch (err) {
+    showFlash('Error rejecting ' + id + ': ' + err.message, true);
+  }
+}
+
+async function completeTask(slug) {
+  try {
+    const res = await fetch('/api/tasks/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ slug: slug })
+    });
+    const data = await res.json();
+    showFlash(data.message || ('Completed ' + slug), !data.ok);
+    await refreshState();
+  } catch (err) {
+    showFlash('Error completing ' + slug + ': ' + err.message, true);
+  }
+}
+
+async function archiveTask(slug) {
+  try {
+    const res = await fetch('/api/tasks/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ slug: slug })
+    });
+    const data = await res.json();
+    showFlash(data.message || ('Archived ' + slug), !data.ok);
+    await refreshState();
+  } catch (err) {
+    showFlash('Error archiving ' + slug + ': ' + err.message, true);
+  }
+}
+
+async function refreshState() {
+  try {
+    const res = await fetch('/api/state', { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return;
+    const state = await res.json();
+    document.getElementById('last-updated').textContent = 'Updated ' + state.updatedAt;
+
+    // Update pending approvals
+    const pendingList = document.getElementById('pending-list');
+    document.getElementById('pending-count').textContent = state.pending ? state.pending.length : 0;
+    if (state.pending && state.pending.length > 0) {
+      let html = '';
+      for (const p of state.pending) {
+        const shortSha = p.sha256 ? p.sha256.substring(0, 12) : '';
+        html += '<div class="card pending-hero" id="proposal-' + p.id + '">' +
+          '<div class="meta-row"><div><strong style="font-size:13px">' + escapeHTML(p.summary) + '</strong></div>' +
+          '<span class="badge badge-warn">' + escapeHTML(p.actionType) + '</span></div>' +
+          '<div class="muted" style="margin:4px 0">ID: <code>' + escapeHTML(p.id) + '</code> · SHA-256: <code title="' + escapeHTML(p.sha256) + '">' + escapeHTML(shortSha) + '</code></div>' +
+          '<pre class="code-block">' + escapeHTML(p.command) + '</pre>' +
+          '<div class="actions">' +
+          '<button type="button" class="btn btn-approve" onclick="approveProposal(\'' + p.id + '\', \'' + shortSha + '\')">✓ Approve (' + escapeHTML(shortSha) + ')</button>' +
+          '<button type="button" class="btn btn-reject" onclick="rejectProposal(\'' + p.id + '\')">✕ Reject</button>' +
+          '</div></div>';
+      }
+      pendingList.innerHTML = html;
+    } else {
+      pendingList.innerHTML = '<div class="card muted" id="no-pending">No pending outbound actions requiring authorization.</div>';
+    }
+
+    // Update tasks
+    const tasksList = document.getElementById('tasks-list');
+    document.getElementById('task-count').textContent = state.tasks ? state.tasks.length : 0;
+    if (state.tasks && state.tasks.length > 0) {
+      let html = '';
+      for (const t of state.tasks) {
+        const badgeClass = t.status === 'active' ? 'badge-pass' : 'badge-warn';
+        html += '<div class="card" id="task-' + escapeHTML(t.taskSlug) + '">' +
+          '<div class="meta-row"><strong>' + escapeHTML(t.title) + '</strong>' +
+          '<span class="badge ' + badgeClass + '">' + escapeHTML(t.status) + '</span></div>' +
+          '<div class="muted" style="margin:4px 0">Slug: <code>' + escapeHTML(t.taskSlug) + '</code> · Model: ' + escapeHTML(t.model) + ' · Conv: <a href="conversation://' + escapeHTML(t.conversationId) + '">' + escapeHTML(t.conversationId) + '</a></div>' +
+          (t.lastSummary ? '<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">' + escapeHTML(t.lastSummary) + '</div>' : '') +
+          '<div class="actions">' +
+          (t.status === 'active' ? '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" onclick="completeTask(\'' + escapeHTML(t.taskSlug) + '\')">Complete</button>' : '') +
+          (t.status !== 'archived' ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" onclick="archiveTask(\'' + escapeHTML(t.taskSlug) + '\')">Archive</button>' : '') +
+          '</div></div>';
+      }
+      tasksList.innerHTML = html;
+    } else {
+      tasksList.innerHTML = '<div class="card muted">No active tasks on the live board.</div>';
+    }
+
+    // Update Quota spawns
+    if (state.quota) {
+      const qSpan = document.getElementById('quota-spawns');
+      if (qSpan) qSpan.textContent = state.quota.spawnsToday;
+    }
+  } catch (err) {
+    console.warn('background state refresh failed:', err);
+  }
+}
+
+// Auto-refresh state every 3 seconds for real-time responsiveness
+setInterval(refreshState, 3000);
+</script>
 </body>
 </html>`))
 
@@ -441,6 +867,7 @@ func SyncMarkdownConsole(vaultDir string) error {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# 🏛️ agy-hq Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	b.WriteString("[🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n")
 
 	if len(state.Pending) > 0 {
 		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **Pending Approvals (`%d` item(s) waiting):**\n", len(state.Pending))
