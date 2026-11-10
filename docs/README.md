@@ -50,6 +50,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 | [RFC-0009](design/0009-task-board-redesign.md) | **Scalable Task Board, Live Console & Hot/Cold Lifecycle Redesign** | Per-tier console visibility (100% active shown, capped idle/completed), two-tier hot/cold storage (`tasks.json` + `tasks_archive.jsonl`), seamless cold recall (`hq reopen`), bounded `SessionStart`, and `hq tasks` CLI | Implemented |
 | [RFC-0010](design/0010-agent-recursive-self-improvement.md) | **Bounded Agent Recursive Self-Improvement (RSI) — 4-Stage Trace Mining, Verification & Human-Gated Evolution** | 0-token friction trace mining, ACE-compliant skill/code delta hypotheses, 4-gate sandboxed verification oracle (Ring 0 TCB AST check + counterfactual replay + E2E suite), and 1-tap SHA-256 approval | Implemented |
 | [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md) | **Automated CI/CD Pipeline, Mathematical PII/Vault Boundary Verification & Agent Harness Regression Gate** | Two-tier defense-in-depth (`pre-commit`/`pre-push` + GitHub Actions), 5-invariant mathematical PII/secret scanner (`hq ci check-pii`), Skill/Hook/Routing contract verifier (`hq ci check-harness`), and `sync.Once` E2E acceleration (`10.5s` -> `1.8s`) | Implemented |
+| [RFC-0012](design/0012-token-observability.md) | **End-to-End Token Usage, Latency & Cost/Quota Observability** | Stat-cached transcript token/latency ingestion, ground-truth parent-child subagent DAG reconciliation, `./bin/hq obs` CLI (`tokens`, `top`, `inspect`, `anomalies`, `budget`), Web UI & Console gauges, and 5 deterministic anomaly/budget guards | Draft (Phase 1) |
 
 ---
 
@@ -75,3 +76,4 @@ To keep documentation maintainable as the project evolves, docs are organized in
 - [05 — Google Chat Integration Pathways & Account Architecture Audit](research/05_gchat_integration.md)
 - [06 — Task Board, Console Layout & Conversation Lifecycle Audit](research/06_taskboard_and_console_audit.md)
 - [07 — Agent Recursive Self-Improvement (RSI): Literature Survey, Production Trace Loops & Safety Invariants](research/07_agent_recursive_self_improvement.md)
+- [08 — Empirical Audit of Antigravity Token Telemetry, Prefix Caching & Multi-Agent Attribution](research/08_token_observability_and_telemetry.md)
