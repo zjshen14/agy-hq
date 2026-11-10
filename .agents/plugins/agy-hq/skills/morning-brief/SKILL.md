@@ -12,8 +12,9 @@ Produce a concise, actionable daily brief covering life admin, engineering proje
 
 ## Steps
 
-1. **Check Pending Approvals & Active Worktrees:**
+1. **Check Pending Approvals, Active Worktrees & Token/Context Health:**
    - Run `./bin/hq status` to inspect any pending approval proposals in `local/memory/pending/` and active git worktrees in `local/worktrees/`.
+   - Run `./bin/hq obs tokens --since=24h` to check 24h uncached token burn, Prefix Cache Hit Ratio (`CHR %`), `[HQ] Front Desk` context watermark (recommending `/compact` if $\ge 120\text{k}$ tokens), and any active `A1`–`A5` anomaly alerts.
 2. **Calendar, Gmail, Google Chat & Life Admin:**
    - If the `gcalendar` skill/plugin is available, check today's schedule and highlight time-sensitive meetings or conflicts.
    - Check Gmail via `./bin/hq gmail search` and Google Chat via `./bin/hq gchat search --query="is:unread"` (plus any overnight digests in `local/notes/inbox/`) to summarize high-priority unread threads, DMs, and any auto-drafted replies awaiting approval.

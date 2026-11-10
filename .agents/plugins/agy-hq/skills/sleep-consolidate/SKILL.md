@@ -17,8 +17,9 @@ description: >-
 
 ## Four-Stage Dreaming Workflow
 
-### Stage 1: Baseline Memory Audit & Stale Reference Check
-1. Run `./bin/hq memory status` to inspect:
+### Stage 1: Baseline Memory Audit, Subagent DAG Reconciliation & Stale Reference Check
+1. Run `./bin/hq obs reconcile` and `./bin/hq memory status` to inspect:
+   - Ground-truth parent-child subagent attribution in `local/memory/tasks.json` and 24h token/context anomalies (`./bin/hq obs tokens --since=24h`).
    - Current line and token usage of `local/MEMORY.md` against the **80-line Roadmap Index cap**.
    - Existing Knowledge Wiki pages in `local/memory/topics/*.md` and any unlinked topic slugs.
    - Active vs. expired bi-temporal facts in `local/memory/facts.jsonl`.
