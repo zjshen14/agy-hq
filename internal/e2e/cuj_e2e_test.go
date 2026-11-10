@@ -33,6 +33,9 @@ var (
 
 func setupHQEnv(t *testing.T) *hqEnv {
 	t.Helper()
+	for _, k := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR"} {
+		_ = os.Unsetenv(k)
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

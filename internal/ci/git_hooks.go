@@ -11,6 +11,8 @@ import (
 const preCommitScript = `#!/bin/sh
 # agy-hq managed pre-commit hook (Ring 0 TCB — RFC-0011)
 set -e
+unset $(git rev-parse --local-env-vars 2>/dev/null || true)
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 
 # 1. Fast shell fallback guard on local/ and vault/ paths
 if git diff --cached --name-only | grep -qE '^(local|vault)/'; then
@@ -46,6 +48,8 @@ fi
 const prePushScript = `#!/bin/sh
 # agy-hq managed pre-push hook (Ring 0 TCB — RFC-0011)
 set -e
+unset $(git rev-parse --local-env-vars 2>/dev/null || true)
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 
 if [ "${HQ_IN_PRE_PUSH:-0}" = "1" ]; then
   exit 0
@@ -212,7 +216,14 @@ func RunPrePush(rootDir string, skipTests bool) error {
 	}
 
 	fmt.Println("==> [pre-push 3/3] Running `go vet ./...` and full test suite (`go test ./...`)...")
-	baseEnv := append(os.Environ(), "HQ_IN_PRE_PUSH=1")
+	var baseEnv []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_") {
+			continue
+		}
+		baseEnv = append(baseEnv, kv)
+	}
+	baseEnv = append(baseEnv, "HQ_IN_PRE_PUSH=1")
 
 	vetCmd := exec.Command("go", "vet", "./...")
 	vetCmd.Dir = rootDir
