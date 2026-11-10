@@ -69,9 +69,30 @@ if [ -x "./bin/hq" ]; then
 fi
 `
 
+func resolveGitHooksDir(rootDir string) string {
+	hooksDir := filepath.Join(rootDir, ".git", "hooks")
+	if st, err := os.Stat(hooksDir); err == nil && st.IsDir() {
+		return hooksDir
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, ".git")); err == nil {
+		if out, gErr := gitOutput(rootDir, "rev-parse", "--git-path", "hooks"); gErr == nil {
+			cand := strings.TrimSpace(out)
+			if cand != "" {
+				if !filepath.IsAbs(cand) {
+					cand = filepath.Clean(filepath.Join(rootDir, cand))
+				}
+				if st, sErr := os.Stat(cand); sErr == nil && st.IsDir() {
+					return cand
+				}
+			}
+		}
+	}
+	return hooksDir
+}
+
 // InstallGitHooks installs or updates `.git/hooks/pre-commit` and `.git/hooks/pre-push` in rootDir.
 func InstallGitHooks(rootDir string) ([]string, error) {
-	hooksDir := filepath.Join(rootDir, ".git", "hooks")
+	hooksDir := resolveGitHooksDir(rootDir)
 	st, err := os.Stat(hooksDir)
 	if err != nil || !st.IsDir() {
 		return nil, nil
@@ -107,7 +128,7 @@ func InstallGitHooks(rootDir string) ([]string, error) {
 
 // CheckGitHooksInstalled verifies that `.git/hooks/pre-commit` and `.git/hooks/pre-push` exist and are executable.
 func CheckGitHooksInstalled(rootDir string) (bool, string) {
-	hooksDir := filepath.Join(rootDir, ".git", "hooks")
+	hooksDir := resolveGitHooksDir(rootDir)
 	var missing []string
 	for _, name := range []string{"pre-commit", "pre-push"} {
 		p := filepath.Join(hooksDir, name)

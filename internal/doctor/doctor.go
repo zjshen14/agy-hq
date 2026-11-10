@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,6 +27,21 @@ type CheckResult struct {
 // Run executes environment, sandbox, CLI, and Vault health checks.
 func Run(vaultDir string) []CheckResult {
 	var results []CheckResult
+
+	// 0. Check Go Toolchain & Runtime
+	if goPath, gErr := exec.LookPath("go"); gErr == nil && goPath != "" {
+		results = append(results, CheckResult{
+			Name:   "Go Toolchain",
+			Status: "PASS",
+			Detail: fmt.Sprintf("%s (%s)", runtime.Version(), goPath),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Go Toolchain",
+			Status: "WARN",
+			Detail: fmt.Sprintf("compiled with %s, but 'go' binary not found on PATH (needed for './bin/hq upgrade' and CI)", runtime.Version()),
+		})
+	}
 
 	// 1. Check Antigravity permission preset in ~/.gemini/config/config.json
 	home, _ := os.UserHomeDir()
@@ -259,7 +275,7 @@ func Run(vaultDir string) []CheckResult {
 
 	// 9. Check Local CI & Git Hook Guards (.git/hooks/pre-commit & pre-push)
 	if rootDir, err := vault.ResolveRoot(); err == nil {
-		if _, sErr := os.Stat(filepath.Join(rootDir, ".git", "hooks")); sErr == nil {
+		if _, sErr := os.Stat(filepath.Join(rootDir, ".git")); sErr == nil {
 			if hooksOK, hooksDetail := ci.CheckGitHooksInstalled(rootDir); hooksOK {
 				results = append(results, CheckResult{
 					Name:   "CI & Git Hook Guards",

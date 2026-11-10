@@ -6,6 +6,15 @@ cd "$ROOT_DIR"
 
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
+INIT_FLAGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --demo|--with-sample-data)
+      INIT_FLAGS+=("--demo")
+      ;;
+  esac
+done
+
 echo "==> [1/5] Checking Go toolchain..."
 if ! command -v go >/dev/null 2>&1; then
   if command -v brew >/dev/null 2>&1; then
@@ -22,7 +31,7 @@ mkdir -p bin
 go build -o ./bin/hq ./cmd/hq
 
 echo "==> [3/5] Initializing private Vault (./local/) & CI git hooks (pre-commit + pre-push)..."
-./bin/hq init
+./bin/hq init "${INIT_FLAGS[@]}"
 ./bin/hq ci install-hooks 2>/dev/null || true
 
 echo "==> [4/5] Auto-arming background daemon & scheduled triggers..."

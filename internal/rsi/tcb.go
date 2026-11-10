@@ -21,6 +21,8 @@ var Ring0ProtectedPaths = []string{
 	".github/",
 	".gitignore",
 	".git/hooks/",
+	"LICENSE",
+	"SECURITY.md",
 	"local/.gitignore",
 	"scripts/bootstrap.sh",
 	"templates/gitignore.tmpl",

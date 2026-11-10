@@ -88,7 +88,7 @@ This file is the **single source of truth** for tracking what is done, what is i
 
 ### M3: Production Integrations, Task Board Hierarchy & Self-Improvement
 *Goal: Scale `agy-hq` with hybrid Google Chat transport, tiered task board management, embedded sidecar console, automated pre-IPO deal flow monitoring, recursive self-improvement, and CI defense-in-depth.*
-- **Specs:** [RFC-0008](design/0008-gchat-integration.md), [RFC-0009](design/0009-task-board-redesign.md), [RFC-0010](design/0010-agent-recursive-self-improvement.md), [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md)
+- **Specs:** [RFC-0008](design/0008-gchat-integration.md), [RFC-0009](design/0009-task-board-redesign.md), [RFC-0010](design/0010-agent-recursive-self-improvement.md), [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md), [RFC-0012](design/0012-token-observability.md), [RFC-0013](design/0013-open-source-launch-strategy.md)
 
 - [x] **M3.1 (Decoupled Google Chat Integration — RFC-0008):**
   - Hybrid transport in `internal/gchat/`: Workspace OAuth REST API v1 + personal `@gmail.com` `--headless=new` Chrome CDP WebSocket transport (`127.0.0.1:9222`) with network jail and isolated profile in `local/private/gchat/chrome-profile`.
@@ -103,8 +103,8 @@ This file is the **single source of truth** for tracking what is done, what is i
   - Embedded Go HTTP server on `127.0.0.1:4242` serving both browser dashboard and Antigravity Aux Pane (`sidecar://agy-hq-console/`).
   - Real-time Task Board, pending approval buttons with SHA-256 verification, git worktree status, and daemon health telemetry.
   - Zero-token Markdown sync (`webui.SyncMarkdownConsole`) updating `CONSOLE.md` and `hq_console.md` on every hook and heartbeat tick.
-- [x] **M3.4 (Pre-IPO Secondary Watchdog & Master Retrospective Ledger):**
-  - Automated proactive trigger (`secondary-deal-watch`, 11:00 AM & 4:00 PM PT) monitoring inbound Secondary Market secondary deal flow.
+- [x] **M3.4 (Secondary Deal-Flow Watchdog & Master Retrospective Ledger):**
+  - Automated proactive trigger (`secondary-deal-watch`, 11:00 AM & 4:00 PM PT) monitoring inbound secondary deal flow and prospectuses.
   - Persistent retrospective database in `local/notes/investing/opportunities/INDEX.md` logging valuations, discounts, scores, and review milestones.
   - Autonomous prospectus and financial extraction rule without user prompting.
 - [x] **M3.5 (Bounded Agent Recursive Self-Improvement — RFC-0010):**
@@ -112,8 +112,14 @@ This file is the **single source of truth** for tracking what is done, what is i
   - Multi-tier canary tracking and automatic rollback on post-merge friction regression.
 - [x] **M3.6 (Automated CI/CD Pipeline & Regression Harness — RFC-0011):**
   - Two-tier defense-in-depth: local pre-commit/pre-push hooks (`hq ci install-hooks`) and GitHub Actions workflow (`.github/workflows/ci.yml`).
-  - Mathematical 5-invariant PII scanner (`hq ci check-pii`) and Harness contract verifier (`hq ci check-harness`).
+  - Mathematical 6-invariant PII scanner (`hq ci check-pii [--history]`) and Harness contract verifier (`hq ci check-harness`).
   - Accelerated CUJ E2E suite (`cuj_e2e_test.go`) running in ~1.8 seconds with 100% test coverage.
+- [x] **M3.7 (End-to-End Token & Context Observability — RFC-0012):**
+  - Stat-cached transcript token/latency ingestion, ground-truth parent-child subagent DAG reconciliation, and `./bin/hq obs` CLI (`tokens`, `top`, `inspect`, `anomalies`, `budget`, `reconcile`).
+  - Automated `SessionStart` 160k Front Desk `/compact` nudge and daily uncached/deep token budget circuit breakers.
+- [x] **M3.8 (Open-Source Readiness, Governance & 5-Minute `--demo` Onboarding — RFC-0013):**
+  - Contextual PII invariant (`P6-ContextualPII`), optional `local/private/pii-denylist.txt`, full commit history scanner (`hq ci check-pii --history`), deterministic history scrubber (`hq ci scrub-history`), and subprocess `GIT_DIR` sanitization.
+  - Apache License 2.0 (`LICENSE`), `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, GitHub templates, and opt-in synthetic sample dataset (`./bin/hq init --demo` / `./scripts/bootstrap.sh --demo`).
 
 ---
 

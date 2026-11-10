@@ -37,6 +37,36 @@ func IsTempPath(p string) bool {
 	return false
 }
 
+// SanitizedGitEnv returns os.Environ() with parent git hook environment variables stripped
+// so subprocess git commands never bleed into an outer repository when invoked inside git hooks.
+func SanitizedGitEnv() []string {
+	raw := os.Environ()
+	out := make([]string, 0, len(raw))
+	for _, kv := range raw {
+		if strings.HasPrefix(kv, "GIT_DIR=") ||
+			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(kv, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(kv, "GIT_OBJECT_DIRECTORY=") ||
+			strings.HasPrefix(kv, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") ||
+			strings.HasPrefix(kv, "GIT_COMMON_DIR=") ||
+			strings.HasPrefix(kv, "GIT_PREFIX=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// SanitizedGitCommand constructs an exec.Cmd for git with SanitizedGitEnv() and optional working directory.
+func SanitizedGitCommand(dir string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = SanitizedGitEnv()
+	return cmd
+}
+
 // ResolveRoot finds the agy-hq repository root directory.
 func ResolveRoot() (string, error) {
 	if envRoot := os.Getenv("HQ_ROOT_DIR"); envRoot != "" {
@@ -197,20 +227,17 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 	// Initialize independent git repository inside local/ if not already present
 	gitDir := filepath.Join(vaultDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		initCmd := exec.Command("git", "init", "-b", "main")
-		initCmd.Dir = vaultDir
+		initCmd := SanitizedGitCommand(vaultDir, "init", "-b", "main")
 		if out, err := initCmd.CombinedOutput(); err != nil {
 			return created, fmt.Errorf("git init in vault: %w (%s)", err, string(out))
 		}
 		// Configure local git identity fallback if needed so initial commit succeeds
-		_ = exec.Command("git", "-C", vaultDir, "config", "user.name", "hq-vault").Run()
-		_ = exec.Command("git", "-C", vaultDir, "config", "user.email", "hq-vault@localhost").Run()
+		_ = SanitizedGitCommand(vaultDir, "config", "user.name", "hq-vault").Run()
+		_ = SanitizedGitCommand(vaultDir, "config", "user.email", "hq-vault@localhost").Run()
 
-		addCmd := exec.Command("git", "add", ".")
-		addCmd.Dir = vaultDir
+		addCmd := SanitizedGitCommand(vaultDir, "add", ".")
 		if err := addCmd.Run(); err == nil {
-			commitCmd := exec.Command("git", "commit", "-m", "chore(vault): initialize private agy-hq vault")
-			commitCmd.Dir = vaultDir
+			commitCmd := SanitizedGitCommand(vaultDir, "commit", "-m", "chore(vault): initialize private agy-hq vault")
 			_ = commitCmd.Run()
 		}
 		created = append(created, ".git (initialized private Vault repository)")

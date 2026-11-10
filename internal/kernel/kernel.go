@@ -832,7 +832,7 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 			task := &tasks[i]
 			if task.WorktreeDir != "" {
 				if info, err := os.Stat(task.WorktreeDir); err == nil && info.IsDir() {
-					cmdStatus := exec.Command("git", "-C", task.WorktreeDir, "status", "--porcelain")
+					cmdStatus := sanitizedGitCmd("-C", task.WorktreeDir, "status", "--porcelain")
 					outStatus, err := cmdStatus.Output()
 					if err != nil {
 						return fmt.Errorf("git status check failed on %s: %w", task.WorktreeDir, err)
@@ -853,14 +853,14 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 					} else {
 						removeArgs = []string{"-C", repoRoot, "worktree", "remove", task.WorktreeDir}
 					}
-					cmdRemove := exec.Command("git", removeArgs...)
+					cmdRemove := sanitizedGitCmd(removeArgs...)
 					if out, err := cmdRemove.CombinedOutput(); err != nil {
 						return fmt.Errorf("git worktree remove failed: %w (%s)", err, string(out))
 					}
 					if _, err := os.Stat(task.WorktreeDir); err == nil {
 						_ = os.RemoveAll(task.WorktreeDir)
 					}
-					_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
+					_ = sanitizedGitCmd("-C", repoRoot, "worktree", "prune").Run()
 				}
 			}
 
@@ -902,9 +902,9 @@ func restoreWorktreeForReopen(vaultDir string, task *ActiveTask) error {
 	_ = os.MkdirAll(filepath.Dir(task.WorktreeDir), 0o755)
 	var cmd *exec.Cmd
 	if branch != "" {
-		cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", task.WorktreeDir, branch)
+		cmd = sanitizedGitCmd("-C", repoRoot, "worktree", "add", task.WorktreeDir, branch)
 	} else {
-		cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "hq/"+task.TaskSlug, task.WorktreeDir)
+		cmd = sanitizedGitCmd("-C", repoRoot, "worktree", "add", "-b", "hq/"+task.TaskSlug, task.WorktreeDir)
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git worktree add failed: %w (%s)", err, string(out))
@@ -1005,7 +1005,7 @@ func isWorktreeCleanOrAbsent(wtDir string) bool {
 	if err != nil || !info.IsDir() {
 		return true
 	}
-	cmd := exec.Command("git", "-C", wtDir, "status", "--porcelain")
+	cmd := sanitizedGitCmd("-C", wtDir, "status", "--porcelain")
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -1075,8 +1075,8 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 					if repoRoot == "" {
 						repoRoot = resolveRepoRootForWorktree(vaultDir, t.WorktreeDir)
 					}
-					_ = exec.Command("git", "-C", repoRoot, "worktree", "remove", t.WorktreeDir).Run()
-					_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
+					_ = sanitizedGitCmd("-C", repoRoot, "worktree", "remove", t.WorktreeDir).Run()
+					_ = sanitizedGitCmd("-C", repoRoot, "worktree", "prune").Run()
 				}
 			}
 			t.Status = "archived"
@@ -1285,8 +1285,28 @@ func FilterTasks(vaultDir string, activeOnly, archiveOnly, includeAllHot, includ
 	return out, nil
 }
 
+func sanitizedGitCmd(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	raw := os.Environ()
+	env := make([]string, 0, len(raw))
+	for _, kv := range raw {
+		if strings.HasPrefix(kv, "GIT_DIR=") ||
+			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(kv, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(kv, "GIT_OBJECT_DIRECTORY=") ||
+			strings.HasPrefix(kv, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") ||
+			strings.HasPrefix(kv, "GIT_COMMON_DIR=") ||
+			strings.HasPrefix(kv, "GIT_PREFIX=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = env
+	return cmd
+}
+
 func resolveRepoRootForWorktree(vaultDir, worktreeDir string) string {
-	cmdCommon := exec.Command("git", "-C", worktreeDir, "rev-parse", "--git-common-dir")
+	cmdCommon := sanitizedGitCmd("-C", worktreeDir, "rev-parse", "--git-common-dir")
 	if out, err := cmdCommon.Output(); err == nil {
 		commonDir := strings.TrimSpace(string(out))
 		if !filepath.IsAbs(commonDir) {
@@ -1309,7 +1329,7 @@ func gitBranchExists(repoDir, branch string) bool {
 	if repoDir == "" || branch == "" {
 		return false
 	}
-	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd := sanitizedGitCmd("-C", repoDir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
 }
 

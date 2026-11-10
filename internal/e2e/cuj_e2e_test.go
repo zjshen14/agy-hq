@@ -2408,6 +2408,161 @@ func TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards(t *testing.T) {
 	}
 }
 
+// CUJ-20: Open-Source --demo Onboarding, Governance TCB & Git History PII Sanitization (RFC-0013)
+func TestCUJ20_OpenSourceDemoOnboardingGovernanceAndPIIGuard(t *testing.T) {
+	// 1. Bare `hq init` on a clean environment must NOT seed synthetic demo artifacts
+	cleanEnv := setupHQEnv(t)
+	if out, err := cleanEnv.run("", "init"); err != nil {
+		t.Fatalf("bare hq init failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(cleanEnv.vaultDir, "inbox", "acme-corp-2026-10-Q.html")); !os.IsNotExist(err) {
+		t.Fatalf("expected bare hq init NOT to seed acme-corp-2026-10-Q.html")
+	}
+
+	// 2. Opt-in `hq init --demo` seeds ACME 10-Q inbox filing, thesis, 3 sample tasks, 1 SHA-256 proposal, and 3 facts
+	demoEnv := setupHQEnv(t)
+	initDemoOut, err := demoEnv.run("", "init", "--demo")
+	if err != nil || !strings.Contains(initDemoOut, "(--demo)") {
+		t.Fatalf("hq init --demo failed: %v\n%s", err, initDemoOut)
+	}
+	for _, rel := range []string{
+		filepath.Join("inbox", "acme-corp-2026-10-Q.html"),
+		filepath.Join("notes", "investing", "tickers", "ACME", "thesis.md"),
+		filepath.Join("memory", "tasks.json"),
+		filepath.Join("memory", "pending", "prop-demo-acme-q3-alert.json"),
+		filepath.Join("memory", "facts.jsonl"),
+	} {
+		if _, sErr := os.Stat(filepath.Join(demoEnv.vaultDir, rel)); sErr != nil {
+			t.Fatalf("expected --demo artifact %s to exist: %v", rel, sErr)
+		}
+	}
+
+	// Re-running `hq init --demo` must be strictly idempotent (no duplicate tasks or overwritten user state)
+	if out2, err2 := demoEnv.run("", "init", "--demo"); err2 != nil || strings.Contains(out2, "(--demo)") {
+		t.Fatalf("expected second hq init --demo run to be idempotent with 0 newly seeded items, got:\n%s (%v)", out2, err2)
+	}
+	tasks, err := kernel.ListTasks(demoEnv.vaultDir)
+	if err != nil || len(tasks) != 3 {
+		t.Fatalf("expected 3 sample Layer-1 tasks after idempotent --demo init, got %d (%v)", len(tasks), err)
+	}
+	props, err := approvals.List(demoEnv.vaultDir)
+	if err != nil || len(props) != 1 || props[0].ID != "prop-demo-acme-q3-alert" {
+		t.Fatalf("expected 1 sample pending proposal prop-demo-acme-q3-alert, got %+v (%v)", props, err)
+	}
+	// Approve the seeded sample proposal using its deterministic SHA-256 prefix
+	appOut, err := demoEnv.run("", "approve", props[0].ID, "--sha256="+props[0].SHA256[:12])
+	if err != nil || !strings.Contains(appOut, "[Sample] Dispatched ACME Q3 10-Q thesis check summary") {
+		t.Fatalf("expected deterministic approval of --demo proposal to succeed, got:\n%s (%v)", appOut, err)
+	}
+
+	// 3. Verify `hq doctor --json` structured output & Ring 0 TCB governance protection
+	docJSONOut, err := demoEnv.run("", "doctor", "--json")
+	if err != nil {
+		t.Fatalf("hq doctor --json failed: %v\n%s", err, docJSONOut)
+	}
+	var docChecks []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Detail string `json:"detail"`
+	}
+	if jErr := json.Unmarshal([]byte(docJSONOut), &docChecks); jErr != nil || len(docChecks) < 6 {
+		t.Fatalf("expected valid JSON array from hq doctor --json, got err=%v raw=%s", jErr, docJSONOut)
+	}
+	foundGoCheck := false
+	for _, c := range docChecks {
+		if c.Name == "Go Toolchain" && c.Status == "PASS" {
+			foundGoCheck = true
+		}
+	}
+	if !foundGoCheck {
+		t.Fatalf("expected Go Toolchain PASS check in hq doctor --json, got: %+v", docChecks)
+	}
+	for _, govFile := range []string{"LICENSE", "SECURITY.md", ".github/ISSUE_TEMPLATE/bug_report.md"} {
+		if _, sErr := os.Stat(filepath.Join(demoEnv.rootDir, filepath.FromSlash(govFile))); sErr != nil {
+			t.Fatalf("expected governance file %s in root repository: %v", govFile, sErr)
+		}
+	}
+	if !rsi.IsRing0Path("LICENSE") || !rsi.IsRing0Path("SECURITY.md") {
+		t.Fatalf("expected LICENSE and SECURITY.md to be protected inside Ring 0 Immutable TCB")
+	}
+
+	// 4. End-to-End `hq ci check-pii --history` & `hq ci scrub-history --apply` on an isolated multi-commit repo
+	histRepo := t.TempDir()
+	runHistGit := func(args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = histRepo
+		out, gErr := c.CombinedOutput()
+		if gErr != nil {
+			t.Fatalf("git %v: %v (%s)", args, gErr, string(out))
+		}
+		return string(out)
+	}
+	runHistGit("init", "-b", "main")
+	runHistGit("config", "user.name", "OSS Maintainer")
+	runHistGit("config", "user.email", "maintainer@example.com")
+	_ = os.WriteFile(filepath.Join(histRepo, ".gitignore"), []byte("/local/\n/vault/\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(histRepo, "templates"), 0o755)
+
+	leakedEmail := "private.founder" + "@real-domain.io"
+	leakedSpace := "spaces/" + "OpaqueDm_88"
+
+	// Commit 1: leaks personal email & opaque Google Chat space ID
+	_ = os.WriteFile(filepath.Join(histRepo, "README.md"),
+		[]byte("# Sample\nReach "+leakedEmail+" or "+leakedSpace+"\n"), 0o644)
+	runHistGit("add", ".gitignore", "README.md")
+	runHistGit("commit", "-m", "feat: add chat notes for "+leakedSpace)
+
+	// Commit 2: cleans HEAD so tracked tree is clean, leaving leak only in history
+	_ = os.WriteFile(filepath.Join(histRepo, "README.md"),
+		[]byte("# Sample\nReach user@gmail.com or spaces/AAAA_LAUNCH_01\n"), 0o644)
+	runHistGit("add", "README.md")
+	runHistGit("commit", "-m", "docs: replace with synthetic placeholders")
+
+	runInHistRepo := func(args ...string) (string, error) {
+		c := exec.Command(demoEnv.binPath, args...)
+		c.Dir = histRepo
+		c.Env = append(os.Environ(),
+			"HQ_ROOT_DIR="+histRepo,
+			"HQ_VAULT_DIR="+filepath.Join(histRepo, "local"),
+			"HQ_BIN_PATH="+demoEnv.binPath,
+		)
+		out, cErr := c.CombinedOutput()
+		return string(out), cErr
+	}
+
+	// Tracked tree check passes, whereas `--history` catches Commit 1!
+	if out, cErr := runInHistRepo("ci", "check-pii"); cErr != nil {
+		t.Fatalf("expected HEAD check-pii to pass, got: %v\n%s", cErr, out)
+	}
+	if histOut, cErr := runInHistRepo("ci", "check-pii", "--history"); cErr == nil || !strings.Contains(histOut, "P5-EmailAllowlist") || !strings.Contains(histOut, "P6-ContextualPII") {
+		t.Fatalf("expected check-pii --history to fail on Commit 1 leaks, got err=%v out=\n%s", cErr, histOut)
+	}
+
+	// Scrub git history deterministically with `--apply`
+	repMapPath := filepath.Join(t.TempDir(), "scrub-map.txt")
+	_ = os.WriteFile(repMapPath, []byte(leakedEmail+"==>user@gmail.com\n"+leakedSpace+"==>spaces/AAAA_LAUNCH_01\n"), 0o644)
+
+	dryOut, err := runInHistRepo("ci", "scrub-history", "--replacements="+repMapPath)
+	if err != nil || !strings.Contains(dryOut, "[DRY-RUN]") {
+		t.Fatalf("expected scrub-history dry-run output, got err=%v out=\n%s", err, dryOut)
+	}
+	applyOut, err := runInHistRepo("ci", "scrub-history", "--replacements="+repMapPath, "--apply")
+	if err != nil || !strings.Contains(applyOut, "[APPLIED]") {
+		t.Fatalf("expected scrub-history --apply to succeed, got err=%v out=\n%s", err, applyOut)
+	}
+
+	// Verify `check-pii --history` now passes 100% while preserving both commits!
+	cleanHistOut, err := runInHistRepo("ci", "check-pii", "--history")
+	if err != nil || !strings.Contains(cleanHistOut, "[PASS]") {
+		t.Fatalf("expected check-pii --history to pass after scrub-history --apply, got err=%v out=\n%s", err, cleanHistOut)
+	}
+	commitLines := strings.Split(strings.TrimSpace(runHistGit("log", "--oneline")), "\n")
+	if len(commitLines) != 2 {
+		t.Fatalf("expected 2 commits preserved after history scrub, got %d (%v)", len(commitLines), commitLines)
+	}
+}
+
 func copyDirRecursive(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

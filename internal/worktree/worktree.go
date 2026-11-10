@@ -3,9 +3,10 @@ package worktree
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 // Add creates an isolated git worktree under local/worktrees/<repo>-<task>/
@@ -41,7 +42,7 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 		repoBase = parts[len(parts)-1]
 		bareDir := filepath.Join(reposRoot, repoBase+".git")
 		if _, err := os.Stat(bareDir); os.IsNotExist(err) {
-			cloneCmd := exec.Command("git", "clone", "--bare", url, bareDir)
+			cloneCmd := vault.SanitizedGitCommand("", "clone", "--bare", url, bareDir)
 			if out, err := cloneCmd.CombinedOutput(); err != nil {
 				return "", fmt.Errorf("git clone --bare %s: %w (%s)", url, err, string(out))
 			}
@@ -59,10 +60,10 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 		branch = "hq/" + safeTask
 	}
 
-	cmd := exec.Command("git", "-C", gitRepoDir, "worktree", "add", "-b", branch, targetDir)
+	cmd := vault.SanitizedGitCommand("", "-C", gitRepoDir, "worktree", "add", "-b", branch, targetDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// Fallback if branch already exists
-		cmdExisting := exec.Command("git", "-C", gitRepoDir, "worktree", "add", targetDir, branch)
+		cmdExisting := vault.SanitizedGitCommand("", "-C", gitRepoDir, "worktree", "add", targetDir, branch)
 		if out2, err2 := cmdExisting.CombinedOutput(); err2 != nil {
 			return "", fmt.Errorf("git worktree add failed: %v (%s / %s)", err, string(out), string(out2))
 		}
@@ -80,7 +81,7 @@ func Remove(vaultDir, nameOrPath string) error {
 	if _, err := os.Stat(target); err != nil {
 		return err
 	}
-	_ = exec.Command("git", "-C", target, "worktree", "remove", "--force", target).Run()
+	_ = vault.SanitizedGitCommand("", "-C", target, "worktree", "remove", "--force", target).Run()
 	return os.RemoveAll(target)
 }
 

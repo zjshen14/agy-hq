@@ -20,10 +20,10 @@ Evaluate new filings or news against an explicit investment thesis and falsifica
 3. **Kill-Criteria Audit:**
    - Explicitly score each falsification criterion (`INTACT`, `WATCH`, or `BREACHED`) and append a dated entry to `local/notes/investing/tickers/<TICKER>/journal.md`.
 
-## Pre-IPO Secondary Opportunities & Secondary Watchdog
+## Pre-IPO Secondary Opportunities & Deal-Flow Watchdog
 
 1. **Automated Secondary Watchdog (`secondary-deal-watch`):**
-   - Runs weekdays at 11:00 AM and 4:00 PM PT to ingest inbound Secondary Market secondary deal flow.
+   - Optional scheduled trigger (configured in `local/triggers.yaml`) to ingest inbound private-market or secondary deal flow.
 2. **Autonomous Document Pulls (Zero Friction Invariant):**
    - Never ask the user whether to pull financials or term sheets. Autonomously pull all prospectuses, cap tables, valuation metrics, and transaction history proactively.
 3. **Master Retrospective Ledger (`local/notes/investing/opportunities/INDEX.md`):**

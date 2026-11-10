@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -46,11 +47,25 @@ func main() {
 
 	switch os.Args[1] {
 	case "init":
+		fs := flag.NewFlagSet("init", flag.ExitOnError)
+		demo := fs.Bool("demo", false, "Seed synthetic [Sample] ACME 10-Q inbox filing, thesis, tasks, approval, and facts")
+		withSample := fs.Bool("with-sample-data", false, "Alias for --demo: seed synthetic [Sample] dataset")
+		_ = fs.Parse(os.Args[2:])
 		templateDir := filepath.Join(rootDir, "templates")
 		created, err := vault.Init(vaultDir, templateDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
 			os.Exit(1)
+		}
+		if *demo || *withSample {
+			demoSeeded, dErr := vault.SeedDemoData(vaultDir)
+			if dErr != nil {
+				fmt.Fprintf(os.Stderr, "hq init --demo failed: %v\n", dErr)
+				os.Exit(1)
+			}
+			for _, ds := range demoSeeded {
+				created = append(created, ds+" (--demo)")
+			}
 		}
 		if convID := vault.ResolveConversationID(); convID != "" {
 			if _, ok := kernel.GetFrontDesk(vaultDir); !ok {
@@ -116,15 +131,15 @@ func main() {
 		// 2. Pull upstream Layer 1 root repo (and optional private Vault remote if configured)
 		if !*noPull {
 			fmt.Println("==> [2/5] Pulling latest agy-hq upstream commits...")
-			pullCmd := exec.Command("git", "-C", rootDir, "pull", "--ff-only")
+			pullCmd := vault.SanitizedGitCommand(rootDir, "pull", "--ff-only")
 			if out, err := pullCmd.CombinedOutput(); err != nil {
 				fmt.Fprintf(os.Stderr, "hq upgrade: git pull --ff-only failed (%v):\n%s\n", err, strings.TrimSpace(string(out)))
 				os.Exit(1)
 			} else {
 				fmt.Printf("    %s\n", strings.TrimSpace(string(out)))
 			}
-			if err := exec.Command("git", "-C", vaultDir, "remote", "get-url", "origin").Run(); err == nil {
-				_ = exec.Command("git", "-C", vaultDir, "pull", "--rebase", "origin", "main").Run()
+			if err := vault.SanitizedGitCommand(vaultDir, "remote", "get-url", "origin").Run(); err == nil {
+				_ = vault.SanitizedGitCommand(vaultDir, "pull", "--rebase", "origin", "main").Run()
 			}
 		} else {
 			fmt.Println("==> [2/5] Skipping git pull (--no-pull)")
@@ -170,9 +185,18 @@ func main() {
 		}
 
 	case "doctor":
+		fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output diagnostic results as JSON")
+		_ = fs.Parse(os.Args[2:])
 		results := doctor.Run(vaultDir)
-		for _, r := range results {
-			fmt.Printf("[%s] %-30s %s\n", r.Status, r.Name, r.Detail)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(results)
+		} else {
+			for _, r := range results {
+				fmt.Printf("[%s] %-30s %s\n", r.Status, r.Name, r.Detail)
+			}
 		}
 
 	case "status":
@@ -1798,9 +1822,21 @@ func runCICLI(rootDir string, args []string) {
 	case "check-pii":
 		fs := flag.NewFlagSet("ci check-pii", flag.ExitOnError)
 		staged := fs.Bool("staged", false, "Audit only staged git index changes")
+		history := fs.Bool("history", false, "Audit full git commit history (git log --all -p), author metadata, and refs")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
-		violations, err := ci.CheckPII(rootDir, *staged)
+		var violations []ci.PIIViolation
+		var err error
+		mode := "tracked repository tree"
+		if *history {
+			mode = "full git commit history"
+			violations, err = ci.CheckPIIHistory(rootDir)
+		} else {
+			if *staged {
+				mode = "staged git index"
+			}
+			violations, err = ci.CheckPII(rootDir, *staged)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq ci check-pii error: %v\n", err)
 			os.Exit(1)
@@ -1810,13 +1846,9 @@ func runCICLI(rootDir string, args []string) {
 			enc.SetIndent("", "  ")
 			_ = enc.Encode(violations)
 		} else if len(violations) == 0 {
-			mode := "tracked repository tree"
-			if *staged {
-				mode = "staged git index"
-			}
-			fmt.Printf("[PASS] Zero PII, Vault boundary, or credential leaks in %s (Invariants P1-P5 clean)\n", mode)
+			fmt.Printf("[PASS] Zero PII, Vault boundary, or credential leaks in %s (Invariants P1-P6 clean)\n", mode)
 		} else {
-			fmt.Fprintf(os.Stderr, "[FAIL] %d PII / Vault boundary violation(s) detected:\n", len(violations))
+			fmt.Fprintf(os.Stderr, "[FAIL] %d PII / Vault boundary violation(s) detected in %s:\n", len(violations), mode)
 			for _, v := range violations {
 				fmt.Fprintf(os.Stderr, "  - %s\n", v.String())
 			}
@@ -1824,6 +1856,64 @@ func runCICLI(rootDir string, args []string) {
 		if len(violations) > 0 {
 			os.Exit(1)
 		}
+
+	case "scrub-history":
+		fs := flag.NewFlagSet("ci scrub-history", flag.ExitOnError)
+		replacements := fs.String("replacements", "", "Path to deterministic replacement rules file (literal==>replacement)")
+		apply := fs.Bool("apply", false, "Rewrite git history in-place (defaults to read-only dry-run)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		if strings.TrimSpace(*replacements) == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq ci scrub-history --replacements=<path> [--apply] [--json]")
+			os.Exit(1)
+		}
+		rep, err := ci.ScrubGitHistory(rootDir, *replacements, *apply)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq ci scrub-history failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+		} else if rep.DryRun {
+			fmt.Printf("[DRY-RUN] Evaluated %d replacement rule(s): %d match(es) across %d commit(s) %v\n",
+				rep.RuleCount, rep.MatchedReplacements, rep.MatchedCommits, rep.SampleCommits)
+		} else {
+			fmt.Printf("[APPLIED] Rewrote git history across %d matched commit(s) (%d replacement(s) from %d rule(s)) and pruned backup refs.\n",
+				rep.MatchedCommits, rep.MatchedReplacements, rep.RuleCount)
+		}
+
+	case "apply-replacements":
+		fs := flag.NewFlagSet("ci apply-replacements", flag.ExitOnError)
+		dir := fs.String("dir", ".", "Target directory to scrub")
+		file := fs.String("file", "", "Replacement rules file")
+		_ = fs.Parse(args)
+		targetDir, err := filepath.Abs(*dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "apply-replacements resolve dir: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := ci.ApplyReplacementRulesToTree(targetDir, *file); err != nil {
+			fmt.Fprintf(os.Stderr, "apply-replacements failed: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "apply-replacements-stdin":
+		fs := flag.NewFlagSet("ci apply-replacements-stdin", flag.ExitOnError)
+		file := fs.String("file", "", "Replacement rules file")
+		_ = fs.Parse(args)
+		rules, err := ci.ParseReplacementRules(*file)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "apply-replacements-stdin parse rules: %v\n", err)
+			os.Exit(1)
+		}
+		raw, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			os.Exit(1)
+		}
+		updated, _ := ci.ApplyReplacementRulesToText(string(raw), rules)
+		fmt.Print(updated)
 
 	case "check-harness":
 		fs := flag.NewFlagSet("ci check-harness", flag.ExitOnError)
@@ -1875,7 +1965,7 @@ func runCICLI(rootDir string, args []string) {
 		}
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown ci subcommand: %s (expected check-pii, check-harness, pre-commit, pre-push, install-hooks)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown ci subcommand: %s (expected check-pii, check-harness, scrub-history, pre-commit, pre-push, install-hooks)\n", sub)
 		os.Exit(1)
 	}
 }
@@ -2296,17 +2386,17 @@ func printUsage() {
 	fmt.Println(`Usage: hq <command> [args]
 
 Commands:
-  init                                Initialize local/ private Vault and git repository
+  init [--demo]                       Initialize local/ private Vault (optionally seed [Sample] dataset)
   upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, and migrate Vault
   migrate [--quiet]                   Run non-destructive Vault schema & template migrations
-  doctor                              Check Antigravity sandbox, CLI, and Vault health
+  doctor [--json]                     Check Antigravity sandbox, CLI, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
   obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability
   memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
   rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
-  ci <check-pii|check-harness|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness contract verification
+  ci <check-pii|check-harness|scrub-history|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
   webui [--addr=127.0.0.1:4242]       Start interactive Web UI Console & Antigravity Sidecar

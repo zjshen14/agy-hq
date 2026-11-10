@@ -31,7 +31,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 |---|---|---|---|
 | [PRD-0001](product/0001-vision-and-ux.md) | **Core Product Vision & Day-in-the-Life UX** | The four user touchpoints: Mobile/Web Remote Control, Desktop + Aux Console, Drop Folder, and Sleep-Time Consolidation | Approved |
 | [PRD-0002](product/0002-open-workflows-and-skills.md) | **Open-Ended Workflows & Additive Skills** | How the agent handles any ad-hoc task out of the box (writing, coding, research, admin), boosted by progressive-disclosure `SKILL.md` skills | Approved |
-| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–19) & E2E Acceptance Criteria** | Deterministic expected behaviors across all 19 core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
+| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–20) & E2E Acceptance Criteria** | Deterministic expected behaviors across all 20 core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
 
 ---
 
@@ -51,7 +51,7 @@ To keep documentation maintainable as the project evolves, docs are organized in
 | [RFC-0010](design/0010-agent-recursive-self-improvement.md) | **Bounded Agent Recursive Self-Improvement (RSI) — 4-Stage Trace Mining, Verification & Human-Gated Evolution** | 0-token friction trace mining, ACE-compliant skill/code delta hypotheses, 4-gate sandboxed verification oracle (Ring 0 TCB AST check + counterfactual replay + E2E suite), and 1-tap SHA-256 approval | Implemented |
 | [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md) | **Automated CI/CD Pipeline, Mathematical PII/Vault Boundary Verification & Agent Harness Regression Gate** | Two-tier defense-in-depth (`pre-commit`/`pre-push` + GitHub Actions), 5-invariant mathematical PII/secret scanner (`hq ci check-pii`), Skill/Hook/Routing contract verifier (`hq ci check-harness`), and `sync.Once` E2E acceleration (`10.5s` -> `1.8s`) | Implemented |
 | [RFC-0012](design/0012-token-observability.md) | **End-to-End Token Usage, Latency & Cost/Quota Observability** | Stat-cached transcript token/latency ingestion, ground-truth parent-child subagent DAG reconciliation, `./bin/hq obs` CLI (`tokens`, `top`, `inspect`, `anomalies`, `budget`, `reconcile`), Web UI & Console gauges, and 5 deterministic anomaly/budget guards | Implemented |
-| [RFC-0013](design/0013-open-source-launch-strategy.md) | **Open-Source Readiness, Forensic Privacy Sanitization, Governance & Launch Architecture** | Forensic Two-Layer Vault & Git history audit (`P6-ContextualPII` + `check-pii --history`), subprocess `GIT_DIR` hardening, licensing & governance (`Apache-2.0` vs. `MIT`, `SECURITY.md`, `CONTRIBUTING.md`), 5-minute `--demo` onboarding, and Show HN launch playbook | Approved |
+| [RFC-0013](design/0013-open-source-launch-strategy.md) | **Open-Source Readiness, Forensic Privacy Sanitization, Governance & Launch Architecture** | Forensic Two-Layer Vault & Git history audit (`P6-ContextualPII` + `check-pii --history`), subprocess `GIT_DIR` hardening, licensing & governance (`Apache-2.0` vs. `MIT`, `SECURITY.md`, `CONTRIBUTING.md`), 5-minute `--demo` onboarding, and Show HN launch playbook | Implemented |
 
 ---
 

@@ -661,11 +661,9 @@ func extractRelativeLinkTargets(line string) []string {
 
 func listMarkdownFiles(rootDir string) ([]string, error) {
 	if _, err := os.Stat(filepath.Join(rootDir, ".git")); err == nil {
-		cmd := exec.Command("git", "ls-files", "*.md")
-		cmd.Dir = rootDir
-		if out, gErr := cmd.Output(); gErr == nil {
+		if out, gErr := gitOutput(rootDir, "ls-files", "*.md"); gErr == nil {
 			var files []string
-			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 				line = strings.TrimSpace(line)
 				if line == "" {
 					continue

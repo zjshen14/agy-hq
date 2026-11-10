@@ -45,7 +45,7 @@ These read-only metadata commands are safe to run inline (including at `[HQ] Fro
 
 - **List Spaces & DMs (and refresh local name cache):**
   ```sh
-  ./bin/hq gchat spaces [--query="Project"]
+  ./bin/hq gchat spaces [--query="Launch"]
   ```
 - **Search Message Snippets:**
   ```sh

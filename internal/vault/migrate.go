@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -52,13 +51,13 @@ func SnapshotVault(vaultDir, reason string) bool {
 	if _, err := os.Stat(gitDir); err != nil {
 		return false
 	}
-	statusOut, err := exec.Command("git", "-C", vaultDir, "status", "--porcelain").Output()
+	statusOut, err := SanitizedGitCommand(vaultDir, "status", "--porcelain").Output()
 	if err != nil || len(strings.TrimSpace(string(statusOut))) == 0 {
 		return false
 	}
-	_ = exec.Command("git", "-C", vaultDir, "add", "-A").Run()
+	_ = SanitizedGitCommand(vaultDir, "add", "-A").Run()
 	msg := fmt.Sprintf("chore(vault): pre-upgrade snapshot (%s)", reason)
-	if err := exec.Command("git", "-C", vaultDir, "commit", "-m", msg).Run(); err != nil {
+	if err := SanitizedGitCommand(vaultDir, "commit", "-m", msg).Run(); err != nil {
 		return false
 	}
 	return true

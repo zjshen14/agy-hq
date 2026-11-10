@@ -191,7 +191,7 @@ Users and the `[HQ] Front Desk` coordinator should never need to memorize opaque
   1. Exact `SpaceID` match (`spaces/AAAA_LAUNCH_01` or `AAAA_LAUNCH_01`),
   2. Case-insensitive exact `DisplayName` match (`"Engineering Core"`, `"Project Launch Space"`, `"Alice Chen"`),
   3. Case-insensitive substring match (`"project launch"`),
-  4. Multi-word token overlap match (`"Project Launch Fair"` $\rightarrow$ matches `"Project"` + `"Science"`).
+  4. Multi-word token overlap match (`"Project Launch Fair"` $\rightarrow$ matches `"Project"` + `"Launch"`).
 - If a human name, email address (`user@gmail.com`), or username handle (`user77`) is not found in the local cache or the 20 visible sidebar spaces, `ResolveSpaceTarget` automatically invokes `resolveOrCreateDMViaCDP(vaultDir, cfg, raw)`:
   - It drives Google Chat's `"New chat"` PeopleKit search in headless Chrome (`button[jsname="TrXBg"]` $\rightarrow$ `input[aria-label="Add 1 or more people"]` $\rightarrow$ `[role="option"][pkd-target]` $\rightarrow$ `"Start chat"` button `button[jsname="OCpkoe"]`),
   - Reads the resolved DM `spaceId` from `window.location.href` (`/app/chat/<id>`), caches it in `local/memory/gchat/spaces_cache.json`, and returns it in ~2 seconds—without needing a subagent!

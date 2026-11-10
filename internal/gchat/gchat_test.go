@@ -258,13 +258,13 @@ func TestPhase4_FuzzySpaceResolutionAndAuthURLDetection(t *testing.T) {
 	if err != nil || spID2 != "spaces/AAAA_LAUNCH_01" || spName2 != "Project Launch Space" {
 		t.Fatalf("expected substring match for project launch, got id=%q name=%q err=%v", spID2, spName2, err)
 	}
-	// Multi-word token match ("Project Launch Fair" -> matches "Project" + "Science")
+	// Multi-word token match ("Project Launch Fair" -> matches "Project" + "Launch")
 	spID3, spName3, err := ResolveSpaceTarget(vaultDir, "personal", "Project Launch Fair")
 	if err != nil || spID3 != "spaces/AAAA_LAUNCH_01" || spName3 != "Project Launch Space" {
 		t.Fatalf("expected token match for Project Launch Fair, got id=%q name=%q err=%v", spID3, spName3, err)
 	}
 	// CreateOrUpdateDraft using natural space name automatically populates SpaceID and SpaceName
-	spec, err := CreateOrUpdateDraft(vaultDir, "personal", "", "Project Launch Space", "", "", "Science fair schedule update", "conv-clean")
+	spec, err := CreateOrUpdateDraft(vaultDir, "personal", "", "Project Launch Space", "", "", "Launch milestone schedule update", "conv-clean")
 	if err != nil {
 		t.Fatalf("CreateOrUpdateDraft by natural name failed: %v", err)
 	}
