@@ -1267,13 +1267,19 @@ func main() {
 		} else if p := os.Getenv("PORT"); p != "" {
 			defaultAddr = "127.0.0.1:" + p
 		}
-		addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server")
+		addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server (loopback only by default)")
+		allowRemote := fs.Bool("allow-remote", false, "Explicitly permit binding HQ Console HTTP server to a non-loopback interface")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns in background watcher")
 		daemonArgs := os.Args[2:]
 		if len(daemonArgs) > 0 && (daemonArgs[0] == "start" || daemonArgs[0] == "run") {
 			daemonArgs = daemonArgs[1:]
 		}
 		_ = fs.Parse(daemonArgs)
+
+		if !*allowRemote && !webui.IsLoopbackAddr(*addr) {
+			fmt.Fprintf(os.Stderr, "hq daemon security error: refusing to bind HTTP console to non-loopback address %q (use 127.0.0.1:<port> or pass --allow-remote)\n", *addr)
+			os.Exit(1)
+		}
 
 		if err := kernel.RecordDaemonStart(vaultDir, *addr); err != nil {
 			fmt.Fprintf(os.Stderr, "hq daemon error: %v\n", err)

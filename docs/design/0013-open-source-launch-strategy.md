@@ -41,7 +41,7 @@ flowchart LR
 
     subgraph ForensicFindings["Gaps Uncovered by RFC-0013 Forensic Audit"]
         G1["Gap 1: Contextual/Relational PII in 13 Tracked Files\n(Family names, Space names, Space IDs, handles)"]
-        G2["Gap 2: Historical Commit Diff Leaks\n(Personal email in commits fced00e & b3c7550)"]
+        G2["Gap 2: Historical Commit Diff Leaks\n(Personal email in pre-RFC-0011 commits)"]
         G3["Gap 3: Subprocess GIT_DIR Environment Bleed\n(Orphaned test commits on hq/sample-repo-fix-bug)"]
         G4["Gap 4: Worktree .git File Detection & Template Drift\n(templates/config.yaml port 4747 vs 4242)"]
     end

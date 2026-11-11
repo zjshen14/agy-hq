@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
@@ -387,8 +388,10 @@ var (
 		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
 		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
 		regexp.MustCompile(`(?i)\bhq\s+rsi\s+apply\b`),
+		regexp.MustCompile(`(?i)/api/(?:approve|reject)\b`),
 	}
 
+	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|propose|status)\b`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
@@ -397,13 +400,44 @@ var (
 	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\./)?bin/hq|hq)\s+claim-desk\b`)
 )
 
+func canonicalizeHookPath(vaultDir, rawPath string) string {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		return ""
+	}
+	p := trimmed
+	if !filepath.IsAbs(p) {
+		rootDir := filepath.Dir(filepath.Clean(vaultDir))
+		p = filepath.Join(rootDir, p)
+	}
+	clean := filepath.Clean(p)
+	cur := clean
+	var tail []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return filepath.Clean(resolved)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return clean
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+}
+
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
 // as well as Front Desk non-blocking policy (blocking repo/worktree edits, test runs, and capping lookups at 3).
 func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload ToolCallPayload
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
-		_, wErr := w.Write([]byte(`{"decision":"allow"}` + "\n"))
-		return wErr
+		return json.NewEncoder(w).Encode(map[string]interface{}{
+			"decision": "deny",
+			"reason":   "Blocked by agy-hq PreToolUse safety policy: malformed hook payload JSON (fail-closed).",
+		})
 	}
 
 	if payload.ToolCall.Name == "run_command" {
@@ -416,6 +450,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 		checkLine := cmdLine
 		if reHQPropose.MatchString(cmdLine) {
+			if reDoubleQuotedCmdSubst.MatchString(cmdLine) {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   "Blocked by agy-hq approval policy: command substitution ($(...) or backticks) inside double-quoted `hq propose --cmd=\"...\"` executes immediately before approval. Use single quotes (`--cmd='...'`) or literal strings.",
+				})
+			}
 			checkLine = reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)
 		}
 		for _, re := range outboundCommandPatterns {
@@ -432,8 +472,30 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
+	// Protect deterministic proposal & RSI verification stores from direct LLM file tampering across all sessions
+	if payload.ToolCall.Name == "write_file" || payload.ToolCall.Name == "edit_file" {
+		if pathArg, ok := payload.ToolCall.Args["Path"].(string); ok && strings.TrimSpace(pathArg) != "" {
+			canonPath := canonicalizeHookPath(vaultDir, pathArg)
+			canonVault := canonicalizeHookPath(vaultDir, vaultDir)
+			for _, protectedSub := range []string{
+				filepath.Join(canonVault, "memory", "pending"),
+				filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
+				filepath.Join(canonVault, "memory", "rsi", "archive.jsonl"),
+				filepath.Join(canonVault, "memory", "interventions.jsonl"),
+			} {
+				if canonPath == protectedSub || strings.HasPrefix(canonPath, protectedSub+string(filepath.Separator)) {
+					return json.NewEncoder(w).Encode(map[string]interface{}{
+						"decision": "deny",
+						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, RSI hypotheses, or intervention audit logs are prohibited. Use `./bin/hq propose` or `./bin/hq rsi`.",
+					})
+				}
+			}
+		}
+	}
+
 	// Block direct LLM browser automation (chrome-devtools MCP) against chat.google.com to prevent bypassing hq gchat quarantine & approval gates
 	if strings.Contains(strings.ToLower(payload.ToolCall.Name), "chrome-devtools") ||
+		payload.ToolCall.Name == "call_mcp_tool" ||
 		payload.ToolCall.Name == "navigate_page" || payload.ToolCall.Name == "new_page" ||
 		payload.ToolCall.Name == "evaluate_script" || payload.ToolCall.Name == "click" || payload.ToolCall.Name == "fill" {
 		rawArgs, _ := json.Marshal(payload.ToolCall.Args)
@@ -445,20 +507,21 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Enforce Quarantined Reader profile on sessions that have ingested untrusted external email
+	// Enforce Quarantined Reader profile on sessions that have ingested untrusted external email/chat
 	if taintReason, tainted := gmail.IsSessionTainted(vaultDir, payload.ConversationID); tainted {
 		switch payload.ToolCall.Name {
-		case "search_web":
+		case "search_web", "write_file", "edit_file", "invoke_subagent", "define_subagent", "send_message", "schedule", "call_mcp_tool":
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): web search egress is disabled after reading untrusted email.", taintReason),
+				"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): tool %q is disabled after reading untrusted external messages.", taintReason, payload.ToolCall.Name),
 			})
 		case "read_file", "grep_search", "find_by_name":
+			canonVault := canonicalizeHookPath(vaultDir, vaultDir)
+			cleanPrivate := filepath.Join(canonVault, "private")
+			cleanMem := filepath.Join(canonVault, "MEMORY.md")
 			for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
 				if p, ok := payload.ToolCall.Args[key].(string); ok && p != "" {
-					cleanP := filepath.Clean(p)
-					cleanPrivate := filepath.Clean(filepath.Join(vaultDir, "private"))
-					cleanMem := filepath.Clean(filepath.Join(vaultDir, "MEMORY.md"))
+					cleanP := canonicalizeHookPath(vaultDir, p)
 					if cleanP == cleanPrivate || strings.HasPrefix(cleanP, cleanPrivate+string(filepath.Separator)) || cleanP == cleanMem {
 						return json.NewEncoder(w).Encode(map[string]interface{}{
 							"decision": "deny",
@@ -469,10 +532,17 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 		case "run_command":
 			cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
-			if !reAllowedQuarantineHQCmd.MatchString(cmdLine) || strings.ContainsAny(cmdLine, ";|&`$") {
+			if !reAllowedQuarantineHQCmd.MatchString(cmdLine) || strings.ContainsAny(cmdLine, "\n\r;|&`$") {
 				return json.NewEncoder(w).Encode(map[string]interface{}{
 					"decision": "deny",
-					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): only `./bin/hq gmail <search|read-quarantined|draft|triage-result|attachment-quarantine>` and `./bin/hq propose` are permitted in quarantined sessions.", taintReason),
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): only single-line `./bin/hq gmail <search|read-quarantined|draft|triage-result|attachment-quarantine>`, `./bin/hq gchat <spaces|search|read-quarantined|draft|triage-result>`, and `./bin/hq propose` are permitted in quarantined sessions.", taintReason),
+				})
+			}
+		default:
+			if strings.HasPrefix(payload.ToolCall.Name, "mcp_") {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): MCP tools (%s) are disabled in quarantined sessions.", taintReason, payload.ToolCall.Name),
 				})
 			}
 		}
@@ -488,6 +558,41 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					hashShort := prop.Metadata["contentHash"]
 					if hashShort == "" {
 						hashShort = prop.Metadata["diffSha256"]
+					}
+					bodyPreview := prop.Metadata["bodyPreview"]
+					fromVal := prop.Metadata["from"]
+					toVal := prop.Metadata["to"]
+					subjVal := prop.Metadata["subject"]
+					spaceName := prop.Metadata["spaceName"]
+					spaceID := prop.Metadata["spaceId"]
+					if prop.ActionType == "gchat_send" && prop.Metadata["draftId"] != "" {
+						if spec, dErr := gchat.GetDraft(vaultDir, prop.Metadata["account"], prop.Metadata["draftId"]); dErr == nil {
+							bodyPreview = spec.Body
+							hashShort = spec.ContentHash
+							if spec.From != "" {
+								fromVal = spec.From
+							}
+							if spec.SpaceName != "" {
+								spaceName = spec.SpaceName
+							}
+							if spec.SpaceID != "" {
+								spaceID = spec.SpaceID
+							}
+						}
+					} else if prop.ActionType == "gmail_send" && prop.Metadata["draftId"] != "" {
+						if spec, dErr := gmail.GetDraft(vaultDir, prop.Metadata["account"], prop.Metadata["draftId"]); dErr == nil {
+							bodyPreview = spec.Body
+							hashShort = spec.ContentHash
+							if spec.From != "" {
+								fromVal = spec.From
+							}
+							if spec.To != "" {
+								toVal = spec.To
+							}
+							if spec.Subject != "" {
+								subjVal = spec.Subject
+							}
+						}
 					}
 					if len(hashShort) > 12 {
 						hashShort = hashShort[:12]
@@ -506,11 +611,11 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 							"Approve sending Google Chat Message %s?\n• Account: %s (%s)\n• Space: %s [%s]\n• Thread: %s\n• Message: %s\n• Draft Hash: %s",
 							prop.Metadata["draftId"],
 							prop.Metadata["account"],
-							prop.Metadata["from"],
-							prop.Metadata["spaceName"],
-							prop.Metadata["spaceId"],
+							fromVal,
+							spaceName,
+							spaceID,
 							threadLabel,
-							prop.Metadata["bodyPreview"],
+							bodyPreview,
 							hashShort,
 						)
 					} else if prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch" {
@@ -530,10 +635,10 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 						canonicalQ = fmt.Sprintf(
 							"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
 							prop.Metadata["draftId"],
-							prop.Metadata["from"],
-							prop.Metadata["to"],
-							prop.Metadata["subject"],
-							prop.Metadata["bodyPreview"],
+							fromVal,
+							toVal,
+							subjVal,
+							bodyPreview,
 							hashShort,
 						)
 					}

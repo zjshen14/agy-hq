@@ -685,22 +685,36 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, threadID, to, cc, subj
 	}
 
 	draftsDir := filepath.Join(vaultDir, "memory", "gmail", "drafts")
-	if err := os.MkdirAll(draftsDir, 0o755); err != nil {
+	if err := os.MkdirAll(draftsDir, 0o700); err != nil {
 		return DraftSpec{}, err
 	}
 	data, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return DraftSpec{}, err
 	}
-	if err := os.WriteFile(filepath.Join(draftsDir, draftID+".json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(draftsDir, draftID+".json"), data, 0o600); err != nil {
 		return DraftSpec{}, err
 	}
 	return spec, nil
 }
 
+var reSafeGmailDraftID = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,128}$`)
+
+func validateGmailDraftID(draftID string) (string, error) {
+	id := strings.TrimSpace(draftID)
+	if id == "" || id == "." || id == ".." || strings.Contains(id, "..") || !reSafeGmailDraftID.MatchString(id) {
+		return "", fmt.Errorf("invalid gmail draft ID %q", draftID)
+	}
+	return id, nil
+}
+
 // GetDraft loads a DraftSpec from local/memory/gmail/drafts/<draftID>.json (and refreshes from remote if available).
 func GetDraft(vaultDir, accountAlias, draftID string) (DraftSpec, error) {
-	p := filepath.Join(vaultDir, "memory", "gmail", "drafts", strings.TrimSpace(draftID)+".json")
+	cleanID, err := validateGmailDraftID(draftID)
+	if err != nil {
+		return DraftSpec{}, err
+	}
+	p := filepath.Join(vaultDir, "memory", "gmail", "drafts", cleanID+".json")
 	data, err := os.ReadFile(p)
 	if err != nil {
 		return DraftSpec{}, fmt.Errorf("draft %q not found: %w", draftID, err)
@@ -715,33 +729,41 @@ func GetDraft(vaultDir, accountAlias, draftID string) (DraftSpec, error) {
 
 // VerifyAndSendDraft re-verifies the draft's ContentHash and active account immediately before sending.
 func VerifyAndSendDraft(vaultDir, accountAlias, draftID, expectedHash string) (string, error) {
+	cleanID, err := validateGmailDraftID(draftID)
+	if err != nil {
+		return "", err
+	}
+	normHash := strings.ToLower(strings.TrimSpace(expectedHash))
+	if len(normHash) < 8 {
+		return "", fmt.Errorf("draft contentHash prefix required (minimum 8 hex characters)")
+	}
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
 	if err != nil {
 		return "", err
 	}
-	spec, err := GetDraft(vaultDir, cfg.Alias, draftID)
+	spec, err := GetDraft(vaultDir, cfg.Alias, cleanID)
 	if err != nil {
 		return "", err
 	}
 	if !strings.EqualFold(spec.From, cfg.Email) {
 		return "", fmt.Errorf("account mismatch: draft From=%s != active account %s", spec.From, cfg.Email)
 	}
-	if expectedHash != "" && !strings.HasPrefix(spec.ContentHash, expectedHash) {
+	if !strings.HasPrefix(strings.ToLower(spec.ContentHash), normHash) {
 		return "", fmt.Errorf("draft contentHash mismatch (bait-and-switch blocked): current=%s, approved=%s", spec.ContentHash[:12], expectedHash)
 	}
 
 	if mDir := mockDir(vaultDir); mDir != "" {
-		sentPath := filepath.Join(mDir, fmt.Sprintf("sent-%s.json", draftID))
+		sentPath := filepath.Join(mDir, fmt.Sprintf("sent-%s.json", cleanID))
 		data, _ := json.MarshalIndent(spec, "", "  ")
-		_ = os.WriteFile(sentPath, data, 0o644)
-		return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", draftID, spec.From, spec.To, spec.Subject, spec.ContentHash[:12]), nil
+		_ = os.WriteFile(sentPath, data, 0o600)
+		return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", cleanID, spec.From, spec.To, spec.Subject, spec.ContentHash[:12]), nil
 	}
 
-	out, err := sendDraftViaPluginCLI(cfg, draftID)
+	out, err := sendDraftViaPluginCLI(cfg, cleanID)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s]: %s", draftID, spec.From, spec.To, spec.Subject, out), nil
+	return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s]: %s", cleanID, spec.From, spec.To, spec.Subject, out), nil
 }
 
 // --- Pure Go Sidecar Pre-Check (`hq gmail precheck` & `hq daemon`) ---
@@ -918,18 +940,18 @@ func QuarantineAttachment(vaultDir, filename string, content []byte, fromHeader,
 	safeName := fmt.Sprintf("%s-%s%s", safeBase, hashPrefix, ext)
 
 	quarantineDir := filepath.Join(vaultDir, "inbox", "quarantine")
-	if err := os.MkdirAll(quarantineDir, 0o755); err != nil {
+	if err := os.MkdirAll(quarantineDir, 0o700); err != nil {
 		return "", false, err
 	}
 	qPath := filepath.Join(quarantineDir, safeName)
-	if err := os.WriteFile(qPath, content, 0o644); err != nil {
+	if err := os.WriteFile(qPath, content, 0o600); err != nil {
 		return "", false, err
 	}
 
 	reg, _ := LoadRegistry(vaultDir)
 	if isDKIMTrustedSender(fromHeader, authResults, reg.TrustedDomains) {
 		inboxDir := filepath.Join(vaultDir, "inbox")
-		_ = os.MkdirAll(inboxDir, 0o755)
+		_ = os.MkdirAll(inboxDir, 0o700)
 		inboxPath := filepath.Join(inboxDir, safeName)
 		if err := os.Rename(qPath, inboxPath); err == nil {
 			return inboxPath, true, nil

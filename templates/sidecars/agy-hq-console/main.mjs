@@ -10,7 +10,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const homeDir = process.env.HOME || homedir();
 const TARGET_PORT = 4242;
 const TARGET_HOST = '127.0.0.1';
-const HQ_BIN = join(homeDir, 'Workspaces/agy/headquarter/bin/hq');
+
+function resolveHQBin() {
+  if (process.env.HQ_BIN_PATH && existsSync(process.env.HQ_BIN_PATH)) {
+    return process.env.HQ_BIN_PATH;
+  }
+  let dir = __dirname;
+  for (let i = 0; i < 8; i++) {
+    const candidate = join(dir, 'bin', 'hq');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return join(process.cwd(), 'bin', 'hq');
+}
+const HQ_BIN = resolveHQBin();
 
 // Preload JS location or fallback
 let preloadJS = '';
@@ -123,7 +138,7 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT && listenPort !== TARGET_PORT) {
     }
     if (token && req.method !== 'GET') {
       const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token');
-      if (provided && provided !== token) {
+      if (!provided || provided !== token) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;

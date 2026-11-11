@@ -22,6 +22,22 @@ func TestCreateApproveAndReject(t *testing.T) {
 		t.Fatalf("expected error on mismatched sha256 prefix")
 	}
 
+	// Empty or short SHA prefix must fail
+	if _, err := Approve(vaultDir, prop.ID, ""); err == nil {
+		t.Fatalf("expected error on empty sha256 prefix")
+	}
+	if _, err := Approve(vaultDir, prop.ID, prop.SHA256[:4]); err == nil {
+		t.Fatalf("expected error on short (<8 char) sha256 prefix")
+	}
+
+	// Path traversal proposal ID must fail on Approve and Reject
+	if _, err := Approve(vaultDir, "../../outside", prop.SHA256[:12]); err == nil {
+		t.Fatalf("expected error on path traversal proposal ID in Approve")
+	}
+	if err := Reject(vaultDir, "../../outside", "nope"); err == nil {
+		t.Fatalf("expected error on path traversal proposal ID in Reject")
+	}
+
 	// Valid SHA prefix must execute command and remove from pending
 	out, err := Approve(vaultDir, prop.ID, prop.SHA256[:12])
 	if err != nil {

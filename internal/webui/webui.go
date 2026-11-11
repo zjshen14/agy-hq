@@ -1,10 +1,15 @@
 package webui
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,11 +38,66 @@ type DashboardState struct {
 	TodayTurns    []hooks.JournalEntry `json:"todayTurns"`
 	Health        []doctor.CheckResult `json:"health"`
 	FlashResult   string               `json:"flashResult,omitempty"`
+	CSRFToken     string               `json:"-"`
+}
+
+// IsLoopbackAddr returns true if listenAddr binds strictly to a loopback interface (127.0.0.1, ::1, or localhost).
+func IsLoopbackAddr(listenAddr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		host = strings.TrimSpace(listenAddr)
+	}
+	return isLoopbackHostOnly(host) && host != ""
+}
+
+func isLoopbackHostHeader(hostHeader string) bool {
+	trimmed := strings.TrimSpace(hostHeader)
+	if trimmed == "" {
+		return true
+	}
+	host := trimmed
+	if h, _, err := net.SplitHostPort(trimmed); err == nil {
+		host = h
+	}
+	return isLoopbackHostOnly(host)
+}
+
+func isLoopbackHostOnly(host string) bool {
+	h := strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+func isAllowedSameOriginRequest(r *http.Request) bool {
+	if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+		return false
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !isLoopbackHostOnly(u.Hostname()) {
+			return false
+		}
+	}
+	return true
+}
+
+func generateCSRFToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func validCSRFToken(expected, candidate string) bool {
+	c := strings.TrimSpace(candidate)
+	if expected == "" || len(c) != len(expected) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(c)) == 1
 }
 
 // NewHandler creates the HTTP mux for the HQ Console side pane and API.
 func NewHandler(vaultDir string) http.Handler {
 	mux := http.NewServeMux()
+	csrfToken := generateCSRFToken()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -50,12 +110,20 @@ func NewHandler(vaultDir string) http.Handler {
 	})
 
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
 		state := loadState(vaultDir, "")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(state)
 	})
 
 	mux.HandleFunc("/api/obs", func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
 		sum := obs.BuildDashboardSummary(vaultDir, time.Now())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sum)
@@ -66,20 +134,34 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
 
-		var id, sha string
+		var id, sha, reqCSRF string
 		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			var body struct {
-				ID     string `json:"id"`
-				SHA256 string `json:"sha256"`
+				ID        string `json:"id"`
+				SHA256    string `json:"sha256"`
+				CSRFToken string `json:"csrf_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			id = strings.TrimSpace(body.ID)
 			sha = strings.TrimSpace(body.SHA256)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
 		} else {
 			_ = r.ParseForm()
 			id = strings.TrimSpace(r.FormValue("id"))
 			sha = strings.TrimSpace(r.FormValue("sha256"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
 		}
 
 		out, err := approvals.ApproveProposal(vaultDir, id, sha)
@@ -103,6 +185,7 @@ func NewHandler(vaultDir string) http.Handler {
 			return
 		}
 		state := loadState(vaultDir, msg)
+		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
 
@@ -111,20 +194,34 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
 
-		var id, reason string
+		var id, reason, reqCSRF string
 		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			var body struct {
-				ID     string `json:"id"`
-				Reason string `json:"reason"`
+				ID        string `json:"id"`
+				Reason    string `json:"reason"`
+				CSRFToken string `json:"csrf_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			id = strings.TrimSpace(body.ID)
 			reason = strings.TrimSpace(body.Reason)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
 		} else {
 			_ = r.ParseForm()
 			id = strings.TrimSpace(r.FormValue("id"))
 			reason = strings.TrimSpace(r.FormValue("reason"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
 		}
 		if reason == "" {
 			reason = "Rejected via HQ Console"
@@ -147,6 +244,7 @@ func NewHandler(vaultDir string) http.Handler {
 			return
 		}
 		state := loadState(vaultDir, msg)
+		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
 
@@ -155,17 +253,31 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
 
-		var slug string
+		var slug, reqCSRF string
 		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			var body struct {
-				Slug string `json:"slug"`
+				Slug      string `json:"slug"`
+				CSRFToken string `json:"csrf_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			slug = strings.TrimSpace(body.Slug)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
 		} else {
 			_ = r.ParseForm()
 			slug = strings.TrimSpace(r.FormValue("slug"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
 		}
 
 		err := kernel.CompleteTask(vaultDir, slug, "")
@@ -184,6 +296,7 @@ func NewHandler(vaultDir string) http.Handler {
 			return
 		}
 		state := loadState(vaultDir, msg)
+		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
 
@@ -192,17 +305,31 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
 
-		var slug string
+		var slug, reqCSRF string
 		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			var body struct {
-				Slug string `json:"slug"`
+				Slug      string `json:"slug"`
+				CSRFToken string `json:"csrf_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			slug = strings.TrimSpace(body.Slug)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
 		} else {
 			_ = r.ParseForm()
 			slug = strings.TrimSpace(r.FormValue("slug"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
 		}
 
 		err := kernel.ArchiveTask(vaultDir, slug, false)
@@ -221,6 +348,7 @@ func NewHandler(vaultDir string) http.Handler {
 			return
 		}
 		state := loadState(vaultDir, msg)
+		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
 
@@ -231,10 +359,17 @@ func NewHandler(vaultDir string) http.Handler {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		state := loadState(vaultDir, "")
+		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
 
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHostHeader(r.Host) {
+			http.Error(w, "forbidden: non-loopback Host header rejected (DNS rebinding guard)", http.StatusForbidden)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 const preloadBridgeJS = `/**
@@ -310,9 +445,11 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	isGmail := p.ActionType == "gmail_send" || strings.Contains(p.Command, "gmail") || strings.HasPrefix(draftID, "draft-")
 
 	var payload string
+	loadedFromDraft := false
 	if isGChat && draftID != "" {
 		if spec, err := gchat.GetDraft(vaultDir, account, draftID); err == nil && spec.Body != "" {
 			payload = spec.Body
+			loadedFromDraft = true
 			if p.Metadata["spaceName"] == "" {
 				p.Metadata["spaceName"] = spec.SpaceName
 			}
@@ -322,6 +459,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 		}
 	} else if isGmail && draftID != "" {
 		if spec, err := gmail.GetDraft(vaultDir, account, draftID); err == nil && (spec.Body != "" || spec.Subject != "") {
+			loadedFromDraft = true
 			if spec.Subject != "" && !strings.Contains(spec.Body, spec.Subject) {
 				payload = fmt.Sprintf("Subject: %s\n\n%s", spec.Subject, spec.Body)
 			} else {
@@ -340,7 +478,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 
 	if payload != "" {
 		p.Metadata["draftPayload"] = payload
-		if p.Metadata["bodyPreview"] == "" {
+		if loadedFromDraft || p.Metadata["bodyPreview"] == "" {
 			p.Metadata["bodyPreview"] = payload
 		}
 		if isGChat && strings.HasPrefix(p.Summary, "Send Google Chat Draft ") {
@@ -472,6 +610,7 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="hq-csrf-token" content="{{.CSRFToken}}">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>agy-hq Console</title>
 <script src="/preload.js"></script>
@@ -793,10 +932,10 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     {{end}}
     <pre class="code-block">{{.Command}}</pre>
     <div class="actions">
-      <button type="button" class="btn btn-approve" onclick="approveProposal('{{.ID}}', '{{shortSHA .SHA256}}')">
+      <button type="button" class="btn btn-approve" data-hq-action="approve" data-id="{{.ID}}" data-sha="{{shortSHA .SHA256}}">
         ✓ Approve ({{shortSHA .SHA256}})
       </button>
-      <button type="button" class="btn btn-reject" onclick="rejectProposal('{{.ID}}')">
+      <button type="button" class="btn btn-reject" data-hq-action="reject" data-id="{{.ID}}">
         ✕ Reject
       </button>
     </div>
@@ -889,10 +1028,10 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     {{if .LastSummary}}<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">{{.LastSummary}}</div>{{end}}
     <div class="actions">
       {{if eq .Status "active"}}
-      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" onclick="completeTask('{{.TaskSlug}}')">Complete</button>
+      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="complete-task" data-slug="{{.TaskSlug}}">Complete</button>
       {{end}}
       {{if ne .Status "archived"}}
-      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" onclick="archiveTask('{{.TaskSlug}}')">Archive</button>
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="archive-task" data-slug="{{.TaskSlug}}">Archive</button>
       {{end}}
     </div>
   </div>
@@ -956,8 +1095,23 @@ function showFlash(message, isError) {
   setTimeout(() => { if (banner.parentElement) banner.remove(); }, 5000);
 }
 
+const CSRF_TOKEN = ((document.querySelector('meta[name="hq-csrf-token"]') || {}).content) || '';
+
 function escapeHTML(s) {
-  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function postHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-HQ-CSRF-Token': CSRF_TOKEN
+  };
 }
 
 async function approveProposal(id, sha) {
@@ -965,8 +1119,8 @@ async function approveProposal(id, sha) {
   try {
     const res = await fetch('/api/approve', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ id: id, sha256: sha })
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, sha256: sha, csrf_token: CSRF_TOKEN })
     });
     const data = await res.json();
     showFlash(data.message || ('Approved ' + id), !data.ok);
@@ -982,8 +1136,8 @@ async function rejectProposal(id) {
   try {
     const res = await fetch('/api/reject', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ id: id, reason: reason })
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, reason: reason, csrf_token: CSRF_TOKEN })
     });
     const data = await res.json();
     showFlash(data.message || ('Rejected ' + id), !data.ok);
@@ -997,8 +1151,8 @@ async function completeTask(slug) {
   try {
     const res = await fetch('/api/tasks/complete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ slug: slug })
+      headers: postHeaders(),
+      body: JSON.stringify({ slug: slug, csrf_token: CSRF_TOKEN })
     });
     const data = await res.json();
     showFlash(data.message || ('Completed ' + slug), !data.ok);
@@ -1012,8 +1166,8 @@ async function archiveTask(slug) {
   try {
     const res = await fetch('/api/tasks/archive', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ slug: slug })
+      headers: postHeaders(),
+      body: JSON.stringify({ slug: slug, csrf_token: CSRF_TOKEN })
     });
     const data = await res.json();
     showFlash(data.message || ('Archived ' + slug), !data.ok);
@@ -1022,6 +1176,21 @@ async function archiveTask(slug) {
     showFlash('Error archiving ' + slug + ': ' + err.message, true);
   }
 }
+
+document.addEventListener('click', function(ev) {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('[data-hq-action]') : null;
+  if (!btn) return;
+  const act = btn.getAttribute('data-hq-action');
+  if (act === 'approve') {
+    approveProposal(btn.getAttribute('data-id') || '', btn.getAttribute('data-sha') || '');
+  } else if (act === 'reject') {
+    rejectProposal(btn.getAttribute('data-id') || '');
+  } else if (act === 'complete-task') {
+    completeTask(btn.getAttribute('data-slug') || '');
+  } else if (act === 'archive-task') {
+    archiveTask(btn.getAttribute('data-slug') || '');
+  }
+});
 
 async function refreshState() {
   try {
@@ -1044,15 +1213,15 @@ async function refreshState() {
           '<blockquote class="preview-quote">' + escapeHTML(preview) + '</blockquote>' +
           '</div>' : '';
 
-        html += '<div class="card pending-hero" id="proposal-' + p.id + '">' +
+        html += '<div class="card pending-hero" id="proposal-' + escapeHTML(p.id) + '">' +
           '<div class="meta-row"><div><strong style="font-size:13px">' + escapeHTML(p.summary) + '</strong></div>' +
           '<span class="badge badge-warn">' + escapeHTML(p.actionType) + '</span></div>' +
           '<div class="muted" style="margin:4px 0">ID: <code>' + escapeHTML(p.id) + '</code> · SHA-256: <code title="' + escapeHTML(p.sha256) + '">' + escapeHTML(shortSha) + '</code></div>' +
           previewHtml +
           '<pre class="code-block">' + escapeHTML(p.command) + '</pre>' +
           '<div class="actions">' +
-          '<button type="button" class="btn btn-approve" onclick="approveProposal(\'' + p.id + '\', \'' + shortSha + '\')">✓ Approve (' + escapeHTML(shortSha) + ')</button>' +
-          '<button type="button" class="btn btn-reject" onclick="rejectProposal(\'' + p.id + '\')">✕ Reject</button>' +
+          '<button type="button" class="btn btn-approve" data-hq-action="approve" data-id="' + escapeHTML(p.id) + '" data-sha="' + escapeHTML(shortSha) + '">✓ Approve (' + escapeHTML(shortSha) + ')</button>' +
+          '<button type="button" class="btn btn-reject" data-hq-action="reject" data-id="' + escapeHTML(p.id) + '">✕ Reject</button>' +
           '</div></div>';
       }
       pendingList.innerHTML = html;
@@ -1073,8 +1242,8 @@ async function refreshState() {
           '<div class="muted" style="margin:4px 0">Slug: <code>' + escapeHTML(t.taskSlug) + '</code> · Model: ' + escapeHTML(t.model) + ' · Conv: <a href="conversation://' + escapeHTML(t.conversationId) + '">' + escapeHTML(t.conversationId) + '</a></div>' +
           (t.lastSummary ? '<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">' + escapeHTML(t.lastSummary) + '</div>' : '') +
           '<div class="actions">' +
-          (t.status === 'active' ? '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" onclick="completeTask(\'' + escapeHTML(t.taskSlug) + '\')">Complete</button>' : '') +
-          (t.status !== 'archived' ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" onclick="archiveTask(\'' + escapeHTML(t.taskSlug) + '\')">Archive</button>' : '') +
+          (t.status === 'active' ? '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="complete-task" data-slug="' + escapeHTML(t.taskSlug) + '">Complete</button>' : '') +
+          (t.status !== 'archived' ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="archive-task" data-slug="' + escapeHTML(t.taskSlug) + '">Archive</button>' : '') +
           '</div></div>';
       }
       tasksList.innerHTML = html;

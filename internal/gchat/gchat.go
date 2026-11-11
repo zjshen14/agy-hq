@@ -921,14 +921,14 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 	}
 
 	draftsDir := filepath.Join(vaultDir, "memory", "gchat", "drafts")
-	if err := os.MkdirAll(draftsDir, 0o755); err != nil {
+	if err := os.MkdirAll(draftsDir, 0o700); err != nil {
 		return DraftSpec{}, err
 	}
 	data, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return DraftSpec{}, err
 	}
-	if err := os.WriteFile(filepath.Join(draftsDir, draftID+".json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(draftsDir, draftID+".json"), data, 0o600); err != nil {
 		return DraftSpec{}, err
 	}
 	return spec, nil
@@ -948,9 +948,23 @@ func ProposalSummary(spec DraftSpec) string {
 	return fmt.Sprintf("Send Google Chat to %s: %q", target, preview)
 }
 
+var reSafeDraftID = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,128}$`)
+
+func validateDraftID(draftID string) (string, error) {
+	id := strings.TrimSpace(draftID)
+	if id == "" || id == "." || id == ".." || strings.Contains(id, "..") || !reSafeDraftID.MatchString(id) {
+		return "", fmt.Errorf("invalid gchat draft ID %q", draftID)
+	}
+	return id, nil
+}
+
 // GetDraft loads a DraftSpec from local/memory/gchat/drafts/<draftID>.json and recomputes its ContentHash.
 func GetDraft(vaultDir, accountAlias, draftID string) (DraftSpec, error) {
-	p := filepath.Join(vaultDir, "memory", "gchat", "drafts", strings.TrimSpace(draftID)+".json")
+	cleanID, err := validateDraftID(draftID)
+	if err != nil {
+		return DraftSpec{}, err
+	}
+	p := filepath.Join(vaultDir, "memory", "gchat", "drafts", cleanID+".json")
 	data, err := os.ReadFile(p)
 	if err != nil {
 		return DraftSpec{}, fmt.Errorf("gchat draft %q not found: %w", draftID, err)
@@ -965,27 +979,35 @@ func GetDraft(vaultDir, accountAlias, draftID string) (DraftSpec, error) {
 
 // VerifyAndSendDraft re-verifies the draft's ContentHash and active account immediately before sending.
 func VerifyAndSendDraft(vaultDir, accountAlias, draftID, expectedHash string) (string, error) {
+	cleanID, err := validateDraftID(draftID)
+	if err != nil {
+		return "", err
+	}
+	normHash := strings.ToLower(strings.TrimSpace(expectedHash))
+	if len(normHash) < 8 {
+		return "", fmt.Errorf("gchat draft contentHash prefix required (minimum 8 hex characters)")
+	}
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
 	if err != nil {
 		return "", err
 	}
-	spec, err := GetDraft(vaultDir, cfg.Alias, draftID)
+	spec, err := GetDraft(vaultDir, cfg.Alias, cleanID)
 	if err != nil {
 		return "", err
 	}
 	if !strings.EqualFold(spec.From, cfg.Email) {
 		return "", fmt.Errorf("account mismatch: draft From=%s != active account %s", spec.From, cfg.Email)
 	}
-	if expectedHash != "" && !strings.HasPrefix(spec.ContentHash, expectedHash) {
+	if !strings.HasPrefix(strings.ToLower(spec.ContentHash), normHash) {
 		return "", fmt.Errorf("gchat draft contentHash mismatch (bait-and-switch blocked): current=%s, approved=%s", spec.ContentHash[:12], expectedHash)
 	}
 
 	if mDir := mockDir(vaultDir); mDir != "" {
-		sentPath := filepath.Join(mDir, fmt.Sprintf("sent-%s.json", draftID))
+		sentPath := filepath.Join(mDir, fmt.Sprintf("sent-%s.json", cleanID))
 		data, _ := json.MarshalIndent(spec, "", "  ")
-		_ = os.WriteFile(sentPath, data, 0o644)
+		_ = os.WriteFile(sentPath, data, 0o600)
 		return fmt.Sprintf("Sent Google Chat draft %s [Account: %s -> Space: %s (%s)] (hash:%s)",
-			draftID, spec.Account, spec.SpaceName, spec.SpaceID, spec.ContentHash[:12]), nil
+			cleanID, spec.Account, spec.SpaceName, spec.SpaceID, spec.ContentHash[:12]), nil
 	}
 
 	var out string

@@ -16,9 +16,9 @@ Before transitioning `github.com/zjshen14/agy-hq` from a private repository to a
 1. **Structural Vault Separation (`P1`–`P5`) Passed, But Relational/Contextual PII (`P6`) Leaked into 13 Tracked Files:**
    - While [`internal/ci/pii.go`](../../internal/ci/pii.go) (implemented in [RFC-0011](../design/0011-ci-pipeline-and-regression-harness.md)) successfully prevented any file under `local/`, any workstation `$HOME` path, any API key, or any unapproved email address from remaining in `HEAD`, **contextual personal identifiers** (real family member names, real Google Chat Space IDs, a personal username handle, and private project slugs) were used as realistic examples in `AGENTS.md`, `.agents/plugins/agy-hq/skills/*/SKILL.md`, `cmd/hq/main.go`, `docs/`, and unit test fixtures (`internal/gchat/gchat_test.go`, `internal/webui/webui_test.go`).
 2. **Historical Git Commit Diffs Contain Scrubbed Personal Emails & Relational PII:**
-   - Commits `fced00e` and `b3c7550` (prior to RFC-0011's email allowlist) committed a real personal Gmail address (`<personal-handle>@gmail.com`) into tracked files. Although removed from `HEAD` in commit `2cea73a`, those strings remain permanently visible in `git log -p` unless the Git history is sanitized prior to public release.
+   - Two pre-RFC-0011 commits committed a real personal Gmail address (`<personal-handle>@gmail.com`) into tracked files. Although removed from `HEAD` in a follow-up commit, those strings remain permanently visible in `git log -p` unless the Git history is sanitized prior to public release.
 3. **Subprocess `GIT_DIR` Environment Bleed Created Orphaned Test Commits in Root `.git`:**
-   - Prior to commit `4a8642c`, running `go test ./...` from inside a git hook caused `exec.Command("git", "init", ...)` inside `vault.Init` (`internal/vault/vault.go`) and `worktree.Add` (`internal/worktree/worktree.go`) to inherit `GIT_DIR` from the parent hook process, writing temporary test commits (`d774976`, `7fdd069`, `32d60f5` on branch `hq/sample-repo-fix-bug`) into the root `.git` object store.
+   - Prior to fixing environment sanitization, running `go test ./...` from inside a git hook caused `exec.Command("git", "init", ...)` inside `vault.Init` (`internal/vault/vault.go`) and `worktree.Add` (`internal/worktree/worktree.go`) to inherit `GIT_DIR` from the parent hook process, writing temporary test commits on branch `hq/sample-repo-fix-bug` into the root `.git` object store.
 4. **Template & Port Configuration Drift in `templates/`:**
    - `templates/config.yaml` still specifies `listen_addr: "127.0.0.1:4747"` whereas the daemon, WebUI, and Antigravity Sidecar standardized on `127.0.0.1:4242`.
    - `templates/USER.md` references a personal topic filename (`<family-topic>.md`).
@@ -44,15 +44,15 @@ In [RFC-0011 §4](../design/0011-ci-pipeline-and-regression-harness.md), `CheckP
 | :--- | :--- | :--- | :--- |
 | **C1: Family & Contact Names** | `"<Child-Name> Science Project"`, `"<Child-Name> Science Fair"`, `"<Child-Name> Group"`, `"<Child-Name> Game Finder"`, `"<Family-Group-Chat>"`, `"<Spouse-Full-Name>"`, `"<Spouse-First-Name>"`, `"<Author-First-Name>"` | • `AGENTS.md`<br>• `.agents/plugins/agy-hq/skills/gchat/SKILL.md`<br>• `cmd/hq/main.go`<br>• `docs/architecture.md`<br>• `docs/design/0008-gchat-integration.md`<br>• `docs/design/0009-task-board-redesign.md`<br>• `docs/research/06_taskboard_and_console_audit.md`<br>• `internal/gchat/gchat.go`<br>• `internal/gchat/gchat_test.go`<br>• `internal/webui/webui_test.go` | Replace with synthetic engineering/team personas: `"Project Launch Space"`, `"Engineering Core"`, `"Alice Chen"`, `"Alice"`, `"Alex"`. |
 | **C2: Real Google Chat Space IDs** | 3 real 11-char Google Chat `spaces/<id>` literals | • `.agents/plugins/agy-hq/skills/gchat/SKILL.md`<br>• `docs/design/0008-gchat-integration.md`<br>• `internal/gchat/gchat.go`<br>• `internal/gchat/gchat_test.go`<br>• `internal/webui/webui_test.go` | Replace with synthetic space IDs: `spaces/AAAA_LAUNCH_01`, `spaces/AAAA_DM_ALICE`, `spaces/AAAA_DM_BOB`. |
-| **C3: Personal Handle** | Personal Gmail username handle (and historical `<personal-handle>@gmail.com`) | • `AGENTS.md`<br>• `.agents/plugins/agy-hq/skills/gchat/SKILL.md`<br>• `internal/gchat/cdp_ws.go`<br>• Historical commits `fced00e`, `b3c7550` | Replace with synthetic handle `"alex_dev"` / `"alice@gmail.com"`. *(Note: GitHub repo owner `zjshen14` in `go.mod` and repo URLs is intentional public attribution).* |
+| **C3: Personal Handle** | Personal Gmail username handle (and historical `<personal-handle>@gmail.com`) | • `AGENTS.md`<br>• `.agents/plugins/agy-hq/skills/gchat/SKILL.md`<br>• `internal/gchat/cdp_ws.go`<br>• Historical pre-RFC-0011 commits | Replace with synthetic handle `"alex_dev"` / `"alice@gmail.com"`. *(Note: GitHub repo owner `zjshen14` in `go.mod` and repo URLs is intentional public attribution).* |
 | **C4: Personal Vault Topic & Task Slugs** | Personal family topic `.md` filename, private project slug, and personal task IDs | • `AGENTS.md`<br>• `README.md`<br>• `templates/USER.md`<br>• `.agents/plugins/agy-hq/skills/sleep-consolidate/SKILL.md`<br>• `.agents/plugins/agy-hq/skills/thesis-check/SKILL.md`<br>• `docs/architecture.md`<br>• `docs/roadmap.md` | Replace with generic workspace examples: `project-notes.md`, `webapp-redesign`, `sleep-consolidate`, `deal-flow-watch`. |
 
 ### 2.3 Git History Contamination & Remediation Options
 
-Even after scrubbing all 13 files in a new commit on `main`, anyone who clones the repository can run `git log -p` and recover:
-1. The personal `@gmail.com` address from commits `fced00e` and `b3c7550`.
-2. Every family name, space name, and real Google Chat Space ID from commits `de2ed04`, `36d5078`, `effecc2`, `b323001`, `d2e0687`, `fced00e`, `b3c7550`, `7e061c3`, and `d8c0f9b`.
-3. Orphaned test branch `refs/heads/hq/sample-repo-fix-bug` (`32d60f5`, `7fdd069`, `d774976`).
+Even after scrubbing all 13 files in a new commit on `main`, anyone who clones an unsanitized repository can run `git log -p` and recover:
+1. The personal `@gmail.com` address from historical pre-RFC-0011 commits.
+2. Every family name, space name, and real Google Chat Space ID from prior documentation and feature commits.
+3. Orphaned test branch `refs/heads/hq/sample-repo-fix-bug`.
 
 We evaluate two mechanical history-remediation strategies prior to flipping the repository to Public:
 

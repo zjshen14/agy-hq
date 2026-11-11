@@ -219,9 +219,26 @@ func Apply(rootDir, vaultDir, rsiID, expectDiffSHA string) (string, error) {
 	if actualHex != h.DiffSHA256 {
 		return "", fmt.Errorf("diff integrity mismatch for %s", h.ID)
 	}
+	if h.Verification.VerifiedDiffSHA256 != "" && h.Verification.VerifiedDiffSHA256 != actualHex {
+		return "", fmt.Errorf("verified diff SHA-256 mismatch for %s", h.ID)
+	}
 	expect := strings.ToLower(strings.TrimSpace(expectDiffSHA))
-	if expect != "" && !strings.HasPrefix(strings.ToLower(h.DiffSHA256), expect) {
-		return "", fmt.Errorf("expect-diff-sha256 mismatch: expected prefix %q, got %q", expect, h.DiffSHA256[:12])
+	if len(expect) < 8 || !strings.HasPrefix(strings.ToLower(h.DiffSHA256), expect) {
+		return "", fmt.Errorf("expect-diff-sha256 mismatch (minimum 8 hex chars required): expected prefix %q, got %q", expect, h.DiffSHA256[:12])
+	}
+
+	// Re-enforce Gate 1 (Ring 0 TCB, Taint Isolation & Anti-Goodhart) at Apply time to defeat local JSON tampering
+	obsList, _ := LoadObservations(vaultDir)
+	if ok, reason := CheckTCBAndAntiGoodhart(rootDir, vaultDir, h, obsList); !ok {
+		return "", fmt.Errorf("apply blocked by TCB re-verification: %s", reason)
+	}
+
+	cleanRoot, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve rootDir: %w", err)
+	}
+	if evalRoot, rErr := filepath.EvalSymlinks(cleanRoot); rErr == nil {
+		cleanRoot = evalRoot
 	}
 
 	// Take Dual-Repo Pre-Apply Snapshot in local/.git
@@ -233,9 +250,19 @@ func Apply(rootDir, vaultDir, rsiID, expectDiffSHA string) (string, error) {
 
 	if h.DeltaOp != nil {
 		for _, tf := range h.TargetFiles {
-			absPath := tf
-			if !filepath.IsAbs(absPath) {
-				absPath = filepath.Join(rootDir, filepath.FromSlash(tf))
+			if filepath.IsAbs(tf) {
+				return "", fmt.Errorf("refusing absolute target file path %q in RSI apply", tf)
+			}
+			absPath := filepath.Clean(filepath.Join(cleanRoot, filepath.FromSlash(tf)))
+			if evalPath, eErr := filepath.EvalSymlinks(absPath); eErr == nil {
+				absPath = evalPath
+			}
+			rel, relErr := filepath.Rel(cleanRoot, absPath)
+			if relErr != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				return "", fmt.Errorf("refusing target file %q escaping repository root", tf)
+			}
+			if IsRing0Path(rel) {
+				return "", fmt.Errorf("refusing target file %q inside Ring 0 Immutable TCB", tf)
 			}
 			rawBytes, err := os.ReadFile(absPath)
 			if err != nil {

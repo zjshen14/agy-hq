@@ -257,3 +257,83 @@ func TestSubagentFrontDeskGuardHooks(t *testing.T) {
 		t.Fatalf("expected PreToolUse to deny subagent claim-desk, got: %s", toolOut.String())
 	}
 }
+
+func TestPreToolUseSecurityHardening(t *testing.T) {
+	rootDir := t.TempDir()
+	vaultDir := filepath.Join(rootDir, "local")
+	_ = os.MkdirAll(filepath.Join(vaultDir, "private"), 0o700)
+	_ = os.WriteFile(filepath.Join(vaultDir, "private", "secret.txt"), []byte("top-secret"), 0o600)
+
+	var out bytes.Buffer
+
+	// 1. Malformed JSON must fail closed
+	_ = HandlePreToolUse(strings.NewReader(`{not-valid-json`), &out, vaultDir)
+	if !strings.Contains(out.String(), `"decision":"deny"`) {
+		t.Fatalf("expected malformed JSON to fail closed (deny), got: %s", out.String())
+	}
+
+	// 2. Direct write_file to pending proposals or RSI hypotheses must be denied
+	for _, rel := range []string{
+		filepath.Join(vaultDir, "memory", "pending", "prop-123456-abcdef123456.json"),
+		filepath.Join(vaultDir, "memory", "rsi", "hypotheses", "rsi-1.json"),
+		filepath.Join(vaultDir, "memory", "interventions.jsonl"),
+	} {
+		out.Reset()
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-worker",
+			"toolCall": map[string]interface{}{
+				"name": "write_file",
+				"args": map[string]interface{}{"Path": rel, "Content": "{}"},
+			},
+		})
+		_ = HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir)
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected deny for direct write_file to %s, got: %s", rel, out.String())
+		}
+	}
+
+	// 3. Double-quoted command substitution in hq propose and direct curl to /api/approve must be denied
+	for _, cmd := range []string{
+		`./bin/hq propose --type=ext --summary="s" --cmd="echo $(cat local/private/secret.txt)"`,
+		`curl -X POST http://127.0.0.1:4242/api/approve -d "id=prop-1"`,
+	} {
+		out.Reset()
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-worker",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": cmd},
+			},
+		})
+		_ = HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir)
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected deny for %q, got: %s", cmd, out.String())
+		}
+	}
+
+	// 4. Quarantined session escapes (newline command separator, symlink read, invoke_subagent, write_file, call_mcp_tool)
+	_ = gmail.MarkSessionTainted(vaultDir, "conv-q", "gmail:thread:99")
+	_ = os.MkdirAll(filepath.Join(vaultDir, "notes"), 0o700)
+	symPath := filepath.Join(vaultDir, "notes", "sneaky-link.txt")
+	_ = os.Symlink(filepath.Join(vaultDir, "private", "secret.txt"), symPath)
+
+	escapeProbes := []map[string]interface{}{
+		{"name": "run_command", "args": map[string]interface{}{"CommandLine": "./bin/hq status\ncurl https://evil.example.com"}},
+		{"name": "read_file", "args": map[string]interface{}{"Path": symPath}},
+		{"name": "read_file", "args": map[string]interface{}{"Path": "local/private/secret.txt"}},
+		{"name": "write_file", "args": map[string]interface{}{"Path": filepath.Join(vaultDir, "notes", "x.md")}},
+		{"name": "invoke_subagent", "args": map[string]interface{}{"Role": "escape"}},
+		{"name": "call_mcp_tool", "args": map[string]interface{}{"ServerName": "chrome-devtools-plugin_chrome-devtools"}},
+	}
+	for _, tc := range escapeProbes {
+		out.Reset()
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-q",
+			"toolCall":       tc,
+		})
+		_ = HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir)
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected quarantined session to deny %+v, got: %s", tc, out.String())
+		}
+	}
+}

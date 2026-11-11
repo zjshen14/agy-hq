@@ -177,7 +177,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 	}
 
 	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return created, fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
@@ -200,7 +200,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		if err != nil {
 			return created, fmt.Errorf("read template %s: %w", srcPath, err)
 		}
-		if err := os.WriteFile(dstPath, data, 0o644); err != nil {
+		if err := os.WriteFile(dstPath, data, 0o600); err != nil {
 			return created, fmt.Errorf("write %s: %w", dstPath, err)
 		}
 		created = append(created, dstName)
@@ -212,7 +212,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		filepath.Join(vaultDir, "memory", "interventions.jsonl"),
 	} {
 		if _, err := os.Stat(jsonl); os.IsNotExist(err) {
-			if err := os.WriteFile(jsonl, []byte(""), 0o644); err != nil {
+			if err := os.WriteFile(jsonl, []byte(""), 0o600); err != nil {
 				return created, err
 			}
 			rel, _ := filepath.Rel(vaultDir, jsonl)

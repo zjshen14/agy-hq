@@ -9,10 +9,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+var (
+	reValidProposalID = regexp.MustCompile(`^prop-[a-z0-9][a-z0-9\-]{3,63}$`)
+	reValidSHAPrefix  = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
+)
+
+// ValidateProposalID rejects path traversal, quotes, or malformed proposal identifiers.
+func ValidateProposalID(id string) error {
+	trimmed := strings.TrimSpace(id)
+	if !reValidProposalID.MatchString(trimmed) {
+		return fmt.Errorf("invalid proposal id %q (expected prop-<ts>-<hex>)", id)
+	}
+	return nil
+}
 
 // Proposal represents an approval-bound action staged in local/memory/pending/<id>.json.
 type Proposal struct {
@@ -57,7 +72,7 @@ func Create(vaultDir, actionType, summary, command, workDir, convID string) (Pro
 // CreateWithMetadata stages a new pending proposal with optional structured metadata (e.g., Gmail draft fields).
 func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID string, meta map[string]string) (Proposal, error) {
 	pendingDir := filepath.Join(vaultDir, "memory", "pending")
-	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
+	if err := os.MkdirAll(pendingDir, 0o700); err != nil {
 		return Proposal{}, err
 	}
 	id := generateID()
@@ -78,7 +93,7 @@ func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID 
 		return Proposal{}, err
 	}
 	dst := filepath.Join(pendingDir, id+".json")
-	if err := os.WriteFile(dst, data, 0o644); err != nil {
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
 		return Proposal{}, err
 	}
 	return prop, nil
@@ -96,7 +111,11 @@ func List(vaultDir string) ([]Proposal, error) {
 	}
 	var out []Proposal
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fileID := strings.TrimSuffix(e.Name(), ".json")
+		if ValidateProposalID(fileID) != nil {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(pendingDir, e.Name()))
@@ -105,6 +124,9 @@ func List(vaultDir string) ([]Proposal, error) {
 		}
 		var p Proposal
 		if err := json.Unmarshal(data, &p); err == nil {
+			if ValidateProposalID(p.ID) != nil || p.ID != fileID {
+				continue
+			}
 			out = append(out, p)
 		}
 	}
@@ -123,7 +145,17 @@ func Approve(vaultDir, id, shaPrefix string) (string, error) {
 // ApproveProposal verifies the SHA-256 prefix, executes the staged command deterministically in Go,
 // removes the pending file, and appends an audit entry to local/memory/interventions.jsonl.
 func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
-	pendingPath := filepath.Join(vaultDir, "memory", "pending", id+".json")
+	id = strings.TrimSpace(id)
+	if err := ValidateProposalID(id); err != nil {
+		return "", err
+	}
+	normPrefix := strings.ToLower(strings.TrimSpace(shaPrefix))
+	if !reValidSHAPrefix.MatchString(normPrefix) {
+		return "", fmt.Errorf("sha256 prefix required (minimum 8 lowercase hex characters, got %q)", shaPrefix)
+	}
+
+	pendingDir := filepath.Join(vaultDir, "memory", "pending")
+	pendingPath := filepath.Join(pendingDir, id+".json")
 	data, err := os.ReadFile(pendingPath)
 	if err != nil {
 		return "", fmt.Errorf("read proposal %s: %w", id, err)
@@ -132,13 +164,23 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	if err := json.Unmarshal(data, &prop); err != nil {
 		return "", err
 	}
+	if prop.ID != id {
+		return "", fmt.Errorf("proposal ID mismatch: file=%s json=%s", id, prop.ID)
+	}
 	expected := ComputeHash(prop.ActionType, prop.Command)
 	if prop.SHA256 != expected {
 		return "", fmt.Errorf("tampered proposal: stored sha256 %s != computed %s", prop.SHA256, expected)
 	}
-	if shaPrefix != "" && !strings.HasPrefix(prop.SHA256, shaPrefix) {
-		return "", fmt.Errorf("sha256 prefix mismatch: got %s, expected prefix of %s", shaPrefix, prop.SHA256)
+	if !strings.HasPrefix(strings.ToLower(prop.SHA256), normPrefix) {
+		return "", fmt.Errorf("sha256 prefix mismatch: got %s, expected prefix of %s", normPrefix, prop.SHA256)
 	}
+
+	// Atomically claim the pending file prior to execution to prevent concurrent double-approval races.
+	claimPath := filepath.Join(pendingDir, ".executing-"+id+".json")
+	if err := os.Rename(pendingPath, claimPath); err != nil {
+		return "", fmt.Errorf("claim proposal %s (already approved or removed): %w", id, err)
+	}
+	defer func() { _ = os.Remove(claimPath) }()
 
 	cmd := exec.Command("sh", "-c", prop.Command)
 	if prop.WorkDir != "" {
@@ -148,7 +190,6 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	output := string(outBytes)
 
 	prop.Status = "approved"
-	_ = os.Remove(pendingPath)
 
 	rec := InterventionRecord{
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -170,6 +211,10 @@ func Reject(vaultDir, id, reason string) error {
 
 // RejectProposal removes the proposal from pending/ and logs the rejection to interventions.jsonl.
 func RejectProposal(vaultDir, id, reason string) error {
+	id = strings.TrimSpace(id)
+	if err := ValidateProposalID(id); err != nil {
+		return err
+	}
 	pendingPath := filepath.Join(vaultDir, "memory", "pending", id+".json")
 	data, err := os.ReadFile(pendingPath)
 	if err != nil {
@@ -194,11 +239,12 @@ func RejectProposal(vaultDir, id, reason string) error {
 
 func appendIntervention(vaultDir string, rec InterventionRecord) {
 	logPath := filepath.Join(vaultDir, "memory", "interventions.jsonl")
+	_ = os.MkdirAll(filepath.Dir(logPath), 0o700)
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}

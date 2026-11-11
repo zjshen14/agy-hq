@@ -18,6 +18,13 @@ var Ring0ProtectedPaths = []string{
 	"internal/ci/",
 	"internal/rsi/tcb.go",
 	"internal/rsi/verifier.go",
+	"internal/rsi/proposer.go",
+	"internal/webui/",
+	"internal/vault/vault.go",
+	".agents/hooks.json",
+	".agents/plugins/agy-hq/hooks.json",
+	".agents/plugins/agy-hq/sidecars/",
+	".gemini/",
 	".github/",
 	".gitignore",
 	".git/hooks/",
@@ -26,6 +33,7 @@ var Ring0ProtectedPaths = []string{
 	"local/.gitignore",
 	"scripts/bootstrap.sh",
 	"templates/gitignore.tmpl",
+	"templates/sidecars/",
 }
 
 // IsRing0Path returns true if relOrAbsPath touches any Ring 0 Immutable TCB file.
@@ -64,6 +72,16 @@ func CheckTCBAndAntiGoodhart(rootDir, vaultDir string, h *RSIHypothesis, observa
 			p := strings.TrimSpace(line[6:])
 			if IsRing0Path(p) {
 				return false, fmt.Sprintf("Gate 1 violation: diff header %q touches Ring 0 Immutable TCB", p)
+			}
+		} else if strings.HasPrefix(line, "rename from ") {
+			p := strings.TrimSpace(strings.TrimPrefix(line, "rename from "))
+			if IsRing0Path(p) {
+				return false, fmt.Sprintf("Gate 1 violation: diff rename header %q touches Ring 0 Immutable TCB", p)
+			}
+		} else if strings.HasPrefix(line, "rename to ") {
+			p := strings.TrimSpace(strings.TrimPrefix(line, "rename to "))
+			if IsRing0Path(p) {
+				return false, fmt.Sprintf("Gate 1 violation: diff rename header %q touches Ring 0 Immutable TCB", p)
 			}
 		}
 	}

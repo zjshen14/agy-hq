@@ -2595,10 +2595,6 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 			if parentID != "" && fd.ConversationID != "" && parentID != fd.ConversationID {
 				isNested = true
 			}
-			// Special-case check for known historical nested subagents
-			if t.TaskSlug == "subagent-brand-opus-5-5-creative-director" || t.ConversationID == "00000000-0000-0000-0000-000000000105" {
-				isNested = true
-			}
 		}
 
 		if isNested {
