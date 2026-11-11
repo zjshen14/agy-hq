@@ -1933,15 +1933,16 @@ func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
 // SpawnTask invokes `agentapi new-conversation --model=<modelID>` (or simulates it if dryRun is true),
 // enforcing the daily spawn budget, auto-downgrading to gemini-3.8-flash-medium if a higher-tier model
 // hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Flash is also exhausted.
-func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool) (string, error) {
+func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
 	if modelID == "" {
 		modelID, _, _ = ResolveModel(prompt, "", "", "")
 	}
+	isForced := len(force) > 0 && force[0]
 	state := LoadQuota(vaultDir)
-	if state.CircuitOpen {
+	if state.CircuitOpen && !isForced {
 		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
 	}
-	if state.SpawnsToday >= state.MaxDailySpawns {
+	if state.SpawnsToday >= state.MaxDailySpawns && !isForced {
 		state.CircuitOpen = true
 		state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
 		_ = SaveQuota(vaultDir, state)
@@ -2702,7 +2703,7 @@ func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
 // Antigravity model (including cross-family models such as claude-opus-5-5-high or claude-sonnet-5-5-high)
 // via LanguageServerService/StartCascade (with parentConversationId, subagentDescriptor, and agentScriptItem)
 // followed by delivering the initial prompt from parentConvID.
-func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir string, dryRun bool) (string, error) {
+func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir string, dryRun bool, force ...bool) (string, error) {
 	if modelID == "" {
 		modelID, _, _ = ResolveModel(prompt, "", "", "")
 	} else if !strings.HasPrefix(strings.TrimSpace(modelID), "MODEL_") {
@@ -2717,13 +2718,14 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		role = "[standard] general: Subagent Worker"
 	}
 
+	isForced := len(force) > 0 && force[0]
 	state := LoadQuota(vaultDir)
-	if state.CircuitOpen {
+	if state.CircuitOpen && !isForced {
 		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
 	}
 
 	isFrontDesk := IsFrontDeskConversation(vaultDir, parentConvID)
-	if isFrontDesk && state.SpawnsToday >= state.MaxDailySpawns {
+	if isFrontDesk && state.SpawnsToday >= state.MaxDailySpawns && !isForced {
 		state.CircuitOpen = true
 		state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
 		_ = SaveQuota(vaultDir, state)

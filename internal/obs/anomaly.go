@@ -27,8 +27,8 @@ type BudgetConfig struct {
 // DefaultBudgetConfig returns the RFC-0012 default budget and context guard configuration.
 func DefaultBudgetConfig() BudgetConfig {
 	return BudgetConfig{
-		DailyUncachedBudget:     15_000_000,
-		DailyDeepUncachedBudget: 5_000_000,
+		DailyUncachedBudget:     50_000_000,
+		DailyDeepUncachedBudget: 30_000_000,
 		WarnContextTokens:       120_000,
 		NudgeContextTokens:      160_000,
 		CritContextTokens:       180_000,
@@ -390,6 +390,16 @@ func SyncDailyBudgetCircuitBreaker(vaultDir string, now time.Time) (tripped bool
 		if !q.CircuitOpen {
 			q.CircuitOpen = true
 			q.CircuitReason = reason
+			_ = kernel.SaveQuota(vaultDir, q)
+		}
+	} else {
+		// If the circuit breaker was previously tripped by a budget guard, but the budget
+		// was increased (or a new day started) so tripped is now false, automatically close it.
+		q := kernel.LoadQuota(vaultDir)
+		if q.CircuitOpen && (strings.HasPrefix(q.CircuitReason, "daily uncached token budget reached") ||
+			strings.HasPrefix(q.CircuitReason, "daily deep-tier token budget reached")) {
+			q.CircuitOpen = false
+			q.CircuitReason = ""
 			_ = kernel.SaveQuota(vaultDir, q)
 		}
 	}

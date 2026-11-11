@@ -649,12 +649,15 @@ func main() {
 		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
 		titleOverride := fs.String("title", "", "Optional custom conversation title")
 		scopeOverride := fs.String("scope", "", "Optional custom task scope")
+		force := fs.Bool("force", false, "Force spawn even if quota circuit breaker is open")
+		ignoreBudget := fs.Bool("ignore-budget", false, "Alias for --force to bypass daily token budget circuit breaker")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*taskName == "" && *role == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo>] [--tier=quick|standard|deep] [--model=...] [--depth=low|medium|high] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo>] [--tier=quick|standard|deep] [--model=...] [--depth=low|medium|high] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
+		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
 		fullPrompt := *prompt
 		var wtDir string
@@ -697,7 +700,7 @@ func main() {
 			if workDir == "" {
 				workDir = rootDir
 			}
-			out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun)
+			out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun, isForced)
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq spawn --subagent error: %v\n", err)
@@ -726,7 +729,7 @@ func main() {
 			LastSummary:   *prompt,
 			Status:        "active",
 		})
-		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun)
+		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun, isForced)
 		if spawnedID := kernel.ExtractUUID(out); spawnedID != "" {
 			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 				TaskSlug:       *taskName,
@@ -761,12 +764,15 @@ func main() {
 		model := fs.String("model", "", "Optional model override (flash, carbon, sonnet, opus, or full model ID)")
 		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high)")
 		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
+		force := fs.Bool("force", false, "Force spawn even if quota circuit breaker is open")
+		ignoreBudget := fs.Bool("ignore-budget", false, "Alias for --force to bypass daily token budget circuit breaker")
 		dryRun := fs.Bool("dry-run", false, "Simulate subagent spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*role == "" && *taskName == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--model=...] [--depth=low|medium|high] [--parent=<conv-id>] [--repo=<repo>] [--task=<slug>] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--model=...] [--depth=low|medium|high] [--parent=<conv-id>] [--repo=<repo>] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
+		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
 		subRole := *role
 		if subRole == "" {
@@ -787,7 +793,7 @@ func main() {
 			workDir = wtDir
 			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
 		}
-		out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun)
+		out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun, isForced)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq subagent error: %v\n", err)

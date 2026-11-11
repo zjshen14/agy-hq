@@ -56,6 +56,9 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 		folderName = safeTask
 	}
 	targetDir := filepath.Join(worktreesRoot, folderName)
+	if info, err := os.Stat(targetDir); err == nil && info.IsDir() {
+		return targetDir, nil
+	}
 	if branch == "" {
 		branch = "hq/" + safeTask
 	}
