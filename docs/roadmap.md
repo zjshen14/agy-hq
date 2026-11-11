@@ -45,7 +45,7 @@ This file is the **single source of truth** for tracking what is done, what is i
   - Implement `internal/webui` HTTP server (`127.0.0.1:4242`) and `hq daemon` / `hq webui`.
   - Render the **Pending Approvals Queue** (`[Approve (sha256)]` / `[Reject]`) and execute approved commands deterministically in Go with zero LLM in the loop.
   - Render the **Active Worktrees**, **Today's Turn Journal**, and **System Health** views.
-- [x] **M1.6 (Starter `.agents/skills/`):** Author the public-safe starter skills in `.agents/skills/*/SKILL.md`:
+- [x] **M1.6 (Starter Skills Bundle):** Author the public-safe starter skills in `.agents/plugins/agy-hq/skills/*/SKILL.md`:
   - [x] `morning-brief/SKILL.md`
   - [x] `sleep-consolidate/SKILL.md`
   - [x] `inbox-triage/SKILL.md`
@@ -70,19 +70,19 @@ This file is the **single source of truth** for tracking what is done, what is i
   - Track `schedule` and `manage_task` calls in `PreToolUse` and reconcile armed triggers.
   - Exempt Turn-1 initialization housekeeping reads from the Front Desk lookup cap.
 - [x] **M2.5 (Task Conversation Lifecycle & Native Subagent Tracking):**
-  - Full task state machine (`active` $\rightarrow$ `completed` $\rightarrow$ `archived` / `reopen`) managed via `tasks.json` and CLI (`hq complete`, `hq archive`, `hq reopen`).
+  - Full task state machine (`active` → `completed` → `archived` / `reopen`) managed via `tasks.json` and CLI (`hq complete`, `hq archive`, `hq reopen`).
   - Track native `invoke_subagent` calls, quota increments, task board registration, and completion/cancellation via `PreToolUse` and `Stop` hooks.
   - Mechanical non-blocking Front Desk guardrails blocking direct source/worktree edits and heavy test suites, with a 3-lookup per-turn cap.
 - [x] **M2.6 (Decoupled Native Gmail Integration — RFC-0005):**
   - Layer 1 primitives: Multi-account registry (`hq gmail init` / `accounts`), search (`hq gmail list`), sandboxed text reader (`hq gmail read`), and draft management (`hq gmail draft`).
-  - Safe staged execution: Live sending strictly gated behind approval proposals (`hq propose --type=gmail_send` $\rightarrow$ `hq gmail send`).
+  - Safe staged execution: Live sending strictly gated behind approval proposals (`hq propose --type=gmail_send` → `hq gmail send`).
   - Pure-Go unread sidecar precheck (`hq gmail triage`), batch triage results recording, and quarantined attachment handling.
 - [x] **M2.7 (Four-Layer Memory Engine & Dreaming Falsification — RFC-0006):**
   - 4-layer stack: Roadmap Index (`MEMORY.md` < 2,500 tokens), Knowledge Wiki (`local/memory/topics/*.md`), bi-temporal facts (`local/memory/facts.jsonl`), and raw transcripts.
   - CLI fact management (`hq memory add-fact`, `prune-fact`, `compact`, `topics`).
   - Ground-truth dreaming verification (`hq memory verify-transcript`) preventing unverified or optimistic self-reports from compounding in long-term memory.
-- [x] **M2.8 (End-to-End Black-Box Test Suite — CUJs 1–18):**
-  - Full black-box regression suite in `internal/e2e/cuj_e2e_test.go` verifying all 18 Critical User Journeys against the compiled `bin/hq` binary (100% passing).
+- [x] **M2.8 (End-to-End Black-Box Test Suite — CUJs 1–20):**
+  - Full black-box regression suite in `internal/e2e/cuj_e2e_test.go` verifying all 20 Critical User Journeys against the compiled `bin/hq` binary (100% passing).
 
 ---
 
@@ -103,10 +103,9 @@ This file is the **single source of truth** for tracking what is done, what is i
   - Embedded Go HTTP server on `127.0.0.1:4242` serving both browser dashboard and Antigravity Aux Pane (`sidecar://agy-hq-console/`).
   - Real-time Task Board, pending approval buttons with SHA-256 verification, git worktree status, and daemon health telemetry.
   - Zero-token Markdown sync (`webui.SyncMarkdownConsole`) updating `CONSOLE.md` and `hq_console.md` on every hook and heartbeat tick.
-- [x] **M3.4 (Secondary Deal-Flow Watchdog & Master Retrospective Ledger):**
-  - Automated proactive trigger (`secondary-deal-watch`, 11:00 AM & 4:00 PM PT) monitoring inbound secondary deal flow and prospectuses.
-  - Persistent retrospective database in `local/notes/investing/opportunities/INDEX.md` logging valuations, discounts, scores, and review milestones.
-  - Autonomous prospectus and financial extraction rule without user prompting.
+- [x] **M3.4 (Custom Domain Watchdogs & Structured Vault Ledgers):**
+  - Declarative custom schedules in `local/triggers.yaml` (e.g., `edgar-close-watch`, deal-flow or filing monitors) paired with domain notes in `local/notes/investing/`.
+  - Quarantined prospectus/filing extraction and structured retrospective ledgers without user prompting.
 - [x] **M3.5 (Bounded Agent Recursive Self-Improvement — RFC-0010):**
   - 4-stage pipeline in `internal/rsi/`: 0-token friction trace mining (`hq rsi mine`), ACE delta hypotheses (`hq rsi hypothesize`), 4-gate sandboxed verification harness (`hq rsi verify`), and 1-tap approval staging (`hq rsi propose`).
   - Multi-tier canary tracking and automatic rollback on post-merge friction regression.

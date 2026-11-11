@@ -6,9 +6,9 @@
 
 ## 1. Architectural Philosophy
 
-**`agy-hq` (Headquarter)** turns an always-on Mac running Google Antigravity into a 24/7 general-purpose, proactive personal assistant using four core principles:
+**`agy-hq` (Headquarter)** turns an always-on Mac or Linux workstation running Google Antigravity into a 24/7 general-purpose, proactive personal assistant using four core principles:
 
-1. **General-Purpose by Default, Boosted by Additive Skills ([ADR-0006](decisions/0006-general-agent-and-skills-over-packs.md), [PRD-0002](product/0002-open-workflows-and-skills.md)):** The agent is never boxed into rigid domain packs. It can handle *any* open-ended request (writing a post, planning a trip, debugging code, researching a stock) out of the box, while progressive-disclosure `.agents/skills/*/SKILL.md` files provide expert runbooks when relevant.
+1. **General-Purpose by Default, Boosted by Additive Skills ([ADR-0006](decisions/0006-general-agent-and-skills-over-packs.md), [PRD-0002](product/0002-open-workflows-and-skills.md)):** The agent is never boxed into rigid domain packs. It can handle *any* open-ended request (writing a post, planning a trip, debugging code, researching a stock) out of the box, while progressive-disclosure `.agents/plugins/agy-hq/skills/*/SKILL.md` files provide expert runbooks when relevant.
 2. **Piggyback on Antigravity's Native Strengths ([ADR-0001](decisions/0001-option-1.5-hybrid-on-antigravity.md)):** Reuse Antigravity's code execution, macOS Seatbelt sandbox, Chrome DevTools browser automation, MCP client, subagents, cron scheduler, and mobile **Remote Control** PWA.
 3. **A Thin Go Microkernel (`bin/hq`, [ADR-0002](decisions/0002-go-microkernel-binary.md)):** Plug into Antigravity's `hooks.json` and `sidecar.json` interfaces to add cross-session memory, zero-token event pre-checks, lock-free per-task parallel isolation, and deterministic approval gates.
 4. **Strict Two-Layer Separation ([ADR-0003](decisions/0003-two-layer-oss-and-private-vault.md), [RFC-0001](design/0001-vault-and-task-isolation.md)):** Keep the open-source engine and reusable skills in the public-safe root repository, while isolating 100% of personal profile data, memories, journals, triggers, and files inside `local/` (an independent private git repository).
@@ -37,7 +37,8 @@ flowchart TB
     TASKS["Layer-1 Task Engine (RFC-0001, RFC-0007, RFC-0009)\n• local/memory/tasks.json (active) vs tasks_archive.jsonl (cold)\n• Isolated git worktrees (local/worktrees/<repo>-<task>/)"]
     GCHAT["Google Chat CDP & Gmail Transports (RFC-0005, RFC-0008)\n• Headless Chrome CDP WebSocket (127.0.0.1:9222)\n• Quarantined readers & 1-step proposal staging"]
     RSI["Recursive Self-Improvement Engine (RFC-0010)\n• 4-stage friction mining, hypothesis, 4-gate verification"]
-    CI["CI/CD & Harness Contracts (RFC-0011)\n• Mathematical PII guards (P1-P5) & Harness gates (H1-H4B)"]
+    OBS["Token & Latency Observability (RFC-0012)\n• Stat-cached transcript burn, subagent DAG & budget guards"]
+    CI["CI/CD & Harness Contracts (RFC-0011, RFC-0013)\n• Mathematical PII guards (P1-P6) & Harness gates (H1-H4B)"]
   end
 
   subgraph AgentLayer["4. Antigravity Agent Sessions (PRD-0002)"]
@@ -62,6 +63,7 @@ flowchart TB
   HOOKS <--> TASKS
   HOOKS <--> GCHAT
   HOOKS <--> RSI
+  HOOKS <--> OBS
   HOOKS <--> CI
 ```
 
@@ -75,7 +77,7 @@ To deliver genuine 24/7 proactive personal assistance without requiring open IDE
   - On **macOS**: Configures a user LaunchAgent in `~/Library/LaunchAgents/com.antigravity.hq.daemon.plist` with `RunAtLoad` and `KeepAlive`.
   - On **Linux**: Configures a user systemd service unit in `~/.config/systemd/user/hq-daemon.service` with automatic restarts and journal logging.
 - **Zero-Token Idle Pre-Checks (RFC-0004):** The daemon executes two high-frequency pure-Go timers in 0 LLM tokens:
-  1. **15-Second Inbox Scanner:** Scans `local/inbox/`, routes incoming files (CSVs $\rightarrow$ `ledger-ingest`, tax PDFs $\rightarrow$ `tax-prep`, SEC filings $\rightarrow$ `thesis-check`, general $\rightarrow$ `inbox-triage`), moves them to `local/inbox/queued/`, and triggers quarantined execution.
+  1. **15-Second Inbox Scanner:** Scans `local/inbox/`, routes incoming files (CSVs → `ledger-ingest`, tax PDFs → `tax-prep`, SEC filings → `thesis-check`, general → `inbox-triage`), moves them to `local/inbox/queued/`, and triggers quarantined execution.
   2. **30-Minute Heartbeat Gatekeeper & Dead-Man's Switch:** Evaluates daily quota caps, checks unread status, and monitors whether today's `brief-YYYY-MM-DD.md` has been compiled by 08:00 AM, firing a high-priority alert if missed.
 - **Embedded Aux Web UI:** Hosts the local HTTP server (`127.0.0.1:4242`) powering both the Antigravity Sidecar pane (`sidecar://agy-hq-console/`) and standalone browser dashboard.
 
@@ -156,10 +158,10 @@ To support Google Chat across both Google Workspace and personal `@gmail.com` ac
      ```sh
      ./bin/hq gchat propose --to="Project Launch Space" --body="Hello team"
      ```
-   - Automatically resolves names via fuzzy cache (`spaces_cache.json`) or PeopleKit search, pre-warms the target space tab in headless Chrome, drafts the message, and stages a SHA-256 bound `gchat_send` proposal (`local/memory/proposals/<id>.json`).
+   - Automatically resolves names via fuzzy cache (`spaces_cache.json`) or PeopleKit search, pre-warms the target space tab in headless Chrome, drafts the message, and stages a SHA-256 bound `gchat_send` proposal (`local/memory/pending/<id>.json`).
 3. **Quarantine Reader Gate (`hq gchat read-quarantined`):**
    - Full message body inspection is restricted to quarantined subagents. Calling `read-quarantined` permanently flags the conversation ID in `local/memory/tainted_sessions.json`.
-   - Tainted sessions have `search_web` blocked and `run_command` restricted strictly to read/draft/propose operations, neutralizing prompt-injection exfiltration attacks from malicious chat messages.
+   - Tainted sessions have `search_web`, `write_file`, `edit_file`, `invoke_subagent`, `send_message`, `schedule`, and `call_mcp_tool` blocked, symlink-resolved reads of `local/private/**` denied, and `run_command` restricted strictly to newline-free read/draft/propose operations—neutralizing prompt-injection exfiltration attacks from untrusted messages.
 4. **1-Tap Mobile Approval:**
    - Outbound messages are presented via `ask_question` with exact SHA-256 prefixes and recipient previews, executed deterministically by `./bin/hq approve <id> --sha256=<prefix>` with zero LLM intervention.
 
@@ -240,9 +242,10 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
 │   ├── approvals/                     # SHA-256 pending queue & deterministic CLI executor
 │   ├── ci/                            # CI/CD PII scanners, harness contracts & git hook installer
 │   ├── doctor/                        # Diagnostic checks for sandbox, CLI, and Vault health
-│   ├── e2e/                           # Black-box E2E tests for CUJ 1–18
+│   ├── e2e/                           # Black-box E2E tests for CUJs 1–20
 │   ├── gchat/                         # Decoupled Google Chat CDP WebSocket & REST transports
 │   ├── gmail/                         # Decoupled Gmail Layer 1 primitives & sidecar engine
+│   ├── obs/                           # Token, prefix-cache, latency & context observability engine
 │   ├── rsi/                           # 4-stage recursive self-improvement engine
 │   ├── vault/                         # Memory auditing, 4-layer topics, bi-temporal fact engine
 │   ├── webui/                         # Interactive Aux Console (sidecar://agy-hq-console/, http://127.0.0.1:4242)

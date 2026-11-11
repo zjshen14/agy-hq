@@ -15,7 +15,7 @@ The newest generation of personal agents—Meta Muse, Manus, OpenAI `dots`, Anth
 5. **Consolidated Long-Term Memory** (never starts from a blank slate).
 6. **Compounding Skills** (distills repeated workflows into verified skills).
 
-`agy-hq` delivers all six pillars on top of an always-on Mac running Google Antigravity, while keeping 100% of personal data inside a git-ignored private `Vault` (`local/`).
+`agy-hq` delivers all six pillars on top of an always-on Mac or Linux workstation running Google Antigravity, while keeping 100% of personal data inside a git-ignored private `Vault` (`local/`).
 
 ---
 
@@ -45,7 +45,7 @@ Drag any bank CSV, PDF receipt, W-2, 10-K, or notes file into `local/inbox/`:
 
 ### Touchpoint 4: Nightly "Sleep-Time" Consolidation (11:30 PM)
 While you sleep, the automated `sleep-consolidate` workflow runs 100% silently in the background (zero Front Desk chat messages), auditing memory against ground-truth session transcripts:
-- Applies incremental delta updates to `local/MEMORY.md` ($\le 80$ line Roadmap Index) and `local/memory/facts.jsonl`.
+- Applies incremental delta updates to `local/MEMORY.md` (`<= 80` line Roadmap Index) and `local/memory/facts.jsonl`.
 - Distills deep operational and architectural knowledge into Topic Wiki pages (`local/memory/topics/*.md`).
 - Mines friction traces and stages verified recursive self-improvement (`./bin/hq rsi`) proposals for 1-tap approval.
 - Commits the private `local/` Vault to git, rolling all findings cleanly into the 7:30 AM Morning Brief (`/morning-brief`).

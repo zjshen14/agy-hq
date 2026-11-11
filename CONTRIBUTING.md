@@ -18,11 +18,11 @@ Every pull request is verified mechanically by `./bin/hq ci pre-push` and GitHub
    - Tip: Add your own personal names or project slugs to `local/private/pii-denylist.txt` (git-ignored) so `./bin/hq ci pre-commit` catches accidental mentions automatically on your machine.
 3. **Progressive-Disclosure Skill Budget (`Gate H1`):**
    - Every `.agents/plugins/agy-hq/skills/<name>/SKILL.md` file must have valid `name` + `description` YAML frontmatter and remain **`<= 150 lines`** (`rsi.MaxSkillMarkdownLines = 150`) to protect conversation context budgets.
-4. **Research $\rightarrow$ RFC $\rightarrow$ Code for Architectural Features (`Gate H4-B`):**
+4. **Research → RFC → Code for Architectural Features (`Gate H4-B`):**
    - Non-trivial subsystems require a technical RFC in `docs/design/NNNN-<slug>.md` (and optional research note in `docs/research/`) indexed in [`docs/README.md`](docs/README.md).
    - All Markdown files must have balanced fenced code blocks and valid relative links pointing to git-tracked files.
 5. **Ring 0 Trusted Computing Base (`internal/rsi/tcb.go`):**
-   - Changes touching `internal/approvals/`, `internal/ci/`, `internal/rsi/`, `.github/`, `LICENSE`, or `SECURITY.md` undergo extra maintainer review.
+   - Changes touching `internal/approvals/`, `internal/hooks/`, `internal/webui/`, `internal/vault/`, `internal/ci/`, `internal/rsi/`, `internal/gmail/`, `internal/gchat/`, `cmd/hq/`, `.agents/hooks.json`, `.agents/plugins/agy-hq/sidecars/`, `.github/`, `AGENTS.md`, `LICENSE`, or `SECURITY.md` are protected from automated self-modification and undergo extra maintainer review.
 
 ---
 

@@ -29,6 +29,7 @@
 | **CUJ-17** | Bounded Agent Recursive Self-Improvement (RSI) | `hq rsi`, `internal/rsi` | `TestCUJ17_AgentRSIMiningVerificationAndApproval` |
 | **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
 | **CUJ-19** | End-to-End Token & Context Observability, Subagent DAG Attribution & Budget Circuit Breaker | `hq obs`, `internal/obs`, `hq hook stop`, `hq doctor` | `TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards` |
+| **CUJ-20** | Open-Source `--demo` Onboarding, Governance TCB & Git History PII Sanitization | `hq init --demo`, `hq doctor --json`, `hq ci check-pii --history`, `hq ci scrub-history` | `TestCUJ20_OpenSourceDemoOnboardingGovernanceAndPIIGuard` |
 
 ---
 
@@ -70,7 +71,7 @@
 1. **Automatic Complexity Tiering:**
    - `quick` prompts (`status`, `triage`, `brief`, `summary`, `typo`) → `gemini-3.8-flash-low` (`flash_lite`).
    - `standard` prompts (feature coding, unit tests, bug fixes) → `gemini-3.8-flash-high` (`flash`).
-   - `deep` prompts (`architecture`, `design`, `security`, `audit`, `race condition`, `root cause`, `thesis`) → `gemini-4-argon-high` (`pro`).
+   - `deep` prompts (`architecture`, `design`, `security`, `audit`, `race condition`, `root cause`, `thesis`) → `gemini-4-carbon-high` (`pro`).
 2. **User Override Priority:**
    - Explicit CLI flags (`--model=opus --depth=high`, `--model=sonnet --depth=medium`) and natural-language prompt hints (`"use opus"`, `"use sonnet"`, `"use flash"`) always override automatic tiering.
 3. **429 Quota Fallback & Circuit Breaker:**
@@ -81,7 +82,7 @@
 1. **Hard-Deny in `PreToolUse` (`hq hook pre-tool`):**
    - Direct execution of `gws gmail send`, `gws chat send`, `gh pr merge`, `gh release create`, or `vercel --prod` via `run_command` is blocked with `{"decision":"deny"}`.
 2. **Proposal Staging (`hq propose`):**
-   - Writes `local/memory/proposals/<id>.json` with deterministic `SHA256(command + "\n" + workDir)` and updates `hq_console.md`.
+   - Writes `local/memory/pending/<id>.json` with deterministic `SHA256(command + "\n" + workDir)` and updates `hq_console.md`.
 3. **Cryptographic Verification & Execution (`hq approve` / `hq reject`):**
    - Approving with a mismatched `--sha256` prefix fails and leaves the proposal untouched.
    - Approving with a matching `--sha256` prefix executes the command deterministically, removes the pending proposal, appends an audit record to `local/memory/interventions.jsonl`, and updates `hq_console.md`.
@@ -180,7 +181,7 @@
 ---
 
 ## CUJ-18: Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate
-1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 5 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist) across both staged diffs (`--staged`) and the full tracked tree.
+1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 6 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist, P6 contextual PII & real `spaces/<id>` guard) across staged diffs (`--staged`), the full tracked tree, and commit history (`--history`).
 2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B (`.agents/hooks.json` == `.agents/plugins/agy-hq/hooks.json` byte parity + 18-probe `PreToolUse` security/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
 3. **Local Git Hook Enforcement (`hq ci install-hooks` / `pre-commit` / `pre-push`):** Automatically installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` and rejects commits containing leaked PII/credentials, unformatted Go files, or broken Markdown links before they leave the developer workstation.
 

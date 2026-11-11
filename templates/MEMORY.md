@@ -1,6 +1,6 @@
 # Consolidated Long-Term Memory (Roadmap Index)
 
-> Maintained as a concise Roadmap Index ($\le 80$ lines) via nightly `sleep-consolidate` dreaming. Deep domain lessons live in `local/memory/topics/*.md` and `local/notes/`.
+> Maintained as a concise Roadmap Index (`<= 80` lines) via nightly `sleep-consolidate` dreaming. Deep domain lessons live in `local/memory/topics/*.md` and `local/notes/`.
 
 ## Active Priorities
 - Bootstrap `agy-hq` personal assistant workspace and daily workflows.
