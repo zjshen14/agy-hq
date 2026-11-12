@@ -450,12 +450,54 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			})
 		}
 		// Universal Credential Vault Guard: block direct shell reads/mutations of raw OAuth tokens, Chrome cookies, credentials, or pii-denylist.txt across ALL sessions
+		cleanVault := filepath.Clean(vaultDir)
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 		credShellHit := reLocalCredentialShell.MatchString(cmdLine)
+		if !credShellHit {
+			vaultBases := []string{cleanVault}
+			if canonVault != "" && canonVault != cleanVault {
+				vaultBases = append(vaultBases, canonVault)
+			}
+			for _, vBase := range vaultBases {
+				if vBase == "" || vBase == "." {
+					continue
+				}
+				for _, sub := range []string{"gmail", "gchat", "credentials", "pii-denylist.txt"} {
+					if strings.Contains(cmdLine, filepath.Join(vBase, "private", sub)) {
+						credShellHit = true
+						break
+					}
+				}
+				if credShellHit {
+					break
+				}
+			}
+		}
 		if !credShellHit && canonVault != "" {
-			for _, sub := range []string{"gmail", "gchat", "credentials", "pii-denylist.txt"} {
-				if strings.Contains(cmdLine, filepath.Join(canonVault, "private", sub)) {
-					credShellHit = true
+			credTargets := []string{
+				filepath.Join(canonVault, "private", "gmail"),
+				filepath.Join(canonVault, "private", "gchat"),
+				filepath.Join(canonVault, "private", "credentials"),
+				filepath.Join(canonVault, "private", "pii-denylist.txt"),
+			}
+			for _, tok := range strings.FieldsFunc(cmdLine, func(r rune) bool {
+				switch r {
+				case ' ', '\t', '\n', '\r', '\'', '"', '=', ';', '|', '&', '<', '>', '(', ')':
+					return true
+				}
+				return false
+			}) {
+				if !strings.Contains(tok, "/") && !strings.Contains(tok, "\\") {
+					continue
+				}
+				canonTok := canonicalizeHookPath(vaultDir, tok)
+				for _, cp := range credTargets {
+					if canonTok == cp || strings.HasPrefix(canonTok, cp+string(filepath.Separator)) {
+						credShellHit = true
+						break
+					}
+				}
+				if credShellHit {
 					break
 				}
 			}

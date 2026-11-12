@@ -2806,16 +2806,16 @@ func TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge(t *testi
 	}
 	_, _ = env.run("", "reject", piiProp.ID)
 
-	// 3. Stage a proposal with a short TTL (`--ttl=200ms`), let it expire, and confirm `hq approve` deterministically rejects it!
-	if out, err := env.run("", "propose", "--type=external_action", "--ttl=200ms", "--summary=Ephemeral quote reply", "--cmd=echo stale-send"); err != nil {
-		t.Fatalf("propose --ttl=200ms failed: %v (%s)", err, out)
+	// 3. Stage a proposal with a short TTL (`--ttl=1500ms`), let it expire, and confirm `hq approve` deterministically rejects it!
+	if out, err := env.run("", "propose", "--type=external_action", "--ttl=1500ms", "--summary=Ephemeral quote reply", "--cmd=echo stale-send"); err != nil {
+		t.Fatalf("propose --ttl=1500ms failed: %v (%s)", err, out)
 	}
 	pendingTTL, _ := approvals.List(env.vaultDir)
 	if len(pendingTTL) != 1 {
 		t.Fatalf("expected 1 TTL proposal, got %d", len(pendingTTL))
 	}
 	ttlProp := pendingTTL[0]
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(1700 * time.Millisecond)
 
 	expAppOut, expErr := env.run("", "approve", ttlProp.ID, "--sha256="+ttlProp.SHA256[:12])
 	if expErr == nil || !strings.Contains(expAppOut, "expired") {

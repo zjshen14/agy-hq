@@ -337,3 +337,44 @@ func TestPreToolUseSecurityHardening(t *testing.T) {
 		}
 	}
 }
+
+// Regression test for macOS TMPDIR symlink resolution (/var/folders -> /private/var/folders)
+// and symlinked shell path escapes targeting Credential Vault directories.
+func TestSymlinkedVaultDirCredentialShellGuard(t *testing.T) {
+	base := t.TempDir()
+	realVault := filepath.Join(base, "real-private-var-vault")
+	symlinkVault := filepath.Join(base, "symlink-var-vault")
+	if err := os.MkdirAll(filepath.Join(realVault, "private", "gmail"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realVault, "private", "gmail", "tokens.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realVault, symlinkVault); err != nil {
+		t.Fatal(err)
+	}
+	sneakyLink := filepath.Join(base, "sneaky-gmail-link")
+	if err := os.Symlink(filepath.Join(realVault, "private", "gmail"), sneakyLink); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cmd := range []string{
+		"cat " + filepath.Join(symlinkVault, "private", "gmail", "tokens.json"),
+		"cat " + filepath.Join(sneakyLink, "tokens.json"),
+	} {
+		var out bytes.Buffer
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-untainted",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": cmd},
+			},
+		})
+		if err := HandlePreToolUse(bytes.NewReader(raw), &out, symlinkVault); err != nil {
+			t.Fatalf("HandlePreToolUse(%q): %v", cmd, err)
+		}
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected deny on symlinked credential shell command %q, got: %s", cmd, out.String())
+		}
+	}
+}
