@@ -50,7 +50,7 @@ func TestMineHypothesizeVerifyProposeApplyAndAblate(t *testing.T) {
 			"conversationId": cid,
 			"executionNum":   idx + 1,
 			"transcriptPath": txPath,
-			"modelName":      "gemini-3.8-flash-high",
+			"modelName":      "gemini-4-hydrogen-high",
 			"stepCount":      7,
 			"toolErrorCount": 1,
 			"turnErrorCount": 1,
@@ -119,7 +119,7 @@ func TestMineHypothesizeVerifyProposeApplyAndAblate(t *testing.T) {
 	// 7. Test Model-Upgrade Ablation (`Ablate` when upgrading to gemini-5-ultra)
 	ablated, err := Ablate(rootDir, vaultDir, "gemini-5-ultra")
 	if err != nil || len(ablated) == 0 {
-		t.Fatalf("expected Ablate to stage deprecation hypothesis for gemini-3.8-flash-high scoped rule when upgrading to gemini-5-ultra, got %d (%v)", len(ablated), err)
+		t.Fatalf("expected Ablate to stage deprecation hypothesis for gemini-4-hydrogen-high scoped rule when upgrading to gemini-5-ultra, got %d (%v)", len(ablated), err)
 	}
 }
 

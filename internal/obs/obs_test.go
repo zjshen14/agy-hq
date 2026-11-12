@@ -104,7 +104,7 @@ func TestDAGTreeRollupsAndSubagentAttributionReconcile(t *testing.T) {
 		Kind:           "subagent",
 		Scope:          "wrong",
 		Tier:           "quick",
-		Model:          "gemini-3.8-flash-high",
+		Model:          "gemini-4-hydrogen-high",
 		ConversationID: sub1ID,
 		Status:         "completed",
 	})

@@ -20,15 +20,15 @@ quota:
 routing:
   tiers:
     quick:
-      model: gemini-3.8-flash-low
+      model: gemini-4-hydrogen-low
       subagent_model: flash_lite
     standard:
-      model: gemini-3.8-flash-high
+      model: gemini-4-hydrogen-high
       subagent_model: flash
     deep:
       model: gemini-4-carbon-high
       subagent_model: pro
-  fallback_on_429: gemini-3.8-flash-medium
+  fallback_on_429: gemini-4-hydrogen-medium
 
 attention:
   mode: balanced

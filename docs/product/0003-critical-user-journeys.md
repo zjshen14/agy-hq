@@ -73,13 +73,13 @@
 
 ### CUJ-4: Smart Model & Thinking-Depth Routing + 429 Quota Fallback
 1. **Automatic Complexity Tiering:**
-   - `quick` prompts (`status`, `triage`, `brief`, `summary`, `typo`) → `gemini-3.8-flash-low` (`flash_lite`).
-   - `standard` prompts (feature coding, unit tests, bug fixes) → `gemini-3.8-flash-high` (`flash`).
+   - `quick` prompts (`status`, `triage`, `brief`, `summary`, `typo`) → `gemini-4-hydrogen-low` (`flash_lite`).
+   - `standard` prompts (feature coding, unit tests, bug fixes) → `gemini-4-hydrogen-high` (`flash`).
    - `deep` prompts (`architecture`, `design`, `security`, `audit`, `race condition`, `root cause`, `thesis`) → `gemini-4-carbon-high` (`pro`).
 2. **User Override Priority:**
    - Explicit CLI flags (`--model=opus --depth=high`, `--model=sonnet --depth=medium`) and natural-language prompt hints (`"use opus"`, `"use sonnet"`, `"use flash"`) always override automatic tiering.
 3. **429 Quota Fallback & Circuit Breaker:**
-   - If a non-Flash model hits `429 RESOURCE_EXHAUSTED`, `SpawnTask` automatically retries once on `gemini-3.8-flash-medium`.
+   - If a non-Flash model hits `429 RESOURCE_EXHAUSTED`, `SpawnTask` automatically retries once on `gemini-4-hydrogen-medium`.
    - Daily background spawns are capped at `maxDailySpawns` (15), tripping the circuit breaker (`circuitOpen: true`) when exhausted.
 
 ### CUJ-5: Approval-Bound Outbound Execution & Tamper Rejection

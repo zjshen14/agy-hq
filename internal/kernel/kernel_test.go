@@ -50,10 +50,10 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	}
 
 	// 3. Verify smart model + depth routing and user overrides
-	if m, tier, sub := ResolveModel("Summarize the status of open PRs", "", "", ""); m != "gemini-3.8-flash-low" || tier != "quick" || sub != "flash_lite" {
+	if m, tier, sub := ResolveModel("Summarize the status of open PRs", "", "", ""); m != "gemini-4-hydrogen-low" || tier != "quick" || sub != "flash_lite" {
 		t.Fatalf("unexpected quick tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
-	if m, tier, sub := ResolveModel("Implement the CSV parser for bank statements", "", "", ""); m != "gemini-3.8-flash-high" || tier != "standard" || sub != "flash" {
+	if m, tier, sub := ResolveModel("Implement the CSV parser for bank statements", "", "", ""); m != "gemini-4-hydrogen-high" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected standard tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, tier, sub := ResolveModel("Perform a security audit and architecture review", "", "", ""); m != "gemini-4-carbon-high" || tier != "deep" || sub != "pro" {
@@ -61,6 +61,12 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	}
 	if m, _, _ := ResolveModel("Fix a bug", "opus", "medium", ""); m != "claude-opus-5-5-medium" {
 		t.Fatalf("unexpected explicit user override: got %s", m)
+	}
+	if m, _, _ := ResolveModel("Fix a bug", "hydrogen", "xhigh", ""); m != "gemini-4-hydrogen-xhigh" {
+		t.Fatalf("unexpected hydrogen override: got %s", m)
+	}
+	if m, _, _ := ResolveModel("Fix a bug", "flash", "high", ""); m != "gemini-4-hydrogen-high" {
+		t.Fatalf("unexpected flash alias override: got %s", m)
 	}
 	if m, _, _ := ResolveModel("Architecture design", "carbon", "high", ""); m != "gemini-4-carbon-high" {
 		t.Fatalf("unexpected carbon override: got %s", m)
@@ -166,6 +172,9 @@ func TestResolveModelEnumAndSpawnSubagent(t *testing.T) {
 	enumVal, err := ResolveModelEnum("", "", "claude-opus-5-5-high")
 	if err != nil || enumVal != "MODEL_PLACEHOLDER_M402" {
 		t.Fatalf("expected MODEL_PLACEHOLDER_M402, got %q (%v)", enumVal, err)
+	}
+	if hVal, hErr := ResolveModelEnum("", "", "gemini-4-hydrogen-high"); hErr != nil || hVal != "MODEL_PLACEHOLDER_M525" {
+		t.Fatalf("expected MODEL_PLACEHOLDER_M525 for gemini-4-hydrogen-high, got %q (%v)", hVal, hErr)
 	}
 
 	// 2. Mock LanguageServerService Connect JSON endpoints

@@ -1725,7 +1725,7 @@ var (
 	reDeepTask        = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|complex|deep|hard)\b`)
 	reQuickTask       = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|brief|consolidate|list|format|lint|typo|quick)\b`)
 	reUUID            = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	rePromptModelHint = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|flash_lite|flash-lite|flash)\b`)
+	rePromptModelHint = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|hydrogen|flash_lite|flash-lite|flash)\b`)
 )
 
 // ExtractUUID returns the first UUID v4 found in s (e.g., from agentapi stdout), or "".
@@ -1733,10 +1733,11 @@ func ExtractUUID(s string) string {
 	return strings.ToLower(reUUID.FindString(s))
 }
 
-// ResolveModel selects the Antigravity model ID and thinking depth (low/medium/high)
+// ResolveModel selects the Antigravity model ID and thinking depth (low/medium/high/xhigh)
 // based on explicit user overrides or automatic task-complexity classification.
 //
 // Verified Antigravity model IDs (`agy models`):
+//   - gemini-4-hydrogen-{low,medium,high,xhigh}
 //   - gemini-3.8-flash-{low,medium,high}
 //   - gemini-4-carbon-{low,medium,high}
 //   - gemini-4-argon-{low,medium,high}
@@ -1774,7 +1775,7 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 			depth = "low"
 		}
 		if model == "" {
-			model = "gemini-3.8-flash"
+			model = "gemini-4-hydrogen"
 		}
 		subagentModel = "flash_lite"
 	case "deep":
@@ -1791,18 +1792,21 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 			depth = "high"
 		}
 		if model == "" {
-			model = "gemini-3.8-flash"
+			model = "gemini-4-hydrogen"
 		}
 		subagentModel = "flash"
 	}
 
 	// Normalize shorthand model aliases
 	switch model {
+	case "hydrogen":
+		model = "gemini-4-hydrogen"
+		subagentModel = "flash"
 	case "flash":
-		model = "gemini-3.8-flash"
+		model = "gemini-4-hydrogen"
 		subagentModel = "flash"
 	case "flash_lite", "flash-lite":
-		model = "gemini-3.8-flash"
+		model = "gemini-4-hydrogen"
 		depth = "low"
 		subagentModel = "flash_lite"
 	case "carbon":
@@ -1819,8 +1823,8 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 		subagentModel = "pro"
 	}
 
-	// If model already ends with -low, -medium, or -high, keep it as-is
-	if strings.HasSuffix(model, "-low") || strings.HasSuffix(model, "-medium") || strings.HasSuffix(model, "-high") {
+	// If model already ends with -low, -medium, -high, or -xhigh, keep it as-is
+	if strings.HasSuffix(model, "-low") || strings.HasSuffix(model, "-medium") || strings.HasSuffix(model, "-high") || strings.HasSuffix(model, "-xhigh") {
 		return model, tier, subagentModel
 	}
 	return fmt.Sprintf("%s-%s", model, depth), tier, subagentModel
@@ -1941,8 +1945,8 @@ func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
 }
 
 // SpawnTask invokes `agentapi new-conversation --model=<modelID>` (or simulates it if dryRun is true),
-// enforcing the daily spawn budget, auto-downgrading to gemini-3.8-flash-medium if a higher-tier model
-// hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Flash is also exhausted.
+// enforcing the daily spawn budget, auto-downgrading to gemini-4-hydrogen-medium if a higher-tier model
+// hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
 func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
 	if modelID == "" {
 		modelID, _, _ = ResolveModel(prompt, "", "", "")
@@ -1967,9 +1971,9 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		outBytes, err := cmd.CombinedOutput()
 		output = strings.TrimSpace(string(outBytes))
 		if err != nil {
-			// Quota-aware fallback: if a non-Flash model hit 429, retry once on gemini-3.8-flash-medium
-			if (strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429")) && !strings.Contains(modelID, "flash") {
-				fallbackModel := "gemini-3.8-flash-medium"
+			// Quota-aware fallback: if a non-Hydrogen/non-Flash model hit 429, retry once on gemini-4-hydrogen-medium
+			if (strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429")) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
+				fallbackModel := "gemini-4-hydrogen-medium"
 				fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
 				if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
 					modelID = fallbackModel + " (fallback)"
@@ -2670,6 +2674,10 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 }
 
 var staticModelEnumMap = map[string]string{
+	"gemini-4-hydrogen-xhigh":  "MODEL_PLACEHOLDER_M528",
+	"gemini-4-hydrogen-high":   "MODEL_PLACEHOLDER_M525",
+	"gemini-4-hydrogen-medium": "MODEL_PLACEHOLDER_M526",
+	"gemini-4-hydrogen-low":    "MODEL_PLACEHOLDER_M527",
 	"gemini-4-carbon-high":     "MODEL_PLACEHOLDER_M420",
 	"gemini-4-carbon-medium":   "MODEL_PLACEHOLDER_M421",
 	"gemini-4-carbon-low":      "MODEL_PLACEHOLDER_M422",

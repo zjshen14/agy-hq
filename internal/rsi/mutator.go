@@ -45,7 +45,7 @@ type ACEDeltaOp struct {
 	RuleID     string `json:"ruleId"`               // e.g. "rsi-rule-gchat-01"
 	Section    string `json:"section"`              // e.g. "## Learned Operational Rules (RSI Managed)"
 	Content    string `json:"content"`              // Markdown bullet with HTML metadata comment
-	ModelScope string `json:"modelScope,omitempty"` // e.g. "gemini-3.8-flash-high" or "all"
+	ModelScope string `json:"modelScope,omitempty"` // e.g. "gemini-4-hydrogen-high" or "all"
 }
 
 // RSIHypothesis is a candidate self-improvement mutation persisted in local/memory/rsi/hypotheses/<id>.json.

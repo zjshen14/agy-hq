@@ -395,7 +395,7 @@ func TestCUJ3_TaskConversationLifecycle(t *testing.T) {
 	}
 
 	// 2. Simulate first Stop hook of the newly spawned conversation -> links ConversationID without duplicating entry!
-	stopSpawned := `{"conversationId":"spawned-conv-9999","executionNum":1,"modelName":"gemini-3.8-flash-high","lastUserInput":"Fix failing unit test in PR #279"}`
+	stopSpawned := `{"conversationId":"spawned-conv-9999","executionNum":1,"modelName":"gemini-4-hydrogen-high","lastUserInput":"Fix failing unit test in PR #279"}`
 	if _, err := env.run(stopSpawned, "hook", "stop"); err != nil {
 		t.Fatalf("stop spawned task: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestCUJ3_TaskConversationLifecycle(t *testing.T) {
 	}
 
 	// 3. Subsequent Stop hook on the same task must preserve curated Title and TaskSlug
-	stopTurn2 := `{"conversationId":"spawned-conv-9999","executionNum":2,"modelName":"gemini-3.8-flash-high","lastUserInput":"Follow up question on PR #279"}`
+	stopTurn2 := `{"conversationId":"spawned-conv-9999","executionNum":2,"modelName":"gemini-4-hydrogen-high","lastUserInput":"Follow up question on PR #279"}`
 	if _, err := env.run(stopTurn2, "hook", "stop"); err != nil {
 		t.Fatalf("stop turn 2: %v", err)
 	}
@@ -500,13 +500,13 @@ func TestCUJ4_SmartModelRoutingAndQuotaFallback(t *testing.T) {
 	}{
 		{
 			prompt:    "Quick inbox triage and status summary",
-			wantModel: "gemini-3.8-flash-low",
+			wantModel: "gemini-4-hydrogen-low",
 			wantTier:  "quick",
 			wantSub:   "flash_lite",
 		},
 		{
 			prompt:    "Add unit tests for the new CLI flag",
-			wantModel: "gemini-3.8-flash-high",
+			wantModel: "gemini-4-hydrogen-high",
 			wantTier:  "standard",
 			wantSub:   "flash",
 		},
@@ -732,7 +732,7 @@ func TestCUJ8_TurnJournalingAndLiveConsoleSync(t *testing.T) {
 	_ = json.NewEncoder(stopPayload).Encode(map[string]interface{}{
 		"conversationId":        "task-conv-8888",
 		"executionNum":          3,
-		"modelName":             "gemini-3.8-flash-high",
+		"modelName":             "gemini-4-hydrogen-high",
 		"lastUserInput":         "Update README and run tests",
 		"transcriptPath":        transcriptPath,
 		"terminationReason":     "NO_TOOL_CALL",
@@ -1010,7 +1010,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	// 3. Subagent starts up in its own conversation (conv-sub-123) and runs session-start
 	subArtDir := filepath.Join(t.TempDir(), "brain-sub-123")
 	_ = os.MkdirAll(subArtDir, 0o755)
-	ssSub := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-high"}`, subConv, subArtDir)
+	ssSub := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-hydrogen-high"}`, subConv, subArtDir)
 	subSSOut, err := env.run(ssSub, "hook", "session-start")
 	if err != nil {
 		t.Fatalf("session-start subagent: %v (%s)", err, subSSOut)
@@ -1057,7 +1057,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	// 4. Subagent finishes its work and runs hook stop with a transcript summary
 	subArtDirTranscript := filepath.Join(subArtDir, "transcript.jsonl")
 	_ = os.WriteFile(subArtDirTranscript, []byte(`{"type":"PLANNER_RESPONSE","content":"Fixed race condition and all unit tests pass (100%)."}`+"\n"), 0o644)
-	subStopWithTranscript := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-high","terminationReason":"NO_TOOL_CALL"}`, subConv, subArtDirTranscript, subArtDir)
+	subStopWithTranscript := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-hydrogen-high","terminationReason":"NO_TOOL_CALL"}`, subConv, subArtDirTranscript, subArtDir)
 
 	if _, err := env.run(subStopWithTranscript, "hook", "stop"); err != nil {
 		t.Fatalf("subagent stop failed: %v", err)
@@ -1138,7 +1138,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	// Child subagent starts session-start
 	childArtDir := filepath.Join(t.TempDir(), "brain-child-789")
 	_ = os.MkdirAll(childArtDir, 0o755)
-	ssChild := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-low"}`, nestedConv, childArtDir)
+	ssChild := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-hydrogen-low"}`, nestedConv, childArtDir)
 	childSSOut, err := env.run(ssChild, "hook", "session-start")
 	if err != nil {
 		t.Fatalf("child session-start failed: %v", err)
@@ -1164,7 +1164,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	// Child subagent finishes and runs stop
 	childTranscript := filepath.Join(childArtDir, "transcript.jsonl")
 	_ = os.WriteFile(childTranscript, []byte(`{"type":"PLANNER_RESPONSE","content":"Child work finished."}`+"\n"), 0o644)
-	childStop := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"artifactDirectoryPath":%q,"modelName":"gemini-3.8-flash-low","terminationReason":"NO_TOOL_CALL"}`, nestedConv, childTranscript, childArtDir)
+	childStop := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"artifactDirectoryPath":%q,"modelName":"gemini-4-hydrogen-low","terminationReason":"NO_TOOL_CALL"}`, nestedConv, childTranscript, childArtDir)
 	if _, err := env.run(childStop, "hook", "stop"); err != nil {
 		t.Fatalf("child stop failed: %v", err)
 	}
@@ -1901,7 +1901,7 @@ func TestCUJ16_TaskBoardTieredConsoleAndColdArchive(t *testing.T) {
 			Kind:           "task",
 			Scope:          "notes",
 			Tier:           "standard",
-			Model:          "gemini-3.8-flash-high",
+			Model:          "gemini-4-hydrogen-high",
 			ConversationID: fmt.Sprintf("conv-idle-%02d", i),
 			Status:         "active",
 			CreatedAt:      ts,
@@ -1923,7 +1923,7 @@ func TestCUJ16_TaskBoardTieredConsoleAndColdArchive(t *testing.T) {
 			Kind:           "subagent",
 			Scope:          "repo",
 			Tier:           "standard",
-			Model:          "gemini-3.8-flash-high",
+			Model:          "gemini-4-hydrogen-high",
 			ConversationID: fmt.Sprintf("conv-sub-%02d", i),
 			Status:         "completed",
 			CreatedAt:      ts,
@@ -2101,7 +2101,7 @@ func TestCUJ17_AgentRSIMiningVerificationAndApproval(t *testing.T) {
 	)
 	_ = os.WriteFile(txTelemetry, []byte(strings.Join(turn2Lines, "\n")+"\n"), 0o644)
 
-	stop2 := fmt.Sprintf(`{"conversationId":"conv-rsi-telemetry","executionNum":2,"transcriptPath":%q,"modelName":"gemini-3.8-flash-high","lastUserInput":"Send GChat update"}`, txTelemetry)
+	stop2 := fmt.Sprintf(`{"conversationId":"conv-rsi-telemetry","executionNum":2,"transcriptPath":%q,"modelName":"gemini-4-hydrogen-high","lastUserInput":"Send GChat update"}`, txTelemetry)
 	if _, err := env.run(stop2, "hook", "stop"); err != nil {
 		t.Fatalf("hook stop turn 2: %v", err)
 	}
@@ -2338,7 +2338,7 @@ func TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards(t *testing.T) {
 	}
 
 	// 1. Trigger `hq hook stop` on conv-fd-obs and verify B1 duplicate-invocation deduplication
-	stopPayload := fmt.Sprintf(`{"conversationId":"conv-fd-obs","executionId":"exec-1","executionNumber":1,"modelName":"gemini-3.8-flash-high","stepCount":4,"transcriptPath":%q,"finalResponseText":"Dispatched telemetry auditor."}`, fdTranscriptPath)
+	stopPayload := fmt.Sprintf(`{"conversationId":"conv-fd-obs","executionId":"exec-1","executionNumber":1,"modelName":"gemini-4-hydrogen-high","stepCount":4,"transcriptPath":%q,"finalResponseText":"Dispatched telemetry auditor."}`, fdTranscriptPath)
 	if out, err := env.run(stopPayload, "hook", "stop"); err != nil {
 		t.Fatalf("hq hook stop failed: %v\n%s", err, out)
 	}
@@ -2348,7 +2348,7 @@ func TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards(t *testing.T) {
 	}
 
 	// 2. Verify SessionStart injects the 160k Front Desk context /compact nudge (since current_context = 170k >= 160k)
-	sessPayload := `{"conversationId":"conv-fd-obs","modelName":"gemini-3.8-flash-high"}`
+	sessPayload := `{"conversationId":"conv-fd-obs","modelName":"gemini-4-hydrogen-high"}`
 	sessOut, err := env.run(sessPayload, "hook", "session-start")
 	if err != nil || !strings.Contains(sessOut, "Front Desk Context Health") || !strings.Contains(sessOut, "170k tokens") || !strings.Contains(sessOut, "/compact") {
 		t.Fatalf("expected SessionStart 160k /compact nudge, got:\n%s (%v)", sessOut, err)

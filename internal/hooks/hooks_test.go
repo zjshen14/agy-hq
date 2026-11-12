@@ -184,7 +184,7 @@ func TestCrossMidnightPriorJournalStepsAndDuplicateStopGuard(t *testing.T) {
 	stopJSON, _ := json.Marshal(map[string]interface{}{
 		"conversationId":    "conv-b1-test",
 		"transcriptPath":    tPath,
-		"modelName":         "gemini-3.8-flash-high",
+		"modelName":         "gemini-4-hydrogen-high",
 		"terminationReason": "NO_TOOL_CALL",
 	})
 
@@ -232,7 +232,7 @@ func TestSubagentFrontDeskGuardHooks(t *testing.T) {
 
 	// 2. Subagent starts up SessionStart
 	var ssOut bytes.Buffer
-	subStartPayload := `{"conversationId":"conv-sub-child-999","modelName":"gemini-3.8-flash-high"}`
+	subStartPayload := `{"conversationId":"conv-sub-child-999","modelName":"gemini-4-hydrogen-high"}`
 	if err := HandleSessionStart(strings.NewReader(subStartPayload), &ssOut, vaultDir); err != nil {
 		t.Fatalf("HandleSessionStart subagent: %v", err)
 	}

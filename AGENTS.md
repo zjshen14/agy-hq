@@ -69,8 +69,8 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
        - For a **nested subagent on a cross-family or exact model** (e.g., `claude-opus-5-5-high`, `claude-sonnet-5-5-high`, or any explicit `--model` / `--depth`), run `./bin/hq subagent --model=<model> --depth=<low|medium|high> --role="[<tier>] <scope>: <role>" --prompt="..."` (or `./bin/hq spawn --subagent ...`). This launches a true nested child subagent under the current conversation (`parentConversationId` + `subagentDescriptor`) rather than cluttering the sidebar with a top-level conversation.
        - For a **dedicated top-level sidebar Task Conversation**, run `./bin/hq spawn --task=<slug> --model=... --depth=low|medium|high --prompt="..."`.
      - **Automatic Complexity Tiering (When Unspecified):**
-       - **`quick` (`low` depth — `flash_lite` / `gemini-3.8-flash-low`):** Log checks, inbox triage, status summaries, formatting, or simple lookups.
-       - **`standard` (`high` depth on Flash — `flash` / `gemini-3.8-flash-high`):** Standard feature coding, unit tests, bug fixes, doc searches, and filing extraction (protects scarce Pro/Opus quota).
+       - **`quick` (`low` depth — `flash_lite` / `gemini-4-hydrogen-low`):** Log checks, inbox triage, status summaries, formatting, or simple lookups.
+       - **`standard` (`high` depth on Hydrogen — `flash` / `gemini-4-hydrogen-high`):** Standard feature coding, unit tests, bug fixes, doc searches, and filing extraction (protects scarce Pro/Opus quota).
        - **`deep` (`high` depth on Pro/Carbon — `pro` / `gemini-4-carbon-high`):** Architecture design, root-cause debugging of race conditions, security audits, or investment thesis falsification.
 4. **Approval-Bound Outbound Execution (`./bin/hq propose` + `ask_question`):**
    - **Boundary Definition:**

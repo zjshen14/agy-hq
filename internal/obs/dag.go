@@ -181,9 +181,9 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			case "deep":
 				cm.Model = "gemini-4-carbon-high"
 			case "quick":
-				cm.Model = "gemini-3.8-flash-low"
+				cm.Model = "gemini-4-hydrogen-low"
 			default:
-				cm.Model = "gemini-3.8-flash-high"
+				cm.Model = "gemini-4-hydrogen-high"
 			}
 		}
 		cm.Tier = NormalizeTier(cm.Tier, cm.Model)
