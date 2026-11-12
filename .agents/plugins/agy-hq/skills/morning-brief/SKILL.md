@@ -8,12 +8,14 @@ description: >-
 
 # Morning Brief (`/morning-brief`)
 
-Produce a concise, actionable daily brief covering life admin, engineering projects, and investment watchlist updates.
+Produce a concise, actionable daily brief covering life admin, engineering projects, goals/SLAs, and investment watchlist updates.
 
 ## Steps
 
-1. **Check Pending Approvals, Active Worktrees & Token/Context Health:**
-   - Run `./bin/hq status` to inspect any pending approval proposals in `local/memory/pending/` and active git worktrees in `local/worktrees/`.
+1. **Check Pending Approvals, Attention Outbox, Goals & Token/Context Health:**
+   - Run `./bin/hq status` to inspect pending approval proposals (noting any `expires:` TTLs or `⚠️ PII WARNING` flags) and active git worktrees in `local/worktrees/`.
+   - Run `./bin/hq outbox drain` to consume overnight `brief_rollup` items (quiet-hours DND holds, `INTACT` thesis checks, and SLA nudges) and `./bin/hq ideas list` to surface top pending `ideas_feed` suggestions.
+   - Run `./bin/hq goals due --within=72h` to highlight approaching multi-day goal deadlines and overdue counterparty `WaitingOn` SLAs.
    - Run `./bin/hq obs tokens --since=24h` to check 24h uncached token burn, Prefix Cache Hit Ratio (`CHR %`), `[HQ] Front Desk` context watermark (recommending `/compact` if $\ge 120\text{k}$ tokens), and any active `A1`–`A5` anomaly alerts.
 2. **Calendar, Gmail, Google Chat & Life Admin:**
    - If the `gcalendar` skill/plugin is available, check today's schedule and highlight time-sensitive meetings or conflicts.

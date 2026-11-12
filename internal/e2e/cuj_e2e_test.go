@@ -796,8 +796,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v6") {
-		t.Fatalf("expected v0 -> v6 migration output, got:\n%s", upOut)
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v7") {
+		t.Fatalf("expected v0 -> v7 migration output, got:\n%s", upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -823,13 +823,13 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 		t.Fatalf("expected deprecated hq_console_mobile.md to be removed during migration")
 	}
 
-	// 5. Verify schema_version.json is now at version 5 and re-running `hq migrate` is a clean idempotent no-op
+	// 5. Verify schema_version.json is now at version 7 and re-running `hq migrate` is a clean idempotent no-op
 	migOut2, err := env.run("", "migrate")
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v6 -> v6") {
-		t.Fatalf("expected idempotent v6 -> v6 on second run, got:\n%s", migOut2)
+	if !strings.Contains(migOut2, "Vault Schema Migration: v7 -> v7") {
+		t.Fatalf("expected idempotent v7 -> v7 on second run, got:\n%s", migOut2)
 	}
 }
 
@@ -2560,6 +2560,266 @@ func TestCUJ20_OpenSourceDemoOnboardingGovernanceAndPIIGuard(t *testing.T) {
 	commitLines := strings.Split(strings.TrimSpace(runHistGit("log", "--oneline")), "\n")
 	if len(commitLines) != 2 {
 		t.Fatalf("expected 2 commits preserved after history scrub, got %d (%v)", len(commitLines), commitLines)
+	}
+}
+
+// CUJ-21: Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox Drain & RSI Proactive Noise Mining (RFC-0014 Phase 2A/2D)
+func TestCUJ21_ZeroTokenGatekeepersOutboxDrainAndRSIProactiveNoise(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v\n%s", err, out)
+	}
+
+	// 1. Configure a daemon_gatekeeper trigger backed by a local feed file
+	feedFile := filepath.Join(env.vaultDir, "edgar_feed.txt")
+	_ = os.WriteFile(feedFile, []byte("ACME 8-K item 2.02 filed"), 0o600)
+	trigYAML := fmt.Sprintf(`schedules:
+  - id: edgar-close-watch
+    cron: "CRON_TZ=UTC 30 13 * * 1-5"
+    mode: daemon_gatekeeper
+    model: flash
+    precheck_cmd: ["cat", %q]
+    dedup_mode: stdout_sha256
+    delivery: interrupt_on_breach
+    skill: thesis-check
+`, feedFile)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "triggers.yaml"), []byte(trigYAML), 0o600)
+
+	// First forced evaluation detects new SHA-256 delta -> spawns 1 dry-run isolated worker
+	hb1, err := env.run("", "heartbeat", "--dry-run", "--force-gatekeepers")
+	if err != nil || !strings.Contains(hb1, "edgar-close-watch") {
+		t.Fatalf("expected first forced gatekeeper heartbeat to trigger edgar-close-watch, got err=%v out=\n%s", err, hb1)
+	}
+	// Second forced evaluation with identical stdout SHA-256 -> 0-token cursor skip (gatekeeperSkips=1)!
+	hb2, err := env.run("", "heartbeat", "--dry-run", "--force-gatekeepers")
+	if err != nil || !strings.Contains(hb2, "gatekeeperSkips=1") {
+		t.Fatalf("expected second forced gatekeeper heartbeat to skip unchanged SHA-256 in 0 tokens, got err=%v out=\n%s", err, hb2)
+	}
+
+	// 2. Add brief_rollup items and drain via `hq outbox drain` (used by /morning-brief)
+	addOut, err := env.run("", "outbox", "add", "--tier=brief_rollup", "--scope=ACME", "--skill=thesis-check",
+		"--title=ACME Q3 Margin Intact", "--summary=No kill criteria breached; roll into 7:30 AM Morning Brief.")
+	if err != nil || !strings.Contains(addOut, "tier=brief_rollup") {
+		t.Fatalf("hq outbox add brief_rollup failed: %v\n%s", err, addOut)
+	}
+	drainOut, err := env.run("", "outbox", "drain")
+	if err != nil || !strings.Contains(drainOut, "Drained 1 brief_rollup item(s)") || !strings.Contains(drainOut, "ACME Q3 Margin Intact") {
+		t.Fatalf("expected hq outbox drain to drain 1 brief_rollup item, got err=%v out=\n%s", err, drainOut)
+	}
+	// Second drain is empty (idempotent)
+	drainOut2, err := env.run("", "outbox", "drain")
+	if err != nil || !strings.Contains(drainOut2, "Drained 0 brief_rollup item(s)") {
+		t.Fatalf("expected second hq outbox drain to return 0 items, got err=%v out=\n%s", err, drainOut2)
+	}
+
+	// 3. Emit 5 ideas_feed items from `inbox-triage` and dismiss all 5 (>70% dismissal rate over >=5 items) -> `hq rsi mine` flags `proactive_noise`
+	for i := 1; i <= 5; i++ {
+		rawAdd, aErr := env.run("", "outbox", "add", "--tier=ideas_feed", "--scope=newsletter", "--skill=inbox-triage",
+			fmt.Sprintf("--title=Low-signal promo idea %d", i), "--summary=Optional webinar invite", "--json")
+		if aErr != nil {
+			t.Fatalf("outbox add idea %d: %v (%s)", i, aErr, rawAdd)
+		}
+		var parsed struct {
+			Item struct {
+				ID string `json:"id"`
+			} `json:"item"`
+		}
+		if jErr := json.Unmarshal([]byte(rawAdd), &parsed); jErr != nil || parsed.Item.ID == "" {
+			t.Fatalf("unmarshal idea %d JSON: %v (%s)", i, jErr, rawAdd)
+		}
+		if dOut, dErr := env.run("", "ideas", "dismiss", parsed.Item.ID, "--reason=low-signal"); dErr != nil {
+			t.Fatalf("ideas dismiss %s: %v (%s)", parsed.Item.ID, dErr, dOut)
+		}
+	}
+
+	mineOut, err := env.run("", "rsi", "mine", "--json")
+	if err != nil || !strings.Contains(mineOut, `"category": "proactive_noise"`) || !strings.Contains(mineOut, "inbox-triage") {
+		t.Fatalf("expected hq rsi mine --json to detect proactive_noise for inbox-triage, got err=%v out=\n%s", err, mineOut)
+	}
+}
+
+// CUJ-22: Stateful Multi-Day Goals, Milestones & Zero-Token Waiting-On SLA Sweep (RFC-0014 Phase 2B)
+func TestCUJ22_StatefulGoalsMilestonesAndWaitingOnSLASweep(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v\n%s", err, out)
+	}
+
+	targetDate := time.Now().Add(48 * time.Hour).Format("2006-01-02")
+	if out, err := env.run("", "goals", "add", "--slug=acme-api-launch", "--title=Ship ACME API v2 Contract", "--scope=engineering", "--target="+targetDate); err != nil {
+		t.Fatalf("goals add failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "goals", "milestone", "--goal=acme-api-launch", "--title=Complete security review"); err != nil {
+		t.Fatalf("goals milestone failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "goals", "check-off", "acme-api-launch", "ms-1"); err != nil || !strings.Contains(out, "Checked off milestone") {
+		t.Fatalf("goals check-off failed: %v (%s)", err, out)
+	}
+
+	// Register a short SLA waiting-on obligation (10ms) so it becomes overdue immediately
+	if out, err := env.run("", "goals", "wait-on", "--goal=acme-api-launch", "--counterparty=Bob Rivera <bob@example.com>",
+		"--channel=gmail", "--thread=thread-acme-42", "--summary=Signed MSA redline", "--sla=10ms"); err != nil {
+		t.Fatalf("goals wait-on failed: %v (%s)", err, out)
+	}
+	time.Sleep(25 * time.Millisecond)
+
+	// Heartbeat runs 0-token SLA sweep, detects overdue silent thread, transitions status -> nudge_queued, and queues outbox follow-up alert
+	hbOut, err := env.run("", "heartbeat", "--dry-run")
+	if err != nil || !strings.Contains(hbOut, "goal:acme-api-launch/wait:wait-1") || !strings.Contains(hbOut, "overdue -> outbox:") {
+		t.Fatalf("expected hq heartbeat to detect overdue SLA in 0 tokens, got err=%v out=\n%s", err, hbOut)
+	}
+
+	dueOut, err := env.run("", "goals", "due", "--within=72h")
+	if err != nil || !strings.Contains(dueOut, "acme-api-launch") || !strings.Contains(dueOut, "Bob Rivera") || !strings.Contains(dueOut, "status=nudge_queued") {
+		t.Fatalf("expected hq goals due to surface overdue Bob Rivera SLA with status=nudge_queued, got err=%v out=\n%s", err, dueOut)
+	}
+
+	// Mark counterparty replied and complete the goal
+	if out, err := env.run("", "goals", "mark-replied", "--goal=acme-api-launch", "wait-1"); err != nil || !strings.Contains(out, "Marked waiting-on") {
+		t.Fatalf("goals mark-replied failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "goals", "complete", "acme-api-launch"); err != nil || !strings.Contains(out, "Completed goal acme-api-launch") {
+		t.Fatalf("goals complete failed: %v (%s)", err, out)
+	}
+}
+
+// CUJ-23: Context-Scheduled Console Spaces, On-Demand Entity Dossiers & 4-Layer Surgical Forget Cascade (RFC-0014 Phase 2C)
+func TestCUJ23_ScheduledConsoleSpacesEntityLookupAndSurgicalForget(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v\n%s", err, out)
+	}
+
+	// 1. Verify default Console Spaces exist (`hq spaces list`), pin `market-watch`, and confirm CONSOLE.md renders Active Console Spaces
+	spList, err := env.run("", "spaces", "list")
+	if err != nil || !strings.Contains(spList, "market-watch") || !strings.Contains(spList, "engineering") {
+		t.Fatalf("expected default Console Spaces in hq spaces list, got err=%v out=\n%s", err, spList)
+	}
+	if out, err := env.run("", "spaces", "pin", "market-watch"); err != nil {
+		t.Fatalf("hq spaces pin failed: %v (%s)", err, out)
+	}
+	consoleRaw, err := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
+	if err != nil || !strings.Contains(string(consoleRaw), "Active Console Spaces") || !strings.Contains(string(consoleRaw), "Market Close & Thesis Watch") {
+		t.Fatalf("expected pinned Space 'Market Close & Thesis Watch' in CONSOLE.md, got err=%v out=\n%s", err, string(consoleRaw))
+	}
+
+	// 2. Add an Entity Dossier (`hq memory add-entity`), verify <5ms `hq memory lookup`, and confirm 0 entity content leaks into SessionStart!
+	if out, err := env.run("", "memory", "add-entity", "--name=Alice Chen", "--email=alice@gmail.com",
+		"--space=spaces/AAAA_DM_ALICE", "--context=Partner engineering lead at ACME Corp",
+		"--note=Prefers concise morning summaries; secret project codename Zephyr-99"); err != nil {
+		t.Fatalf("memory add-entity failed: %v (%s)", err, out)
+	}
+	lookupOut, err := env.run("", "memory", "lookup", "alice@gmail.com")
+	if err != nil || !strings.Contains(lookupOut, "Alice Chen") || !strings.Contains(lookupOut, "Zephyr-99") {
+		t.Fatalf("expected hq memory lookup to resolve Alice Chen dossier, got err=%v out=\n%s", err, lookupOut)
+	}
+	sessOut, err := env.run(`{"conversationId":"conv-entity-check"}`, "hook", "session-start")
+	if err != nil || strings.Contains(sessOut, "Zephyr-99") {
+		t.Fatalf("expected SessionStart to inject 0 entity dossier content (Zephyr-99 must stay on-demand), got err=%v out=\n%s", err, sessOut)
+	}
+
+	// 3. Seed Zephyr-99 across facts.jsonl, MEMORY.md, topics/, and notes/, then run 4-layer `hq memory forget --block-pii`
+	if out, err := env.run("", "memory", "add-fact", "--topic=acme", "--statement=Project Zephyr-99 launches next quarter"); err != nil {
+		t.Fatalf("add-fact failed: %v (%s)", err, out)
+	}
+	memPath := filepath.Join(env.vaultDir, "MEMORY.md")
+	origMem, _ := os.ReadFile(memPath)
+	_ = os.WriteFile(memPath, append(origMem, []byte("\n- Track Zephyr-99 launch milestones\n")...), 0o600)
+	_ = os.MkdirAll(filepath.Join(env.vaultDir, "memory", "topics"), 0o700)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "memory", "topics", "zephyr-topic.md"), []byte("# Zephyr-99\nInternal notes.\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "notes", "meeting.md"), []byte("Keep line\nDiscuss Zephyr-99 timeline\n"), 0o600)
+
+	forgetOut, err := env.run("", "memory", "forget", "Zephyr-99", "--topic=zephyr-topic", "--entity=alice-chen", "--block-pii")
+	if err != nil || !strings.Contains(forgetOut, "expiredFacts=1") || !strings.Contains(forgetOut, "memoryLinesRemoved=1") || !strings.Contains(forgetOut, "denylistUpdated=true") {
+		t.Fatalf("expected 4-layer cascade from hq memory forget, got err=%v out=\n%s", err, forgetOut)
+	}
+	afterMem, _ := os.ReadFile(memPath)
+	if strings.Contains(string(afterMem), "Zephyr-99") {
+		t.Fatalf("expected Zephyr-99 line removed from MEMORY.md")
+	}
+	afterNote, _ := os.ReadFile(filepath.Join(env.vaultDir, "notes", "meeting.md"))
+	if strings.Contains(string(afterNote), "Zephyr-99") || !strings.Contains(string(afterNote), "Keep line") {
+		t.Fatalf("expected surgical line removal in notes/meeting.md, got: %q", string(afterNote))
+	}
+	denylistRaw, _ := os.ReadFile(filepath.Join(env.vaultDir, "private", "pii-denylist.txt"))
+	if !strings.Contains(string(denylistRaw), "Zephyr-99") {
+		t.Fatalf("expected --block-pii to append Zephyr-99 to local/private/pii-denylist.txt")
+	}
+}
+
+// CUJ-24: Universal Credential Vault Read-Guard, 24h Proposal Expiration TTL & Outbound Contextual-PII Warning Badge (RFC-0014 Phase 2D)
+func TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v\n%s", err, out)
+	}
+
+	// Seed synthetic credential files & accounting ledger file in local/private/
+	gchatCookie := filepath.Join(env.vaultDir, "private", "gchat", "chrome-profile", "Cookies")
+	gmailToken := filepath.Join(env.vaultDir, "private", "gmail", "tokens.json")
+	denylistPath := filepath.Join(env.vaultDir, "private", "pii-denylist.txt")
+	ledgerPath := filepath.Join(env.vaultDir, "private", "ledger", "2026.journal")
+	_ = os.MkdirAll(filepath.Dir(gchatCookie), 0o700)
+	_ = os.MkdirAll(filepath.Dir(gmailToken), 0o700)
+	_ = os.MkdirAll(filepath.Dir(ledgerPath), 0o700)
+	_ = os.WriteFile(gchatCookie, []byte("mock-cookie"), 0o600)
+	_ = os.WriteFile(gmailToken, []byte(`{"refresh_token":"mock"}`), 0o600)
+	_ = os.WriteFile(denylistPath, []byte("crimson-home-address\n"), 0o600)
+	_ = os.WriteFile(ledgerPath, []byte("2026-11-01 * Opening Balance\n"), 0o600)
+
+	// 1. Untainted regular worker MUST be denied reading/shell-catting credential files, while allowed on local/private/ledger/
+	readCookieIn := fmt.Sprintf(`{"conversationId":"conv-untainted-worker","toolCall":{"name":"read_file","args":{"Path":%q}}}`, gchatCookie)
+	outCookie, _ := env.run(readCookieIn, "hook", "pre-tool")
+	if !strings.Contains(outCookie, `"decision":"deny"`) || !strings.Contains(outCookie, "Credential Vault policy") {
+		t.Fatalf("expected untainted read_file on gchat Cookies to be denied, got:\n%s", outCookie)
+	}
+
+	catTokenIn := fmt.Sprintf(`{"conversationId":"conv-untainted-worker","toolCall":{"name":"run_command","args":{"CommandLine":%q}}}`, "cat "+gmailToken)
+	outToken, _ := env.run(catTokenIn, "hook", "pre-tool")
+	if !strings.Contains(outToken, `"decision":"deny"`) {
+		t.Fatalf("expected untainted shell cat on gmail tokens.json to be denied, got:\n%s", outToken)
+	}
+
+	readLedgerIn := fmt.Sprintf(`{"conversationId":"conv-untainted-worker","toolCall":{"name":"read_file","args":{"Path":%q}}}`, ledgerPath)
+	outLedger, _ := env.run(readLedgerIn, "hook", "pre-tool")
+	if !strings.Contains(outLedger, `"decision":"allow"`) {
+		t.Fatalf("expected untainted ledger-ingest worker to retain read access to local/private/ledger/, got:\n%s", outLedger)
+	}
+
+	// 2. Stage an outbound proposal containing denylisted PII + SSN pattern -> verify RiskFlags & ask_question PII WARNING badge!
+	ssnSample := "123-" + "45-" + "6789"
+	propPIIOut, err := env.run("", "propose", "--type=external_action", "--conv=conv-untainted-worker",
+		"--summary=Send address crimson-home-address and tax ID "+ssnSample+" to vendor",
+		"--cmd=echo sending-external")
+	if err != nil || !strings.Contains(propPIIOut, "Contextual PII Warning") || !strings.Contains(propPIIOut, "denylist_pii_match") || !strings.Contains(propPIIOut, "ssn_pattern") {
+		t.Fatalf("expected hq propose to flag denylist_pii_match and ssn_pattern, got err=%v out=\n%s", err, propPIIOut)
+	}
+	pending, err := approvals.List(env.vaultDir)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("expected 1 pending proposal, got %d (%v)", len(pending), err)
+	}
+	piiProp := pending[0]
+	askIn := fmt.Sprintf(`{"conversationId":"conv-untainted-worker","toolCall":{"name":"ask_question","args":{"questions":[{"question":"Approve %s?","options":["Approve","Reject"]}]}}}`, piiProp.ID)
+	askOut, err := env.run(askIn, "hook", "pre-tool")
+	if err != nil || !strings.Contains(askOut, "PII WARNING") || !strings.Contains(askOut, "denylist_pii_match") {
+		t.Fatalf("expected PreToolUse ask_question overwrite to prepend PII WARNING banner, got err=%v out=\n%s", err, askOut)
+	}
+	_, _ = env.run("", "reject", piiProp.ID)
+
+	// 3. Stage a proposal with a short TTL (`--ttl=200ms`), let it expire, and confirm `hq approve` deterministically rejects it!
+	if out, err := env.run("", "propose", "--type=external_action", "--ttl=200ms", "--summary=Ephemeral quote reply", "--cmd=echo stale-send"); err != nil {
+		t.Fatalf("propose --ttl=200ms failed: %v (%s)", err, out)
+	}
+	pendingTTL, _ := approvals.List(env.vaultDir)
+	if len(pendingTTL) != 1 {
+		t.Fatalf("expected 1 TTL proposal, got %d", len(pendingTTL))
+	}
+	ttlProp := pendingTTL[0]
+	time.Sleep(250 * time.Millisecond)
+
+	expAppOut, expErr := env.run("", "approve", ttlProp.ID, "--sha256="+ttlProp.SHA256[:12])
+	if expErr == nil || !strings.Contains(expAppOut, "expired") {
+		t.Fatalf("expected hq approve on expired proposal to fail with expired error, got err=%v out=\n%s", expErr, expAppOut)
 	}
 }
 

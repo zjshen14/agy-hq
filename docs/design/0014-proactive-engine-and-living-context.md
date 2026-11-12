@@ -1,6 +1,6 @@
 # RFC-0014: Proactive Engine v2 — Event-Driven Gatekeepers, Calibrated Attention Routing, Stateful Goals, Scheduled Console Spaces & Living Context
 
-- **Status:** Proposed (Phase 1 — Awaiting User Review)
+- **Status:** Implemented
 - **Author:** `[Task:research] Learn from Muse.ai Proactive Work` (`gemini-4-carbon-high`)
 - **Created:** 2026-11-12
 - **Companion Research:** [10 — Meta Muse (`muse.ai`) Deep Dive: Personal Context Architecture, Proactive Workflows & Comparative Audit Against `agy-hq`](../research/10_muse_ai_proactive_and_context_study.md)
@@ -55,7 +55,7 @@ flowchart TB
     subgraph Surfaces["4. Living Context & Security Surfaces"]
         SP["Context-Scheduled Console Spaces\n• swe-pulse | market-watch | personal-ops\n• 0-token Go render in hq_console.md & :4242"]
         MEM["Living Context Vault\n• Entity Dossiers (local/memory/entities/)\n• Surgical hq memory forget cascade"]
-        SENT["Sentinel-Grade Guardrails\n• Global local/private/ credential read-guard\n• Contextual-PII outbound badge + 24h TTL\n• Narrow expiring standing policies (hq policy)"]
+        SENT["Sentinel-Grade Guardrails\n• Universal local/private/ credential read-guard\n• Contextual-PII outbound badge + 24h TTL\n• 100% 1-tap human approval on external sends"]
     end
 
     TR & GW -->|"Delta == 0 -> HEARTBEAT_OK (0 tokens)"| SP
@@ -307,17 +307,15 @@ In `HEAD` (`internal/hooks/hooks.go` L518–532), `local/private/` is only block
   - `HandlePreToolUse` denies direct `read_file`, `write_file`, `edit_file`, `grep_search`, `find_by_name`, and direct shell file-read commands (`cat`, `head`, `tail`, `grep`, `python`, `sqlite3`, `jq`, `base64`) targeting those credential paths in **every** conversation (tainted or untainted!).
   - **Result:** Raw OAuth tokens and session cookies **never enter any LLM context window**. Agents interact with Gmail and Google Chat exclusively through the compiled `./bin/hq` Go binary (which acts as the trusted host-side credential surrogate, analogous to `hatch-authd` + `Sentinel`), while legitimate domain files in `local/private/taxes/` and `local/private/ledger/` remain accessible to untainted `tax-prep` and `ledger-ingest` workflows.
 
-### 8.2 Outbound Contextual-PII Scan, Proposal TTLs & Scoped Standing Policies
+### 8.2 Outbound Contextual-PII Scan, Proposal TTLs & Strict 1-Tap Human Approval
 
 1. **Outbound Contextual-PII Leak Warning (Preventing the Muse Marketplace Incident):**
    - When `./bin/hq propose` stages an external message (`gmail_send`, `gchat_send`, `external_action`), Go runs `local/private/pii-denylist.txt` + SSN/account/address heuristics over the outbound body/command.
-   - If sensitive personal identifiers (e.g., home street address, SSN, account number) appear in an outbound payload to a non-allowlisted recipient, `Proposal.RiskFlags` records `["PII_ADDRESS_DETECTED"]` and `HandlePreToolUse` injects a prominent `⚠️ [PII WARNING: Outbound message contains sensitive personal data]` banner into the `ask_question` prompt!
+   - If sensitive personal identifiers (e.g., home street address, SSN, account number) appear in an outbound payload, `Proposal.RiskFlags` records the triggered rule IDs and `HandlePreToolUse` injects a prominent `⚠️ [PII WARNING: ...]` banner directly into the `ask_question` prompt and `:4242` WebUI approval card!
 2. **Proposal Expiration TTL (`ExpiresAt`, Default `24h`):**
    - Stale pending proposals can be dangerous if tapped days later when context has changed (e.g., an old market thesis action or outdated reply). Every `Proposal` receives `ExpiresAt` (default `24h`, configurable via `--ttl`). `ApproveProposal` deterministically rejects expired proposals (`status = "expired"`), and `RunHeartbeat` cleans them into `interventions.jsonl`.
-3. **Narrow, Expiring Standing Policies (`./bin/hq policy` — Bounded `"Allow Always"`):**
-   - To reduce friction on strictly low-risk, reversible actions without ever weakening high-stakes gates:
-     - **Hard-Excluded Classes (Never Eligible for Standing Policies):** Financial transactions, `gh pr merge` on third-party repos, `hq rsi apply`, bulk sends, or outbound messages to new/unbounded recipients (`RiskFlags` non-empty).
-     - **Eligible Narrow Scopes:** Exact `(ActionType, RecipientOrTargetAllowlist, MaxDailyCount, ExpiresAt <= 30d)` rules explicitly created by a 1-tap user SHA-256 confirmation and revocable anytime via `./bin/hq policy list` / `./bin/hq policy revoke <id>` or the `:4242` Console. Every auto-executed action still writes a full `InterventionRecord` (`decision: "approved_by_policy:<policyId>"`) to `local/memory/interventions.jsonl`.
+3. **Zero Standing Auto-Execution for External Sends (Decision D2):**
+   - Unlike Muse Sentinel's `"Allow Always"` standing rules, `agy-hq` intentionally retains **100% per-action 1-tap SHA-256 human approval** across every external send (`gmail_send`, `gchat_send`, `external_action`), eliminating silent prompt-injection exfiltration or stale-policy drift.
 
 ---
 
@@ -352,23 +350,17 @@ Each existing starter skill gains crisp, progressive-disclosure hooks into Proac
 | **Phase 2A: Zero-Token Gatekeepers & Attention Outbox** | `triggers.yaml` v2 (`mode`, `dedup_mode`, `delivery`), `trigger_cursors.json`, 10m triage coalescer in `internal/kernel`, `internal/outbox` (`interrupt`, `brief_rollup`, `ideas_feed`, `silent_ledger` + Quiet Hours), `./bin/hq outbox` & `./bin/hq ideas`. | Unit tests in `internal/outbox/outbox_test.go` + `kernel_test.go`; CUJ-21 E2E test verifying `0`-token cursor skip on unchanged `precheck_cmd` and Quiet Hours hold-until-brief. | Small–Medium |
 | **Phase 2B: Stateful `Goals` & `WaitingOn` SLA Watchdogs** | `local/memory/goals.json`, `./bin/hq goals` CLI, 0-token overdue `WaitingOn` detector in `RunHeartbeat`, `morning-brief` & `sleep-consolidate` sync. | Unit tests for `Goal` lifecycle & `WaitingOn` SLA transitions; CUJ-22 E2E test verifying overdue silent thread detection. | Medium |
 | **Phase 2C: Scheduled Console `Spaces` & Living Context (`forget` + `entities`)** | Declarative `spaces` engine in `internal/webui` (`hq_console.md` + `:4242` tabs), `./bin/hq memory forget` 4-layer cascade, `local/memory/entities/<slug>.md` + `./bin/hq memory lookup`. | `webui_test.go` schedule-window swap tests (`weekdays` vs `weekends`); `vault_test.go` surgical `forget --dry-run` & redaction tests; CUJ-23 E2E test. | Medium |
-| **Phase 2D: Credential Read-Guard & Sentinel Approval Hardening** | Global `local/private/{gmail,gchat,credentials}/` read-guard in `HandlePreToolUse`, outbound contextual-PII warning badge + `24h` proposal `ExpiresAt` in `internal/approvals`, optional `./bin/hq policy` narrow standing rules + RSI dismissal mining. | `hooks_test.go` untainted credential-read denial matrix; `approvals_test.go` TTL expiry & PII warning tests; `hq ci check-harness` `H2-B` extension. | Small–Medium |
+| **Phase 2D: Credential Read-Guard & Sentinel Approval Hardening** | Universal `local/private/{gmail,gchat,credentials,pii-denylist.txt}` read-guard in `HandlePreToolUse`, outbound contextual-PII warning badge + `24h` proposal `ExpiresAt` in `internal/approvals`, and RSI `proactive_noise` dismissal mining. | `hooks_test.go` untainted credential-read denial matrix; `approvals_test.go` TTL expiry & PII warning tests; `hq ci check-harness` `H2-B` extension; CUJ-24 E2E test. | Small–Medium |
 
 ---
 
-## 12. Open Design Decisions for User Review
+## 12. Resolved Design Decisions (Approved & Implemented)
 
-Before writing implementation code on `hq/research-muse-proactive`, we request alignment on four design choices:
-
-1. **Decision D1 — Phased Scope Selection:**
-   - **(Recommended) Option A — Full 4-Subphase Rollout (`2A` $\rightarrow$ `2D`) in Sequential Commits:** Deliver the complete Proactive Engine v2 (`Gatekeepers + Outbox/Ideas` $\rightarrow$ `Goals/WaitingOn` $\rightarrow$ `Scheduled Spaces + Forget/Entities` $\rightarrow$ `Credential Read-Guard + Approval TTLs`).
-   - **Option B — Core Proactivity First (`2A` + `2B` + `2D` Security Guard Only):** Ship 0-token gatekeepers, 4-tier attention routing, `Goals`/`WaitingOn` watchdogs, and the credential read-guard + proposal TTLs first; defer scheduled Console `Spaces` (`2C`) to a follow-up PR.
-2. **Decision D2 — Narrow Standing Policies (`./bin/hq policy` in `2D`):**
-   - **(Recommended) Option A — Keep 100% Per-Action 1-Tap Approval for All External Sends; Add Proposal TTL (`24h`) + Outbound PII Warning Badges Only:** Zero standing auto-execution for any outbound message (`gmail_send`, `gchat_send`), preserving our strictest human-in-the-loop invariant while adding staleness protection and contextual-PII warnings.
-   - **Option B — Enable Narrow Expiring Standing Policies for Allowlisted Recipients:** Allow explicit SHA-confirmed standing rules (`<= 30d` TTL, capped daily count) for specific allowlisted internal/self spaces (e.g., posting automated digests to a personal notes space).
-3. **Decision D3 — Default Schedule for `edgar-close-watch` & Custom Deal Watchdogs:**
-   - **(Recommended) Option A — Migrate Watchdogs to `mode: daemon_gatekeeper` + `isolated_worker`:** Run pre-checks in `hq daemon` (`0` tokens when unchanged) and execute active runs in isolated `flash` workers that emit `interrupt` *only* on `WATCH`/`BREACHED` triggers (rolling `INTACT` checks into `brief_rollup`), keeping `[HQ] Front Desk` context lean.
-   - **Option B — Keep Native Front Desk `schedule()` Crons for All Triggers:** Accept cold-cache wakeups in exchange for running inside the Front Desk process even when `hq daemon` is stopped.
-4. **Decision D4 — Entity Dossiers (`local/memory/entities/<slug>.md`):**
-   - **(Recommended) Option A — Automatic Nightly Distillation in `/sleep-consolidate` + On-Demand `hq memory lookup`:** Automatically create/update contact & counterparty dossiers from verified transcripts during nightly dreaming with `0` `SessionStart` token overhead.
-   - **Option B — Explicit User/Agent Opt-In Only (`hq memory add-entity`):** Only maintain dossiers for contacts the user explicitly asks to track.
+1. **Decision D1 — Full 4-Subphase Rollout (`2A` $\rightarrow$ `2D`) [Approved Option A]:**
+   - Shipped all four subphases end-to-end (`Gatekeepers + Outbox/Ideas` $\rightarrow$ `Goals/WaitingOn SLAs` $\rightarrow$ `Scheduled Console Spaces + Surgical Forget/Entities` $\rightarrow$ `Universal Credential Read-Guard + 24h Proposal TTLs & Contextual-PII Badges`), verified by unit tests and `CUJ-21`..`CUJ-24` black-box E2E tests.
+2. **Decision D2 — Keep 100% Per-Action 1-Tap Approval; Reject Standing Auto-Send Policies [Approved Option A]:**
+   - Kept 100% per-action 1-tap SHA-256 manual approval on all outbound messages (`gmail_send`, `gchat_send`, `external_action`), adding `24h` proposal expiration (`ExpiresAt`) and outbound contextual-PII warning badges (`RiskFlags`) without introducing standing auto-execution policies (`hq policy`).
+3. **Decision D3 — `daemon_gatekeeper` + `isolated_worker` Watchdogs with Graceful Fallback [Approved Option A]:**
+   - Migrated recurring watchdogs (`edgar-close-watch` and custom deal watches) to `mode: daemon_gatekeeper` + `isolated_worker` (interrupting only on `WATCH`/`BREACHED` and rolling `INTACT` into `/morning-brief` via `brief_rollup`), while automatically falling back to Front Desk `schedule()` crons whenever `hq daemon` is inactive (`!IsDaemonActiveFast`).
+4. **Decision D4 — Nightly Entity Dossier Distillation + On-Demand `hq memory lookup` [Approved Option A]:**
+   - Added conflict-resolved contact & counterparty dossiers in `local/memory/entities/<slug>.md` (`0600`), distilled during `/sleep-consolidate` and queried on-demand via `./bin/hq memory lookup` (`<5ms`, `0` `SessionStart` token overhead).

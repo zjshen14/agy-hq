@@ -35,6 +35,7 @@ type MemoryStatusReport struct {
 	EstimatedTokens  int         `json:"estimatedTokens"`
 	OverBudget       bool        `json:"overBudget"`
 	Topics           []TopicPage `json:"topics"`
+	EntityCount      int         `json:"entityCount"`
 	OrphanTopicSlugs []string    `json:"orphanTopicSlugs,omitempty"`
 	ActiveFactCount  int         `json:"activeFactCount"`
 	ExpiredFactCount int         `json:"expiredFactCount"`
@@ -372,6 +373,7 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 	if err != nil {
 		return nil, err
 	}
+	entities, _ := ListEntities(vaultDir)
 
 	var orphans []string
 	for _, tp := range topics {
@@ -410,6 +412,7 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 		EstimatedTokens:  estTokens,
 		OverBudget:       memLines > MaxMemoryIndexLines,
 		Topics:           topics,
+		EntityCount:      len(entities),
 		OrphanTopicSlugs: orphans,
 		ActiveFactCount:  len(activeFacts),
 		ExpiredFactCount: len(expiredFacts),

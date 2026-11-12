@@ -254,6 +254,7 @@ func main() {
 		account := fs.String("account", "", "Optional account alias when --type=gmail_send or --type=gchat_send")
 		workDir := fs.String("workdir", "", "Optional working directory for command execution")
 		convID := fs.String("conv", "", "Optional conversation ID")
+		ttlStr := fs.String("ttl", "", "Optional proposal expiration TTL duration (default 24h)")
 		_ = fs.Parse(os.Args[2:])
 		if *rsiID != "" {
 			hqBin := "./bin/hq"
@@ -357,6 +358,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" --cmd=\"...\" (or --type=gmail_send --draft=<draftId>)")
 			os.Exit(1)
 		}
+		if strings.TrimSpace(*ttlStr) != "" {
+			if d, tErr := time.ParseDuration(strings.TrimSpace(*ttlStr)); tErr == nil {
+				if meta == nil {
+					meta = make(map[string]string)
+				}
+				meta["expiresAt"] = time.Now().Add(d).UTC().Format(time.RFC3339Nano)
+			}
+		}
 		prop, err := approvals.CreateWithMetadata(vaultDir, *actionType, *summary, *cmdStr, *workDir, *convID, meta)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", err)
@@ -364,6 +373,9 @@ func main() {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
+		if len(prop.RiskFlags) > 0 {
+			fmt.Printf("  ⚠️ Contextual PII Warning: %s\n", strings.Join(prop.RiskFlags, ", "))
+		}
 		fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
 
 	case "approve":
@@ -453,14 +465,27 @@ func main() {
 	case "heartbeat":
 		fs := flag.NewFlagSet("heartbeat", flag.ExitOnError)
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns without calling LLM")
+		forceGatekeepers := fs.Bool("force-gatekeepers", false, "Evaluate all daemon_gatekeeper precheck_cmd triggers immediately regardless of cron minute")
 		_ = fs.Parse(os.Args[2:])
+		var extra []string
+		if *forceGatekeepers {
+			gkOut, gkSaves, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, time.Now(), true, *dryRun)
+			extra = append(extra, gkOut...)
+			if gkSaves > 0 {
+				extra = append(extra, fmt.Sprintf("gatekeeperSkips=%d", gkSaves))
+			}
+		}
 		status, err := kernel.RunHeartbeat(vaultDir, *dryRun)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq heartbeat error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(status)
+		if len(extra) > 0 {
+			fmt.Printf("%s | forcedGatekeepers: %s\n", status, strings.Join(extra, "; "))
+		} else {
+			fmt.Println(status)
+		}
 
 	case "claim-desk":
 		fs := flag.NewFlagSet("claim-desk", flag.ExitOnError)
@@ -1354,6 +1379,7 @@ func main() {
 			for _, tp := range rep.Topics {
 				fmt.Printf("  - [%s] %s (%d lines): %s\n", tp.Slug, tp.Title, tp.LineCount, tp.Summary)
 			}
+			fmt.Printf("Entity Dossiers (entities/):      %d dossier(s) (0 SessionStart tokens; on-demand lookup)\n", rep.EntityCount)
 			fmt.Printf("Bi-Temporal Facts (facts.jsonl):  %d active, %d expired (%d raw lines)\n", rep.ActiveFactCount, rep.ExpiredFactCount, rep.RawFactLines)
 			if len(rep.StaleReferences) > 0 {
 				fmt.Println("Stale References Detected:")
@@ -1431,13 +1457,169 @@ func main() {
 			enc.SetEscapeHTML(false)
 			_ = enc.Encode(digest)
 
+		case "forget":
+			var posQ string
+			var flagArgs []string
+			for _, a := range os.Args[3:] {
+				if !strings.HasPrefix(a, "-") && posQ == "" {
+					posQ = a
+				} else {
+					flagArgs = append(flagArgs, a)
+				}
+			}
+			fs := flag.NewFlagSet("memory forget", flag.ExitOnError)
+			query := fs.String("query", "", "Substring or fact ID to scrub across facts, MEMORY.md, topics, entities, and notes")
+			topicSlug := fs.String("topic", "", "Optional topic wiki slug to delete (local/memory/topics/<slug>.md)")
+			entitySlug := fs.String("entity", "", "Optional entity dossier slug to delete (local/memory/entities/<slug>.md)")
+			blockPII := fs.Bool("block-pii", false, "Also append --query to local/private/pii-denylist.txt")
+			dryRun := fs.Bool("dry-run", false, "Preview cascading deletions without mutating files")
+			asJSON := fs.Bool("json", false, "Output JSON report")
+			_ = fs.Parse(flagArgs)
+			if *query == "" {
+				*query = posQ
+			}
+			rep, err := vault.ForgetMemory(vaultDir, *query, *topicSlug, *entitySlug, *blockPII, *dryRun)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory forget failed: %v\n", err)
+				os.Exit(1)
+			}
+			if !*dryRun {
+				_ = webui.SyncMarkdownConsole(vaultDir)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(rep)
+				return
+			}
+			mode := "Executed"
+			if *dryRun {
+				mode = "[DRY-RUN] Previewed"
+			}
+			fmt.Printf("%s surgical forget: expiredFacts=%d, memoryLinesRemoved=%d, deletedFiles=%d, scrubbedFiles=%d, denylistUpdated=%v\n",
+				mode, len(rep.ExpiredFactIDs), rep.MemoryLinesRemoved, len(rep.DeletedFiles), len(rep.ScrubbedFiles), rep.DenylistUpdated)
+
+		case "entities":
+			fs := flag.NewFlagSet("memory entities", flag.ExitOnError)
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(os.Args[3:])
+			list, err := vault.ListEntities(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory entities failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(list)
+				return
+			}
+			for _, d := range list {
+				fmt.Printf("- [%s] %s (%s): %s\n", d.Slug, d.Name, d.Kind, d.Context)
+			}
+
+		case "add-entity":
+			fs := flag.NewFlagSet("memory add-entity", flag.ExitOnError)
+			slug := fs.String("slug", "", "Entity slug (defaults to kebab-case of --name)")
+			name := fs.String("name", "", "Display name")
+			kind := fs.String("kind", "person", "Entity kind (person, organization, project)")
+			email := fs.String("email", "", "Comma-separated email(s)")
+			handle := fs.String("handle", "", "Comma-separated handle(s)")
+			space := fs.String("space", "", "Comma-separated Google Chat space ID(s)")
+			ctxStr := fs.String("context", "", "1-line relationship / role summary")
+			note := fs.String("note", "", "Optional interaction or working-style note to append")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(os.Args[3:])
+			var emails, handles, spaces []string
+			if *email != "" {
+				emails = []string{*email}
+			}
+			if *handle != "" {
+				handles = []string{*handle}
+			}
+			if *space != "" {
+				spaces = []string{*space}
+			}
+			ent, err := vault.UpsertEntity(vaultDir, vault.EntityDossier{
+				Slug:    *slug,
+				Name:    *name,
+				Kind:    *kind,
+				Emails:  emails,
+				Handles: handles,
+				Spaces:  spaces,
+				Context: *ctxStr,
+			}, *note)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory add-entity failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(ent)
+				return
+			}
+			fmt.Printf("Saved entity dossier %s (%s) at %s\n", ent.Slug, ent.Name, ent.Path)
+
+		case "lookup":
+			var posQ string
+			var flagArgs []string
+			for _, a := range os.Args[3:] {
+				if !strings.HasPrefix(a, "-") && posQ == "" {
+					posQ = a
+				} else {
+					flagArgs = append(flagArgs, a)
+				}
+			}
+			fs := flag.NewFlagSet("memory lookup", flag.ExitOnError)
+			qFlag := fs.String("query", "", "Query string (name, email, handle, space ID, or context)")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(flagArgs)
+			if posQ == "" {
+				posQ = *qFlag
+			}
+			hits, err := vault.LookupEntities(vaultDir, posQ)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory lookup failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(hits)
+				return
+			}
+			if len(hits) == 0 {
+				fmt.Printf("No entity dossiers matched %q.\n", posQ)
+				return
+			}
+			for _, d := range hits {
+				fmt.Printf("- [%s] %s (%s): %s (emails=%s, spaces=%s)\n",
+					d.Slug, d.Name, d.Kind, d.Context, strings.Join(d.Emails, ","), strings.Join(d.Spaces, ","))
+				for _, n := range d.Notes {
+					fmt.Printf("    * %s\n", n)
+				}
+			}
+
 		default:
-			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, add-fact, prune-fact, compact, verify-transcript)\n", sub)
+			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup)\n", sub)
 			os.Exit(1)
 		}
 
 	case "tasks":
 		runTasksCLI(vaultDir, os.Args[2:])
+
+	case "outbox":
+		runOutboxCLI(vaultDir, os.Args[2:])
+
+	case "ideas":
+		runIdeasCLI(vaultDir, os.Args[2:])
+
+	case "goals":
+		runGoalsCLI(vaultDir, os.Args[2:])
+
+	case "spaces":
+		runSpacesCLI(vaultDir, os.Args[2:])
 
 	case "obs":
 		runObsCLI(vaultDir, os.Args[2:])
@@ -2405,8 +2587,12 @@ Commands:
   status [--quiet]                    Show pending approvals and active worktrees
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
+  goals <list|add|milestone|check-off|wait-on|mark-replied|due|complete>  Stateful multi-day goals & counterparty SLAs
+  outbox <add|list|drain>             4-tier attention outbox & quiet-hours DND governance
+  ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions
+  spaces <list|active|pin|hide|auto>  Manage schedule-aware Console Spaces
   obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability
-  memory <status|topics|add-fact|prune-fact|compact|verify-transcript>  Manage 4-layer memory engine
+  memory <status|topics|add-fact|prune-fact|forget|entities|add-entity|lookup|compact|verify-transcript>  5-layer living memory engine
   rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
   ci <check-pii|check-harness|scrub-history|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once

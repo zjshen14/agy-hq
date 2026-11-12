@@ -87,8 +87,8 @@ This file is the **single source of truth** for tracking what is done, what is i
 ---
 
 ### M3: Production Integrations, Task Board Hierarchy & Self-Improvement
-*Goal: Scale `agy-hq` with hybrid Google Chat transport, tiered task board management, embedded sidecar console, automated pre-IPO deal flow monitoring, recursive self-improvement, and CI defense-in-depth.*
-- **Specs:** [RFC-0008](design/0008-gchat-integration.md), [RFC-0009](design/0009-task-board-redesign.md), [RFC-0010](design/0010-agent-recursive-self-improvement.md), [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md), [RFC-0012](design/0012-token-observability.md), [RFC-0013](design/0013-open-source-launch-strategy.md)
+*Goal: Scale `agy-hq` with hybrid Google Chat transport, tiered task board management, embedded sidecar console, automated pre-IPO deal flow monitoring, recursive self-improvement, CI defense-in-depth, and Proactive Engine v2.*
+- **Specs:** [RFC-0008](design/0008-gchat-integration.md), [RFC-0009](design/0009-task-board-redesign.md), [RFC-0010](design/0010-agent-recursive-self-improvement.md), [RFC-0011](design/0011-ci-pipeline-and-regression-harness.md), [RFC-0012](design/0012-token-observability.md), [RFC-0013](design/0013-open-source-launch-strategy.md), [RFC-0014](design/0014-proactive-engine-and-living-context.md)
 
 - [x] **M3.1 (Decoupled Google Chat Integration — RFC-0008):**
   - Hybrid transport in `internal/gchat/`: Workspace OAuth REST API v1 + personal `@gmail.com` `--headless=new` Chrome CDP WebSocket transport (`127.0.0.1:9222`) with network jail and isolated profile in `local/private/gchat/chrome-profile`.
@@ -119,6 +119,11 @@ This file is the **single source of truth** for tracking what is done, what is i
 - [x] **M3.8 (Open-Source Readiness, Governance & 5-Minute `--demo` Onboarding — RFC-0013):**
   - Contextual PII invariant (`P6-ContextualPII`), optional `local/private/pii-denylist.txt`, full commit history scanner (`hq ci check-pii --history`), deterministic history scrubber (`hq ci scrub-history`), and subprocess `GIT_DIR` sanitization.
   - Apache License 2.0 (`LICENSE`), `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, GitHub templates, and opt-in synthetic sample dataset (`./bin/hq init --demo` / `./scripts/bootstrap.sh --demo`).
+- [x] **M3.9 (Proactive Engine v2 & Living Context — RFC-0014):**
+  - 0-token cursor gatekeepers (`trigger_cursors.json`), 10-minute triage coalescer, and daemon-aware trigger arming eliminating cold-cache Front Desk wakeups.
+  - 4-tier Attention Router (`internal/outbox`: `interrupt`, `brief_rollup`, `ideas_feed`, `silent_ledger`), Quiet Hours gate, `./bin/hq outbox` + `./bin/hq ideas`, and RSI `proactive_noise` dismissal mining.
+  - Stateful multi-day `Goals` & `WaitingOn` SLA sweep (`./bin/hq goals`), schedule-aware Console `Spaces` (`./bin/hq spaces` + `:4242` tabs), on-demand Entity Dossiers (`./bin/hq memory lookup`), and 4-layer surgical `./bin/hq memory forget [--block-pii]`.
+  - Universal credential vault read-guard across all sessions (`local/private/{gmail,gchat,credentials,pii-denylist.txt}`), `24h` proposal expiration (`ExpiresAt`), outbound contextual-PII warning badges (`RiskFlags`), and `CUJ-21`..`CUJ-24` E2E tests.
 
 ---
 

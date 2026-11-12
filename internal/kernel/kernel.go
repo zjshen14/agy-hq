@@ -15,20 +15,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
 type QuotaState struct {
-	Date            string       `json:"date"`
-	SpawnsToday     int          `json:"spawnsToday"`
-	MaxDailySpawns  int          `json:"maxDailySpawns"`
-	CircuitOpen     bool         `json:"circuitOpen"`
-	CircuitReason   string       `json:"circuitReason,omitempty"`
-	LastHeartbeatAt string       `json:"lastHeartbeatAt,omitempty"`
-	LastStatus      string       `json:"lastStatus,omitempty"`
-	Events          []SpawnEvent `json:"events,omitempty"`
+	Date                 string       `json:"date"`
+	SpawnsToday          int          `json:"spawnsToday"`
+	GatekeeperSavesToday int          `json:"gatekeeperSavesToday,omitempty"`
+	MaxDailySpawns       int          `json:"maxDailySpawns"`
+	CircuitOpen          bool         `json:"circuitOpen"`
+	CircuitReason        string       `json:"circuitReason,omitempty"`
+	LastHeartbeatAt      string       `json:"lastHeartbeatAt,omitempty"`
+	LastStatus           string       `json:"lastStatus,omitempty"`
+	Events               []SpawnEvent `json:"events,omitempty"`
 }
 
 // SpawnEvent records a background task spawn or 0-token gatekeeper event.
@@ -1671,14 +1674,20 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 }
 
 // GetUnarmedTriggers compares local/triggers.yaml against the active Front Desk's ArmedTriggers
+// (and active background daemon coverage for daemon_gatekeeper / isolated_worker schedules)
 // and returns the armed and unarmed ScheduleTrigger slices.
 func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []ScheduleTrigger) {
 	cfg, err := LoadTriggers(vaultDir)
 	if err != nil || cfg == nil {
 		return nil, nil
 	}
+	daemonActive := IsDaemonActiveFast(vaultDir)
 	fd, ok := GetFrontDesk(vaultDir)
 	for _, s := range cfg.Schedules {
+		if daemonActive && (s.EffectiveMode() == "daemon_gatekeeper" || s.EffectiveMode() == "isolated_worker") {
+			armed = append(armed, s)
+			continue
+		}
 		if ok && fd.ArmedTriggers != nil {
 			if _, isArmed := fd.ArmedTriggers[s.ID]; isArmed {
 				armed = append(armed, s)
@@ -1874,6 +1883,7 @@ func LoadQuota(vaultDir string) QuotaState {
 	if state.Date != today {
 		state.Date = today
 		state.SpawnsToday = 0
+		state.GatekeeperSavesToday = 0
 		state.CircuitOpen = false
 		state.CircuitReason = ""
 	}
@@ -2043,53 +2053,80 @@ func ProcessInbox(vaultDir string, dryRun bool) ([]string, error) {
 	return processed, nil
 }
 
-// RunHeartbeat executes the zero-token Go sidecar pre-check loop (inbox drop router + Gmail precheck).
-// If no inbox files, new unread Primary emails, or dead-man's switch alerts are detected, zero LLM tokens are used.
+// RunHeartbeat executes the zero-token Go sidecar pre-check loop (proposal TTL sweep, inbox drop router,
+// Gmail/GChat batch coalescer, daemon gatekeepers, and Waiting-On obligation SLA sweeps).
+// If no actionable deltas are detected, zero LLM tokens are used.
 func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	now := time.Now()
+	_, _ = approvals.ExpireStaleProposals(vaultDir, now)
+
 	inboxActions, err := ProcessInbox(vaultDir, dryRun)
 	if err != nil {
 		return "", err
 	}
 
+	attCfg := outbox.LoadAttentionConfig(vaultDir)
+
+	var readyGmail []CoalescedTriageEntry
 	if batches, _, gErr := gmail.RunPrecheck(vaultDir, ""); gErr == nil && len(batches) > 0 {
 		for _, batch := range batches {
-			title := fmt.Sprintf("[Auto] Gmail Triage (%s · %s)", batch.Account, batch.BatchID)
-			prompt := fmt.Sprintf(
-				"Activate the inbox-triage skill to process Gmail triage batch %s (account=%s, threads=%s). "+
-					"Read each thread via `./bin/hq gmail read-quarantined --account=%s --thread=<threadId>`, "+
-					"create a plain-text draft reply via `./bin/hq gmail draft` if a reply is needed, "+
-					"stage a send proposal via `./bin/hq propose --type=gmail_send --draft=<draftId>`, "+
-					"and save your structured summary via `./bin/hq gmail triage-result --batch=%s`.",
-				batch.BatchID, batch.Account, strings.Join(batch.ThreadIDs, ","), batch.Account, batch.BatchID,
-			)
-			out, spawnErr := SpawnFlashTask(vaultDir, "gmail-precheck:"+batch.BatchID, "inbox-triage", title, prompt, dryRun)
-			if spawnErr != nil {
-				inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (deferred: %v)", batch.BatchID, spawnErr))
-			} else {
-				inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (%s)", batch.BatchID, out))
-			}
+			readyGmail = append(readyGmail, EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", batch.Account, batch.BatchID, batch.ThreadIDs, attCfg.CoalesceWindow, now)...)
+		}
+	} else if attCfg.CoalesceWindow > 0 {
+		readyGmail = EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", "", "", nil, attCfg.CoalesceWindow, now)
+	}
+	for _, entry := range readyGmail {
+		batchLabel := strings.Join(entry.BatchIDs, "+")
+		title := fmt.Sprintf("[Auto] Gmail Triage (%s · %s)", entry.Account, batchLabel)
+		prompt := fmt.Sprintf(
+			"Activate the inbox-triage skill to process Gmail triage batch %s (account=%s, threads=%s). "+
+				"Read each thread via `./bin/hq gmail read-quarantined --account=%s --thread=<threadId>`, "+
+				"create a plain-text draft reply via `./bin/hq gmail draft` if a reply is needed, "+
+				"stage a send proposal via `./bin/hq propose --type=gmail_send --draft=<draftId>`, "+
+				"and save your structured summary via `./bin/hq gmail triage-result --batch=%s`.",
+			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
+		)
+		out, spawnErr := SpawnFlashTask(vaultDir, "gmail-precheck:"+batchLabel, "inbox-triage", title, prompt, dryRun)
+		if spawnErr != nil {
+			inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (deferred: %v)", batchLabel, spawnErr))
+		} else {
+			inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (%s)", batchLabel, out))
 		}
 	}
 
+	var readyChat []CoalescedTriageEntry
 	if chatBatches, _, cErr := gchat.RunPrecheck(vaultDir, ""); cErr == nil && len(chatBatches) > 0 {
 		for _, batch := range chatBatches {
-			title := fmt.Sprintf("[Auto] GChat Triage (%s · %s)", batch.Account, batch.BatchID)
-			prompt := fmt.Sprintf(
-				"Activate the inbox-triage skill to process Google Chat triage batch %s (account=%s, spaces=%s). "+
-					"Read each space/thread via `./bin/hq gchat read-quarantined --account=%s --space=<spaceId>`, "+
-					"create a plain-text draft reply via `./bin/hq gchat draft` if a reply is needed, "+
-					"stage a send proposal via `./bin/hq propose --type=gchat_send --draft=<draftId>`, "+
-					"and save your structured summary via `./bin/hq gchat triage-result --batch=%s`.",
-				batch.BatchID, batch.Account, strings.Join(batch.SpaceIDs, ","), batch.Account, batch.BatchID,
-			)
-			out, spawnErr := SpawnFlashTask(vaultDir, "gchat-precheck:"+batch.BatchID, "inbox-triage", title, prompt, dryRun)
-			if spawnErr != nil {
-				inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (deferred: %v)", batch.BatchID, spawnErr))
-			} else {
-				inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (%s)", batch.BatchID, out))
-			}
+			readyChat = append(readyChat, EnqueueOrFlushCoalescedTriage(vaultDir, "gchat", batch.Account, batch.BatchID, batch.SpaceIDs, attCfg.CoalesceWindow, now)...)
 		}
+	} else if attCfg.CoalesceWindow > 0 {
+		readyChat = EnqueueOrFlushCoalescedTriage(vaultDir, "gchat", "", "", nil, attCfg.CoalesceWindow, now)
+	}
+	for _, entry := range readyChat {
+		batchLabel := strings.Join(entry.BatchIDs, "+")
+		title := fmt.Sprintf("[Auto] GChat Triage (%s · %s)", entry.Account, batchLabel)
+		prompt := fmt.Sprintf(
+			"Activate the inbox-triage skill to process Google Chat triage batch %s (account=%s, spaces=%s). "+
+				"Read each space/thread via `./bin/hq gchat read-quarantined --account=%s --space=<spaceId>`, "+
+				"create a plain-text draft reply via `./bin/hq gchat draft` if a reply is needed, "+
+				"stage a send proposal via `./bin/hq propose --type=gchat_send --draft=<draftId>`, "+
+				"and save your structured summary via `./bin/hq gchat triage-result --batch=%s`.",
+			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
+		)
+		out, spawnErr := SpawnFlashTask(vaultDir, "gchat-precheck:"+batchLabel, "inbox-triage", title, prompt, dryRun)
+		if spawnErr != nil {
+			inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (deferred: %v)", batchLabel, spawnErr))
+		} else {
+			inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (%s)", batchLabel, out))
+		}
+	}
+
+	if gkActions, _, gkErr := EvaluateDaemonGatekeepers(vaultDir, now, false, dryRun); gkErr == nil && len(gkActions) > 0 {
+		inboxActions = append(inboxActions, gkActions...)
+	}
+
+	if goalActions, gErr := SweepWaitingOnObligations(vaultDir, now); gErr == nil && len(goalActions) > 0 {
+		inboxActions = append(inboxActions, goalActions...)
 	}
 
 	state := LoadQuota(vaultDir)

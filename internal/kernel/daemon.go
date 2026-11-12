@@ -20,9 +20,48 @@ import (
 type ScheduleTrigger struct {
 	ID          string   `json:"id"`
 	Cron        string   `json:"cron"`
+	Mode        string   `json:"mode,omitempty"` // front_desk_cron | isolated_worker | daemon_gatekeeper
 	Model       string   `json:"model"`
 	Skill       string   `json:"skill"`
 	PrecheckCmd []string `json:"precheckCmd,omitempty"`
+	DedupMode   string   `json:"dedupMode,omitempty"` // none | exit_zero_nonempty | stdout_sha256
+	Delivery    string   `json:"delivery,omitempty"`  // interrupt | interrupt_on_breach | brief_rollup | ideas_feed | silent_ledger
+}
+
+// EffectiveMode returns the normalized execution mode ("front_desk_cron", "isolated_worker", or "daemon_gatekeeper").
+func (s ScheduleTrigger) EffectiveMode() string {
+	m := strings.ToLower(strings.TrimSpace(s.Mode))
+	switch m {
+	case "daemon_gatekeeper", "isolated_worker", "front_desk_cron":
+		return m
+	}
+	if len(s.PrecheckCmd) > 0 {
+		return "daemon_gatekeeper"
+	}
+	return "front_desk_cron"
+}
+
+// EffectiveDedupMode returns the normalized precheck deduplication mode.
+func (s ScheduleTrigger) EffectiveDedupMode() string {
+	d := strings.ToLower(strings.TrimSpace(s.DedupMode))
+	switch d {
+	case "none", "exit_zero_nonempty", "stdout_sha256":
+		return d
+	}
+	if len(s.PrecheckCmd) > 0 {
+		return "stdout_sha256"
+	}
+	return "none"
+}
+
+// EffectiveDelivery returns the normalized attention delivery policy for this trigger.
+func (s ScheduleTrigger) EffectiveDelivery() string {
+	d := strings.ToLower(strings.TrimSpace(s.Delivery))
+	switch d {
+	case "interrupt", "interrupt_on_breach", "brief_rollup", "ideas_feed", "silent_ledger":
+		return d
+	}
+	return ""
 }
 
 // FiveFieldCron strips any leading CRON_TZ=<tz> token and returns a standard 5-field cron expression
@@ -129,12 +168,18 @@ func parseScheduleField(s *ScheduleTrigger, line string) {
 		s.ID = cleanVal(val)
 	case "cron":
 		s.Cron = cleanVal(val)
+	case "mode":
+		s.Mode = cleanVal(val)
 	case "model":
 		s.Model = cleanVal(val)
 	case "skill":
 		s.Skill = cleanVal(val)
 	case "precheck_cmd":
 		s.PrecheckCmd = parseStringList(val)
+	case "dedup_mode":
+		s.DedupMode = cleanVal(val)
+	case "delivery":
+		s.Delivery = cleanVal(val)
 	}
 }
 
@@ -403,6 +448,20 @@ func RecordDaemonStop(vaultDir string) error {
 		_ = os.Remove(p)
 	}
 	return nil
+}
+
+// IsDaemonActiveFast checks local/memory/daemon.json without making network dials so SessionStart
+// and GetUnarmedTriggers can determine in <1ms whether daemon_gatekeeper schedules are actively managed.
+func IsDaemonActiveFast(vaultDir string) bool {
+	data, err := os.ReadFile(daemonStatePath(vaultDir))
+	if err != nil {
+		return false
+	}
+	var st daemonState
+	if json.Unmarshal(data, &st) != nil || st.PID <= 0 {
+		return false
+	}
+	return isProcessAlive(st.PID)
 }
 
 // GetDaemonInfo returns the status, running state, PID, uptime, and declared triggers.

@@ -15,6 +15,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 )
 
 // FrictionCategory classifies the type of agentic friction observed in ground-truth telemetry.
@@ -27,6 +28,7 @@ const (
 	FrictionDraftEdited      FrictionCategory = "draft_edited"
 	FrictionRepeatedWorkflow FrictionCategory = "repeated_workflow"
 	FrictionQuotaAnomaly     FrictionCategory = "quota_anomaly"
+	FrictionProactiveNoise   FrictionCategory = "proactive_noise"
 )
 
 // AttributionFaultLayer identifies where in a multi-agent hierarchy a failure originated (Who&When).
@@ -502,6 +504,34 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 				cm.ParentConversationID,
 				cm.Model,
 				anom.Timestamp,
+				false,
+			)
+		}
+	}
+
+	// 3c. Scan outbox ideas_feed dismissal rates (>70% across >=5 resolved ideas) as FrictionProactiveNoise (RFC-0014)
+	if stats, err := outbox.ComputeSkillDismissalStats(vaultDir); err == nil {
+		for _, st := range stats {
+			if st.TotalResolved < 5 || st.DismissRate <= 0.70 {
+				continue
+			}
+			reasonsSuffix := ""
+			if st.SampleReasons != "" {
+				reasonsSuffix = fmt.Sprintf(" (user reasons: %s)", st.SampleReasons)
+			}
+			upsert(
+				FrictionProactiveNoise,
+				FaultWorkerACIOrSkill,
+				st.Skill,
+				"hq_outbox",
+				"ideas_feed:"+st.Skill,
+				fmt.Sprintf("Skill %s has %.0f%% proactive idea dismissal rate (%d/%d dismissed)%s", st.Skill, st.DismissRate*100.0, st.DismissedCount, st.TotalResolved, reasonsSuffix),
+				fmt.Sprintf("Tighten proactive idea generation threshold in %s/SKILL.md so low-signal suggestions are suppressed", st.Skill),
+				st.DismissedCount,
+				"outbox-"+st.Skill,
+				"",
+				"",
+				st.LastSeenAt,
 				false,
 			)
 		}

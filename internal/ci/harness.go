@@ -342,7 +342,39 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		return false, "Front Desk 4th inline lookup tool call was not denied"
 	}
 
-	return true, "18/18 PreToolUse security, quarantine, and Front Desk non-blocking probes passed"
+	// 5. Universal Credential Vault guard across untainted sessions (gmail/gchat/credentials/pii-denylist blocked; taxes/ledger permitted)
+	credReadOut, _ := runHook(map[string]interface{}{
+		"conversationId": "conv-worker",
+		"toolCall": map[string]interface{}{
+			"name": "read_file",
+			"args": map[string]interface{}{"Path": filepath.Join(vaultDir, "private", "gchat", "accounts.json")},
+		},
+	})
+	if !strings.Contains(credReadOut, `"decision":"deny"`) {
+		return false, "Universal Credential Vault guard failed to deny untainted read_file on private/gchat/accounts.json"
+	}
+	credShellOut, _ := runHook(map[string]interface{}{
+		"conversationId": "conv-worker",
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "cat " + filepath.Join(vaultDir, "private", "gmail", "tokens.json")},
+		},
+	})
+	if !strings.Contains(credShellOut, `"decision":"deny"`) {
+		return false, "Universal Credential Vault guard failed to deny untainted shell cat on private/gmail/tokens.json"
+	}
+	ledgerReadOut, _ := runHook(map[string]interface{}{
+		"conversationId": "conv-worker",
+		"toolCall": map[string]interface{}{
+			"name": "read_file",
+			"args": map[string]interface{}{"Path": filepath.Join(vaultDir, "private", "ledger", "2026.beancount")},
+		},
+	})
+	if !strings.Contains(ledgerReadOut, `"decision":"allow"`) {
+		return false, "Untainted worker should still be allowed to read private/ledger/"
+	}
+
+	return true, "21/21 PreToolUse security, credential-guard, quarantine, and Front Desk non-blocking probes passed"
 }
 
 func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {

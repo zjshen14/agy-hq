@@ -235,20 +235,21 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
 ├── .gitignore                         # Ignores /local/, /bin/, and *.secret*
 ├── AGENTS.md                          # General-purpose assistant rules (mounts ./local/)
 ├── go.mod                             # Go module for bin/hq
-├── cmd/hq/                            # CLI: init | hook | daemon | propose | notify | status | memory | gmail | gchat | spawn | subagent | tasks | rsi | ci
+├── cmd/hq/                            # CLI: init | hook | daemon | propose | status | memory | outbox | ideas | goals | spaces | gmail | gchat | spawn | subagent | tasks | obs | rsi | ci
 ├── internal/                          # Go microkernel packages
-│   ├── kernel/                        # Trigger runner, worker pool, daemon installer, quota circuit breaker
-│   ├── hooks/                         # SessionStart, PreToolUse action/PII guard, Stop parser
-│   ├── approvals/                     # SHA-256 pending queue & deterministic CLI executor
+│   ├── kernel/                        # Trigger gatekeepers, goals/SLA sweep, worker pool, daemon installer, quota breaker
+│   ├── hooks/                         # SessionStart, PreToolUse action/credential/PII guard, Stop parser
+│   ├── approvals/                     # SHA-256 pending queue, 24h TTL, contextual-PII badge & CLI executor
 │   ├── ci/                            # CI/CD PII scanners, harness contracts & git hook installer
 │   ├── doctor/                        # Diagnostic checks for sandbox, CLI, and Vault health
-│   ├── e2e/                           # Black-box E2E tests for CUJs 1–20
+│   ├── e2e/                           # Black-box E2E tests for CUJs 1–24
 │   ├── gchat/                         # Decoupled Google Chat CDP WebSocket & REST transports
 │   ├── gmail/                         # Decoupled Gmail Layer 1 primitives & sidecar engine
 │   ├── obs/                           # Token, prefix-cache, latency & context observability engine
-│   ├── rsi/                           # 4-stage recursive self-improvement engine
-│   ├── vault/                         # Memory auditing, 4-layer topics, bi-temporal fact engine
-│   ├── webui/                         # Interactive Aux Console (sidecar://agy-hq-console/, http://127.0.0.1:4242)
+│   ├── outbox/                        # 4-tier attention router, Quiet Hours gate & Ideas feed (RFC-0014)
+│   ├── rsi/                           # 4-stage recursive self-improvement & proactive noise engine
+│   ├── vault/                         # Memory auditing, 4-layer topics, entities, surgical forget & facts
+│   ├── webui/                         # Interactive Aux Console & Scheduled Spaces (http://127.0.0.1:4242)
 │   └── worktree/                      # Isolated git worktree lifecycle manager
 ├── templates/                         # Starter blueprints copied into ./local/ by `hq init`
 ├── docs/                              # Documentation Hub (product/, design/, decisions/, research/)
@@ -276,14 +277,18 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
     ├── USER.md                        # Personal profile, preferences, writing voice & goals
     ├── MEMORY.md                      # Consolidated Roadmap Index (<2,500 tokens)
     ├── CONSOLE.md                     # Live status artifact & task board template
+    ├── console_spaces/                # Custom schedule-aware Console Space YAML cards (RFC-0014)
     ├── inbox/                         # Drag-and-drop folder (CSVs, PDFs, notes, receipts)
     ├── notes/                         # Open-ended non-repo work (posts, research, theses, plans)
     ├── worktrees/                     # Parallel git worktrees (<repo>-<task>/) across any GitHub repo
     ├── repos/                         # Optional bare git clones for external GitHub repos
-    ├── private/                       # High-PII records (ledger/, taxes/, gchat/) with strict context guard
-    └── memory/                        # 4-layer memory store:
+    ├── private/                       # High-PII records (ledger/, taxes/) & isolated credentials (gmail/, gchat/)
+    └── memory/                        # 4-layer memory & proactive state store:
         ├── topics/                    # Topic wiki pages (RFC-0006)
+        ├── entities/                  # On-demand contact & counterparty dossiers (RFC-0014)
         ├── facts.jsonl                # Bi-temporal atomic facts (RFC-0006)
+        ├── goals.json                 # Stateful multi-day Goals & WaitingOn SLAs (RFC-0014)
+        ├── trigger_cursors.json       # 0-token pre-check SHA-256 cursors (RFC-0014)
         ├── journal/YYYY-MM-DD/        # Monotonic per-turn execution journals
         ├── tasks.json                 # Tracked Layer-1 task conversations & lifecycle states
         ├── tasks_archive.jsonl        # Cold storage for archived tasks (RFC-0009)

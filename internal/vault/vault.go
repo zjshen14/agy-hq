@@ -169,11 +169,13 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		filepath.Join(vaultDir, "private", "ledger"),
 		filepath.Join(vaultDir, "private", "taxes"),
 		filepath.Join(vaultDir, "memory", "topics"),
+		filepath.Join(vaultDir, "memory", "entities"),
 		filepath.Join(vaultDir, "memory", "journal"),
 		filepath.Join(vaultDir, "memory", "pending"),
 		filepath.Join(vaultDir, "memory", "outbox"),
 		filepath.Join(vaultDir, "memory", "proposals"),
 		filepath.Join(vaultDir, "memory", "rsi", "hypotheses"),
+		filepath.Join(vaultDir, "console_spaces"),
 	}
 
 	for _, d := range dirs {

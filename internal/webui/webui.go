@@ -23,22 +23,27 @@ import (
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
-// DashboardState aggregates live Vault, approval, worktree, task, journal, quota, observability, and doctor state.
+// DashboardState aggregates live Vault, approval, worktree, task, journal, quota, observability, spaces, goals, ideas, and doctor state.
 type DashboardState struct {
-	VaultDir      string               `json:"vaultDir"`
-	UpdatedAt     string               `json:"updatedAt"`
-	Quota         kernel.QuotaState    `json:"quota"`
-	Observability obs.DashboardSummary `json:"observability"`
-	Pending       []approvals.Proposal `json:"pending"`
-	Worktrees     []string             `json:"worktrees"`
-	Tasks         []kernel.ActiveTask  `json:"tasks"`
-	TodayTurns    []hooks.JournalEntry `json:"todayTurns"`
-	Health        []doctor.CheckResult `json:"health"`
-	FlashResult   string               `json:"flashResult,omitempty"`
-	CSRFToken     string               `json:"-"`
+	VaultDir      string                         `json:"vaultDir"`
+	UpdatedAt     string                         `json:"updatedAt"`
+	Quota         kernel.QuotaState              `json:"quota"`
+	Observability obs.DashboardSummary           `json:"observability"`
+	Pending       []approvals.Proposal           `json:"pending"`
+	ActiveSpaces  []ConsoleSpace                 `json:"activeSpaces,omitempty"`
+	Goals         []kernel.Goal                  `json:"goals,omitempty"`
+	OverdueWaits  []kernel.OverdueWaitingSummary `json:"overdueWaits,omitempty"`
+	Ideas         []outbox.OutboxItem            `json:"ideas,omitempty"`
+	Worktrees     []string                       `json:"worktrees"`
+	Tasks         []kernel.ActiveTask            `json:"tasks"`
+	TodayTurns    []hooks.JournalEntry           `json:"todayTurns"`
+	Health        []doctor.CheckResult           `json:"health"`
+	FlashResult   string                         `json:"flashResult,omitempty"`
+	CSRFToken     string                         `json:"-"`
 }
 
 // IsLoopbackAddr returns true if listenAddr binds strictly to a loopback interface (127.0.0.1, ::1, or localhost).
@@ -352,6 +357,126 @@ func NewHandler(vaultDir string) http.Handler {
 		renderHTML(w, state)
 	})
 
+	mux.HandleFunc("/api/console-spaces", func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
+		spaces, _ := ListSpaces(vaultDir, time.Now())
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(spaces)
+	})
+
+	mux.HandleFunc("/api/console-spaces/set", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
+		var id, mode, reqCSRF string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				ID        string `json:"id"`
+				Mode      string `json:"mode"`
+				CSRFToken string `json:"csrf_token"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id = strings.TrimSpace(body.ID)
+			mode = strings.TrimSpace(body.Mode)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
+		} else {
+			_ = r.ParseForm()
+			id = strings.TrimSpace(r.FormValue("id"))
+			mode = strings.TrimSpace(r.FormValue("mode"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
+		}
+		err := SetSpaceOverride(vaultDir, id, mode)
+		_ = SyncMarkdownConsole(vaultDir)
+		msg := fmt.Sprintf("Updated space %s (%s)", id, mode)
+		if err != nil {
+			msg = fmt.Sprintf("Error updating space %s: %v", id, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": err == nil, "message": msg})
+	})
+
+	mux.HandleFunc("/api/ideas/action", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
+		var id, action, reason, durationStr, reqCSRF string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				ID        string `json:"id"`
+				Action    string `json:"action"`
+				Reason    string `json:"reason"`
+				Duration  string `json:"duration"`
+				CSRFToken string `json:"csrf_token"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id = strings.TrimSpace(body.ID)
+			action = strings.ToLower(strings.TrimSpace(body.Action))
+			reason = strings.TrimSpace(body.Reason)
+			durationStr = strings.TrimSpace(body.Duration)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
+		} else {
+			_ = r.ParseForm()
+			id = strings.TrimSpace(r.FormValue("id"))
+			action = strings.ToLower(strings.TrimSpace(r.FormValue("action")))
+			reason = strings.TrimSpace(r.FormValue("reason"))
+			durationStr = strings.TrimSpace(r.FormValue("duration"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
+		}
+
+		now := time.Now()
+		var err error
+		switch action {
+		case "promote":
+			_, err = outbox.PromoteIdea(vaultDir, id, now)
+		case "snooze":
+			dur := 24 * time.Hour
+			if durationStr != "" {
+				if parsed, dErr := time.ParseDuration(durationStr); dErr == nil && parsed > 0 {
+					dur = parsed
+				}
+			}
+			_, err = outbox.SnoozeIdea(vaultDir, id, dur, now)
+		case "dismiss":
+			_, err = outbox.DismissIdea(vaultDir, id, reason, now)
+		default:
+			err = fmt.Errorf("unsupported action %q", action)
+		}
+		_ = SyncMarkdownConsole(vaultDir)
+		msg := fmt.Sprintf("Idea %s: %s", id, action)
+		if err != nil {
+			msg = fmt.Sprintf("Error updating idea %s: %v", id, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": err == nil, "message": msg})
+	})
+
 	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		_, _ = w.Write([]byte(faviconSVG))
@@ -511,12 +636,46 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	health := doctor.Run(vaultDir)
 	quota := kernel.LoadQuota(vaultDir)
 	obsSum := obs.BuildDashboardSummary(vaultDir, now)
+	activeSpaces, _ := ActiveSpaces(vaultDir, now)
+	allGoals, _ := kernel.ListGoals(vaultDir)
+	var activeGoals []kernel.Goal
+	var overdueWaits []kernel.OverdueWaitingSummary
+	for _, g := range allGoals {
+		if g.Status != "active" {
+			continue
+		}
+		activeGoals = append(activeGoals, g)
+		for _, wItem := range g.WaitingOn {
+			if wItem.Status == "replied" {
+				continue
+			}
+			isOverdue := wItem.Status == "nudge_queued" || wItem.Status == "overdue"
+			if wItem.FollowUpAfter != "" {
+				if ft, pErr := time.Parse(time.RFC3339, wItem.FollowUpAfter); pErr == nil && !now.Before(ft) {
+					isOverdue = true
+				}
+			}
+			if isOverdue {
+				overdueWaits = append(overdueWaits, kernel.OverdueWaitingSummary{
+					GoalSlug:  g.Slug,
+					GoalTitle: g.Title,
+					Scope:     g.Scope,
+					Waiting:   wItem,
+				})
+			}
+		}
+	}
+	ideas, _ := outbox.List(vaultDir, outbox.TierIdeasFeed, outbox.StatusPending, now)
 	return DashboardState{
 		VaultDir:      vaultDir,
 		UpdatedAt:     now.Format("15:04:05"),
 		Quota:         quota,
 		Observability: obsSum,
 		Pending:       pending,
+		ActiveSpaces:  activeSpaces,
+		Goals:         activeGoals,
+		OverdueWaits:  overdueWaits,
+		Ideas:         ideas,
 		Worktrees:     wts,
 		Tasks:         sel.VisibleRows,
 		TodayTurns:    turns,
@@ -922,8 +1081,13 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
       <span class="badge badge-warn">{{.ActionType}}</span>
     </div>
     <div class="muted" style="margin:4px 0">
-      ID: <code>{{.ID}}</code> · SHA-256: <code title="{{.SHA256}}">{{shortSHA .SHA256}}</code>
+      ID: <code>{{.ID}}</code> · SHA-256: <code title="{{.SHA256}}">{{shortSHA .SHA256}}</code>{{if .ExpiresAt}} · Expires: <code>{{.ExpiresAt}}</code>{{end}}
     </div>
+    {{if .RiskFlags}}
+    <div style="margin:6px 0">
+      <span class="badge badge-danger">⚠️ Contextual PII Warning: {{range $i, $f := .RiskFlags}}{{if $i}}, {{end}}{{$f}}{{end}}</span>
+    </div>
+    {{end}}
     {{if draftPayload .}}
     <div class="preview-box">
       <div class="preview-title">💬 Message Preview</div>
@@ -1049,6 +1213,56 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
   {{end}}
 {{else}}
   <div class="card muted">No active git worktrees in local/worktrees/.</div>
+{{end}}
+</div>
+
+{{if .ActiveSpaces}}
+<h2>Active Console Spaces ({{len .ActiveSpaces}})</h2>
+<div id="spaces-list">
+  {{range .ActiveSpaces}}
+  <div class="card" id="space-{{.ID}}">
+    <div class="meta-row">
+      <strong>🗂️ {{.Title}}</strong>
+      <div>
+        {{if eq .OverrideMode "pin"}}<span class="badge badge-info">PINNED</span> {{end}}
+        <span class="badge badge-pass">{{.ID}}</span>
+      </div>
+    </div>
+    <div class="muted" style="margin:4px 0">Schedule: <code>{{.Schedule}}</code>{{if .Scope}} · Scope: <code>{{.Scope}}</code>{{end}}</div>
+    {{range .RenderedCards}}
+    <div style="margin-top:8px">
+      <div class="kpi-label">{{.Title}}</div>
+      {{range .Lines}}<div class="muted" style="color:#cbd5e1">• {{.}}</div>{{end}}
+    </div>
+    {{end}}
+    <div class="actions">
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-override" data-id="{{.ID}}" data-mode="hide">Hide Space</button>
+      {{if .OverrideMode}}<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-override" data-id="{{.ID}}" data-mode="auto">Reset Schedule</button>{{end}}
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+<h2>Proactive Ideas Feed (<span id="ideas-count">{{len .Ideas}}</span>)</h2>
+<div id="ideas-list">
+{{if .Ideas}}
+  {{range .Ideas}}
+  <div class="card" id="idea-{{.ID}}">
+    <div class="meta-row">
+      <strong>💡 {{.Title}}</strong>
+      <span class="badge badge-info">{{if .SourceSkill}}{{.SourceSkill}}{{else}}idea{{end}}</span>
+    </div>
+    {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
+    <div class="actions">
+      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="promote">Promote</button>
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="snooze">Snooze 24h</button>
+      <button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="dismiss">Dismiss</button>
+    </div>
+  </div>
+  {{end}}
+{{else}}
+  <div class="card muted">No pending proactive ideas in outbox.</div>
 {{end}}
 </div>
 
@@ -1189,6 +1403,26 @@ document.addEventListener('click', function(ev) {
     completeTask(btn.getAttribute('data-slug') || '');
   } else if (act === 'archive-task') {
     archiveTask(btn.getAttribute('data-slug') || '');
+  } else if (act === 'idea-action') {
+    const id = btn.getAttribute('data-id') || '';
+    const op = btn.getAttribute('data-idea-op') || '';
+    let reason = '';
+    if (op === 'dismiss') {
+      reason = prompt('Optional reason for dismissing idea ' + id + ':', 'Not relevant right now') || '';
+    }
+    fetch('/api/ideas/action', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, action: op, reason: reason, duration: '24h', csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated ' + id), !d.ok); refreshState(); });
+  } else if (act === 'space-override') {
+    const id = btn.getAttribute('data-id') || '';
+    const mode = btn.getAttribute('data-mode') || 'auto';
+    fetch('/api/console-spaces/set', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, mode: mode, csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated space ' + id), !d.ok); location.reload(); });
   }
 });
 
@@ -1300,7 +1534,15 @@ func SyncMarkdownConsole(vaultDir string) error {
 			if len(short) > 12 {
 				short = short[:12]
 			}
-			fmt.Fprintf(&b, "> - **`%s`** (`%s` · `sha256:%s`): %s — `%s`\n", p.ID, p.ActionType, short, p.Summary, p.Command)
+			piiBadge := ""
+			if len(p.RiskFlags) > 0 {
+				piiBadge = fmt.Sprintf(" · ⚠️ **PII WARNING [%s]**", strings.Join(p.RiskFlags, ", "))
+			}
+			expBadge := ""
+			if p.ExpiresAt != "" {
+				expBadge = fmt.Sprintf(" · `expires:%s`", p.ExpiresAt)
+			}
+			fmt.Fprintf(&b, "> - **`%s`** (`%s` · `sha256:%s`%s%s): %s — `%s`\n", p.ID, p.ActionType, short, expBadge, piiBadge, p.Summary, p.Command)
 			payload := ""
 			if p.Metadata != nil {
 				if dp := p.Metadata["draftPayload"]; dp != "" {
@@ -1346,7 +1588,11 @@ func SyncMarkdownConsole(vaultDir string) error {
 	if state.Quota.CircuitOpen {
 		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
 	}
-	fmt.Fprintf(&b, "- **Background Flash Spawns Today:** `%d / %d` (`%s`)\n", state.Quota.SpawnsToday, state.Quota.MaxDailySpawns, circuitBadge)
+	gatekeeperNote := ""
+	if state.Quota.GatekeeperSavesToday > 0 {
+		gatekeeperNote = fmt.Sprintf(" · 0-Token Gatekeeper Skips: `%d`", state.Quota.GatekeeperSavesToday)
+	}
+	fmt.Fprintf(&b, "- **Background Flash Spawns Today:** `%d / %d` (`%s`%s)\n", state.Quota.SpawnsToday, state.Quota.MaxDailySpawns, circuitBadge, gatekeeperNote)
 	fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
 		obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
 		obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
@@ -1443,6 +1689,50 @@ func SyncMarkdownConsole(vaultDir string) error {
 	} else {
 		for _, wt := range state.Worktrees {
 			fmt.Fprintf(&b, "- `%s` (`%s`)\n", filepath.Base(wt), wt)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.ActiveSpaces) > 0 {
+		fmt.Fprintf(&b, "## 🗂️ Active Console Spaces (`%d` Active)\n", len(state.ActiveSpaces))
+		for _, sp := range state.ActiveSpaces {
+			pinTag := ""
+			if sp.OverrideMode == "pin" {
+				pinTag = " · `PINNED`"
+			}
+			fmt.Fprintf(&b, "- **%s** (`%s` · `%s`%s)\n", sp.Title, sp.ID, sp.Schedule, pinTag)
+			for _, card := range sp.RenderedCards {
+				fmt.Fprintf(&b, "  - *%s:* %s\n", card.Title, strings.Join(card.Lines, " | "))
+			}
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.Goals) > 0 || len(state.OverdueWaits) > 0 {
+		fmt.Fprintf(&b, "## 🎯 Active Goals & Counterparty SLAs (`%d` Goal(s) · `%d` Overdue Wait(s))\n", len(state.Goals), len(state.OverdueWaits))
+		for _, g := range state.Goals {
+			done := 0
+			for _, m := range g.Milestones {
+				if m.Done {
+					done++
+				}
+			}
+			dueTag := ""
+			if g.TargetDate != "" {
+				dueTag = fmt.Sprintf(" · target `%s`", g.TargetDate)
+			}
+			fmt.Fprintf(&b, "- **`%s`** — %s (`%d/%d` milestones%s)\n", g.Slug, g.Title, done, len(g.Milestones), dueTag)
+		}
+		for _, ow := range state.OverdueWaits {
+			fmt.Fprintf(&b, "- ⚠️ **Overdue SLA (`%s`):** Waiting on **%s** for *%s* (`%s` · deadline `%s`)\n", ow.GoalSlug, ow.Waiting.Counterparty, ow.Waiting.Summary, ow.Waiting.Channel, ow.Waiting.FollowUpAfter)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.Ideas) > 0 {
+		fmt.Fprintf(&b, "## 💡 Proactive Ideas Feed (`%d` Pending)\n", len(state.Ideas))
+		for _, it := range state.Ideas {
+			fmt.Fprintf(&b, "- **`%s`** (`%s`): **%s** — %s *(run `./bin/hq ideas promote %s` or `dismiss %s`)*\n", it.ID, it.SourceSkill, it.Title, it.Summary, it.ID, it.ID)
 		}
 		b.WriteString("\n---\n\n")
 	}

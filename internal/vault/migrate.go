@@ -12,7 +12,7 @@ import (
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -135,6 +135,16 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	if prev.Version < 6 {
 		removedSlugs, _ := kernel.CleanNestedTasks(vaultDir)
 		recordStep("v6_layer1_taskboard_cleanup", fmt.Sprintf("Cleaned %d nested child subagent(s) from tasks.json to enforce Layer-1 task invariant", len(removedSlugs)))
+	}
+
+	// Migration v6 -> v7: Proactive Engine v2 (RFC-0014) — credential gitignore rules, trigger modes/delivery, entities & console_spaces dirs
+	if prev.Version < 7 {
+		mergedIgnore := mergeGitignoreAdditive(
+			filepath.Join(templateDir, "gitignore.tmpl"),
+			filepath.Join(vaultDir, ".gitignore"),
+		)
+		upgradedTriggers := upgradeV7ProactiveTriggers(vaultDir)
+		recordStep("v7_proactive_engine_v2", fmt.Sprintf("Upgraded Proactive Engine v2 (gitignoreRulesAdded=%d, triggersUpgraded=%v, entitiesAndSpacesReady=true)", mergedIgnore, upgradedTriggers))
 	}
 
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml
@@ -348,6 +358,38 @@ func upgradeSleepConsolidateTriggerModel(vaultDir string) bool {
 		}
 	}
 	return false
+}
+
+func upgradeV7ProactiveTriggers(vaultDir string) bool {
+	trigPath := filepath.Join(vaultDir, "triggers.yaml")
+	b, err := os.ReadFile(trigPath)
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	if strings.Contains(s, "mode: daemon_gatekeeper") || strings.Contains(s, "dedup_mode:") {
+		return false
+	}
+	updated := s
+	oldEdgar := "  - id: edgar-close-watch\n    cron: \"CRON_TZ=America/Los_Angeles 30 13 * * 1-5\"\n    model: flash\n    precheck_cmd: [\"./bin/hq\", \"status\", \"--quiet\"]\n    skill: thesis-check"
+	newEdgar := "  - id: edgar-close-watch\n    cron: \"CRON_TZ=America/Los_Angeles 30 13 * * 1-5\"\n    mode: daemon_gatekeeper\n    model: flash\n    precheck_cmd: [\"./bin/hq\", \"status\", \"--quiet\"]\n    dedup_mode: stdout_sha256\n    delivery: interrupt_on_breach\n    skill: thesis-check"
+	if strings.Contains(updated, oldEdgar) {
+		updated = strings.Replace(updated, oldEdgar, newEdgar, 1)
+	}
+	oldMorning := "  - id: morning-brief\n    cron: \"CRON_TZ=America/Los_Angeles 30 7 * * *\"\n    model: flash\n    skill: morning-brief"
+	newMorning := "  - id: morning-brief\n    cron: \"CRON_TZ=America/Los_Angeles 30 7 * * *\"\n    mode: front_desk_cron\n    model: flash\n    delivery: interrupt\n    skill: morning-brief"
+	if strings.Contains(updated, oldMorning) {
+		updated = strings.Replace(updated, oldMorning, newMorning, 1)
+	}
+	oldSleep := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    model: gemini-4-carbon-high\n    skill: sleep-consolidate"
+	newSleep := "  - id: sleep-consolidate\n    cron: \"CRON_TZ=America/Los_Angeles 30 23 * * *\"\n    mode: isolated_worker\n    model: gemini-4-carbon-high\n    delivery: silent_ledger\n    skill: sleep-consolidate"
+	if strings.Contains(updated, oldSleep) {
+		updated = strings.Replace(updated, oldSleep, newSleep, 1)
+	}
+	if updated == s {
+		return false
+	}
+	return os.WriteFile(trigPath, []byte(updated), 0o600) == nil
 }
 
 func migrateV5TaskBoardHierarchy(vaultDir string) (int, int) {

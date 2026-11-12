@@ -392,7 +392,8 @@ var (
 	}
 
 	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
-	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|propose|status)\b`)
+	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|outbox\s+add|propose|status)\b`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|pii-denylist\.txt)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -448,6 +449,23 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				"reason":   "Blocked by Front Desk Lease Subagent Invariant: subagents are ephemeral worker processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).",
 			})
 		}
+		// Universal Credential Vault Guard: block direct shell reads/mutations of raw OAuth tokens, Chrome cookies, credentials, or pii-denylist.txt across ALL sessions
+		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
+		credShellHit := reLocalCredentialShell.MatchString(cmdLine)
+		if !credShellHit && canonVault != "" {
+			for _, sub := range []string{"gmail", "gchat", "credentials", "pii-denylist.txt"} {
+				if strings.Contains(cmdLine, filepath.Join(canonVault, "private", sub)) {
+					credShellHit = true
+					break
+				}
+			}
+		}
+		if credShellHit {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,pii-denylist.txt} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget` instead.",
+			})
+		}
 		checkLine := cmdLine
 		if reHQPropose.MatchString(cmdLine) {
 			if reDoubleQuotedCmdSubst.MatchString(cmdLine) {
@@ -468,6 +486,31 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					),
 				}
 				return json.NewEncoder(w).Encode(resp)
+			}
+		}
+	}
+
+	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, Chrome cookies, credentials, and pii-denylist.txt across ALL sessions (tainted or untainted)
+	switch payload.ToolCall.Name {
+	case "read_file", "write_file", "edit_file", "grep_search", "find_by_name":
+		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
+		credPaths := []string{
+			filepath.Join(canonVault, "private", "gmail"),
+			filepath.Join(canonVault, "private", "gchat"),
+			filepath.Join(canonVault, "private", "credentials"),
+			filepath.Join(canonVault, "private", "pii-denylist.txt"),
+		}
+		for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
+			if rawArg, ok := payload.ToolCall.Args[key].(string); ok && strings.TrimSpace(rawArg) != "" {
+				canonP := canonicalizeHookPath(vaultDir, rawArg)
+				for _, cp := range credPaths {
+					if canonP == cp || strings.HasPrefix(canonP, cp+string(filepath.Separator)) {
+						return json.NewEncoder(w).Encode(map[string]interface{}{
+							"decision": "deny",
+							"reason":   "Blocked by agy-hq Credential Vault policy: direct LLM access to local/private/{gmail,gchat,credentials,pii-denylist.txt} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget`.",
+						})
+					}
+				}
 			}
 		}
 	}
@@ -554,19 +597,25 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			rawArgs, _ := json.Marshal(payload.ToolCall.Args)
 			rawStr := string(rawArgs)
 			for _, prop := range pending {
-				if (prop.ActionType == "gmail_send" || prop.ActionType == "gchat_send" || prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch") && prop.Metadata != nil && strings.Contains(rawStr, prop.ID) {
-					hashShort := prop.Metadata["contentHash"]
-					if hashShort == "" {
-						hashShort = prop.Metadata["diffSha256"]
+				isStructuredPreview := (prop.ActionType == "gmail_send" || prop.ActionType == "gchat_send" || prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch") && prop.Metadata != nil
+				hasPIIWarning := len(prop.RiskFlags) > 0
+				if (isStructuredPreview || hasPIIWarning) && strings.Contains(rawStr, prop.ID) {
+					meta := prop.Metadata
+					if meta == nil {
+						meta = map[string]string{}
 					}
-					bodyPreview := prop.Metadata["bodyPreview"]
-					fromVal := prop.Metadata["from"]
-					toVal := prop.Metadata["to"]
-					subjVal := prop.Metadata["subject"]
-					spaceName := prop.Metadata["spaceName"]
-					spaceID := prop.Metadata["spaceId"]
-					if prop.ActionType == "gchat_send" && prop.Metadata["draftId"] != "" {
-						if spec, dErr := gchat.GetDraft(vaultDir, prop.Metadata["account"], prop.Metadata["draftId"]); dErr == nil {
+					hashShort := meta["contentHash"]
+					if hashShort == "" {
+						hashShort = meta["diffSha256"]
+					}
+					bodyPreview := meta["bodyPreview"]
+					fromVal := meta["from"]
+					toVal := meta["to"]
+					subjVal := meta["subject"]
+					spaceName := meta["spaceName"]
+					spaceID := meta["spaceId"]
+					if prop.ActionType == "gchat_send" && meta["draftId"] != "" {
+						if spec, dErr := gchat.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
 							bodyPreview = spec.Body
 							hashShort = spec.ContentHash
 							if spec.From != "" {
@@ -579,8 +628,8 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 								spaceID = spec.SpaceID
 							}
 						}
-					} else if prop.ActionType == "gmail_send" && prop.Metadata["draftId"] != "" {
-						if spec, dErr := gmail.GetDraft(vaultDir, prop.Metadata["account"], prop.Metadata["draftId"]); dErr == nil {
+					} else if prop.ActionType == "gmail_send" && meta["draftId"] != "" {
+						if spec, dErr := gmail.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
 							bodyPreview = spec.Body
 							hashShort = spec.ContentHash
 							if spec.From != "" {
@@ -603,14 +652,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 					var canonicalQ string
 					if prop.ActionType == "gchat_send" {
-						threadLabel := prop.Metadata["threadId"]
+						threadLabel := meta["threadId"]
 						if threadLabel == "" {
 							threadLabel = "(new message)"
 						}
 						canonicalQ = fmt.Sprintf(
 							"Approve sending Google Chat Message %s?\n• Account: %s (%s)\n• Space: %s [%s]\n• Thread: %s\n• Message: %s\n• Draft Hash: %s",
-							prop.Metadata["draftId"],
-							prop.Metadata["account"],
+							meta["draftId"],
+							meta["account"],
 							fromVal,
 							spaceName,
 							spaceID,
@@ -622,25 +671,36 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 						canonicalQ = fmt.Sprintf(
 							"Approve RSI Self-Improvement Patch %s (%s)?\n• Hypothesis: %s (%s)\n• Fault Layer: %s\n• Target Files: %s\n• Verification Scorecard: %s\n• Diff SHA-256: %s\n• Diff Preview:\n%s",
 							prop.ID,
-							prop.Metadata["ringLabel"],
-							prop.Metadata["rsiId"],
-							prop.Metadata["title"],
-							prop.Metadata["faultLayer"],
-							prop.Metadata["targetFiles"],
-							prop.Metadata["gateSummary"],
+							meta["ringLabel"],
+							meta["rsiId"],
+							meta["title"],
+							meta["faultLayer"],
+							meta["targetFiles"],
+							meta["gateSummary"],
 							hashShort,
-							prop.Metadata["canonicalDiffPreview"],
+							meta["canonicalDiffPreview"],
 						)
-					} else {
+					} else if prop.ActionType == "gmail_send" {
 						canonicalQ = fmt.Sprintf(
 							"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
-							prop.Metadata["draftId"],
+							meta["draftId"],
 							fromVal,
 							toVal,
 							subjVal,
 							bodyPreview,
 							hashShort,
 						)
+					} else {
+						canonicalQ = fmt.Sprintf(
+							"Approve outbound action %s (%s)?\n• Summary: %s\n• Command: %s",
+							prop.ID,
+							prop.ActionType,
+							prop.Summary,
+							prop.Command,
+						)
+					}
+					if hasPIIWarning {
+						canonicalQ = fmt.Sprintf("⚠️ [PII WARNING: %s]\n%s", strings.Join(prop.RiskFlags, ", "), canonicalQ)
 					}
 					overwriteArgs := map[string]interface{}{
 						"questions": []map[string]interface{}{

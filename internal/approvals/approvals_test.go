@@ -1,8 +1,11 @@
 package approvals
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCreateApproveAndReject(t *testing.T) {
@@ -10,6 +13,9 @@ func TestCreateApproveAndReject(t *testing.T) {
 	prop, err := Create(vaultDir, "test_echo", "Echo test message", "echo approved-ok", "", "conv-1")
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
+	}
+	if prop.ExpiresAt == "" {
+		t.Fatalf("expected default 24h ExpiresAt on new proposal")
 	}
 
 	list, err := List(vaultDir)
@@ -50,5 +56,35 @@ func TestCreateApproveAndReject(t *testing.T) {
 	listAfter, _ := List(vaultDir)
 	if len(listAfter) != 0 {
 		t.Fatalf("expected 0 pending proposals after approval, got %d", len(listAfter))
+	}
+}
+
+func TestProposalTTLExpirationAndContextualPIIScan(t *testing.T) {
+	vaultDir := t.TempDir()
+	privDir := filepath.Join(vaultDir, "private")
+	_ = os.MkdirAll(privDir, 0o700)
+	_ = os.WriteFile(filepath.Join(privDir, "pii-denylist.txt"), []byte("ProjectNightfall\n"), 0o600)
+
+	pastExp := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	prop, err := CreateWithMetadata(vaultDir, "gmail_send", "Send contract draft", "echo never-run", "", "conv-ttl", map[string]string{
+		"expiresAt":    pastExp,
+		"draftPayload": "Includes ProjectNightfall, SSN 123-45-6789, and 742 Evergreen Avenue.",
+	})
+	if err != nil {
+		t.Fatalf("CreateWithMetadata: %v", err)
+	}
+	if prop.RiskTier != "pii_warning" || len(prop.RiskFlags) < 3 {
+		t.Fatalf("expected pii_warning and >=3 RiskFlags, got tier=%q flags=%v", prop.RiskTier, prop.RiskFlags)
+	}
+
+	// Attempting to approve an expired proposal must fail and record "expired"
+	if _, err := ApproveProposal(vaultDir, prop.ID, prop.SHA256[:12]); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expected expired error on ApproveProposal, got: %v", err)
+	}
+
+	// Verify interventions.jsonl recorded Decision="expired"
+	interBytes, err := os.ReadFile(filepath.Join(vaultDir, "memory", "interventions.jsonl"))
+	if err != nil || !strings.Contains(string(interBytes), `"decision":"expired"`) {
+		t.Fatalf("expected expired record in interventions.jsonl, got: %s (%v)", string(interBytes), err)
 	}
 }

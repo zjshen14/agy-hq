@@ -11,9 +11,11 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 )
 
 var reCSRFMeta = regexp.MustCompile(`<meta name="hq-csrf-token" content="([0-9a-f]+)">`)
@@ -265,5 +267,94 @@ func TestWebUIDraftPayloadAndMessagePreview(t *testing.T) {
 	}
 	if !strings.Contains(consoleStr, "**Message Preview:**") || !strings.Contains(consoleStr, draftBody) {
 		t.Fatalf("expected CONSOLE.md to contain '**Message Preview:**' and body, got:\n%s", consoleStr)
+	}
+}
+
+func TestSpacesScheduleIdeasAndPIIBadge(t *testing.T) {
+	vaultDir := t.TempDir()
+	cfg := `spaces:
+  - id: morning-ops
+    title: "Morning Command"
+    schedule: "weekdays 06:30-10:00 America/Los_Angeles"
+    widgets: [goals_summary, ideas_feed]
+  - id: weekend-review
+    title: "Weekend Review"
+    schedule: "weekends 09:00-12:00 America/Los_Angeles"
+    widgets: [goals_summary]
+`
+	_ = os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(cfg), 0o600)
+
+	loc, _ := time.LoadLocation("America/Los_Angeles")
+	wedMorning := time.Date(2026, 11, 11, 8, 15, 0, 0, loc) // Wednesday 08:15 PT
+	active, err := ActiveSpaces(vaultDir, wedMorning)
+	if err != nil {
+		t.Fatalf("ActiveSpaces: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != "morning-ops" {
+		t.Fatalf("expected only morning-ops active on Wednesday 08:15 PT, got %+v", active)
+	}
+
+	// Pin weekend-review so it appears regardless of schedule
+	if err := SetSpaceOverride(vaultDir, "weekend-review", "pin"); err != nil {
+		t.Fatalf("SetSpaceOverride pin: %v", err)
+	}
+	activePinned, _ := ActiveSpaces(vaultDir, wedMorning)
+	if len(activePinned) != 2 {
+		t.Fatalf("expected 2 active spaces after pinning weekend-review, got %d", len(activePinned))
+	}
+
+	// Seed an idea and a contextual-PII proposal, verify WebUI endpoints and CONSOLE.md ordering
+	idea, _, err := outbox.Add(vaultDir, outbox.OutboxItem{
+		Tier:        outbox.TierIdeasFeed,
+		SourceSkill: "inbox-triage",
+		Title:       "Draft Q4 partner sync agenda",
+		Summary:     "Alice mentioned API milestones in thread.",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("outbox.Add: %v", err)
+	}
+
+	_, err = approvals.CreateWithMetadata(vaultDir, "gmail_send", "Email external vendor", "echo send", "", "conv-1", map[string]string{
+		"bodyPreview": "Wire details SSN 123-45-6789 included",
+	})
+	if err != nil {
+		t.Fatalf("CreateWithMetadata: %v", err)
+	}
+
+	h := NewHandler(vaultDir)
+	reqGet := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/", nil)
+	recGet := httptest.NewRecorder()
+	h.ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("GET / failed: %d", recGet.Code)
+	}
+	html := recGet.Body.String()
+	if !strings.Contains(html, "Contextual PII Warning") {
+		t.Fatalf("expected Contextual PII Warning badge in HTML, got:\n%s", html)
+	}
+	csrf := extractTestCSRFToken(t, html)
+
+	// Dismiss idea via /api/ideas/action
+	reqDismiss := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4242/api/ideas/action", strings.NewReader(`{"id":"`+idea.ID+`","action":"dismiss","reason":"Already handled"}`))
+	reqDismiss.Header.Set("Content-Type", "application/json")
+	reqDismiss.Header.Set("X-HQ-CSRF-Token", csrf)
+	recDismiss := httptest.NewRecorder()
+	h.ServeHTTP(recDismiss, reqDismiss)
+	if recDismiss.Code != http.StatusOK || !strings.Contains(recDismiss.Body.String(), `"ok":true`) {
+		t.Fatalf("POST /api/ideas/action failed (%d): %s", recDismiss.Code, recDismiss.Body.String())
+	}
+
+	// Verify SyncMarkdownConsole keeps Section 2 -> Section 3 contiguous (preserving CUJ-11 slice invariant)
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole: %v", err)
+	}
+	mdBytes, _ := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	md := string(mdBytes)
+	idx2 := strings.Index(md, "## 📋 2. Task Board")
+	idx3 := strings.Index(md, "## 🌿 3. Active Parallel Git Worktrees")
+	idxSpaces := strings.Index(md, "## 🗂️ Active Console Spaces")
+	idx4 := strings.Index(md, "## 🕒 4. Recent Turn Activity")
+	if idx2 < 0 || idx3 <= idx2 || idxSpaces <= idx3 || idx4 <= idxSpaces {
+		t.Fatalf("expected Console section order 2 < 3 < Spaces < 4, got idx2=%d idx3=%d idxSpaces=%d idx4=%d\n%s", idx2, idx3, idxSpaces, idx4, md)
 	}
 }
