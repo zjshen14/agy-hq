@@ -30,6 +30,10 @@
 | **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
 | **CUJ-19** | End-to-End Token & Context Observability, Subagent DAG Attribution & Budget Circuit Breaker | `hq obs`, `internal/obs`, `hq hook stop`, `hq doctor` | `TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards` |
 | **CUJ-20** | Open-Source `--demo` Onboarding, Governance TCB & Git History PII Sanitization | `hq init --demo`, `hq doctor --json`, `hq ci check-pii --history`, `hq ci scrub-history` | `TestCUJ20_OpenSourceDemoOnboardingGovernanceAndPIIGuard` |
+| **CUJ-21** | Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox Drain & RSI Proactive Noise Mining | `hq heartbeat --force-gatekeepers`, `hq outbox`, `hq ideas`, `hq rsi mine` | `TestCUJ21_ZeroTokenGatekeepersOutboxDrainAndRSIProactiveNoise` |
+| **CUJ-22** | Stateful Multi-Day `Goals`, Milestones & Zero-Token `WaitingOn` SLA Sweep | `hq goals`, `hq heartbeat`, `local/memory/goals.json` | `TestCUJ22_StatefulGoalsMilestonesAndWaitingOnSLASweep` |
+| **CUJ-23** | Context-Scheduled Console `Spaces`, On-Demand Entity Dossiers & 4-Layer Surgical `forget` | `hq spaces`, `hq memory add-entity|lookup|forget` | `TestCUJ23_ScheduledConsoleSpacesEntityLookupAndSurgicalForget` |
+| **CUJ-24** | Universal Credential Vault Read-Guard, `24h` Proposal TTL & Outbound Contextual-PII Badge | `hq hook pre-tool`, `hq propose --ttl`, `hq approve` | `TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge` |
 
 ---
 
@@ -182,7 +186,7 @@
 
 ## CUJ-18: Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate
 1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 6 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist, P6 contextual PII & real `spaces/<id>` guard) across staged diffs (`--staged`), the full tracked tree, and commit history (`--history`).
-2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B (`.agents/hooks.json` == `.agents/plugins/agy-hq/hooks.json` byte parity + 18-probe `PreToolUse` security/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
+2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B (`.agents/hooks.json` == `.agents/plugins/agy-hq/hooks.json` byte parity + 21-probe `PreToolUse` security/credential-guard/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
 3. **Local Git Hook Enforcement (`hq ci install-hooks` / `pre-commit` / `pre-push`):** Automatically installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` and rejects commits containing leaked PII/credentials, unformatted Go files, or broken Markdown links before they leave the developer workstation.
 
 ---
@@ -202,3 +206,30 @@
 1. **Opt-In Synthetic `--demo` Seeding (`hq init --demo`):** Bare `./bin/hq init` scaffolds an empty private `local/` Vault, whereas `./bin/hq init --demo` (or `./scripts/bootstrap.sh --demo`) non-destructively seeds `local/inbox/acme-corp-2026-10-Q.html`, `local/notes/investing/tickers/ACME/thesis.md`, 3 `[Sample]` Layer-1 tasks, 1 SHA-256 bound `[Sample]` pending approval, and 3 verified bi-temporal `[Sample]` facts.
 2. **Structured Diagnostics & Governance Ring 0 TCB (`hq doctor --json`):** `./bin/hq doctor --json` reports structured `PASS`/`WARN` status across Go toolchain, Antigravity sandbox, Vault, Task Board, Memory budget, and Git hooks; `LICENSE` (`Apache-2.0`) and `SECURITY.md` are protected inside `rsi.Ring0ProtectedPaths`.
 3. **Historical Commit Audit & Deterministic Sanitization (`hq ci check-pii --history` & `hq ci scrub-history`):** Invariant `P6-ContextualPII` blocks non-synthetic Google Chat `spaces/<id>` literals and terms listed in `local/private/pii-denylist.txt`; `hq ci check-pii --history` catches PII leaked in earlier commits even if deleted from `HEAD`; `hq ci scrub-history --replacements=<map> --apply` deterministically rewrites historical commits and prunes backup refs so `--history` passes with zero violations.
+
+---
+
+## CUJ-21: Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox Drain & RSI Proactive Noise Mining ([RFC-0014](../design/0014-proactive-engine-and-living-context.md))
+1. **Cursor-Deduplicated Pre-Checks (`hq heartbeat --force-gatekeepers`):** Evaluates `daemon_gatekeeper` schedules (`precheck_cmd`) against `local/memory/trigger_cursors.json`. New `stdout_sha256` output dispatches an isolated `flash` worker; identical `stdout_sha256` output on subsequent runs skips execution in **0 LLM tokens** (`gatekeeperSkips=1`).
+2. **Morning Brief Outbox Rollup (`hq outbox add|drain`):** Background runs emit `brief_rollup` items (`hq outbox add --tier=brief_rollup`), which `hq outbox drain` atomically drains once for `/morning-brief` synthesis.
+3. **Proactive Noise Feedback Loop (`hq ideas dismiss` $\rightarrow$ `hq rsi mine`):** When a skill emits $\ge 5$ resolved `ideas_feed` suggestions with a $> 70\%$ user dismissal rate, `hq rsi mine` deterministically emits a `proactive_noise` friction event to tighten that skill's threshold.
+
+---
+
+## CUJ-22: Stateful Multi-Day `Goals`, Milestones & Zero-Token `WaitingOn` SLA Sweep ([RFC-0014](../design/0014-proactive-engine-and-living-context.md))
+1. **Goal & Milestone Lifecycle (`hq goals add|milestone|check-off|complete`):** Tracks multi-day intentions and milestones in `local/memory/goals.json` and renders progress in the live Console.
+2. **Counterparty Silence Detection (`hq goals wait-on|due|mark-replied`):** Registers external reply SLAs (`FollowUpAfter`). `hq heartbeat` sweeps active obligations in **0 LLM tokens**, transitioning overdue silent threads to `nudge_queued` and surfacing an outbox follow-up alert until resolved via `hq goals mark-replied`.
+
+---
+
+## CUJ-23: Context-Scheduled Console `Spaces`, On-Demand Entity Dossiers & 4-Layer Surgical `forget` ([RFC-0014](../design/0014-proactive-engine-and-living-context.md))
+1. **Schedule-Aware Console `Spaces` (`hq spaces list|active|pin|hide|auto`):** Evaluates weekday/weekend wall-clock windows in pure Go (0 LLM tokens, 0 untrusted JS) to render active domain cards (`morning-ops`, `market-watch`, `engineering`, plus custom `local/console_spaces/*.yaml` definitions) in `CONSOLE.md`, `hq_console.md`, and `:4242`.
+2. **On-Demand Entity Dossiers (`hq memory add-entity|entities|lookup`):** Stores `0600`-permissioned contact/counterparty dossiers in `local/memory/entities/<slug>.md` with `<5ms` lookup and **0 bytes** injected into `SessionStart`.
+3. **4-Layer Surgical `forget` (`hq memory forget [--block-pii] [--dry-run]`):** Excises matching facts (`facts.jsonl`), roadmap bullets (`MEMORY.md`), topic/entity files (`topics/`, `entities/`), and note lines (`notes/`), optionally appending the forgotten string to `local/private/pii-denylist.txt` and snapshotting `local/.git`.
+
+---
+
+## CUJ-24: Universal Credential Vault Read-Guard, `24h` Proposal TTL & Outbound Contextual-PII Badge ([RFC-0014](../design/0014-proactive-engine-and-living-context.md))
+1. **Universal Credential Vault Isolation (`hq hook pre-tool`):** Denies direct `read_file`, `write_file`, `edit_file`, `grep_search`, `find_by_name`, and shell inspection (`cat`, symlinked path tokens, etc.) targeting `local/private/{gmail,gchat,credentials,pii-denylist.txt}` across **every** session (tainted or untainted), while preserving untainted worker access to `local/private/{ledger,taxes}/`.
+2. **Outbound Contextual-PII Leak Warning (`hq propose` + `ask_question`):** Scans staged outbound payloads against `pii-denylist.txt` and SSN/account/street-address patterns, recording `RiskFlags` and prepending a prominent `⚠️ [PII WARNING: ...]` banner into `ask_question` and `:4242`.
+3. **Deterministic Proposal Expiration (`--ttl`, Default `24h`):** Rejects `hq approve` calls on expired pending proposals (`status = "expired"`) so stale drafts can never execute days later.

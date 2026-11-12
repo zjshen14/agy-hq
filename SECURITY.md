@@ -33,10 +33,11 @@ Vulnerabilities in any of the following deterministic Go microkernel boundaries 
 
 1. **Two-Layer Vault Isolation (`internal/vault/`, `internal/ci/pii.go`):**
    - Bypass of `.gitignore` or `hq ci check-pii` Invariants `P1`–`P6` allowing files from `local/` or `vault/` (or credentials/PII) to be committed to the Layer 1 root repository.
-2. **Quarantined Reader & Session Taint Isolation (`internal/hooks/`, `internal/gmail/`, `internal/gchat/`):**
+2. **Quarantined Reader & Universal Credential Vault Isolation (`internal/hooks/`, `internal/gmail/`, `internal/gchat/`):**
+   - Bypass of the Universal Credential Vault Guard allowing *any* session (tainted or untainted) to read, write, or shell-inspect `local/private/{gmail,gchat,credentials,pii-denylist.txt}` (including via symlinked paths).
    - Bypass of `tainted_sessions.json` lockdown after `hq gmail read` or `hq gchat read-quarantined` (e.g., enabling `search_web`, `write_file`, `edit_file`, `invoke_subagent`, `schedule`, or `call_mcp_tool`, reading symlink-resolved `local/private/**`, or injecting newline-chained shell commands from a tainted session).
-3. **SHA-256 Approval-Bound Outbound Execution (`internal/approvals/`, `PreToolUse`):**
-   - Bypass of `PreToolUse` hard blocks on direct external mutations (`hq gmail send`, `hq gchat send-draft`, `gh pr merge`, `npm publish`, `/api/approve`), bait-and-switch hash verification (`VerifyAndSendDraft` / mandatory `>= 8`-char `hq approve --sha256=<prefix>`), or the anti-spoofing `ask_question` canonical draft overwrite.
+3. **SHA-256 Approval-Bound Outbound Execution, TTL & Contextual-PII Guards (`internal/approvals/`, `PreToolUse`):**
+   - Bypass of `PreToolUse` hard blocks on direct external mutations (`hq gmail send`, `hq gchat send-draft`, `gh pr merge`, `npm publish`, `/api/approve`), bait-and-switch hash verification (`VerifyAndSendDraft` / mandatory `>= 8`-char `hq approve --sha256=<prefix>`), `24h` proposal expiration (`ExpiresAt`), outbound contextual-PII warning injection (`RiskFlags`), or the anti-spoofing `ask_question` canonical draft overwrite.
 4. **Ring 0 Immutable Trusted Computing Base (`internal/rsi/tcb.go`):**
    - Bypass of `IsRing0Path` or `rsi.Apply` re-verification allowing recursive self-improvement (`hq rsi`) to mutate `internal/approvals/`, `internal/hooks/`, `internal/webui/`, `internal/vault/`, `internal/ci/`, `internal/rsi/`, `cmd/hq/`, `.agents/hooks.json`, `.agents/plugins/agy-hq/sidecars/`, `AGENTS.md`, `LICENSE`, `SECURITY.md`, `.github/`, or `.git/hooks/`.
 5. **Loopback Sidecar & Headless Browser Network Jail (`internal/webui/`, `internal/gchat/cdp_ws.go`):**
@@ -46,4 +47,4 @@ Vulnerabilities in any of the following deterministic Go microkernel boundaries 
 - Prompt behavior variance inside non-quarantined user-initiated sessions that does not cross a mechanical `PreToolUse`, taint, Vault, or SHA-256 approval boundary.
 - Misconfigurations where the user explicitly disables Antigravity's OS sandbox (`TURBO` mode—flagged with `WARN` by `./bin/hq doctor`).
 
-See [Architecture Overview](docs/architecture.md) and [RFC-0005](docs/design/0005-gmail-integration.md) / [RFC-0008](docs/design/0008-gchat-integration.md) / [RFC-0011](docs/design/0011-ci-pipeline-and-regression-harness.md) for full threat models.
+See [Architecture Overview](docs/architecture.md) and [RFC-0005](docs/design/0005-gmail-integration.md) / [RFC-0008](docs/design/0008-gchat-integration.md) / [RFC-0011](docs/design/0011-ci-pipeline-and-regression-harness.md) / [RFC-0014](docs/design/0014-proactive-engine-and-living-context.md) for full threat models.

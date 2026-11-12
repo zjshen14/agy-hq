@@ -33,9 +33,9 @@ Most agent setups fail in daily life for one of three reasons: long coding/resea
 | Pillar | What Happens in Daily Use | Mechanical Guarantee |
 | :--- | :--- | :--- |
 | **1. Non-Blocking Front Desk & Worktrees** | Chat with one pinned `[HQ] Front Desk` thread from desktop or phone. Quick questions answer inline; coding and deep research fan out into isolated git worktrees (`local/worktrees/<repo>-<task>/`). | `PreToolUse` hooks cap inline lookups at `3` calls and block direct source edits or test suites on the Front Desk thread. |
-| **2. 0-Token Console & Idle Watchdogs** | Drop PDFs, CSVs, or 10-Qs into `local/inbox/`. Background `launchd`/`systemd` timers route files, check unread queues, and refresh the live `hq_console.md` Task Board & port `4242` dashboard. | Pure-Go gatekeepers consume **0 LLM tokens** while idle, waking an agent only when actionable work arrives. |
-| **3. Approval-Bound Outbound Safety** | Emails, Google Chat messages, third-party PR merges, and releases are drafted and previewed in chat for 1-tap Mobile Remote Control approval. | `PreToolUse` hard-blocks direct outbound mutations; `./bin/hq approve <id> --sha256=<prefix>` verifies payload hashes in Go, and untrusted readers run in tainted quarantine. |
-| **4. 4-Layer Memory & Silent Dreaming** | Every turn logs a 0-token journal. At 11:30 PM, silent background dreaming verifies claims against raw transcripts, updates Topic Wiki pages, mines friction (`hq rsi`), and rolls insights into your 7:30 AM Morning Brief. | Strict **Two-Layer Vault** separation (`Invariants P1–P6`) ensures personal notes, memory, and PII in `local/` can never be committed to the public engine repo. |
+| **2. 0-Token Console, Gatekeepers & Spaces** | Drop PDFs, CSVs, or 10-Qs into `local/inbox/`. Background `launchd`/`systemd` timers run SHA-256 cursor pre-checks, sweep `WaitingOn` SLAs, route attention across 4 tiers (`interrupt`, `brief_rollup`, `ideas_feed`, `silent_ledger`), and adapt Console `Spaces` by time of day. | Pure-Go gatekeepers consume **0 LLM tokens** when feeds are unchanged, waking isolated `flash` workers only on real deltas and respecting Quiet Hours. |
+| **3. Approval-Bound Outbound & Credential Safety** | Emails, Google Chat messages, third-party PR merges, and releases are drafted and previewed in chat (`24h` TTL + contextual-PII warning badges) for 1-tap Mobile Remote Control approval. | `PreToolUse` hard-blocks direct outbound mutations and raw credential reads (`local/private/{gmail,gchat,credentials}/`) across **all** sessions; `./bin/hq approve <id> --sha256=<prefix>` verifies payload hashes in Go. |
+| **4. 4-Layer Living Memory & Silent Dreaming** | Every turn logs a 0-token journal. At 11:30 PM, silent dreaming verifies claims against raw transcripts, updates Topic Wiki & on-demand Entity Dossiers (`hq memory lookup`), supports 4-layer `hq memory forget`, mines friction (`hq rsi`), and rolls insights into your 7:30 AM Morning Brief. | Strict **Two-Layer Vault** separation (`Invariants P1–P6`) ensures personal notes, memory, and PII in `local/` can never be committed to the public engine repo. |
 
 ---
 
@@ -79,9 +79,9 @@ git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter &
 agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked Root Git Repo)
 ├── AGENTS.md                          # Front Desk routing, Vault boundaries & approval invariants
 ├── cmd/hq/                            # Single static Go CLI entrypoint (zero external dependencies)
-├── internal/                          # Go microkernel (hooks, kernel, approvals, obs, rsi, ci, webui, gmail, gchat)
+├── internal/                          # Go microkernel (hooks, kernel, outbox, approvals, obs, rsi, ci, webui, gmail, gchat)
 ├── templates/                         # Clean starter blueprints copied into ./local/ by `hq init`
-├── docs/                              # PRDs, technical RFCs (0001–0013), ADRs & research archive
+├── docs/                              # PRDs, technical RFCs (0001–0014), ADRs & research archive
 ├── assets/branding/                   # Official Asymmetric Wing Cradle icon pack & social preview
 ├── .agents/
 │   ├── hooks.json                     # SessionStart (memory), PreToolUse (guardrails), Stop (0-token log)
@@ -90,13 +90,13 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 └── local/                             # LAYER 2: Your Private Vault (Git-Ignored; Own Private local/.git)
     ├── USER.md                        # Your profile, communication preferences & goals
     ├── MEMORY.md                      # Bounded Roadmap Index (< 2,500 tokens) auto-injected at SessionStart
-    ├── CONSOLE.md                     # Zero-token live Task Board & telemetry snapshot
-    ├── config.yaml & triggers.yaml    # Quota budgets, cron schedules & 0-token inbox routing rules
+    ├── CONSOLE.md                     # Zero-token live Task Board, Console Spaces & Ideas snapshot
+    ├── config.yaml & triggers.yaml    # Attention/Quiet Hours, Spaces, quota budgets & 0-token cursor gatekeepers
     ├── inbox/                         # Zero-prompt drop folder (CSVs, PDFs, filings, receipts)
     ├── notes/                         # Personal notes, research, drafts & investment theses
     ├── worktrees/                     # Isolated parallel git worktrees (<repo>-<task>/)
-    ├── private/                       # High-PII records (ledger/, taxes/, gchat/) blocked from tainted sessions
-    └── memory/                        # topics/*.md wiki, facts.jsonl, journal/, tasks.json, pending/ approvals
+    ├── private/                       # High-PII records (ledger/, taxes/) & isolated credentials (gmail/, gchat/)
+    └── memory/                        # topics/*.md, entities/*.md, goals.json, outbox/, facts.jsonl, journal/, pending/
 ```
 
 ---
@@ -130,6 +130,9 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 | `./bin/hq status` | Show pending outbound approvals, active git worktrees, and Front Desk status |
 | `./bin/hq webui` | Launch interactive HQ Console dashboard on `http://127.0.0.1:4242` |
 | `./bin/hq tasks [--active\|--all]` | Inspect active Layer-1 Task Conversations, subagents, and cold archive |
+| `./bin/hq goals [list\|add\|wait-on\|due]` | Track multi-day Goals, milestones, and counterparty `WaitingOn` reply SLAs |
+| `./bin/hq ideas [list\|promote\|snooze\|dismiss]` | Review, promote to Task, snooze, or dismiss proactive `ideas_feed` suggestions |
+| `./bin/hq spaces [list\|active\|pin\|hide\|auto]` | Inspect or pin schedule-aware Console Spaces (`morning-ops`, `market-watch`, `engineering`) |
 | `./bin/hq obs tokens` | View daily uncached token burn, prefix-cache hit ratio (`CHR %`), and latency |
 | `./bin/hq upgrade` | Snapshot `local/.git`, pull latest `agy-hq` commits, recompile `bin/hq`, and migrate |
 | `./bin/hq ci pre-push` | Run full local verification gate (`P1–P6` PII, `H1–H4B` contracts, unit & CUJ E2E tests) |
@@ -158,13 +161,17 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 | | `./bin/hq adopt --conv=<id> --task=<slug>` | Adopt existing conversation (or demote Front Desk to a Task) |
 | | `./bin/hq claim-desk / release-desk` | Manage the single active `[HQ] Front Desk` intake lease |
 | | `./bin/hq worktree add <repo> <task>` | Create isolated git worktree in `local/worktrees/<repo>-<task>/` |
-| **Safety & Approvals** | `./bin/hq propose --type=... --summary="..." --cmd="..."` | Stage irreversible outbound action for 1-tap approval |
-| | `./bin/hq approve <id> --sha256=<prefix>` | Verify `>= 8`-char SHA-256 prefix and deterministically execute staged action |
+| **Safety & Approvals** | `./bin/hq propose --type=... --summary="..." --cmd="..." [--ttl=24h]` | Stage irreversible outbound action (`24h` TTL + contextual-PII scan) for 1-tap approval |
+| | `./bin/hq approve <id> --sha256=<prefix>` | Verify `>= 8`-char SHA-256 prefix, check TTL expiry, and execute staged action |
 | | `./bin/hq reject <id>` | Reject and remove pending outbound proposal |
+| **Proactive Outbox, Goals & Spaces** | `./bin/hq outbox <add\|list\|drain>` | Route background insights across `interrupt`, `brief_rollup`, `ideas_feed`, and `silent_ledger` |
+| | `./bin/hq ideas <list\|promote\|snooze\|dismiss>` | Manage proactive `ideas_feed` queue (dismissals feed `hq rsi mine`) |
+| | `./bin/hq goals <list\|add\|milestone\|check-off\|wait-on\|mark-replied\|due\|complete>` | Manage multi-day Goals and 0-token counterparty `WaitingOn` reply SLAs |
+| | `./bin/hq spaces <list\|active\|pin\|hide\|auto>` | Inspect or override schedule-aware Console Spaces |
 | **Daemon, Web UI & Heartbeat** | `./bin/hq daemon install / status / uninstall` | Manage `launchd` (macOS) or `systemd` (Linux) background HQ daemon service |
 | | `./bin/hq daemon [--addr=127.0.0.1:4242]` | Run background daemon watcher and loopback HTTP server |
 | | `./bin/hq webui [--addr=127.0.0.1:4242]` | Start interactive Web UI Console & Antigravity Sidecar |
-| | `./bin/hq heartbeat [--dry-run]` | Run 0-token idle pre-checks, Dead-Man's Switch, and inbox drop router |
+| | `./bin/hq heartbeat [--dry-run] [--force-gatekeepers]` | Run 0-token cursor pre-checks, `WaitingOn` SLA sweep, Dead-Man's Switch, and inbox router |
 | **Token & Cost Observability** | `./bin/hq obs tokens [--days=7]` | Daily uncached input, cache read, output tokens, `CHR %`, and latency breakdown |
 | | `./bin/hq obs top [--tree]` | Rank conversations by self or full parent-child tree uncached token burn |
 | | `./bin/hq obs inspect <conv-or-slug>` | Per-turn context growth, prefix-cache hits, and compaction telemetry |
@@ -179,7 +186,10 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 | | `./bin/hq gmail read --thread=<id>` | Read email thread in quarantined plain-text format |
 | | `./bin/hq gmail draft --to=... --body=...` | Create or update draft email for staged review |
 | | `./bin/hq gmail triage` | Run pure-Go unread sidecar precheck and batch triage items |
-| **Memory & RSI Engine** | `./bin/hq memory status / topics` | Inspect 4-layer memory hierarchy and Knowledge Wiki pages |
+| **Memory & RSI Engine** | `./bin/hq memory status / topics / entities` | Inspect 4-layer memory hierarchy, Knowledge Wiki pages, and Entity Dossiers |
+| | `./bin/hq memory lookup <query>` | On-demand (`< 5ms`, `0` `SessionStart` tokens) contact & counterparty dossier lookup |
+| | `./bin/hq memory add-entity --name=...` | Create or merge an Entity Dossier in `local/memory/entities/<slug>.md` |
+| | `./bin/hq memory forget "<query>" [--block-pii]` | Cascading 4-layer surgical scrub across facts, `MEMORY.md`, topics, entities, and notes |
 | | `./bin/hq memory verify-transcript <convId>` | Verify claims against raw transcripts before promoting memory |
 | | `./bin/hq memory add-fact / prune-fact / compact` | Record, soft-prune, or compact bi-temporal atomic facts with provenance |
 | | `./bin/hq rsi mine [--since=24h]` | Mine 0-token ground-truth friction events from journals |
@@ -198,9 +208,9 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 
 Explore the **[Documentation Hub (`docs/README.md`)](docs/README.md)** for guided reading paths across:
 - **[System Architecture Overview](docs/architecture.md)** & **[Implementation Roadmap](docs/roadmap.md)**
-- **Product Specs (`PRD-0001` – `PRD-0003`):** Day-in-the-life UX, open-ended skills, and all 20 E2E Critical User Journeys
-- **Technical RFCs (`RFC-0001` – `RFC-0013`):** Two-Layer Vault, 4-layer memory dreaming, SHA-256 approval gates, Gmail & Google Chat quarantine transports, bounded RSI, token observability, and CI/privacy verification
-- **Architecture Decision Records (`ADR-0001` – `ADR-0006`)** & **Research Archive (`01` – `09`)**
+- **Product Specs (`PRD-0001` – `PRD-0003`):** Day-in-the-life UX, open-ended skills, and all 24 E2E Critical User Journeys
+- **Technical RFCs (`RFC-0001` – `RFC-0014`):** Two-Layer Vault, 4-layer memory dreaming, SHA-256 approval gates, Gmail & Google Chat quarantine transports, bounded RSI, token observability, CI/privacy verification, and Proactive Engine v2
+- **Architecture Decision Records (`ADR-0001` – `ADR-0006`)** & **Research Archive (`01` – `10`)**
 
 ---
 
