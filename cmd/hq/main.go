@@ -1320,19 +1320,29 @@ func main() {
 			os.Exit(0)
 		}()
 
-		// Background 15s inbox watcher & 30m 0-token heartbeat gatekeeper loop
+		// Background 15s inbox watcher, 30s cron/coalescer tick, & 30m 0-token heartbeat loop
 		go func() {
 			_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+			_ = webui.SyncMarkdownConsole(vaultDir)
 			inboxTicker := time.NewTicker(15 * time.Second)
+			cronTicker := time.NewTicker(30 * time.Second)
 			hbTicker := time.NewTicker(30 * time.Minute)
 			defer inboxTicker.Stop()
+			defer cronTicker.Stop()
 			defer hbTicker.Stop()
 			for {
 				select {
 				case <-inboxTicker.C:
-					_, _ = kernel.ProcessInbox(vaultDir, *dryRun)
+					if out, _ := kernel.ProcessInbox(vaultDir, *dryRun); len(out) > 0 {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				case <-cronTicker.C:
+					if gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, time.Now(), false, *dryRun); len(gkActs) > 0 {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
 				case <-hbTicker.C:
 					_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+					_ = webui.SyncMarkdownConsole(vaultDir)
 				}
 			}
 		}()
