@@ -88,9 +88,9 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			cm.Title = "[HQ] Front Desk"
 			cm.Scope = "hq"
 			if cm.Model == "" {
-				cm.Model = "gemini-4-carbon-high"
+				cm.Model = "gemini-4-hydrogen-medium"
 			}
-			cm.Tier = NormalizeTier("deep", cm.Model)
+			cm.Tier = NormalizeTier("", cm.Model)
 			cm.Status = "active"
 		} else {
 			if t, ok := taskByConv[cid]; ok {

@@ -53,11 +53,29 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	if m, tier, sub := ResolveModel("Summarize the status of open PRs", "", "", ""); m != "gemini-4-hydrogen-low" || tier != "quick" || sub != "flash_lite" {
 		t.Fatalf("unexpected quick tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
+	if m, tier, sub := ResolveModel("High-frequency Hiive inbox polling scan", "", "", ""); m != "gemini-4-hydrogen-low" || tier != "quick" || sub != "flash_lite" {
+		t.Fatalf("unexpected hiive quick polling routing: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Generate Morning Brief and multi-source summary", "", "", ""); m != "gemini-4-hydrogen-medium" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected routine medium routing: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("[Auto] EDGAR Close Watch: Activate the thesis-check skill to monitor new after-close 8-K filings", "", "", ""); m != "gemini-4-hydrogen-medium" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected edgar-close-watch medium routing: model=%s tier=%s sub=%s", m, tier, sub)
+	}
 	if m, tier, sub := ResolveModel("Implement the CSV parser for bank statements", "", "", ""); m != "gemini-4-hydrogen-high" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected standard tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
+	if m, tier, sub := ResolveModel("Exhaustive multi-file refactor of kernel handlers", "", "", ""); m != "gemini-4-hydrogen-xhigh" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected heavy xhigh sweep routing: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Nightly sleep consolidation and memory dreaming", "", "", ""); m != "gemini-4-carbon-medium" || tier != "deep" || sub != "pro" {
+		t.Fatalf("unexpected deep-medium consolidation routing: model=%s tier=%s sub=%s", m, tier, sub)
+	}
 	if m, tier, sub := ResolveModel("Perform a security audit and architecture review", "", "", ""); m != "gemini-4-carbon-high" || tier != "deep" || sub != "pro" {
 		t.Fatalf("unexpected deep tier routing: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Audit NVDA KC-1 breach and thesis falsification", "", "", ""); m != "gemini-4-carbon-high" || tier != "deep" || sub != "pro" {
+		t.Fatalf("unexpected high-stakes thesis deep routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, _, _ := ResolveModel("Fix a bug", "opus", "medium", ""); m != "claude-opus-5-5-medium" {
 		t.Fatalf("unexpected explicit user override: got %s", m)
@@ -65,11 +83,23 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	if m, _, _ := ResolveModel("Fix a bug", "hydrogen", "xhigh", ""); m != "gemini-4-hydrogen-xhigh" {
 		t.Fatalf("unexpected hydrogen override: got %s", m)
 	}
+	if m, _, _ := ResolveModel("Fix a bug", "hydrogen", "medium", ""); m != "gemini-4-hydrogen-medium" {
+		t.Fatalf("unexpected hydrogen medium override: got %s", m)
+	}
 	if m, _, _ := ResolveModel("Fix a bug", "flash", "high", ""); m != "gemini-4-hydrogen-high" {
 		t.Fatalf("unexpected flash alias override: got %s", m)
 	}
 	if m, _, _ := ResolveModel("Architecture design", "carbon", "high", ""); m != "gemini-4-carbon-high" {
 		t.Fatalf("unexpected carbon override: got %s", m)
+	}
+	if m, tier, sub := ResolveModel("Consolidate memory", "", "", "deep-medium"); m != "gemini-4-carbon-medium" || tier != "deep" || sub != "pro" {
+		t.Fatalf("unexpected deep-medium tier override: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Refactor", "", "", "heavy"); m != "gemini-4-hydrogen-xhigh" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected heavy tier override: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Digest", "", "", "routine"); m != "gemini-4-hydrogen-medium" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected routine tier override: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, _, _ := ResolveModel("Architecture design", "argon", "high", ""); m != "gemini-4-carbon-high" {
 		t.Fatalf("unexpected argon alias override: got %s", m)

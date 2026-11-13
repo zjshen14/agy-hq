@@ -8,6 +8,8 @@ description: >-
 
 # Morning Brief (`/morning-brief`)
 
+> **Model Routing:** Scheduled/background runs default to **Gemini 4 Hydrogen (Medium)** (`gemini-4-hydrogen-medium` / `--tier=routine`) for structured multi-source synthesis.
+
 Produce a concise, actionable daily brief covering life admin, engineering projects, goals/SLAs, and investment watchlist updates.
 
 ## Steps

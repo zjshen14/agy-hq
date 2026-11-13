@@ -505,10 +505,28 @@ func TestCUJ4_SmartModelRoutingAndQuotaFallback(t *testing.T) {
 			wantSub:   "flash_lite",
 		},
 		{
+			prompt:    "Morning brief and filing extraction",
+			wantModel: "gemini-4-hydrogen-medium",
+			wantTier:  "standard",
+			wantSub:   "flash",
+		},
+		{
 			prompt:    "Add unit tests for the new CLI flag",
 			wantModel: "gemini-4-hydrogen-high",
 			wantTier:  "standard",
 			wantSub:   "flash",
+		},
+		{
+			prompt:    "Exhaustive multi-file refactor and hard E2E test debugging",
+			wantModel: "gemini-4-hydrogen-xhigh",
+			wantTier:  "standard",
+			wantSub:   "flash",
+		},
+		{
+			prompt:    "Nightly sleep consolidation and deep research memo",
+			wantModel: "gemini-4-carbon-medium",
+			wantTier:  "deep",
+			wantSub:   "pro",
 		},
 		{
 			prompt:    "Investigate root cause of race condition in auth architecture",

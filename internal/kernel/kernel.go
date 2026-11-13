@@ -1720,12 +1720,16 @@ func ReleaseFrontDesk(vaultDir string) error {
 }
 
 var (
-	reTaxForm         = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
-	reSecFiling       = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
-	reDeepTask        = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|complex|deep|hard)\b`)
-	reQuickTask       = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|brief|consolidate|list|format|lint|typo|quick)\b`)
-	reUUID            = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	rePromptModelHint = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|hydrogen|flash_lite|flash-lite|flash)\b`)
+	reTaxForm          = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
+	reSecFiling        = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
+	reDeepHighOnlyTask = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|falsif|kc-?1|breach|rfc)\b`)
+	reDeepTask         = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|kc-?1|breach|rfc|complex|deep)\b`)
+	reDeepMediumTask   = regexp.MustCompile(`(?i)\b(sleep[- ]?consolidat\w*|consolidat(?:e|ion)|dreaming|research\s+memo|deep\s+research)\b`)
+	reHeavySweepTask   = regexp.MustCompile(`(?i)\b(exhaustive|multi[- ]?file\s+refactor\w*|hard\s+e2e|e2e\s+debug\w*|test\s+debug\w*|sweep)\b`)
+	reRoutineTask      = regexp.MustCompile(`(?i)\b(morning[- ]?brief|edgar[- ]?close[- ]?watch|close\s+watch|filing\s+extract\w*|multi[- ]?source\s+summar\w*|brief)\b`)
+	reQuickTask        = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|list|format|lint|typo|quick|hiive|poll\w*|lookup)\b`)
+	reUUID             = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	rePromptModelHint  = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|hydrogen|flash_lite|flash-lite|flash)\b`)
 )
 
 // ExtractUUID returns the first UUID v4 found in s (e.g., from agentapi stdout), or "".
@@ -1735,6 +1739,14 @@ func ExtractUUID(s string) string {
 
 // ResolveModel selects the Antigravity model ID and thinking depth (low/medium/high/xhigh)
 // based on explicit user overrides or automatic task-complexity classification.
+//
+// Supported routing profiles (canonical tier returned is quick|standard|deep):
+//   - quick (gemini-4-hydrogen-low, flash_lite): high-frequency polling, simple lookups, status summaries
+//   - routine / synthesis / medium (gemini-4-hydrogen-medium, flash): structured crons (morning-brief, edgar-close-watch), filing extraction
+//   - standard (gemini-4-hydrogen-high, flash): feature coding, unit tests, bug fixes, doc searches
+//   - heavy / sweep / xhigh (gemini-4-hydrogen-xhigh, flash): exhaustive multi-file refactors, hard E2E/test debugging
+//   - deep-medium / consolidation (gemini-4-carbon-medium, pro): nightly sleep consolidation, deep research memos
+//   - deep (gemini-4-carbon-high, pro): Phase 1 Architecture/RFC design, security/concurrency audits, thesis falsification
 //
 // Verified Antigravity model IDs (`agy models`):
 //   - gemini-4-hydrogen-{low,medium,high,xhigh}
@@ -1756,9 +1768,15 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 		}
 	}
 
-	// 1. Infer tier from prompt if not explicitly specified
+	// 1. Infer profile/tier from prompt if not explicitly specified
 	if tier == "" {
 		switch {
+		case reDeepMediumTask.MatchString(prompt) && !reDeepHighOnlyTask.MatchString(prompt):
+			tier = "deep-medium"
+		case reHeavySweepTask.MatchString(prompt) && !reDeepHighOnlyTask.MatchString(prompt):
+			tier = "heavy"
+		case reRoutineTask.MatchString(prompt) && !reDeepHighOnlyTask.MatchString(prompt):
+			tier = "routine"
 		case reDeepTask.MatchString(prompt):
 			tier = "deep"
 		case reQuickTask.MatchString(prompt):
@@ -1768,33 +1786,52 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 		}
 	}
 
-	// 2. Default depth + model family per tier when not overridden by user
+	// 2. Normalize tier to canonical quick|standard|deep and assign default depth + model family
+	inferredDepth := ""
 	switch tier {
 	case "quick":
-		if depth == "" {
-			depth = "low"
-		}
+		inferredDepth = "low"
 		if model == "" {
 			model = "gemini-4-hydrogen"
 		}
 		subagentModel = "flash_lite"
-	case "deep":
-		if depth == "" {
-			depth = "high"
+	case "routine", "synthesis", "medium", "standard-medium":
+		tier = "standard"
+		inferredDepth = "medium"
+		if model == "" {
+			model = "gemini-4-hydrogen"
 		}
+		subagentModel = "flash"
+	case "heavy", "sweep", "xhigh", "standard-xhigh":
+		tier = "standard"
+		inferredDepth = "xhigh"
+		if model == "" {
+			model = "gemini-4-hydrogen"
+		}
+		subagentModel = "flash"
+	case "deep-medium", "deep_medium", "deep-routine", "deep_routine", "consolidation", "research":
+		tier = "deep"
+		inferredDepth = "medium"
+		if model == "" {
+			model = "gemini-4-carbon"
+		}
+		subagentModel = "pro"
+	case "deep":
+		inferredDepth = "high"
 		if model == "" {
 			model = "gemini-4-carbon"
 		}
 		subagentModel = "pro"
 	default: // "standard"
 		tier = "standard"
-		if depth == "" {
-			depth = "high"
-		}
+		inferredDepth = "high"
 		if model == "" {
 			model = "gemini-4-hydrogen"
 		}
 		subagentModel = "flash"
+	}
+	if depth == "" {
+		depth = inferredDepth
 	}
 
 	// Normalize shorthand model aliases
@@ -1825,6 +1862,23 @@ func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (mo
 
 	// If model already ends with -low, -medium, -high, or -xhigh, keep it as-is
 	if strings.HasSuffix(model, "-low") || strings.HasSuffix(model, "-medium") || strings.HasSuffix(model, "-high") || strings.HasSuffix(model, "-xhigh") {
+		if strings.HasPrefix(model, "gemini-4-carbon-") || strings.HasPrefix(model, "gemini-4-argon-") ||
+			strings.HasPrefix(model, "claude-opus-") || strings.HasPrefix(model, "claude-sonnet-") {
+			subagentModel = "pro"
+			if strings.TrimSpace(explicitTier) == "" && (strings.HasPrefix(model, "gemini-4-carbon-") || strings.HasPrefix(model, "gemini-4-argon-")) {
+				tier = "deep"
+			}
+		} else if strings.HasPrefix(model, "gemini-4-hydrogen-low") || strings.HasPrefix(model, "gemini-3.8-flash-low") {
+			subagentModel = "flash_lite"
+			if strings.TrimSpace(explicitTier) == "" {
+				tier = "quick"
+			}
+		} else if strings.HasPrefix(model, "gemini-4-hydrogen-") || strings.HasPrefix(model, "gemini-3.8-flash-") {
+			subagentModel = "flash"
+			if strings.TrimSpace(explicitTier) == "" {
+				tier = "standard"
+			}
+		}
 		return model, tier, subagentModel
 	}
 	return fmt.Sprintf("%s-%s", model, depth), tier, subagentModel

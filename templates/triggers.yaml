@@ -3,13 +3,13 @@ schedules:
   - id: morning-brief
     cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
     mode: front_desk_cron
-    model: flash
+    model: gemini-4-hydrogen-medium
     delivery: interrupt
     skill: morning-brief
   - id: edgar-close-watch
     cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
     mode: daemon_gatekeeper
-    model: flash
+    model: gemini-4-hydrogen-medium
     precheck_cmd: ["./bin/hq", "status", "--quiet"]
     dedup_mode: stdout_sha256
     delivery: interrupt_on_breach
@@ -17,7 +17,7 @@ schedules:
   - id: sleep-consolidate
     cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
     mode: isolated_worker
-    model: gemini-4-carbon-high
+    model: gemini-4-carbon-medium
     delivery: silent_ledger
     skill: sleep-consolidate
 

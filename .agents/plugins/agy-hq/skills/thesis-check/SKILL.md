@@ -8,6 +8,11 @@ description: >-
 
 # Investment Thesis & Falsification Check (`/thesis-check`)
 
+> **Model Routing Tiering:**
+> - **High-frequency polling** (e.g., Hiive inbox scans): `gemini-4-hydrogen-low` (`flash_lite` / `--tier=quick`).
+> - **Routine close watch & filing extraction** (e.g., `edgar-close-watch`): `gemini-4-hydrogen-medium` (`--tier=routine`).
+> - **High-stakes thesis falsification / `KC-1` breach audits:** `gemini-4-carbon-high` (`pro` / `--tier=deep`).
+
 Evaluate new filings or news against an explicit investment thesis and falsification ("kill") criteria.
 
 ## Steps

@@ -671,7 +671,7 @@ func main() {
 		prompt := fs.String("prompt", "", "Task instructions for the new conversation")
 		model := fs.String("model", "", "Optional model override (hydrogen, flash, carbon, sonnet, opus, or full model ID)")
 		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high, xhigh)")
-		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
+		tier := fs.String("tier", "", "Optional complexity tier override (quick, routine, standard, heavy, deep-medium, deep)")
 		titleOverride := fs.String("title", "", "Optional custom conversation title")
 		scopeOverride := fs.String("scope", "", "Optional custom task scope")
 		force := fs.Bool("force", false, "Force spawn even if quota circuit breaker is open")
@@ -679,7 +679,7 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*taskName == "" && *role == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo>] [--tier=quick|standard|deep] [--model=...] [--depth=low|medium|high] [--force] [--ignore-budget] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo>] [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget
@@ -788,13 +788,13 @@ func main() {
 		prompt := fs.String("prompt", "", "Task instructions for the nested subagent")
 		model := fs.String("model", "", "Optional model override (hydrogen, flash, carbon, sonnet, opus, or full model ID)")
 		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high, xhigh)")
-		tier := fs.String("tier", "", "Optional complexity tier override (quick, standard, deep)")
+		tier := fs.String("tier", "", "Optional complexity tier override (quick, routine, standard, heavy, deep-medium, deep)")
 		force := fs.Bool("force", false, "Force spawn even if quota circuit breaker is open")
 		ignoreBudget := fs.Bool("ignore-budget", false, "Alias for --force to bypass daily token budget circuit breaker")
 		dryRun := fs.Bool("dry-run", false, "Simulate subagent spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*role == "" && *taskName == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--model=...] [--depth=low|medium|high] [--parent=<conv-id>] [--repo=<repo>] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--parent=<conv-id>] [--repo=<repo>] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget

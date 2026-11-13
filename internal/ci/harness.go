@@ -384,7 +384,10 @@ func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {
 		wantModel, wantTier, wantSub string
 	}{
 		{"Summarize inbox status", "", "", "", "gemini-4-hydrogen-low", "quick", "flash_lite"},
+		{"Morning brief and multi-source summary", "", "", "", "gemini-4-hydrogen-medium", "standard", "flash"},
 		{"Fix unit test in parser", "", "", "", "gemini-4-hydrogen-high", "standard", "flash"},
+		{"Exhaustive multi-file refactor sweep", "", "", "", "gemini-4-hydrogen-xhigh", "standard", "flash"},
+		{"Nightly sleep consolidation and deep research memo", "", "", "", "gemini-4-carbon-medium", "deep", "pro"},
 		{"Architecture design and security audit", "", "", "", "gemini-4-carbon-high", "deep", "pro"},
 		{"Use opus to review concurrency bug", "", "", "", "claude-opus-5-5-high", "standard", "pro"},
 		{"Investigate issue", "sonnet", "medium", "deep", "claude-sonnet-5-5-medium", "deep", "pro"},

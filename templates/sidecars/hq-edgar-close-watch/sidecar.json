@@ -4,7 +4,7 @@
     "CRON_TZ=America/Los_Angeles 30 13 * * 1-5",
     "agentapi",
     "new-conversation",
-    "--model=flash",
+    "--model=gemini-4-hydrogen-medium",
     "--title=[Auto] Post-Close Filing Watch",
     "--",
     "Activate the thesis-check skill: check tracked tickers in local/notes/investing/ for any new after-close 8-K, 10-Q, or 10-K filings and evaluate them against written falsification criteria."

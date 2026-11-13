@@ -18,13 +18,23 @@ quota:
   background_model: flash
 
 routing:
+  front_desk_model: gemini-4-hydrogen-medium
   tiers:
     quick:
       model: gemini-4-hydrogen-low
       subagent_model: flash_lite
+    routine:
+      model: gemini-4-hydrogen-medium
+      subagent_model: flash
     standard:
       model: gemini-4-hydrogen-high
       subagent_model: flash
+    heavy:
+      model: gemini-4-hydrogen-xhigh
+      subagent_model: flash
+    deep_routine:
+      model: gemini-4-carbon-medium
+      subagent_model: pro
     deep:
       model: gemini-4-carbon-high
       subagent_model: pro

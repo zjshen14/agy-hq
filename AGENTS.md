@@ -64,14 +64,18 @@ Welcome to **`agy-hq` (Headquarter)** — your single entry point Personal Agent
      - **In-Session Subagent `Role` (`invoke_subagent` / `./bin/hq subagent`):** `[<Tier>] <Scope>: <2-4 Word Role>` (e.g., `[standard] opencli: PR #279 Fixer`, `[deep] NVDA: 10-Q Auditor`).
      - **Scheduled Automation Runs:** `[Auto] <Job Name>` (e.g., `[Auto] Morning Brief`).
    - **Smart Model & Thinking-Depth Routing (With User Override):**
+     - **Front Desk Default (`[HQ] Front Desk`):** **Gemini 4 Hydrogen (Medium)** (`gemini-4-hydrogen-medium`) for low-latency coordination & triage.
      - **User Override First:** If the user specifies a model or depth (e.g., *"use Opus high"*, *"use Flash"*, *"deep thinking"*), always honor it:
-       - For a **nested subagent** on a Gemini tier (`inherit`, `flash_lite`, `flash`, `pro`), call `invoke_subagent(Model=...)`.
-       - For a **nested subagent on a cross-family or exact model** (e.g., `claude-opus-5-5-high`, `claude-sonnet-5-5-high`, or any explicit `--model` / `--depth`), run `./bin/hq subagent --model=<model> --depth=<low|medium|high> --role="[<tier>] <scope>: <role>" --prompt="..."` (or `./bin/hq spawn --subagent ...`). This launches a true nested child subagent under the current conversation (`parentConversationId` + `subagentDescriptor`) rather than cluttering the sidebar with a top-level conversation.
-       - For a **dedicated top-level sidebar Task Conversation**, run `./bin/hq spawn --task=<slug> --model=... --depth=low|medium|high --prompt="..."`.
-     - **Automatic Complexity Tiering (When Unspecified):**
-       - **`quick` (`low` depth — `flash_lite` / `gemini-4-hydrogen-low`):** Log checks, inbox triage, status summaries, formatting, or simple lookups.
-       - **`standard` (`high` depth on Hydrogen — `flash` / `gemini-4-hydrogen-high`):** Standard feature coding, unit tests, bug fixes, doc searches, and filing extraction (protects scarce Pro/Opus quota).
-       - **`deep` (`high` depth on Pro/Carbon — `pro` / `gemini-4-carbon-high`):** Architecture design, root-cause debugging of race conditions, security audits, or investment thesis falsification.
+       - For a **nested subagent** using coarse Gemini aliases (`inherit`, `flash_lite`, `flash`, `pro`), call `invoke_subagent(Model=...)`.
+       - For a **nested subagent on an exact thinking depth or cross-family model** (e.g., `--model=hydrogen --depth=medium|xhigh`, `--model=carbon --depth=medium`, `claude-opus-5-5-high`, `claude-sonnet-5-5-high`, or explicit `--tier`), run `./bin/hq subagent --model=<model> --depth=<low|medium|high|xhigh> --role="[<tier>] <scope>: <role>" --prompt="..."` (or `./bin/hq spawn --subagent ...`). This launches a true nested child subagent under the current conversation (`parentConversationId` + `subagentDescriptor`) rather than cluttering the sidebar with a top-level conversation.
+       - For a **dedicated top-level sidebar Task Conversation**, run `./bin/hq spawn --task=<slug> --model=... --depth=low|medium|high|xhigh --prompt="..."`.
+     - **Automatic Multi-Depth Complexity Matrix (When Unspecified):**
+       - **`quick` (`gemini-4-hydrogen-low` / `flash_lite`, `--tier=quick`):** High-frequency polling (Hiive inbox scans), simple lookups, formatting, status summaries.
+       - **Structured Crons / Medium Synthesis (`gemini-4-hydrogen-medium`, `--tier=routine` or `--model=hydrogen --depth=medium`):** Morning Brief (`morning-brief`), EDGAR Close Watch (`thesis-check` routine close watch), filing extraction, multi-source summaries.
+       - **`standard` Engineering (`gemini-4-hydrogen-high` / `flash`, `--tier=standard`):** Feature coding, unit tests, bug fixes, doc/codebase searches (protects scarce Carbon/Pro/Opus quota).
+       - **Heavy Sweeps / Exhaustive Debugging (`gemini-4-hydrogen-xhigh`, `--tier=heavy` or `--model=hydrogen --depth=xhigh`):** Exhaustive multi-file refactors and hard E2E/test debugging without spending Carbon/Pro quota.
+       - **Deep Routine / Consolidation (`gemini-4-carbon-medium`, `--tier=deep-medium` or `--model=carbon --depth=medium`):** Nightly sleep consolidation (`sleep-consolidate`) and deep research memos.
+       - **`deep` High-Stakes (`gemini-4-carbon-high` / `pro`, `--tier=deep`):** Phase 1 Architecture/RFC design, security/concurrency audits, and investment thesis falsification (`KC-1` breach audits, high-stakes Thesis Checks).
 4. **Approval-Bound Outbound Execution (`./bin/hq propose` + `ask_question`):**
    - **Boundary Definition:**
      - **Approval-Bound:** Never directly execute irreversible external actions (sending live emails via `hq gmail send` / `gws`, posting to external chat channels, merging third-party PRs via `gh pr merge`, publishing npm/vercel releases, financial transactions). These strictly require `./bin/hq propose` + 1-tap `ask_question`:
