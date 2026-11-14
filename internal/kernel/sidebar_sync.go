@@ -3,6 +3,7 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,17 +51,30 @@ func boolPtr(v bool) *bool {
 }
 
 // LSTrajectorySummary models the subset of exa.jetski_cortex_pb.CascadeTrajectorySummary
-// returned by LanguageServerService/GetAllCascadeTrajectories needed for safety gates S2-S7.
+// returned by LanguageServerService/GetAllCascadeTrajectories and JetboxSubscribeToSummaries needed for safety gates S2-S7.
 type LSTrajectorySummary struct {
 	Summary             string                    `json:"summary,omitempty"`
 	StepCount           uint32                    `json:"stepCount,omitempty"`
 	Status              string                    `json:"status,omitempty"`
 	Annotations         LSConversationAnnotations `json:"annotations"`
+	TrajectoryMetadata  LSTrajectoryMetadata      `json:"trajectoryMetadata,omitempty"`
 	WaitingSteps        []json.RawMessage         `json:"waitingSteps,omitempty"`
 	NotFullyIdle        bool                      `json:"notFullyIdle,omitempty"`
 	BackgroundTaskCount uint32                    `json:"backgroundTaskCount,omitempty"`
 	HasActiveChildren   bool                      `json:"hasActiveChildren,omitempty"`
 	HasRunningSubagents bool                      `json:"hasRunningSubagents,omitempty"`
+}
+
+// LSTrajectoryMetadata carries parent/depth lineage so JetboxSubscribeToSummaries
+// excludes nested child subagent subtrajectories while retaining top-level sidebar threads.
+type LSTrajectoryMetadata struct {
+	ParentConversationID string `json:"parentConversationId,omitempty"`
+	RootConversationID   string `json:"rootConversationId,omitempty"`
+	NestingDepth         int    `json:"nestingDepth,omitempty"`
+}
+
+type lsJetboxSummariesFrame struct {
+	Updates map[string]LSTrajectorySummary `json:"updates"`
 }
 
 // LSConversationAnnotations models exa.jetski_cortex_pb.ConversationAnnotations on read responses.
@@ -240,7 +255,7 @@ func (c *SidebarSyncClient) doJSONRPC(ctx context.Context, method string, reqPay
 	return nil
 }
 
-// GetAllCascadeTrajectories fetches top-level conversation summaries from LanguageServerService.
+// GetAllCascadeTrajectories fetches currently loaded in-memory top-level conversation summaries from LanguageServerService.
 func (c *SidebarSyncClient) GetAllCascadeTrajectories(ctx context.Context) (map[string]LSTrajectorySummary, error) {
 	var raw lsGetAllTrajectoriesResponse
 	err := c.doJSONRPC(
@@ -258,6 +273,163 @@ func (c *SidebarSyncClient) GetAllCascadeTrajectories(ctx context.Context) (map[
 		out[normalizeUUID(k)] = v
 	}
 	return out, nil
+}
+
+// GetJetboxTrajectorySummaries reads the initial snapshot burst from LanguageServerService/JetboxSubscribeToSummaries
+// (Connect streaming protocol `application/connect+json`), which includes historical unloaded conversations persisted
+// on disk across Antigravity restarts that are omitted by in-memory GetAllCascadeTrajectories.
+// Nested subtrajectories (parentConversationId != "" or nestingDepth > 0) are filtered out.
+func (c *SidebarSyncClient) GetJetboxTrajectorySummaries(ctx context.Context) (map[string]LSTrajectorySummary, error) {
+	const (
+		jetboxSnapshotChunkSize = 100
+		maxConnectFrameBytes    = 32 * 1024 * 1024
+		jetboxIdleCutoff        = 120 * time.Millisecond
+	)
+	if !c.Available() {
+		return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: errors.New("LanguageServerService credentials unavailable")}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	boundedCtx := ctx
+	var boundCancel context.CancelFunc
+	if deadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(deadline) > DefaultSidebarBatchTimeout {
+		boundedCtx, boundCancel = context.WithTimeout(ctx, DefaultSidebarBatchTimeout)
+		defer boundCancel()
+	}
+	streamCtx, streamCancel := context.WithCancel(boundedCtx)
+	defer streamCancel()
+
+	// Connect streaming envelope: 1-byte flags (0x00) + 4-byte big-endian payload length (2) + "{}"
+	frameReq := []byte{0x00, 0x00, 0x00, 0x00, 0x02, '{', '}'}
+	endpoint := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/JetboxSubscribeToSummaries", c.baseURL)
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, endpoint, bytes.NewReader(frameReq))
+	if err != nil {
+		return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: err}
+	}
+	req.Header.Set("Content-Type", "application/connect+json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("x-codeium-csrf-token", c.csrfToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: err}
+	}
+	defer resp.Body.Close()
+
+	// Graceful fallback if a minimal mock server only implements GetAllCascadeTrajectories.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented || resp.StatusCode == http.StatusMethodNotAllowed {
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, &sidebarRPCError{
+			Method:     "JetboxSubscribeToSummaries",
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(bodyBytes)),
+		}
+	}
+
+	out := make(map[string]LSTrajectorySummary)
+	var idleCutoff atomic.Bool
+	var idleTimer *time.Timer
+	defer func() {
+		if idleTimer != nil {
+			idleTimer.Stop()
+		}
+	}()
+
+	framesRead := 0
+	for {
+		var hdr [5]byte
+		if _, rErr := io.ReadFull(resp.Body, hdr[:]); rErr != nil {
+			if errors.Is(rErr, io.EOF) || (idleCutoff.Load() && framesRead > 0) {
+				break
+			}
+			return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: rErr}
+		}
+		flags := hdr[0]
+		length := binary.BigEndian.Uint32(hdr[1:5])
+		if length > maxConnectFrameBytes {
+			return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: fmt.Errorf("connect frame size %d exceeds cap", length)}
+		}
+		payload := make([]byte, length)
+		if length > 0 {
+			if _, rErr := io.ReadFull(resp.Body, payload); rErr != nil {
+				if idleCutoff.Load() && framesRead > 0 {
+					break
+				}
+				return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: rErr}
+			}
+		}
+		// Connect EndStreamResponse flag (0x02)
+		if flags&0x02 != 0 {
+			break
+		}
+		var frame lsJetboxSummariesFrame
+		if uErr := json.Unmarshal(payload, &frame); uErr != nil {
+			return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: fmt.Errorf("decode frame: %w", uErr)}
+		}
+		framesRead++
+		for k, v := range frame.Updates {
+			if strings.TrimSpace(v.TrajectoryMetadata.ParentConversationID) != "" || v.TrajectoryMetadata.NestingDepth > 0 {
+				continue
+			}
+			out[normalizeUUID(k)] = v
+		}
+		if len(frame.Updates) < jetboxSnapshotChunkSize {
+			streamCancel()
+			break
+		}
+		if idleTimer == nil {
+			idleTimer = time.AfterFunc(jetboxIdleCutoff, func() {
+				idleCutoff.Store(true)
+				streamCancel()
+			})
+		} else {
+			idleTimer.Reset(jetboxIdleCutoff)
+		}
+	}
+	return out, nil
+}
+
+// ResolveTopLevelTrajectories fetches in-memory live trajectories via GetAllCascadeTrajectories and,
+// if any requested candidate UUID is unloaded from RAM (e.g., historical conversations across IDE restarts),
+// enriches the map from JetboxSubscribeToSummaries while keeping live executor fields authoritative.
+func (c *SidebarSyncClient) ResolveTopLevelTrajectories(ctx context.Context, candidateIDs []string) (map[string]LSTrajectorySummary, error) {
+	live, err := c.GetAllCascadeTrajectories(ctx)
+	if err != nil {
+		return nil, err
+	}
+	needJetbox := false
+	for _, rawID := range candidateIDs {
+		cid := normalizeUUID(rawID)
+		if IsCanonicalUUID(cid) {
+			if _, ok := live[cid]; !ok {
+				needJetbox = true
+				break
+			}
+		}
+	}
+	if !needJetbox {
+		return live, nil
+	}
+	jetbox, jbErr := c.GetJetboxTrajectorySummaries(ctx)
+	if jbErr != nil || len(jetbox) == 0 {
+		// Fall back cleanly to live summaries if Jetbox stream is unavailable or times out.
+		return live, nil
+	}
+	merged := make(map[string]LSTrajectorySummary, len(jetbox)+len(live))
+	for k, v := range jetbox {
+		merged[k] = v
+	}
+	for k, v := range live {
+		if jb, ok := merged[k]; ok && v.Annotations.Title == "" && jb.Annotations.Title != "" {
+			v.Annotations.Title = jb.Annotations.Title
+		}
+		merged[k] = v
+	}
+	return merged, nil
 }
 
 // UpdateConversationAnnotations patches annotations on one or multiple cascade IDs with mergeAnnotations=true.
@@ -672,7 +844,7 @@ func syncSingleTaskArchiveState(ctx context.Context, vaultDir string, task *Acti
 		return SidebarSingleSyncResult{Queued: true, SkippedReason: "ls_offline"}
 	}
 
-	summaries, err := client.GetAllCascadeTrajectories(ctx)
+	summaries, err := client.ResolveTopLevelTrajectories(ctx, []string{cid})
 	if err != nil {
 		_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
 			ConversationID:  cid,
@@ -1137,7 +1309,7 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 		defer cancel()
 	}
 
-	summaries, err := client.GetAllCascadeTrajectories(ctx)
+	summaries, err := client.ResolveTopLevelTrajectories(ctx, orderedIDs)
 	if err != nil {
 		rep.LSOnline = false
 		rep.LastError = err.Error()

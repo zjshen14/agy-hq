@@ -84,9 +84,14 @@ Two critical implementation details follow directly from this schema and `agy ch
 1. **Go Pointer Serialization for `archived: false` (`hq reopen`):** Because `archived` uses `proto3_optional` (`oneof _archived`), `mergeAnnotations: true` honors explicit `"archived": false` on the wire to unarchive a thread. However, in Go's `encoding/json`, a plain `bool` field tagged `json:"archived,omitempty"` omits `false`, leaving `_archived` unset! Therefore, `agy-hq`'s request struct **must** use `*bool` (`Archived *bool `json:"archived,omitempty"``) so unarchiving serializes `"archived": false` explicitly while omitting `"archived"` when `nil`.
 2. **Mandatory `archivalStatusTimestamp`:** Antigravity's changelog explicitly notes a prior UI bug when `archival_status_timestamp` was omitted during archival (*"Fixed a bug where the archival status timestamp was not correctly saved when archiving conversations"*). Every archive and unarchive call must populate `"archivalStatusTimestamp"` with the current UTC RFC3339 timestamp (`time.Now().UTC().Format(time.RFC3339Nano)`).
 
-### 3.3 `CascadeTrajectorySummary` & `CascadeRunStatus` (`GetAllCascadeTrajectories`)
+### 3.3 `CascadeTrajectorySummary`: Live (`GetAllCascadeTrajectories`) vs. Unloaded Persisted (`JetboxSubscribeToSummaries`)
 
-`GetAllCascadeTrajectories` (`{"excludeSubtrajectories": true}`) returns `trajectorySummaries` keyed by `cascadeId`. Each summary exposes:
+Empirical verification against multi-day Antigravity workspaces revealed a crucial distinction between **in-memory loaded cascades** and **persisted historical summaries**:
+
+- **`GetAllCascadeTrajectories` (`{"excludeSubtrajectories": true}`)** returns `trajectorySummaries` only for conversations **currently loaded in RAM** inside the `language_server` process (e.g., threads opened since the latest IDE restart), exposing live executor fields (`waitingSteps`, `notFullyIdle`, `backgroundTaskCount`, `hasActiveChildren`, `hasRunningSubagents`).
+- **`JetboxSubscribeToSummaries`** (Connect streaming `application/connect+json`) streams the full persisted `CascadeTrajectorySummary` catalog (`updates` chunks of up to `100` entries in `~25ms`) that backs Antigravity's left sidebar across restarts—including unloaded multi-day-old conversations (`trajectoryMetadata.parentConversationId == ""` and `nestingDepth == 0` for top-level sidebar threads vs. `> 0` for child subagents). Furthermore, `UpdateConversationAnnotations` updates both `annotations/<id>.pbtxt` and the live `Jetbox` sidebar stream even when the target conversation is unloaded from RAM.
+
+Each summary exposes:
 
 - `status` (`exa.cortex_pb.CascadeRunStatus`):
   - `CASCADE_RUN_STATUS_UNSPECIFIED` (`0`)

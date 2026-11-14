@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -694,5 +695,171 @@ func TestSidebarBackfillDryRunZeroWriteGuaranteeAndCompactIntegration(t *testing
 	}
 	if len(cRep.AutoArchivedSlugs) != 1 || cRep.SidebarSyncedCount != 1 || !mockLS.trajectories[uHotDone].Annotations.Archived {
 		t.Fatalf("expected CompactTasks to auto-archive and sync uHotDone, got %+v", cRep)
+	}
+}
+
+func writeConnectFrame(w http.ResponseWriter, flags byte, payload interface{}) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	var hdr [5]byte
+	hdr[0] = flags
+	binary.BigEndian.PutUint32(hdr[1:5], uint32(len(raw)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	if len(raw) > 0 {
+		if _, err := w.Write(raw); err != nil {
+			return err
+		}
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
+}
+
+func TestJetboxUnloadedHistoricalBackfillAndSubtrajectoryFilter(t *testing.T) {
+	now := time.Date(2026, 11, 14, 18, 0, 0, 0, time.UTC)
+	csrf := "jetbox-csrf"
+	vaultDir := t.TempDir()
+
+	uLoaded := testUUID(501)
+	uUnloaded1 := testUUID(502)
+	uUnloaded2 := testUUID(503)
+	uUnloadedPinned := testUUID(504)
+	uSubagent := testUUID(505)
+
+	var mu sync.Mutex
+	inMemoryLoaded := map[string]LSTrajectorySummary{
+		uLoaded: {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: LSConversationAnnotations{Title: "[HQ] Front Desk", Pinned: true}},
+	}
+	jetboxPersisted := map[string]LSTrajectorySummary{
+		uLoaded:         {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: LSConversationAnnotations{Title: "[HQ] Front Desk", Pinned: true}},
+		uUnloaded1:      {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: LSConversationAnnotations{Title: "[Task:hq] 6-Day Old Unloaded 1"}},
+		uUnloaded2:      {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: LSConversationAnnotations{Title: "[Task:hq] 6-Day Old Unloaded 2"}},
+		uUnloadedPinned: {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: LSConversationAnnotations{Title: "[Task:hq] Unloaded Pinned", Pinned: true}},
+		uSubagent: {
+			Status:             "CASCADE_RUN_STATUS_IDLE",
+			TrajectoryMetadata: LSTrajectoryMetadata{ParentConversationID: uLoaded, NestingDepth: 1},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != csrf {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories":
+			mu.Lock()
+			defer mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(lsGetAllTrajectoriesResponse{TrajectorySummaries: inMemoryLoaded})
+
+		case "/exa.language_server_pb.LanguageServerService/JetboxSubscribeToSummaries":
+			if r.Header.Get("Content-Type") != "application/connect+json" {
+				http.Error(w, "expected application/connect+json", http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			cp := make(map[string]LSTrajectorySummary, len(jetboxPersisted))
+			for k, v := range jetboxPersisted {
+				cp[k] = v
+			}
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "application/connect+json")
+			_ = writeConnectFrame(w, 0x00, lsJetboxSummariesFrame{Updates: cp})
+			// Simulate open reactive stream waiting for client cancellation after snapshot (<100 items)
+			<-r.Context().Done()
+
+		case "/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations":
+			body, _ := io.ReadAll(r.Body)
+			var req lsUpdateAnnotationsRequest
+			if err := json.Unmarshal(body, &req); err != nil || !req.MergeAnnotations {
+				http.Error(w, "bad update", http.StatusBadRequest)
+				return
+			}
+			targets := req.CascadeIDs
+			if len(targets) == 0 && req.CascadeID != "" {
+				targets = []string{req.CascadeID}
+			}
+			mu.Lock()
+			for _, id := range targets {
+				nid := normalizeUUID(id)
+				sum, ok := jetboxPersisted[nid]
+				if !ok {
+					mu.Unlock()
+					http.Error(w, `{"code":"not_found"}`, http.StatusNotFound)
+					return
+				}
+				if req.Annotations.Archived != nil {
+					sum.Annotations.Archived = *req.Annotations.Archived
+				}
+				jetboxPersisted[nid] = sum
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := SidebarSyncConfig{
+		BaseURL:        srv.URL,
+		CSRFToken:      csrf,
+		CallerOverride: true,
+		Now:            func() time.Time { return now },
+	}
+
+	_ = SetFrontDesk(vaultDir, uLoaded, "")
+	if err := AppendTasksToColdArchive(vaultDir, []ActiveTask{
+		{ConversationID: uUnloaded1, TaskSlug: "old-1", Status: "archived"},
+		{ConversationID: uUnloaded2, TaskSlug: "old-2", Status: "archived"},
+		{ConversationID: uUnloadedPinned, TaskSlug: "old-pinned", Status: "archived"},
+		{ConversationID: uSubagent, TaskSlug: "old-subagent", Kind: "subagent", Status: "completed"},
+	}); err != nil {
+		t.Fatalf("AppendTasksToColdArchive: %v", err)
+	}
+
+	// 1. Backfill must discover unloaded conversations via JetboxSubscribeToSummaries, archive uUnloaded1 & uUnloaded2,
+	//    skip uUnloadedPinned (Gate S4), and ignore uSubagent (filtered out as nested subtrajectory)!
+	rep, err := SyncSidebar(vaultDir, SyncSidebarOptions{
+		Now:          now,
+		Backfill:     true,
+		ClientConfig: cfg,
+	})
+	if err != nil {
+		t.Fatalf("SyncSidebar with Jetbox unloaded trajectories: %v", err)
+	}
+	if rep.ArchivedCount != 2 || rep.MissingOrSubtrajectoryCount != 1 || len(rep.ProtectedSkipped) != 1 {
+		t.Fatalf("unexpected Jetbox backfill report: %+v", rep)
+	}
+	if rep.ProtectedSkipped[0].Reason != "ui_pinned" {
+		t.Fatalf("expected Gate S4 ui_pinned on unloaded pinned thread, got %+v", rep.ProtectedSkipped)
+	}
+	mu.Lock()
+	if !jetboxPersisted[uUnloaded1].Annotations.Archived || !jetboxPersisted[uUnloaded2].Annotations.Archived || jetboxPersisted[uUnloadedPinned].Annotations.Archived {
+		t.Fatalf("unexpected Jetbox archived state after backfill: %+v", jetboxPersisted)
+	}
+	mu.Unlock()
+
+	// 2. ReopenTaskWithOptions on an unloaded cold conversation must also resolve via Jetbox and unarchive cleanly!
+	reopenRes, err := ReopenTaskWithOptions(vaultDir, "old-1", ReopenTaskOptions{
+		NoWorktree:    true,
+		SidebarConfig: cfg,
+	})
+	if err != nil || !reopenRes.Synced {
+		t.Fatalf("expected ReopenTaskWithOptions on unloaded task to sync via Jetbox: err=%v res=%+v", err, reopenRes)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if jetboxPersisted[uUnloaded1].Annotations.Archived {
+		t.Fatalf("expected uUnloaded1 to be unarchived after cold reopen")
 	}
 }
