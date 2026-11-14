@@ -233,6 +233,7 @@ var (
 		"gmail": true, "gchat": true,
 		"daemon": true, "webui": true, "memory": true,
 		"tasks": true, "outbox": true, "ideas": true, "goals": true,
+		"events": true, "timers": true, "progress": true, "exec-sandboxed": true,
 		"spaces": true, "obs": true, "rsi": true, "ci": true,
 		// Prose words that can follow `hq` in descriptive sentences
 		"daemon_gatekeeper": true, "binary": true, "cli": true, "microkernel": true,

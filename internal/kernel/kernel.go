@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/timers"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
@@ -148,26 +150,27 @@ const (
 // ActiveTask tracks a dedicated multi-turn Task Conversation or background Subagent
 // in local/memory/tasks.json (hot working set) and local/memory/tasks_archive.jsonl (cold ledger).
 type ActiveTask struct {
-	TaskSlug             string `json:"taskSlug"`
-	Title                string `json:"title"`
-	Kind                 string `json:"kind,omitempty"`  // "task" | "subagent" | "auto"
-	Scope                string `json:"scope,omitempty"` // e.g. "agy-hq", "brand", "NVDA", "personal"
-	Tier                 string `json:"tier"`            // "quick" | "standard" | "deep"
-	Model                string `json:"model"`
-	ParentConversationID string `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
-	WorktreeDir          string `json:"worktreeDir,omitempty"`
-	RepoRoot             string `json:"repoRoot,omitempty"`
-	ConversationID       string `json:"conversationId,omitempty"`
-	TurnCount            int    `json:"turnCount,omitempty"`
-	Pinned               bool   `json:"pinned,omitempty"`
-	CreatedAt            string `json:"createdAt"`
-	LastUpdatedAt        string `json:"lastUpdatedAt"`
-	CompletedAt          string `json:"completedAt,omitempty"`
-	ArchivedAt           string `json:"archivedAt,omitempty"`
-	SidebarArchived      bool   `json:"sidebarArchived,omitempty"`
-	SidebarSyncedAt      string `json:"sidebarSyncedAt,omitempty"`
-	LastSummary          string `json:"lastSummary,omitempty"`
-	Status               string `json:"status"` // active, idle, completed, archived, cancelled
+	TaskSlug             string   `json:"taskSlug"`
+	Title                string   `json:"title"`
+	Kind                 string   `json:"kind,omitempty"`  // "task" | "subagent" | "auto"
+	Scope                string   `json:"scope,omitempty"` // e.g. "agy-hq", "brand", "NVDA", "personal"
+	Tier                 string   `json:"tier"`            // "quick" | "standard" | "deep"
+	Model                string   `json:"model"`
+	ParentConversationID string   `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
+	WorktreeDir          string   `json:"worktreeDir,omitempty"`
+	RepoRoot             string   `json:"repoRoot,omitempty"`
+	ConversationID       string   `json:"conversationId,omitempty"`
+	TurnCount            int      `json:"turnCount,omitempty"`
+	Pinned               bool     `json:"pinned,omitempty"`
+	CreatedAt            string   `json:"createdAt"`
+	LastUpdatedAt        string   `json:"lastUpdatedAt"`
+	CompletedAt          string   `json:"completedAt,omitempty"`
+	ArchivedAt           string   `json:"archivedAt,omitempty"`
+	SidebarArchived      bool     `json:"sidebarArchived,omitempty"`
+	SidebarSyncedAt      string   `json:"sidebarSyncedAt,omitempty"`
+	EventIDs             []string `json:"eventIds,omitempty"`
+	LastSummary          string   `json:"lastSummary,omitempty"`
+	Status               string   `json:"status"` // active, idle, completed, archived, cancelled
 }
 
 // EffectiveKind returns "task", "subagent", or "auto", inferring from TaskSlug/Title when Kind is empty.
@@ -627,6 +630,9 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 			if data, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
 				_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
 			}
+			if len(tasks[i].EventIDs) > 0 {
+				_ = events.BindBatchConversation(vaultDir, tasks[i].EventIDs, convID, time.Now(), events.DefaultLeaseTTL)
+			}
 			return tasks[i], true
 		}
 	}
@@ -699,6 +705,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.Status == "" {
 				task.Status = tasks[i].Status
 			}
+			if len(task.EventIDs) == 0 {
+				task.EventIDs = tasks[i].EventIDs
+			}
 			if task.LastSummary == "" {
 				task.LastSummary = tasks[i].LastSummary
 			}
@@ -733,6 +742,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				tasks[i].Title = SanitizeTaskTitle(tasks[i].Title, tasks[i].TaskSlug)
 				tasks[i].Kind = tasks[i].EffectiveKind()
 				tasks[i].Scope = tasks[i].EffectiveScope()
+				if len(tasks[i].EventIDs) > 0 {
+					_ = events.BindBatchConversation(vaultDir, tasks[i].EventIDs, task.ConversationID, time.Now(), events.DefaultLeaseTTL)
+				}
 				updated = true
 				break
 			}
@@ -2305,50 +2317,23 @@ func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool)
 }
 
 // ProcessInbox scans local/inbox/ for newly dropped files, moves each to local/inbox/queued/,
-// routes it to its matching skill, and spawns (or dry-runs) a Flash task.
+// recovers any stranded files in local/inbox/queued/, enqueues durable events, and dispatches ready batches.
 func ProcessInbox(vaultDir string, dryRun bool) ([]string, error) {
-	inboxDir := filepath.Join(vaultDir, "inbox")
-	queuedDir := filepath.Join(inboxDir, "queued")
-	entries, err := os.ReadDir(inboxDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+	now := time.Now()
+	if err := EnqueueInboxFiles(vaultDir, now); err != nil {
 		return nil, err
 	}
-
-	var processed []string
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		if err := os.MkdirAll(queuedDir, 0o755); err != nil {
-			return processed, err
-		}
-		srcPath := filepath.Join(inboxDir, e.Name())
-		dstPath := filepath.Join(queuedDir, e.Name())
-		if err := os.Rename(srcPath, dstPath); err != nil {
-			continue
-		}
-		skill := ClassifyInboxFile(e.Name())
-		title := fmt.Sprintf("[Auto] Inbox Drop: %s (/%s)", e.Name(), skill)
-		prompt := fmt.Sprintf("A new file was dropped into the inbox and moved to %s. Activate the %s skill and process this file.", dstPath, skill)
-		out, err := SpawnFlashTask(vaultDir, "inbox-drop:"+e.Name(), skill, title, prompt, dryRun)
-		if err != nil {
-			processed = append(processed, fmt.Sprintf("%s -> /%s (queued; spawn deferred: %v)", e.Name(), skill, err))
-		} else {
-			processed = append(processed, fmt.Sprintf("%s -> /%s (%s)", e.Name(), skill, out))
-		}
-	}
-	return processed, nil
+	return DispatchPendingEvents(vaultDir, now, dryRun)
 }
 
-// RunHeartbeat executes the zero-token Go sidecar pre-check loop (proposal TTL sweep, inbox drop router,
-// Gmail/GChat batch coalescer, daemon gatekeepers, and Waiting-On obligation SLA sweeps).
+// RunHeartbeat executes the zero-token Go sidecar pre-check loop (proposal TTL sweep, durable timer evaluation,
+// inbox drop router, Gmail/GChat batch coalescer, daemon gatekeepers, event inbox dispatch, outbox interrupt
+// delivery, and Waiting-On obligation SLA sweeps).
 // If no actionable deltas are detected, zero LLM tokens are used.
 func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	now := time.Now()
 	_, _ = approvals.ExpireStaleProposals(vaultDir, now)
+	_, _ = timers.EvaluateDue(vaultDir, now)
 
 	inboxActions, err := ProcessInbox(vaultDir, dryRun)
 	if err != nil {
@@ -2376,12 +2361,20 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 				"and save your structured summary via `hq gmail triage-result --batch=%s`.",
 			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
 		)
-		out, spawnErr := SpawnFlashTask(vaultDir, "gmail-precheck:"+batchLabel, "inbox-triage", title, prompt, dryRun)
-		if spawnErr != nil {
-			inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (deferred: %v)", batchLabel, spawnErr))
-		} else {
-			inboxActions = append(inboxActions, fmt.Sprintf("gmail:%s -> /inbox-triage (%s)", batchLabel, out))
-		}
+		flashModelID, _, _ := ResolveModel(prompt, "flash", "", "")
+		_, _, _ = events.Enqueue(vaultDir, events.Event{
+			Source:   "gmail_precheck",
+			DedupKey: fmt.Sprintf("gmail:%s:%s", entry.Account, batchLabel),
+			ScopeKey: fmt.Sprintf("triage:gmail:%s", entry.Account),
+			Skill:    "inbox-triage",
+			Model:    flashModelID,
+			Title:    title,
+			Prompt:   prompt,
+			Metadata: map[string]string{
+				"trigger":      "gmail-precheck:" + batchLabel,
+				"action_label": fmt.Sprintf("gmail:%s -> /inbox-triage", batchLabel),
+			},
+		}, now)
 	}
 
 	var readyChat []CoalescedTriageEntry
@@ -2403,20 +2396,36 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 				"and save your structured summary via `hq gchat triage-result --batch=%s`.",
 			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
 		)
-		out, spawnErr := SpawnFlashTask(vaultDir, "gchat-precheck:"+batchLabel, "inbox-triage", title, prompt, dryRun)
-		if spawnErr != nil {
-			inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (deferred: %v)", batchLabel, spawnErr))
-		} else {
-			inboxActions = append(inboxActions, fmt.Sprintf("gchat:%s -> /inbox-triage (%s)", batchLabel, out))
-		}
+		flashModelID, _, _ := ResolveModel(prompt, "flash", "", "")
+		_, _, _ = events.Enqueue(vaultDir, events.Event{
+			Source:   "gchat_precheck",
+			DedupKey: fmt.Sprintf("gchat:%s:%s", entry.Account, batchLabel),
+			ScopeKey: fmt.Sprintf("triage:gchat:%s", entry.Account),
+			Skill:    "inbox-triage",
+			Model:    flashModelID,
+			Title:    title,
+			Prompt:   prompt,
+			Metadata: map[string]string{
+				"trigger":      "gchat-precheck:" + batchLabel,
+				"action_label": fmt.Sprintf("gchat:%s -> /inbox-triage", batchLabel),
+			},
+		}, now)
 	}
 
 	if gkActions, _, gkErr := EvaluateDaemonGatekeepers(vaultDir, now, false, dryRun); gkErr == nil && len(gkActions) > 0 {
 		inboxActions = append(inboxActions, gkActions...)
 	}
 
+	if extraActions, dispErr := DispatchPendingEvents(vaultDir, now, dryRun); dispErr == nil && len(extraActions) > 0 {
+		inboxActions = append(inboxActions, extraActions...)
+	}
+
 	if goalActions, gErr := SweepWaitingOnObligations(vaultDir, now); gErr == nil && len(goalActions) > 0 {
 		inboxActions = append(inboxActions, goalActions...)
+	}
+
+	if !dryRun {
+		_, _ = DispatchOutboxToFrontDesk(vaultDir, now, false)
 	}
 
 	if !dryRun && HasPendingSidebarSyncQueue(vaultDir) {

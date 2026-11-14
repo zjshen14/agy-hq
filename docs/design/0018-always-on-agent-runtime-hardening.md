@@ -1,6 +1,6 @@
 # RFC-0018: Always-On Agent Runtime Hardening — Durable Event Inbox, Self-Scheduled Follow-Up Timers, Deferred Approval Resumption, Cross-Run Progress/Reported Memory & OS Credential Sandboxing
 
-- **Status:** Proposed (Phase 1 — Awaiting User Review)
+- **Status:** Implemented
 - **Author:** `[Task:headquarter] Benchmark Anthropic Always-On Agents` (`gemini-4-carbon-high`)
 - **Created:** 2026-11-14
 - **Companion Research:** [14 — Anthropic Always-On Agents Architecture & Forensic Gap Audit Against `agy-hq`](../research/14_anthropic_always_on_agents_gap_audit.md)

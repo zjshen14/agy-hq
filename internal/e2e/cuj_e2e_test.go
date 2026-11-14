@@ -19,6 +19,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/rsi"
+	"github.com/zjshen14/agy-hq/internal/webui"
 )
 
 type hqEnv struct {
@@ -3303,5 +3304,569 @@ func TestCUJ_SidebarConversationArchiveSync(t *testing.T) {
 	}
 	if !strings.Contains(docOut, `"name": "Sidebar Archive Sync Queue"`) {
 		t.Fatalf("expected Sidebar Archive Sync Queue check in hq doctor --json, got: %s", docOut)
+	}
+}
+
+// CUJ-26: Crash-Safe Event Inbox, Authenticated Webhook Push & Precheck Error Health (RFC-0018 Phase 2A)
+func TestCUJ26_CrashSafeEventInboxWebhookPushAndPrecheckHealth(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	// 1. Provision daemon token via `hq events token --json` and verify 0600 permissions
+	tokOut, err := env.run("", "events", "token", "--json")
+	if err != nil {
+		t.Fatalf("hq events token --json failed: %v (%s)", err, tokOut)
+	}
+	var tokResp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(tokOut), &tokResp); err != nil || len(tokResp.Token) != 64 {
+		t.Fatalf("unexpected daemon token response: err=%v out=%s", err, tokOut)
+	}
+	tokInfo, err := os.Stat(filepath.Join(env.vaultDir, "private", "daemon_token"))
+	if err != nil || tokInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("expected daemon_token with 0600 permissions, got info=%v err=%v", tokInfo, err)
+	}
+
+	// 2. Verify authenticated loopback POST /api/events and 7-day deduplication
+	srv := httptest.NewServer(webui.NewHandler(env.vaultDir))
+	defer srv.Close()
+
+	postEvent := func(bearer string, payload string) (*http.Response, map[string]interface{}) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/events", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /api/events failed: %v", err)
+		}
+		defer resp.Body.Close()
+		var body map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		return resp, body
+	}
+
+	unauthResp, _ := postEvent("", `{"source":"webhook","title":"[Auto] Unauth","prompt":"Ignore"}`)
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized without bearer token, got %d", unauthResp.StatusCode)
+	}
+
+	whPayload := `{"source":"webhook","dedupKey":"gh-pr-42","scopeKey":"repo:hq","title":"[Auto] PR #42 Check","prompt":"Review CI on PR #42"}`
+	okResp1, body1 := postEvent(tokResp.Token, whPayload)
+	if okResp1.StatusCode != http.StatusAccepted || body1["deduplicated"] != false {
+		t.Fatalf("expected 202 Accepted with deduplicated=false, got status=%d body=%+v", okResp1.StatusCode, body1)
+	}
+	okResp2, body2 := postEvent(tokResp.Token, whPayload)
+	if okResp2.StatusCode != http.StatusAccepted || body2["deduplicated"] != true {
+		t.Fatalf("expected 202 Accepted with deduplicated=true on replay, got status=%d body=%+v", okResp2.StatusCode, body2)
+	}
+	evMap, _ := body1["event"].(map[string]interface{})
+	whEventID, _ := evMap["id"].(string)
+	if whEventID == "" {
+		t.Fatalf("missing event id in POST /api/events response: %+v", body1)
+	}
+	if dropOut, err := env.run("", "events", "drop", whEventID, "--reason=test-cleanup"); err != nil {
+		t.Fatalf("hq events drop failed: %v (%s)", err, dropOut)
+	}
+
+	// 3. Stranded inbox/queued/ crash recovery + 15m lease expiry respawn + Stop completion
+	queuedDir := filepath.Join(env.vaultDir, "inbox", "queued")
+	if err := os.MkdirAll(queuedDir, 0o755); err != nil {
+		t.Fatalf("mkdir inbox/queued: %v", err)
+	}
+	orphanPath := filepath.Join(queuedDir, "orphan-receipt.png")
+	if err := os.WriteFile(orphanPath, []byte("receipt-bytes-2026"), 0o644); err != nil {
+		t.Fatalf("write orphan-receipt.png: %v", err)
+	}
+
+	fakeBin := filepath.Join(t.TempDir(), "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake-bin: %v", err)
+	}
+	counterFile := filepath.Join(fakeBin, "spawn-count.txt")
+	mockAgentAPI := filepath.Join(fakeBin, "agentapi")
+	script := fmt.Sprintf(`#!/usr/bin/env sh
+count=0
+if [ -f %q ]; then
+  count=$(cat %q)
+fi
+count=$((count + 1))
+printf "%%s" "$count" > %q
+if [ "$count" = "1" ]; then
+  echo "00000000-0000-0000-0000-000000000801"
+else
+  echo "00000000-0000-0000-0000-000000000802"
+fi
+`, counterFile, counterFile, counterFile)
+	if err := os.WriteFile(mockAgentAPI, []byte(script), 0o755); err != nil {
+		t.Fatalf("write mock agentapi: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	disp1, err := env.run("", "events", "dispatch", "--now=2026-11-14T10:00:00Z")
+	if err != nil {
+		t.Fatalf("first hq events dispatch failed: %v (%s)", err, disp1)
+	}
+	if !strings.Contains(disp1, "00000000-0000-0000-0000-000000000801") {
+		t.Fatalf("expected first dispatch to spawn worker 801, got: %s", disp1)
+	}
+	// File must remain in inbox/queued/ while worker 801 holds the active lease
+	if _, err := os.Stat(orphanPath); err != nil {
+		t.Fatalf("orphan-receipt.png must remain in inbox/queued/ until worker completes: %v", err)
+	}
+
+	// Simulate silent crash of worker 801: advance clock +20m (>15m lease TTL) to reap lease (5s retry backoff),
+	// then advance +10s to respawn as worker 802.
+	if reapOut, err := env.run("", "events", "dispatch", "--now=2026-11-14T10:20:00Z"); err != nil {
+		t.Fatalf("lease-reap dispatch at +20m failed: %v (%s)", err, reapOut)
+	}
+	disp2, err := env.run("", "events", "dispatch", "--now=2026-11-14T10:20:10Z")
+	if err != nil {
+		t.Fatalf("second hq events dispatch after backoff failed: %v (%s)", err, disp2)
+	}
+	if !strings.Contains(disp2, "00000000-0000-0000-0000-000000000802") {
+		t.Fatalf("expected crash-reaped event to respawn as worker 802, got: %s", disp2)
+	}
+
+	// Worker 802 completes via `hq hook stop` -> moves queued file to inbox/processed/ and archives event as done
+	artDir802 := filepath.Join(t.TempDir(), "brain-802")
+	_ = os.MkdirAll(artDir802, 0o755)
+	stop802 := fmt.Sprintf(`{"conversationId":"00000000-0000-0000-0000-000000000802","executionNum":1,"artifactDirectoryPath":%q,"lastAgentOutput":"Triaged receipt"}`, artDir802)
+	if stopOut, err := env.run(stop802, "hook", "stop"); err != nil {
+		t.Fatalf("hq hook stop for worker 802 failed: %v (%s)", err, stopOut)
+	}
+	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+		t.Fatalf("expected orphan-receipt.png to be moved out of inbox/queued/ upon worker completion")
+	}
+	procMatches, _ := filepath.Glob(filepath.Join(env.vaultDir, "inbox", "processed", "*_orphan-receipt.png"))
+	if len(procMatches) != 1 {
+		t.Fatalf("expected processed receipt in inbox/processed/, got matches=%v", procMatches)
+	}
+	archBytes, err := os.ReadFile(filepath.Join(env.vaultDir, "memory", "events_archive.jsonl"))
+	if err != nil || !strings.Contains(string(archBytes), `"status":"done"`) {
+		t.Fatalf("expected completed event in events_archive.jsonl, err=%v content=%s", err, string(archBytes))
+	}
+
+	// 4. Broken precheck_cmd ("exit 2") must NOT inflate GatekeeperSavesToday and must surface WARN in `hq doctor`
+	brokenTriggers := `schedules:
+  - id: broken-watcher
+    cron: "0 4 1 1 *"
+    mode: daemon_gatekeeper
+    skill: inbox-triage
+    model: gemini-4-hydrogen-low
+    title: "[Auto] Broken Watcher"
+    precheck_cmd: "exit 2"
+    prompt: "Never reached"
+`
+	if err := os.WriteFile(filepath.Join(env.vaultDir, "triggers.yaml"), []byte(brokenTriggers), 0o644); err != nil {
+		t.Fatalf("write broken triggers.yaml: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if hbOut, err := env.run("", "heartbeat", "--dry-run", "--force-gatekeepers"); err != nil {
+			t.Fatalf("heartbeat run %d failed: %v (%s)", i+1, err, hbOut)
+		}
+	}
+	qState := kernel.LoadQuota(env.vaultDir)
+	if qState.GatekeeperSavesToday != 0 {
+		t.Fatalf("broken precheck_cmd (exit 2) must NOT increment GatekeeperSavesToday, got %d", qState.GatekeeperSavesToday)
+	}
+	docJSON, _ := env.run("", "doctor", "--json")
+	var docChecks []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(docJSON), &docChecks); err != nil {
+		t.Fatalf("unmarshal hq doctor --json failed: %v (%s)", err, docJSON)
+	}
+	foundEventCheck := false
+	for _, chk := range docChecks {
+		if chk.Name == "Event Inbox & Gatekeeper Health" {
+			foundEventCheck = true
+			if chk.Status != "WARN" || !strings.Contains(chk.Detail, "degraded prechecks: broken-watcher") {
+				t.Fatalf("expected WARN with degraded prechecks on Event Inbox & Gatekeeper Health, got %+v", chk)
+			}
+		}
+	}
+	if !foundEventCheck {
+		t.Fatalf("missing Event Inbox & Gatekeeper Health check in hq doctor --json: %s", docJSON)
+	}
+}
+
+// CUJ-27: Agent-Armed Durable Follow-Up Timer Resuming Originating Session Across Run Exit (RFC-0018 Phase 2B)
+func TestCUJ27_AgentFollowUpTimerAcrossRunExit(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	var mu sync.Mutex
+	type deliveredMsg struct {
+		CascadeID string
+		Text      string
+	}
+	var delivered []deliveredMsg
+
+	lsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage" {
+			if r.Header.Get("x-codeium-csrf-token") != "test-csrf-601" {
+				http.Error(w, "invalid csrf", http.StatusForbidden)
+				return
+			}
+			var req struct {
+				CascadeID string `json:"cascadeId"`
+				Items     []struct {
+					Text string `json:"text"`
+				} `json:"items"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			txt := ""
+			if len(req.Items) > 0 {
+				txt = req.Items[0].Text
+			}
+			mu.Lock()
+			delivered = append(delivered, deliveredMsg{CascadeID: req.CascadeID, Text: txt})
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer lsSrv.Close()
+
+	convID := "00000000-0000-0000-0000-000000000601"
+	lsEnv := []string{
+		"ANTIGRAVITY_CONVERSATION_ID=" + convID,
+		"ANTIGRAVITY_LS_ADDRESS=" + lsSrv.URL,
+		"ANTIGRAVITY_CSRF_TOKEN=test-csrf-601",
+	}
+
+	// 1. Agent arms a 2-minute follow-up timer and exits its turn cleanly (0 tokens while waiting)
+	armOut, err := env.runWithEnv("", lsEnv,
+		"timers", "set",
+		"--kind=follow_up",
+		"--in=2m",
+		"--now=2026-11-14T12:00:00Z",
+		"--title=[Follow-Up] CI Build #77",
+		"--prompt=Check CI build #77 status and merge readiness",
+	)
+	if err != nil {
+		t.Fatalf("hq timers set failed: %v (%s)", err, armOut)
+	}
+
+	// 2. Dispatch at +1m -> timer is not yet due, 0 messages delivered
+	if out, err := env.runWithEnv("", lsEnv, "events", "dispatch", "--now=2026-11-14T12:01:00Z"); err != nil {
+		t.Fatalf("dispatch at +1m failed: %v (%s)", err, out)
+	}
+	mu.Lock()
+	if len(delivered) != 0 {
+		t.Fatalf("expected 0 messages delivered before timer dueAt, got %+v", delivered)
+	}
+	mu.Unlock()
+
+	// 3. Dispatch at +2m05s -> timer fires into Event Inbox and resumes convID via SendUserCascadeMessage
+	if out, err := env.runWithEnv("", lsEnv, "events", "dispatch", "--now=2026-11-14T12:02:05Z"); err != nil {
+		t.Fatalf("dispatch at +2m05s failed: %v (%s)", err, out)
+	}
+	mu.Lock()
+	if len(delivered) != 1 {
+		t.Fatalf("expected 1 continuation message delivered at +2m05s, got %+v", delivered)
+	}
+	gotMsg := delivered[0]
+	mu.Unlock()
+
+	if gotMsg.CascadeID != convID || !strings.Contains(gotMsg.Text, "Check CI build #77 status") {
+		t.Fatalf("unexpected continuation message: %+v", gotMsg)
+	}
+	if q := kernel.LoadQuota(env.vaultDir); q.SpawnsToday != 0 {
+		t.Fatalf("resuming an existing conversation via follow_up timer must consume 0 new spawns, got %d", q.SpawnsToday)
+	}
+}
+
+// CUJ-28: Deferred Approval Resumption, Shell-Free Argv + Env Scrub & Progress Checkpoints (RFC-0018 Phase 2C/2D)
+func TestCUJ28_DeferredApprovalResumptionArgvScrubAndProgressCheckpoints(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	var mu sync.Mutex
+	var continuations []string
+	lsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage" {
+			var req struct {
+				CascadeID string `json:"cascadeId"`
+				Items     []struct {
+					Text string `json:"text"`
+				} `json:"items"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if len(req.Items) > 0 {
+				mu.Lock()
+				continuations = append(continuations, req.CascadeID+"|"+req.Items[0].Text)
+				mu.Unlock()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer lsSrv.Close()
+
+	helperOutFile := filepath.Join(t.TempDir(), "helper-out.txt")
+	helperScript := filepath.Join(t.TempDir(), "deploy-helper.sh")
+	helperBody := fmt.Sprintf("#!/usr/bin/env sh\nprintf 'ARGS=%%s|CSRF=%%s' \"$*\" \"${ANTIGRAVITY_CSRF_TOKEN:-EMPTY}\" > %q\n", helperOutFile)
+	if err := os.WriteFile(helperScript, []byte(helperBody), 0o755); err != nil {
+		t.Fatalf("write helperScript: %v", err)
+	}
+
+	convID := "00000000-0000-0000-0000-000000000701"
+	lsEnv := []string{
+		"ANTIGRAVITY_CONVERSATION_ID=" + convID,
+		"ANTIGRAVITY_LS_ADDRESS=" + lsSrv.URL,
+		"ANTIGRAVITY_CSRF_TOKEN=super-secret-csrf-701",
+	}
+
+	// 1. Stage shell-free argv proposal with --resume-on-decide and --continuation
+	propOut, err := env.runWithEnv("", lsEnv,
+		"propose",
+		"--type=external_action",
+		"--summary=Run staging deploy helper",
+		"--resume-on-decide",
+		"--continuation=Verify post-deploy health metrics",
+		"--",
+		helperScript, "--env=staging", "--Literal$Var",
+	)
+	if err != nil {
+		t.Fatalf("hq propose argv failed: %v (%s)", err, propOut)
+	}
+	allProps, err := approvals.List(env.vaultDir)
+	if err != nil {
+		t.Fatalf("approvals.List: %v", err)
+	}
+	var p1 approvals.Proposal
+	for _, p := range allProps {
+		if p.Status == "pending" {
+			p1 = p
+			break
+		}
+	}
+	if p1.ID == "" {
+		t.Fatalf("expected 1 pending proposal, got %+v", allProps)
+	}
+
+	// 2. Approve proposal -> helper runs without shell expansion & with ANTIGRAVITY_CSRF_TOKEN scrubbed, and queues continuation
+	appOut, err := env.runWithEnv("", lsEnv, "approve", p1.ID, "--sha256="+p1.SHA256[:12])
+	if err != nil {
+		t.Fatalf("hq approve failed: %v (%s)", err, appOut)
+	}
+	helperGot, err := os.ReadFile(helperOutFile)
+	if err != nil {
+		t.Fatalf("read helper output: %v", err)
+	}
+	if string(helperGot) != "ARGS=--env=staging --Literal$Var|CSRF=EMPTY" {
+		t.Fatalf("expected exact shell-free argv and scrubbed CSRF env, got %q", string(helperGot))
+	}
+
+	if dispOut, err := env.runWithEnv("", lsEnv, "events", "dispatch"); err != nil {
+		t.Fatalf("hq events dispatch after approve failed: %v (%s)", err, dispOut)
+	}
+	mu.Lock()
+	if len(continuations) != 1 || !strings.Contains(continuations[0], convID+"|") || !strings.Contains(continuations[0], "Deferred Proposal Approved & Executed") || !strings.Contains(continuations[0], "Verify post-deploy health metrics") {
+		t.Fatalf("expected Approved continuation delivered to %s, got %+v", convID, continuations)
+	}
+	mu.Unlock()
+
+	// 3. Stage second resumable proposal and reject with steering reason -> resumes originating conversation with feedback
+	prop2Out, err := env.runWithEnv("", lsEnv,
+		"propose",
+		"--type=external_action",
+		"--summary=Publish production release",
+		"--resume-on-decide",
+		"--cmd=echo prod",
+	)
+	if err != nil {
+		t.Fatalf("second hq propose failed: %v (%s)", err, prop2Out)
+	}
+	allProps2, _ := approvals.List(env.vaultDir)
+	var p2 approvals.Proposal
+	for _, p := range allProps2 {
+		if p.Status == "pending" {
+			p2 = p
+			break
+		}
+	}
+	if p2.ID == "" {
+		t.Fatalf("expected 1 pending proposal for rejection test, got %+v", allProps2)
+	}
+	if rejOut, err := env.runWithEnv("", lsEnv, "reject", p2.ID, "--reason=Defer release until Monday freeze lifts"); err != nil {
+		t.Fatalf("hq reject failed: %v (%s)", err, rejOut)
+	}
+	if dispOut, err := env.runWithEnv("", lsEnv, "events", "dispatch"); err != nil {
+		t.Fatalf("hq events dispatch after reject failed: %v (%s)", err, dispOut)
+	}
+	mu.Lock()
+	if len(continuations) != 2 || !strings.Contains(continuations[1], "Deferred Proposal Rejected by User") || !strings.Contains(continuations[1], "Defer release until Monday freeze lifts") {
+		t.Fatalf("expected Rejected steering continuation delivered to %s, got %+v", convID, continuations)
+	}
+	mu.Unlock()
+
+	// 4. Structured task progress checkpoint (`hq progress save/show`) + `hq reopen` recovery banner
+	if err := kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "deploy-flow",
+		ConversationID: convID,
+		Title:          "[Task:hq] Deploy Flow",
+		Kind:           "task",
+		Status:         "active",
+		CreatedAt:      "2026-11-14T12:00:00Z",
+		LastUpdatedAt:  "2026-11-14T12:00:00Z",
+	}); err != nil {
+		t.Fatalf("RegisterTask: %v", err)
+	}
+	saveOut, err := env.run("",
+		"progress", "save",
+		"--task=deploy-flow",
+		"--goal=Ship v2 release safely",
+		"--done=Staging verified",
+		"--next=Wait for Monday freeze window",
+		"--pointers=docs/design/0018-always-on-agent-runtime-hardening.md",
+	)
+	if err != nil {
+		t.Fatalf("hq progress save failed: %v (%s)", err, saveOut)
+	}
+	showOut, err := env.run("", "progress", "show", "deploy-flow")
+	if err != nil || !strings.Contains(showOut, "Wait for Monday freeze window") {
+		t.Fatalf("hq progress show unexpected: err=%v out=%s", err, showOut)
+	}
+	if err := kernel.ArchiveTask(env.vaultDir, "deploy-flow", true); err != nil {
+		t.Fatalf("ArchiveTask: %v", err)
+	}
+	reopenOut, err := env.run("", "reopen", "deploy-flow", "--no-worktree", "--no-sidebar")
+	if err != nil {
+		t.Fatalf("hq reopen failed: %v (%s)", err, reopenOut)
+	}
+	if !strings.Contains(reopenOut, "Progress checkpoint ready:") {
+		t.Fatalf("expected hq reopen to announce active progress checkpoint, got:\n%s", reopenOut)
+	}
+}
+
+// CUJ-29: Lean [Auto] SessionStart, Gray-Zone PreToolUse Guard, Exec Sandbox & Outbox Eval Harness (RFC-0018 Phase 2C/2D)
+func TestCUJ29_UnattendedAutoGrayZoneGuardSandboxAndOutboxEval(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	// Populate Vault state so full SessionStart has realistic goals/notes/activity while [Auto] stays lean
+	for i := 1; i <= 5; i++ {
+		_, _ = env.run("", "goals", "add", "--id", fmt.Sprintf("goal-%d", i), "--title", fmt.Sprintf("Quarterly Milestone %d", i), "--scope", "hq")
+	}
+	autoConv := "00000000-0000-0000-0000-000000000950"
+	taskConv := "00000000-0000-0000-0000-000000000951"
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "auto-sweep",
+		ConversationID: autoConv,
+		Title:          "[Auto] Morning Sweep",
+		Kind:           "auto",
+		Scope:          "hq",
+		Status:         "active",
+		CreatedAt:      "2026-11-14T08:00:00Z",
+		LastUpdatedAt:  "2026-11-14T08:00:00Z",
+	})
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "interactive-dev",
+		ConversationID: taskConv,
+		Title:          "[Task:hq] Interactive Feature",
+		Kind:           "task",
+		Scope:          "hq",
+		Status:         "active",
+		CreatedAt:      "2026-11-14T08:00:00Z",
+		LastUpdatedAt:  "2026-11-14T08:00:00Z",
+	})
+
+	artAuto := filepath.Join(t.TempDir(), "brain-auto")
+	artTask := filepath.Join(t.TempDir(), "brain-task")
+	_ = os.MkdirAll(artAuto, 0o755)
+	_ = os.MkdirAll(artTask, 0o755)
+
+	ssAuto, err := env.run(fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q}`, autoConv, artAuto), "hook", "session-start")
+	if err != nil {
+		t.Fatalf("[Auto] session-start failed: %v (%s)", err, ssAuto)
+	}
+	ssTask, err := env.run(fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q}`, taskConv, artTask), "hook", "session-start")
+	if err != nil {
+		t.Fatalf("[Task] session-start failed: %v (%s)", err, ssTask)
+	}
+	if len(ssAuto)*2 > len(ssTask) {
+		t.Fatalf("expected [Auto] SessionStart (%d bytes) to be >=50%% leaner than full [Task] SessionStart (%d bytes)", len(ssAuto), len(ssTask))
+	}
+
+	// 2. Verify [Auto] PreToolUse blocks gray-zone external mutations while allowing `hq propose`
+	checkPreTool := func(cmdLine string) string {
+		t.Helper()
+		in := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":%q}}}`, autoConv, cmdLine)
+		out, err := env.run(in, "hook", "pre-tool")
+		if err != nil {
+			t.Fatalf("hq hook pre-tool failed: %v (%s)", err, out)
+		}
+		return out
+	}
+
+	if out := checkPreTool("gh pr create --title test --body demo"); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected [Auto] PreToolUse to deny gh pr create, got: %s", out)
+	}
+	if out := checkPreTool("curl -X POST https://api.example.com/v1/notify -d '{}'"); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected [Auto] PreToolUse to deny external POST webhook, got: %s", out)
+	}
+	if out := checkPreTool(`hq propose --type=external_action --summary="Create PR" --cmd="gh pr create --title test"`); !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected [Auto] PreToolUse to allow staging via hq propose, got: %s", out)
+	}
+
+	// 3. Verify `hq exec-sandboxed` strips sensitive tokens and reports capability JSON
+	sbStatus, err := env.run("", "exec-sandboxed", "--status", "--json")
+	if err != nil || !strings.Contains(sbStatus, `"backend"`) {
+		t.Fatalf("hq exec-sandboxed --status --json failed: err=%v out=%s", err, sbStatus)
+	}
+	sbEnvOut, err := env.runWithEnv("", []string{
+		"ANTIGRAVITY_CSRF_TOKEN=csrf-secret-950",
+		"GITHUB_TOKEN=ghp_secret_950",
+		"UNLISTED_CUSTOM_SECRET=unlisted_secret_950",
+		"LC_ALL=C",
+	}, "exec-sandboxed", "--", "env")
+	if err != nil {
+		t.Fatalf("hq exec-sandboxed -- env failed: %v (%s)", err, sbEnvOut)
+	}
+	if strings.Contains(sbEnvOut, "csrf-secret-950") || strings.Contains(sbEnvOut, "ghp_secret_950") || strings.Contains(sbEnvOut, "unlisted_secret_950") {
+		t.Fatalf("expected hq exec-sandboxed allowlist to strip CSRF, GITHUB_TOKEN, and unlisted env vars, got:\n%s", sbEnvOut)
+	}
+	if !strings.Contains(sbEnvOut, "LC_ALL=C") || !strings.Contains(sbEnvOut, "HQ_VAULT_DIR=") {
+		t.Fatalf("expected allowlisted env vars (LC_ALL, HQ_VAULT_DIR) to pass through hq exec-sandboxed, got:\n%s", sbEnvOut)
+	}
+
+	// 4. Verify `hq outbox eval --json` passes 100% of signal-to-noise benchmark cases
+	evalOut, err := env.run("", "outbox", "eval", "--json")
+	if err != nil {
+		t.Fatalf("hq outbox eval --json failed: %v (%s)", err, evalOut)
+	}
+	var evalRep struct {
+		TotalCases       int  `json:"totalCases"`
+		PassedCases      int  `json:"passedCases"`
+		AllThresholdsMet bool `json:"allThresholdsMet"`
+	}
+	if err := json.Unmarshal([]byte(evalOut), &evalRep); err != nil {
+		t.Fatalf("unmarshal outbox eval report: %v (%s)", err, evalOut)
+	}
+	if !evalRep.AllThresholdsMet || evalRep.TotalCases < 10 || evalRep.PassedCases != evalRep.TotalCases {
+		t.Fatalf("expected all outbox eval thresholds met (%d/%d), got: %s", evalRep.PassedCases, evalRep.TotalCases, evalOut)
 	}
 }

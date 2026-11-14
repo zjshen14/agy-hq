@@ -1,15 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/sandbox"
+	"github.com/zjshen14/agy-hq/internal/timers"
+	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
 )
 
@@ -106,8 +114,46 @@ func runOutboxCLI(vaultDir string, args []string) {
 			fmt.Printf("- [%s] (%s) %s: %s\n", it.ID, it.Scope, it.Title, it.Summary)
 		}
 
+	case "eval":
+		fs := flag.NewFlagSet("outbox eval", flag.ExitOnError)
+		fixturesPath := fs.String("fixtures", "", "Optional newline-delimited JSON EvalFixture file (defaults to built-in 10-case calibration corpus)")
+		asJSON := fs.Bool("json", false, "Output JSON report")
+		_ = fs.Parse(rest)
+		var fixtures []outbox.EvalFixture
+		if strings.TrimSpace(*fixturesPath) != "" {
+			loaded, err := outbox.LoadEvalFixturesFromFile(strings.TrimSpace(*fixturesPath))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq outbox eval failed to load %s: %v\n", *fixturesPath, err)
+				os.Exit(1)
+			}
+			fixtures = loaded
+		}
+		rep := outbox.RunEvalSuite(fixtures)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			if !rep.AllThresholdsMet {
+				os.Exit(1)
+			}
+			return
+		}
+		fmt.Printf("Outbox Signal-to-Noise Evaluation: %d/%d passed (allThresholdsMet=%v)\n", rep.PassedCases, rep.TotalCases, rep.AllThresholdsMet)
+		fmt.Printf("  urgentRecall=%.1f%% · quietHoursSuppression=%.1f%% · duplicateSuppression=%.1f%% · falseInterruptRate=%.1f%%\n",
+			rep.UrgentInterruptRecall*100.0, rep.QuietHoursSuppression*100.0, rep.DuplicateSuppressionRate*100.0, rep.FalseInterruptRate*100.0)
+		for _, c := range rep.Cases {
+			mark := "PASS"
+			if !c.Passed {
+				mark = "FAIL"
+			}
+			fmt.Printf("  [%s] %-36s got=%s (cooled=%v) want=%s (cooled=%v)\n", mark, c.Name, c.GotTier, c.GotCooled, c.ExpectTier, c.ExpectCooled)
+		}
+		if !rep.AllThresholdsMet {
+			os.Exit(1)
+		}
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown outbox subcommand: %s (expected add, list, or drain)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown outbox subcommand: %s (expected add, list, drain, or eval)\n", sub)
 		os.Exit(1)
 	}
 }
@@ -613,6 +659,611 @@ func runSpacesCLI(vaultDir string, args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown spaces subcommand: %s (expected list, active, pin, hide, or auto)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func parseOptionalNowFlag(raw string) time.Time {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Now()
+	}
+	if t, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return t
+	}
+	return time.Now()
+}
+
+func runEventsCLI(vaultDir string, args []string) {
+	sub := "list"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		rest = args[1:]
+	}
+
+	switch sub {
+	case "enqueue", "add":
+		fs := flag.NewFlagSet("events enqueue", flag.ExitOnError)
+		source := fs.String("source", "cli", "Event source (cli, webhook, timer, inbox_drop, gatekeeper)")
+		dedup := fs.String("dedup", "", "Optional idempotency dedup key")
+		scope := fs.String("scope", "", "Serialization scope key")
+		session := fs.String("session", "", "Optional target conversation ID to wake")
+		skill := fs.String("skill", "", "Optional skill to invoke")
+		model := fs.String("model", "", "Optional model override")
+		title := fs.String("title", "", "Event title")
+		prompt := fs.String("prompt", "", "Event prompt")
+		availAt := fs.String("available-at", "", "Optional earliest dispatch timestamp (RFC3339)")
+		nowStr := fs.String("now", "", "Optional reference timestamp (RFC3339)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		if strings.TrimSpace(*title) == "" && strings.TrimSpace(*prompt) == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq events enqueue --title=\"...\" --prompt=\"...\" [--scope=...] [--session=...] [--skill=...] [--dedup=...]")
+			os.Exit(1)
+		}
+		now := parseOptionalNowFlag(*nowStr)
+		ev, deduped, err := events.Enqueue(vaultDir, events.Event{
+			Source:      *source,
+			DedupKey:    *dedup,
+			ScopeKey:    *scope,
+			SessionID:   *session,
+			Skill:       *skill,
+			Model:       *model,
+			Title:       *title,
+			Prompt:      *prompt,
+			AvailableAt: *availAt,
+		}, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events enqueue failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{"event": ev, "deduplicated": deduped})
+			return
+		}
+		fmt.Printf("Enqueued event %s [scope=%s, status=%s, deduplicated=%v]\n", ev.ID, ev.ScopeKey, ev.Status, deduped)
+
+	case "list":
+		fs := flag.NewFlagSet("events list", flag.ExitOnError)
+		status := fs.String("status", "", "Status filter (pending, leased, done, dropped)")
+		archived := fs.Bool("archived", false, "Include recent archived events")
+		limit := fs.Int("limit", 50, "Maximum archived events to include")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		items, err := events.List(vaultDir, *status, *archived, *limit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events list failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(items)
+			return
+		}
+		if len(items) == 0 {
+			fmt.Println("No matching events in durable inbox.")
+			return
+		}
+		for _, ev := range items {
+			fmt.Printf("- [%s] (%s · source=%s · scope=%s · attempts=%d/%d) %s\n",
+				ev.ID, ev.Status, ev.Source, ev.ScopeKey, ev.AttemptCount, ev.MaxAttempts, ev.Title)
+		}
+
+	case "inspect":
+		var id string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && id == "" {
+				id = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("events inspect", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if id == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq events inspect <event-id> [--json]")
+			os.Exit(1)
+		}
+		ev, err := events.Inspect(vaultDir, id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events inspect failed: %v\n", err)
+			os.Exit(1)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(ev)
+		_ = asJSON
+
+	case "retry":
+		var id string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && id == "" {
+				id = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("events retry", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if id == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq events retry <event-id> [--json]")
+			os.Exit(1)
+		}
+		ev, err := events.Retry(vaultDir, id, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events retry failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(ev)
+			return
+		}
+		fmt.Printf("Reset event %s to pending\n", ev.ID)
+
+	case "drop":
+		var id string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && id == "" {
+				id = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("events drop", flag.ExitOnError)
+		reason := fs.String("reason", "Dropped via CLI", "Drop reason")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if id == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq events drop <event-id> [--reason=\"...\"] [--json]")
+			os.Exit(1)
+		}
+		ev, err := events.Drop(vaultDir, id, *reason, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events drop failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(ev)
+			return
+		}
+		fmt.Printf("Dropped event %s\n", ev.ID)
+
+	case "dispatch":
+		fs := flag.NewFlagSet("events dispatch", flag.ExitOnError)
+		dryRun := fs.Bool("dry-run", false, "Simulate spawns/continuations without executing")
+		nowStr := fs.String("now", "", "Optional reference timestamp (RFC3339)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		now := parseOptionalNowFlag(*nowStr)
+		dueFired, _ := timers.EvaluateDue(vaultDir, now)
+		_ = kernel.EnqueueInboxFiles(vaultDir, now)
+		actions, err := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events dispatch failed: %v\n", err)
+			os.Exit(1)
+		}
+		outboxCount, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"timersFired":     len(dueFired),
+				"actions":         actions,
+				"outboxDelivered": outboxCount,
+			})
+			return
+		}
+		fmt.Printf("Dispatched %d event batch(es) (timersFired=%d, outboxDelivered=%d)\n", len(actions), len(dueFired), outboxCount)
+		for _, a := range actions {
+			fmt.Printf("  - %s\n", a)
+		}
+
+	case "token":
+		fs := flag.NewFlagSet("events token", flag.ExitOnError)
+		rotate := fs.Bool("rotate", false, "Regenerate local/private/daemon_token")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		if *rotate {
+			_ = os.Remove(filepath.Join(vaultDir, "private", "daemon_token"))
+		}
+		tok, err := events.EnsureDaemonToken(vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq events token failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]string{"token": tok})
+			return
+		}
+		fmt.Println(tok)
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown events subcommand: %s (expected enqueue, list, inspect, retry, drop, dispatch, or token)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func runTimersCLI(vaultDir string, args []string) {
+	sub := "list"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		rest = args[1:]
+	}
+
+	switch sub {
+	case "set", "add":
+		fs := flag.NewFlagSet("timers set", flag.ExitOnError)
+		kind := fs.String("kind", string(timers.TimerFollowUp), "Timer category (follow_up or schedule)")
+		inDur := fs.String("in", "", "Relative duration for follow_up (e.g. 2m, 4h)")
+		atStr := fs.String("at", "", "Absolute RFC3339 timestamp for follow_up")
+		id := fs.String("id", "", "Schedule ID when --kind=schedule")
+		cronExpr := fs.String("cron", "", "5-field cron expression (with optional CRON_TZ=) when --kind=schedule")
+		scope := fs.String("scope", "", "Optional serialization scope key")
+		session := fs.String("session", "", "Target conversation ID for follow_up (defaults to ANTIGRAVITY_CONVERSATION_ID when set)")
+		noSession := fs.Bool("no-session", false, "Do not bind follow_up to ANTIGRAVITY_CONVERSATION_ID")
+		skill := fs.String("skill", "", "Optional skill to invoke")
+		model := fs.String("model", "", "Optional model override")
+		title := fs.String("title", "", "Optional timer title")
+		prompt := fs.String("prompt", "", "Follow-up or schedule instructions")
+		nowStr := fs.String("now", "", "Optional reference timestamp (RFC3339)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		now := parseOptionalNowFlag(*nowStr)
+
+		var tm timers.Timer
+		var err error
+		if strings.ToLower(strings.TrimSpace(*kind)) == string(timers.TimerSchedule) {
+			tm, err = timers.UpsertSchedule(vaultDir, *id, *cronExpr, *scope, *skill, *model, *title, *prompt, now)
+		} else {
+			var dur time.Duration
+			if strings.TrimSpace(*inDur) != "" {
+				dur, err = time.ParseDuration(strings.TrimSpace(*inDur))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq timers set invalid --in %q: %v\n", *inDur, err)
+					os.Exit(1)
+				}
+			}
+			var dueAt time.Time
+			if strings.TrimSpace(*atStr) != "" {
+				dueAt, err = time.Parse(time.RFC3339, strings.TrimSpace(*atStr))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq timers set invalid --at %q: %v\n", *atStr, err)
+					os.Exit(1)
+				}
+			}
+			sessID := strings.TrimSpace(*session)
+			if sessID == "" && !*noSession {
+				sessID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+			}
+			tm, err = timers.SetFollowUp(vaultDir, timers.FollowUpRequest{
+				DueAt:           dueAt,
+				InDuration:      dur,
+				ScopeKey:        *scope,
+				SessionID:       sessID,
+				Skill:           *skill,
+				Model:           *model,
+				Title:           *title,
+				Prompt:          *prompt,
+				CreatedByConvID: strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")),
+			}, now)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq timers set failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(tm)
+			return
+		}
+		fmt.Printf("Armed %s timer %s [dueAt=%s, scope=%s, session=%s]\n", tm.Category, tm.ID, tm.DueAt, tm.ScopeKey, tm.SessionID)
+
+	case "list":
+		fs := flag.NewFlagSet("timers list", flag.ExitOnError)
+		all := fs.Bool("all", false, "Include fired and cancelled timers")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		list, err := timers.List(vaultDir, *all)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq timers list failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(list)
+			return
+		}
+		if len(list) == 0 {
+			fmt.Println("No matching timers.")
+			return
+		}
+		for _, t := range list {
+			fmt.Printf("- [%s] (%s/%s · due=%s · session=%s) %s\n",
+				t.ID, t.Category, t.Status, t.DueAt, t.SessionID, t.Title)
+		}
+
+	case "cancel", "rm", "remove":
+		var id string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && id == "" {
+				id = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("timers cancel", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if id == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq timers cancel <timer-id> [--json]")
+			os.Exit(1)
+		}
+		tm, err := timers.Cancel(vaultDir, id, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq timers cancel failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(tm)
+			return
+		}
+		fmt.Printf("Cancelled timer %s\n", tm.ID)
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown timers subcommand: %s (expected set, list, or cancel)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func runProgressCLI(vaultDir string, args []string) {
+	sub := "list"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		rest = args[1:]
+	}
+
+	resolveDefaultSlug := func(explicit string) string {
+		if s := strings.TrimSpace(explicit); s != "" {
+			return s
+		}
+		if convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")); convID != "" {
+			if t, ok := kernel.FindTaskByConversationID(vaultDir, convID); ok && t.TaskSlug != "" {
+				return t.TaskSlug
+			}
+		}
+		return ""
+	}
+
+	switch sub {
+	case "save":
+		fs := flag.NewFlagSet("progress save", flag.ExitOnError)
+		taskSlug := fs.String("task", "", "Task slug (defaults to active task for ANTIGRAVITY_CONVERSATION_ID)")
+		goal := fs.String("goal", "", "Current task goal")
+		done := fs.String("done", "", "Completed & verified milestones")
+		next := fs.String("next", "", "Remaining next steps")
+		pointers := fs.String("pointers", "", "Key file/commit/PR pointers")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		slug := resolveDefaultSlug(*taskSlug)
+		if slug == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq progress save --task=<slug> --goal=\"...\" --done=\"...\" --next=\"...\" [--pointers=\"...\"]")
+			os.Exit(1)
+		}
+		cp, err := vault.SaveProgress(vaultDir, vault.ProgressCheckpoint{
+			TaskSlug:  slug,
+			Goal:      *goal,
+			Completed: *done,
+			NextSteps: *next,
+			Pointers:  *pointers,
+		}, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq progress save failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(cp)
+			return
+		}
+		fmt.Printf("Saved progress checkpoint for %q (%s)\n", cp.TaskSlug, cp.Path)
+
+	case "show", "get":
+		var posSlug string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && posSlug == "" {
+				posSlug = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("progress show", flag.ExitOnError)
+		taskSlug := fs.String("task", "", "Task slug")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		slug := resolveDefaultSlug(*taskSlug)
+		if slug == "" {
+			slug = posSlug
+		}
+		if slug == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq progress show <task-slug> [--json]")
+			os.Exit(1)
+		}
+		cp, raw, found, err := vault.LoadProgress(vaultDir, slug)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq progress show failed: %v\n", err)
+			os.Exit(1)
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "no active progress checkpoint for %q\n", slug)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(cp)
+			return
+		}
+		fmt.Print(raw)
+
+	case "list":
+		fs := flag.NewFlagSet("progress list", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		list, err := vault.ListProgress(vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq progress list failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(list)
+			return
+		}
+		if len(list) == 0 {
+			fmt.Println("No active task progress checkpoints.")
+			return
+		}
+		for _, cp := range list {
+			fmt.Printf("- [%s] updated=%s — goal=%s | next=%s\n", cp.TaskSlug, cp.UpdatedAt, cp.Goal, cp.NextSteps)
+		}
+
+	case "archive", "clear":
+		var posSlug string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && posSlug == "" {
+				posSlug = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("progress archive", flag.ExitOnError)
+		taskSlug := fs.String("task", "", "Task slug")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		slug := resolveDefaultSlug(*taskSlug)
+		if slug == "" {
+			slug = posSlug
+		}
+		if slug == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq progress archive <task-slug>")
+			os.Exit(1)
+		}
+		dst, err := vault.ArchiveProgress(vaultDir, slug, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq progress archive failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]string{"taskSlug": slug, "archivedTo": dst})
+			return
+		}
+		fmt.Printf("Archived progress checkpoint %q -> %s\n", slug, dst)
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown progress subcommand: %s (expected save, show, list, or archive)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func runExecSandboxedCLI(vaultDir string, args []string) {
+	var flagPart []string
+	var cmdArgv []string
+	sepFound := false
+	for i, a := range args {
+		if a == "--" {
+			cmdArgv = args[i+1:]
+			sepFound = true
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			cmdArgv = args[i:]
+			sepFound = true
+			break
+		}
+		flagPart = append(flagPart, a)
+	}
+	_ = sepFound
+
+	fs := flag.NewFlagSet("exec-sandboxed", flag.ExitOnError)
+	workDir := fs.String("workdir", "", "Optional working directory")
+	netIsolated := fs.Bool("net-isolated", false, "Unshare/deny network inside OS sandbox when supported")
+	statusOnly := fs.Bool("status", false, "Print OS credential sandbox capability and config without running a command")
+	asJSON := fs.Bool("json", false, "Output JSON when --status is set")
+	_ = fs.Parse(flagPart)
+	if len(cmdArgv) == 0 && fs.NArg() > 0 {
+		cmdArgv = fs.Args()
+	}
+
+	if *statusOnly {
+		cfg := sandbox.LoadConfig(vaultDir)
+		cap := sandbox.DetectCapability()
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"mode":       cfg.Mode,
+				"capability": cap,
+			})
+			return
+		}
+		fmt.Printf("OS Credential Sandbox: mode=%s, available=%v, backend=%s — %s\n", cfg.Mode, cap.Available, cap.Backend, cap.Detail)
+		return
+	}
+
+	if len(cmdArgv) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: hq exec-sandboxed [--workdir=...] [--net-isolated] -- <command> [args...]")
+		os.Exit(1)
+	}
+	cmd, _, err := sandbox.BuildCommand(context.Background(), vaultDir, *workDir, *netIsolated, cmdArgv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hq exec-sandboxed error: %v\n", err)
+		os.Exit(1)
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if runErr := cmd.Run(); runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "hq exec-sandboxed failed: %v\n", runErr)
 		os.Exit(1)
 	}
 }

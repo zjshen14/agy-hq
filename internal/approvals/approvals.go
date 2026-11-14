@@ -1,6 +1,7 @@
 package approvals
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,10 +14,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/events"
 )
 
 // DefaultProposalTTL is the standard expiration window for pending outbound approval proposals.
 const DefaultProposalTTL = 24 * time.Hour
+
+const DefaultRejectReason = "Rejected by user"
 
 var (
 	reValidProposalID  = regexp.MustCompile(`^prop-[a-z0-9][a-z0-9\-]{3,63}$`)
@@ -38,19 +43,37 @@ func ValidateProposalID(id string) error {
 
 // Proposal represents an approval-bound action staged in local/memory/pending/<id>.json.
 type Proposal struct {
-	ID             string            `json:"id"`
-	CreatedAt      string            `json:"createdAt"`
-	ExpiresAt      string            `json:"expiresAt,omitempty"`
-	ConversationID string            `json:"conversationId,omitempty"`
-	ActionType     string            `json:"actionType"`
-	Summary        string            `json:"summary"`
-	Command        string            `json:"command"`
-	WorkDir        string            `json:"workDir,omitempty"`
-	SHA256         string            `json:"sha256"`
-	Status         string            `json:"status"`
-	RiskTier       string            `json:"riskTier,omitempty"`
-	RiskFlags      []string          `json:"riskFlags,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	ID               string            `json:"id"`
+	CreatedAt        string            `json:"createdAt"`
+	ExpiresAt        string            `json:"expiresAt,omitempty"`
+	ConversationID   string            `json:"conversationId,omitempty"`
+	ActionType       string            `json:"actionType"`
+	Summary          string            `json:"summary"`
+	Command          string            `json:"command"`
+	CommandArgv      []string          `json:"commandArgv,omitempty"`
+	WorkDir          string            `json:"workDir,omitempty"`
+	SHA256           string            `json:"sha256"`
+	Status           string            `json:"status"`
+	RiskTier         string            `json:"riskTier,omitempty"`
+	RiskFlags        []string          `json:"riskFlags,omitempty"`
+	ResumeOnDecide   bool              `json:"resumeOnDecide,omitempty"`
+	ContinuationNote string            `json:"continuationNote,omitempty"`
+	OriginSkill      string            `json:"originSkill,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
+}
+
+// CreateOptions configures structured argv, deferred session resumption, and skill attribution.
+type CreateOptions struct {
+	ActionType       string
+	Summary          string
+	Command          string
+	CommandArgv      []string
+	WorkDir          string
+	ConversationID   string
+	ResumeOnDecide   bool
+	ContinuationNote string
+	OriginSkill      string
+	Metadata         map[string]string
 }
 
 // IsExpired returns true if ExpiresAt is set and strictly in the past relative to now.
@@ -91,6 +114,16 @@ func generateID() string {
 // ComputeHash computes the deterministic SHA-256 checksum over actionType and command.
 func ComputeHash(actionType, command string) string {
 	sum := sha256.Sum256([]byte(actionType + "\n" + command))
+	return hex.EncodeToString(sum[:])
+}
+
+// ComputeProposalHash binds CommandArgv canonically when populated, falling back to ComputeHash for string commands.
+func ComputeProposalHash(actionType, command string, argv []string) string {
+	if len(argv) == 0 {
+		return ComputeHash(actionType, command)
+	}
+	canonicalArgv, _ := json.Marshal(argv)
+	sum := sha256.Sum256([]byte(actionType + "\nargv:" + string(canonicalArgv)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -149,6 +182,18 @@ func Create(vaultDir, actionType, summary, command, workDir, convID string) (Pro
 // CreateWithMetadata stages a new pending proposal with optional structured metadata, 24h TTL,
 // and automatic outbound contextual-PII warning inspection.
 func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID string, meta map[string]string) (Proposal, error) {
+	return CreateWithOptions(vaultDir, CreateOptions{
+		ActionType:     actionType,
+		Summary:        summary,
+		Command:        command,
+		WorkDir:        workDir,
+		ConversationID: convID,
+		Metadata:       meta,
+	})
+}
+
+// CreateWithOptions stages a pending proposal supporting structured CommandArgv, deferred resumption, and skill attribution.
+func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 	pendingDir := filepath.Join(vaultDir, "memory", "pending")
 	if err := os.MkdirAll(pendingDir, 0o700); err != nil {
 		return Proposal{}, err
@@ -156,17 +201,29 @@ func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID 
 	now := time.Now()
 	id := generateID()
 	expiresAt := now.Add(DefaultProposalTTL).UTC().Format(time.RFC3339)
-	if meta != nil && strings.TrimSpace(meta["expiresAt"]) != "" {
-		expiresAt = strings.TrimSpace(meta["expiresAt"])
+	if opts.Metadata != nil && strings.TrimSpace(opts.Metadata["expiresAt"]) != "" {
+		expiresAt = strings.TrimSpace(opts.Metadata["expiresAt"])
+	}
+	cmdDisplay := strings.TrimSpace(opts.Command)
+	if cmdDisplay == "" && len(opts.CommandArgv) > 0 {
+		cmdDisplay = strings.Join(opts.CommandArgv, " ")
+	}
+	originSkill := strings.TrimSpace(opts.OriginSkill)
+	if originSkill == "" && opts.Metadata != nil {
+		originSkill = strings.TrimSpace(opts.Metadata["originSkill"])
 	}
 
 	var scanBuf strings.Builder
-	scanBuf.WriteString(summary)
+	scanBuf.WriteString(opts.Summary)
 	scanBuf.WriteByte('\n')
-	scanBuf.WriteString(command)
-	if meta != nil {
+	scanBuf.WriteString(cmdDisplay)
+	if len(opts.CommandArgv) > 0 {
+		scanBuf.WriteByte('\n')
+		scanBuf.WriteString(strings.Join(opts.CommandArgv, " "))
+	}
+	if opts.Metadata != nil {
 		for _, k := range []string{"draftPayload", "bodyPreview", "subject"} {
-			if v := strings.TrimSpace(meta[k]); v != "" {
+			if v := strings.TrimSpace(opts.Metadata[k]); v != "" {
 				scanBuf.WriteByte('\n')
 				scanBuf.WriteString(v)
 			}
@@ -179,19 +236,23 @@ func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID 
 	}
 
 	prop := Proposal{
-		ID:             id,
-		CreatedAt:      now.Format(time.RFC3339),
-		ExpiresAt:      expiresAt,
-		ConversationID: convID,
-		ActionType:     actionType,
-		Summary:        summary,
-		Command:        command,
-		WorkDir:        workDir,
-		SHA256:         ComputeHash(actionType, command),
-		Status:         "pending",
-		RiskTier:       riskTier,
-		RiskFlags:      riskFlags,
-		Metadata:       meta,
+		ID:               id,
+		CreatedAt:        now.Format(time.RFC3339),
+		ExpiresAt:        expiresAt,
+		ConversationID:   strings.TrimSpace(opts.ConversationID),
+		ActionType:       strings.TrimSpace(opts.ActionType),
+		Summary:          strings.TrimSpace(opts.Summary),
+		Command:          cmdDisplay,
+		CommandArgv:      opts.CommandArgv,
+		WorkDir:          strings.TrimSpace(opts.WorkDir),
+		SHA256:           ComputeProposalHash(strings.TrimSpace(opts.ActionType), cmdDisplay, opts.CommandArgv),
+		Status:           "pending",
+		RiskTier:         riskTier,
+		RiskFlags:        riskFlags,
+		ResumeOnDecide:   opts.ResumeOnDecide,
+		ContinuationNote: strings.TrimSpace(opts.ContinuationNote),
+		OriginSkill:      originSkill,
+		Metadata:         opts.Metadata,
 	}
 	data, err := json.MarshalIndent(prop, "", "  ")
 	if err != nil {
@@ -290,14 +351,68 @@ func List(vaultDir string) ([]Proposal, error) {
 	return out, nil
 }
 
+// SanitizedApprovalEnv builds a scrubbed environment allowlist for executing approved actions,
+// preventing ANTIGRAVITY_CSRF_TOKEN or unrelated developer secrets from leaking into child processes.
+func SanitizedApprovalEnv(vaultDir string) []string {
+	allowedPrefixes := []string{
+		"HOME=",
+		"USER=",
+		"LOGNAME=",
+		"SHELL=",
+		"LANG=",
+		"LC_",
+		"TZ=",
+		"TERM=",
+		"TMPDIR=",
+		"SSH_AUTH_SOCK=",
+		"DISPLAY=",
+		"XDG_RUNTIME_DIR=",
+		"XDG_CONFIG_HOME=",
+		"XDG_CACHE_HOME=",
+		"HQ_ROOT_DIR=",
+		"AGY_ACCOUNT=",
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		for _, pref := range allowedPrefixes {
+			if strings.HasPrefix(kv, pref) {
+				env = append(env, kv)
+				break
+			}
+		}
+	}
+
+	pathVal := os.Getenv("PATH")
+	var extraDirs []string
+	if exe, eErr := os.Executable(); eErr == nil && exe != "" {
+		extraDirs = append(extraDirs, filepath.Dir(exe))
+	}
+	if home, hErr := os.UserHomeDir(); hErr == nil && home != "" {
+		extraDirs = append(extraDirs, filepath.Join(home, ".local", "bin"))
+	}
+	if len(extraDirs) > 0 {
+		env = append(env, "PATH="+strings.Join(extraDirs, string(os.PathListSeparator))+string(os.PathListSeparator)+pathVal)
+	} else if pathVal != "" {
+		env = append(env, "PATH="+pathVal)
+	}
+
+	if v := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); v != "" {
+		env = append(env, "HQ_VAULT_DIR="+v)
+	} else if strings.TrimSpace(vaultDir) != "" {
+		env = append(env, "HQ_VAULT_DIR="+vaultDir)
+	}
+	return env
+}
+
 // Approve verifies the SHA-256 prefix and TTL, executes the staged command deterministically in Go,
 // removes the pending file, and appends an audit entry to local/memory/interventions.jsonl.
 func Approve(vaultDir, id, shaPrefix string) (string, error) {
 	return ApproveProposal(vaultDir, id, shaPrefix)
 }
 
-// ApproveProposal verifies the SHA-256 prefix and TTL, executes the staged command deterministically in Go,
-// removes the pending file, and appends an audit entry to local/memory/interventions.jsonl.
+// ApproveProposal verifies the SHA-256 prefix and TTL, executes the staged command deterministically in Go
+// (using CommandArgv without sh -c when available and a scrubbed environment), logs to interventions.jsonl,
+// and enqueues a continuation event if ResumeOnDecide is enabled.
 func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	id = strings.TrimSpace(id)
 	if err := ValidateProposalID(id); err != nil {
@@ -321,18 +436,19 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	if prop.ID != id {
 		return "", fmt.Errorf("proposal ID mismatch: file=%s json=%s", id, prop.ID)
 	}
-	if prop.IsExpired(time.Now()) {
+	now := time.Now()
+	if prop.IsExpired(now) {
 		_ = os.Remove(pendingPath)
 		prop.Status = "expired"
 		appendIntervention(vaultDir, InterventionRecord{
-			Timestamp: time.Now().Format(time.RFC3339),
+			Timestamp: now.Format(time.RFC3339),
 			Decision:  "expired",
 			Proposal:  prop,
 			Error:     "attempted approval after TTL expiration",
 		})
 		return "", fmt.Errorf("proposal %s expired at %s; re-stage with ./bin/hq propose", id, prop.ExpiresAt)
 	}
-	expected := ComputeHash(prop.ActionType, prop.Command)
+	expected := ComputeProposalHash(prop.ActionType, prop.Command, prop.CommandArgv)
 	if prop.SHA256 != expected {
 		return "", fmt.Errorf("tampered proposal: stored sha256 %s != computed %s", prop.SHA256, expected)
 	}
@@ -347,33 +463,23 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	}
 	defer func() { _ = os.Remove(claimPath) }()
 
-	cmd := exec.Command("sh", "-c", prop.Command)
+	var cmd *exec.Cmd
+	if len(prop.CommandArgv) > 0 && strings.TrimSpace(prop.CommandArgv[0]) != "" {
+		cmd = exec.Command(prop.CommandArgv[0], prop.CommandArgv[1:]...)
+	} else {
+		cmd = exec.Command("sh", "-c", prop.Command)
+	}
 	if prop.WorkDir != "" {
 		cmd.Dir = prop.WorkDir
 	}
-	env := os.Environ()
-	pathVal := os.Getenv("PATH")
-	var extraDirs []string
-	if exe, eErr := os.Executable(); eErr == nil && exe != "" {
-		extraDirs = append(extraDirs, filepath.Dir(exe))
-	}
-	if home, hErr := os.UserHomeDir(); hErr == nil && home != "" {
-		extraDirs = append(extraDirs, filepath.Join(home, ".local", "bin"))
-	}
-	if len(extraDirs) > 0 {
-		env = append(env, "PATH="+strings.Join(extraDirs, string(os.PathListSeparator))+string(os.PathListSeparator)+pathVal)
-	}
-	if os.Getenv("HQ_VAULT_DIR") == "" && strings.TrimSpace(vaultDir) != "" {
-		env = append(env, "HQ_VAULT_DIR="+vaultDir)
-	}
-	cmd.Env = env
+	cmd.Env = SanitizedApprovalEnv(vaultDir)
+
 	outBytes, execErr := cmd.CombinedOutput()
 	output := string(outBytes)
 
 	prop.Status = "approved"
-
 	rec := InterventionRecord{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: now.Format(time.RFC3339),
 		Decision:  "approved",
 		Proposal:  prop,
 		Output:    output,
@@ -382,6 +488,10 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 		rec.Error = execErr.Error()
 	}
 	appendIntervention(vaultDir, rec)
+
+	if prop.ResumeOnDecide && strings.TrimSpace(prop.ConversationID) != "" {
+		enqueueApprovalDecisionEvent(vaultDir, prop, "approved", output, execErr, now)
+	}
 	return output, execErr
 }
 
@@ -390,7 +500,8 @@ func Reject(vaultDir, id, reason string) error {
 	return RejectProposal(vaultDir, id, reason)
 }
 
-// RejectProposal removes the proposal from pending/ and logs the rejection to interventions.jsonl.
+// RejectProposal removes the proposal from pending/, logs the rejection to interventions.jsonl,
+// and enqueues a steering resumption event to prop.ConversationID when the user provides feedback or ResumeOnDecide is set.
 func RejectProposal(vaultDir, id, reason string) error {
 	id = strings.TrimSpace(id)
 	if err := ValidateProposalID(id); err != nil {
@@ -405,17 +516,79 @@ func RejectProposal(vaultDir, id, reason string) error {
 	if err := json.Unmarshal(data, &prop); err != nil {
 		return err
 	}
+	now := time.Now()
 	prop.Status = "rejected"
 	_ = os.Remove(pendingPath)
 
 	rec := InterventionRecord{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: now.Format(time.RFC3339),
 		Decision:  "rejected",
 		Proposal:  prop,
 		Output:    reason,
 	}
 	appendIntervention(vaultDir, rec)
+
+	trimmedReason := strings.TrimSpace(reason)
+	hasCustomSteering := trimmedReason != "" && !strings.EqualFold(trimmedReason, DefaultRejectReason)
+	if strings.TrimSpace(prop.ConversationID) != "" && (prop.ResumeOnDecide || hasCustomSteering) {
+		enqueueApprovalDecisionEvent(vaultDir, prop, "rejected", trimmedReason, nil, now)
+	}
 	return nil
+}
+
+func enqueueApprovalDecisionEvent(vaultDir string, prop Proposal, decision, detail string, execErr error, now time.Time) {
+	convID := strings.TrimSpace(prop.ConversationID)
+	if convID == "" {
+		return
+	}
+	snippet := strings.TrimSpace(detail)
+	if runes := []rune(snippet); len(runes) > 600 {
+		snippet = string(runes[:600]) + "..."
+	}
+	var prompt strings.Builder
+	if decision == "approved" {
+		prompt.WriteString(fmt.Sprintf("[Deferred Proposal Approved & Executed: `%s` (%s)]\n", prop.ID, prop.ActionType))
+		prompt.WriteString(fmt.Sprintf("- Summary: %s\n", prop.Summary))
+		if execErr != nil {
+			prompt.WriteString(fmt.Sprintf("- Execution Error: %v\n", execErr))
+		} else {
+			prompt.WriteString("- Execution Status: succeeded\n")
+		}
+		if snippet != "" {
+			prompt.WriteString(fmt.Sprintf("- Output:\n```\n%s\n```\n", snippet))
+		}
+		if prop.ContinuationNote != "" {
+			prompt.WriteString(fmt.Sprintf("- Next Continuation Step: %s\n", prop.ContinuationNote))
+		}
+	} else {
+		prompt.WriteString(fmt.Sprintf("[Deferred Proposal Rejected by User: `%s` (%s)]\n", prop.ID, prop.ActionType))
+		prompt.WriteString(fmt.Sprintf("- Original Summary: %s\n", prop.Summary))
+		if snippet != "" {
+			prompt.WriteString(fmt.Sprintf("- User Steering / Rejection Feedback: %q\n", snippet))
+			prompt.WriteString("\nRevise the draft/action according to the user's feedback above and stage an updated proposal via `hq propose` if still appropriate.")
+		} else if prop.ContinuationNote != "" {
+			prompt.WriteString(fmt.Sprintf("- Continuation Note: %s\n", prop.ContinuationNote))
+		}
+	}
+
+	decisionLabel := "Rejected"
+	if decision == "approved" {
+		decisionLabel = "Approved"
+	}
+	_, _, _ = events.Enqueue(vaultDir, events.Event{
+		Source:    "approval_decided",
+		DedupKey:  fmt.Sprintf("approval_decided:%s:%s", prop.ID, decision),
+		ScopeKey:  "session:" + convID,
+		SessionID: convID,
+		Skill:     prop.OriginSkill,
+		Title:     fmt.Sprintf("[Approval %s] %s", decisionLabel, prop.ID),
+		Prompt:    strings.TrimSpace(prompt.String()),
+		Metadata: map[string]string{
+			"proposal_id": prop.ID,
+			"decision":    decision,
+			"action_type": prop.ActionType,
+		},
+	}, now)
 }
 
 func appendIntervention(vaultDir string, rec InterventionRecord) {
@@ -431,4 +604,32 @@ func appendIntervention(vaultDir string, rec InterventionRecord) {
 	}
 	defer f.Close()
 	_, _ = f.Write(append(line, '\n'))
+}
+
+// LoadInterventions reads intervention audit records from local/memory/interventions.jsonl.
+func LoadInterventions(vaultDir string) ([]InterventionRecord, error) {
+	p := filepath.Join(vaultDir, "memory", "interventions.jsonl")
+	f, err := os.Open(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	var out []InterventionRecord
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec InterventionRecord
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			out = append(out, rec)
+		}
+	}
+	return out, scanner.Err()
 }

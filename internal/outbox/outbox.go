@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/zjshen14/agy-hq/internal/approvals"
 )
 
 // Supported attention delivery tiers.
@@ -31,25 +35,32 @@ const (
 	StatusDismissed = "dismissed"
 )
 
+const SemanticDedupWindow = 12 * time.Hour
+
 // OutboxItem represents a proactive insight, rollup item, or actionable idea persisted
 // in local/memory/outbox/items.jsonl.
 type OutboxItem struct {
-	ID            string   `json:"id"`
-	CreatedAt     string   `json:"createdAt"`
-	SourceSkill   string   `json:"sourceSkill"`
-	SourceConvID  string   `json:"sourceConvId,omitempty"`
-	Scope         string   `json:"scope,omitempty"`
-	Tier          string   `json:"tier"` // interrupt | brief_rollup | ideas_feed | silent_ledger
-	Title         string   `json:"title"`
-	Summary       string   `json:"summary"`
-	ProposalIDs   []string `json:"proposalIds,omitempty"`
-	SuggestedSlug string   `json:"suggestedSlug,omitempty"`
-	Critical      bool     `json:"critical,omitempty"`
-	Status        string   `json:"status"` // pending | delivered | promoted | snoozed | dismissed
-	DismissReason string   `json:"dismissReason,omitempty"`
-	SnoozeUntil   string   `json:"snoozeUntil,omitempty"`
-	DowngradedBy  string   `json:"downgradedBy,omitempty"`
-	UpdatedAt     string   `json:"updatedAt"`
+	ID                string   `json:"id"`
+	CreatedAt         string   `json:"createdAt"`
+	SourceSkill       string   `json:"sourceSkill"`
+	SourceConvID      string   `json:"sourceConvId,omitempty"`
+	Scope             string   `json:"scope,omitempty"`
+	Tier              string   `json:"tier"` // interrupt | brief_rollup | ideas_feed | silent_ledger
+	Title             string   `json:"title"`
+	Summary           string   `json:"summary"`
+	ProposalIDs       []string `json:"proposalIds,omitempty"`
+	SuggestedSlug     string   `json:"suggestedSlug,omitempty"`
+	Critical          bool     `json:"critical,omitempty"`
+	Force             bool     `json:"force,omitempty"`
+	Status            string   `json:"status"` // pending | delivered | promoted | snoozed | dismissed
+	DismissReason     string   `json:"dismissReason,omitempty"`
+	SnoozeUntil       string   `json:"snoozeUntil,omitempty"`
+	DowngradedBy      string   `json:"downgradedBy,omitempty"`
+	CoalescedCount    int      `json:"coalescedCount,omitempty"`
+	DeliveryAttempts  int      `json:"deliveryAttempts,omitempty"`
+	NextAttemptAt     string   `json:"nextAttemptAt,omitempty"`
+	LastDeliveryError string   `json:"lastDeliveryError,omitempty"`
+	UpdatedAt         string   `json:"updatedAt"`
 }
 
 // QuietHoursConfig configures DND quiet hours for proactive interrupts.
@@ -71,12 +82,14 @@ type AttentionConfig struct {
 	CoalesceWindowRaw string           `json:"coalesceWindowRaw,omitempty"`
 }
 
-// SkillDismissalStat summarizes user feedback on proactive ideas emitted by a skill.
+// SkillDismissalStat summarizes user feedback on proactive ideas and outbound proposals emitted by a skill.
 type SkillDismissalStat struct {
 	Skill          string  `json:"skill"`
 	TotalResolved  int     `json:"totalResolved"`
 	PromotedCount  int     `json:"promotedCount"`
 	DismissedCount int     `json:"dismissedCount"`
+	ApprovedCount  int     `json:"approvedCount,omitempty"`
+	RejectedCount  int     `json:"rejectedCount,omitempty"`
 	DismissRate    float64 `json:"dismissRate"`
 	SampleReasons  string  `json:"sampleReasons,omitempty"`
 	LastSeenAt     string  `json:"lastSeenAt,omitempty"`
@@ -327,7 +340,86 @@ func topicDedupKey(it OutboxItem) string {
 		strings.ToLower(strings.Join(strings.Fields(it.Title), " "))
 }
 
-// EvaluateDelivery applies attention mode, quiet-hours hold, and per-topic dedup cooldown
+var (
+	reNonTokenChar = regexp.MustCompile(`[^a-z0-9\-]+`)
+	titleStopwords = map[string]bool{
+		"a": true, "an": true, "and": true, "are": true, "at": true, "by": true,
+		"for": true, "from": true, "has": true, "in": true, "is": true, "of": true,
+		"on": true, "or": true, "the": true, "to": true, "with": true, "new": true,
+	}
+)
+
+func extractTitleTokensAndIDs(title string) (tokens map[string]bool, idSig string) {
+	tokens = make(map[string]bool)
+	var ids []string
+	cleaned := reNonTokenChar.ReplaceAllString(strings.ToLower(title), " ")
+	for _, raw := range strings.Fields(cleaned) {
+		tok := strings.Trim(raw, "-")
+		if tok == "" || titleStopwords[tok] {
+			continue
+		}
+		hasDigit := false
+		for _, r := range tok {
+			if unicode.IsDigit(r) {
+				hasDigit = true
+				break
+			}
+		}
+		if hasDigit {
+			ids = append(ids, tok)
+		}
+		// Normalize simple gerund/noun variants ("failing" -> "fail", "failure" -> "fail")
+		norm := tok
+		if !hasDigit {
+			switch {
+			case strings.HasSuffix(norm, "ing") && len(norm) > 5:
+				norm = strings.TrimSuffix(norm, "ing")
+			case strings.HasSuffix(norm, "ure") && len(norm) > 5:
+				norm = strings.TrimSuffix(norm, "ure")
+			case strings.HasSuffix(norm, "s") && len(norm) > 4:
+				norm = strings.TrimSuffix(norm, "s")
+			}
+		}
+		tokens[norm] = true
+	}
+	sort.Strings(ids)
+	return tokens, strings.Join(ids, "|")
+}
+
+func isNearDuplicateTitle(a, b OutboxItem) bool {
+	if !strings.EqualFold(strings.TrimSpace(a.SourceSkill), strings.TrimSpace(b.SourceSkill)) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(a.Scope), strings.TrimSpace(b.Scope)) {
+		return false
+	}
+	tokA, idA := extractTitleTokensAndIDs(a.Title)
+	tokB, idB := extractTitleTokensAndIDs(b.Title)
+	// Distinct numeric/entity IDs (e.g. PR #42 vs PR #43, noisy-1 vs noisy-2) are never duplicates.
+	if idA != idB {
+		return false
+	}
+	if len(tokA) < 2 || len(tokB) < 2 {
+		return false
+	}
+	inter := 0
+	union := make(map[string]bool, len(tokA)+len(tokB))
+	for k := range tokA {
+		union[k] = true
+		if tokB[k] {
+			inter++
+		}
+	}
+	for k := range tokB {
+		union[k] = true
+	}
+	if len(union) == 0 {
+		return false
+	}
+	return float64(inter)/float64(len(union)) >= 0.75
+}
+
+// EvaluateDelivery applies attention mode, quiet-hours hold, exact topic cooldown, and 12h semantic Jaccard dedup
 // deterministically in Go before persisting or dispatching an OutboxItem.
 func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time, item OutboxItem) (OutboxItem, bool) {
 	if now.IsZero() {
@@ -342,17 +434,30 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 		return item, false
 	}
 
-	// 1. Per-topic dedup cooldown check across recent items
-	if cfg.CooldownPerTopic > 0 && (item.Tier == TierInterrupt || item.Tier == TierBriefRollup || item.Tier == TierIdeasFeed) {
+	// 1. Exact per-topic dedup cooldown + 12h entity-preserving semantic Jaccard dedup (unless --force)
+	if !item.Force && (item.Tier == TierInterrupt || item.Tier == TierBriefRollup || item.Tier == TierIdeasFeed) {
 		key := topicDedupKey(item)
+		semWindow := SemanticDedupWindow
+		if cfg.CooldownPerTopic > semWindow {
+			semWindow = cfg.CooldownPerTopic
+		}
 		for i := len(existing) - 1; i >= 0; i-- {
 			prev := existing[i]
-			if topicDedupKey(prev) != key {
+			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" {
 				continue
 			}
 			ts, err := time.Parse(time.RFC3339, prev.CreatedAt)
-			if err == nil && now.Sub(ts) >= 0 && now.Sub(ts) < cfg.CooldownPerTopic {
+			if err != nil || now.Sub(ts) < 0 {
+				continue
+			}
+			if cfg.CooldownPerTopic > 0 && topicDedupKey(prev) == key && now.Sub(ts) < cfg.CooldownPerTopic {
 				item.DowngradedBy = "topic_cooldown"
+				item.Tier = TierSilentLedger
+				item.Status = StatusDelivered
+				return item, true
+			}
+			if now.Sub(ts) < semWindow && isNearDuplicateTitle(prev, item) {
+				item.DowngradedBy = "semantic_dedup"
 				item.Tier = TierSilentLedger
 				item.Status = StatusDelivered
 				return item, true
@@ -402,34 +507,32 @@ func Add(vaultDir string, item OutboxItem, now time.Time) (OutboxItem, bool, err
 		return OutboxItem{}, false, err
 	}
 	cfg := LoadAttentionConfig(vaultDir)
-	evaluated, cooledDown := EvaluateDelivery(existing, cfg, now, item)
-	nowStr := now.UTC().Format(time.RFC3339)
-	if strings.TrimSpace(evaluated.ID) == "" {
-		evaluated.ID = generateID(now)
-	}
-	if evaluated.CreatedAt == "" {
-		evaluated.CreatedAt = nowStr
-	}
-	evaluated.UpdatedAt = nowStr
 
-	replaced := false
-	for i := range existing {
-		if existing[i].ID == evaluated.ID {
-			existing[i] = evaluated
-			replaced = true
-			break
+	nowStr := now.UTC().Format(time.RFC3339)
+	if strings.TrimSpace(item.ID) == "" {
+		item.ID = generateID(now)
+	}
+	item.CreatedAt = nowStr
+	item.UpdatedAt = nowStr
+
+	evaluated, cooled := EvaluateDelivery(existing, cfg, now, item)
+	if cooled && evaluated.DowngradedBy == "semantic_dedup" {
+		for i := len(existing) - 1; i >= 0; i-- {
+			if isNearDuplicateTitle(existing[i], item) {
+				existing[i].CoalescedCount++
+				existing[i].UpdatedAt = nowStr
+				break
+			}
 		}
 	}
-	if !replaced {
-		existing = append(existing, evaluated)
-	}
+	existing = append(existing, evaluated)
 	if err := saveCanonical(vaultDir, existing); err != nil {
-		return OutboxItem{}, cooledDown, err
+		return OutboxItem{}, false, err
 	}
-	return evaluated, cooledDown, nil
+	return evaluated, cooled, nil
 }
 
-// List queries OutboxItems filtered by optional tier and status, automatically waking expired snoozes.
+// List returns OutboxItems filtered by tier and status, automatically waking expired snoozes.
 func List(vaultDir, tierFilter, statusFilter string, now time.Time) ([]OutboxItem, error) {
 	if now.IsZero() {
 		now = time.Now()
@@ -439,12 +542,13 @@ func List(vaultDir, tierFilter, statusFilter string, now time.Time) ([]OutboxIte
 		return nil, err
 	}
 	dirty := false
+	nowStr := now.UTC().Format(time.RFC3339)
 	for i := range items {
 		if items[i].Status == StatusSnoozed && items[i].SnoozeUntil != "" {
-			if until, pErr := time.Parse(time.RFC3339, items[i].SnoozeUntil); pErr == nil && !now.Before(until) {
+			if wakeAt, pErr := time.Parse(time.RFC3339, items[i].SnoozeUntil); pErr == nil && !now.Before(wakeAt) {
 				items[i].Status = StatusPending
 				items[i].SnoozeUntil = ""
-				items[i].UpdatedAt = now.UTC().Format(time.RFC3339)
+				items[i].UpdatedAt = nowStr
 				dirty = true
 			}
 		}
@@ -453,32 +557,24 @@ func List(vaultDir, tierFilter, statusFilter string, now time.Time) ([]OutboxIte
 		_ = saveCanonical(vaultDir, items)
 	}
 
-	tierFilter = strings.ToLower(strings.TrimSpace(tierFilter))
-	statusFilter = strings.ToLower(strings.TrimSpace(statusFilter))
-
 	var out []OutboxItem
 	for _, it := range items {
-		if tierFilter != "" && strings.ToLower(it.Tier) != tierFilter {
+		if tierFilter != "" && !strings.EqualFold(it.Tier, tierFilter) {
 			continue
 		}
-		if statusFilter != "" {
-			if strings.ToLower(it.Status) != statusFilter {
-				continue
-			}
-		} else if it.Status == StatusSnoozed && it.SnoozeUntil != "" {
-			if until, pErr := time.Parse(time.RFC3339, it.SnoozeUntil); pErr == nil && now.Before(until) {
-				continue
-			}
+		if statusFilter != "" && !strings.EqualFold(it.Status, statusFilter) {
+			continue
 		}
 		out = append(out, it)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
+	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt > out[j].CreatedAt
 	})
 	return out, nil
 }
 
-// DrainBriefRollup returns all pending brief_rollup items and atomically transitions them to "delivered".
+// DrainBriefRollup returns all pending brief_rollup items, marks them "delivered",
+// and records each item in local/memory/reported.jsonl so future runs do not repeat them.
 func DrainBriefRollup(vaultDir string, now time.Time) ([]OutboxItem, error) {
 	if now.IsZero() {
 		now = time.Now()
@@ -499,6 +595,9 @@ func DrainBriefRollup(vaultDir string, now time.Time) ([]OutboxItem, error) {
 	if len(drained) > 0 {
 		if err := saveCanonical(vaultDir, items); err != nil {
 			return nil, err
+		}
+		for _, it := range drained {
+			_ = RecordReportedFromItem(vaultDir, it, now)
 		}
 	}
 	return drained, nil
@@ -562,8 +661,8 @@ func mutateItem(vaultDir, id string, now time.Time, fn func(it *OutboxItem, nowS
 	return OutboxItem{}, fmt.Errorf("outbox item %q not found", id)
 }
 
-// ComputeSkillDismissalStats aggregates promoted vs. dismissed resolution rates per skill
-// across ideas_feed items so `hq rsi mine` can detect noisy proactive skills.
+// ComputeSkillDismissalStats aggregates promoted/approved vs. dismissed/rejected resolution rates per skill
+// across both ideas_feed items and outbound approval interventions so `hq rsi mine` detects noisy skills.
 func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 	items, err := LoadAll(vaultDir)
 	if err != nil {
@@ -576,14 +675,8 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 	bySkill := make(map[string]*acc)
 	var skills []string
 
-	for _, it := range items {
-		if it.Tier != TierIdeasFeed && it.Status != StatusDismissed && it.Status != StatusPromoted {
-			continue
-		}
-		if it.Status != StatusPromoted && it.Status != StatusDismissed {
-			continue
-		}
-		sk := strings.TrimSpace(it.SourceSkill)
+	ensureSkill := func(rawSkill string) *acc {
+		sk := strings.TrimSpace(rawSkill)
 		if sk == "" {
 			sk = "general"
 		}
@@ -593,6 +686,14 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 			bySkill[sk] = entry
 			skills = append(skills, sk)
 		}
+		return entry
+	}
+
+	for _, it := range items {
+		if it.Status != StatusPromoted && it.Status != StatusDismissed {
+			continue
+		}
+		entry := ensureSkill(it.SourceSkill)
 		entry.stat.TotalResolved++
 		if it.Status == StatusPromoted {
 			entry.stat.PromotedCount++
@@ -604,6 +705,36 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 		}
 		if it.UpdatedAt > entry.stat.LastSeenAt {
 			entry.stat.LastSeenAt = it.UpdatedAt
+		}
+	}
+
+	// Join rejected/approved proposals carrying explicit OriginSkill attribution from interventions.jsonl
+	if interventions, iErr := approvals.LoadInterventions(vaultDir); iErr == nil {
+		for _, rec := range interventions {
+			if rec.Decision != "approved" && rec.Decision != "rejected" {
+				continue
+			}
+			origin := strings.TrimSpace(rec.Proposal.OriginSkill)
+			if origin == "" && rec.Proposal.Metadata != nil {
+				origin = strings.TrimSpace(rec.Proposal.Metadata["originSkill"])
+			}
+			if origin == "" {
+				continue
+			}
+			entry := ensureSkill(origin)
+			entry.stat.TotalResolved++
+			if rec.Decision == "approved" {
+				entry.stat.ApprovedCount++
+			} else {
+				entry.stat.RejectedCount++
+				entry.stat.DismissedCount++
+				if r := strings.TrimSpace(rec.Output); r != "" && len(entry.reasons) < 3 {
+					entry.reasons = append(entry.reasons, r)
+				}
+			}
+			if rec.Timestamp > entry.stat.LastSeenAt {
+				entry.stat.LastSeenAt = rec.Timestamp
+			}
 		}
 	}
 

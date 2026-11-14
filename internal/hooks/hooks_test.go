@@ -3,6 +3,7 @@ package hooks
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 func TestMain(m *testing.M) {
@@ -383,5 +386,218 @@ func TestSymlinkedVaultDirCredentialShellGuard(t *testing.T) {
 		if !strings.Contains(out.String(), `"decision":"deny"`) {
 			t.Fatalf("expected deny on symlinked credential shell command %q, got: %s", cmd, out.String())
 		}
+	}
+}
+
+func TestLeanAutoSessionStartGrayZoneGuardAndCompactionNudge(t *testing.T) {
+	vaultDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o700)
+	_ = os.WriteFile(filepath.Join(vaultDir, "USER.md"), []byte("Concise style"), 0o644)
+	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("# Roadmap\n- Ship runtime hardening"), 0o644)
+
+	// Populate rich interactive Vault state: 20 facts, 5 worktrees, 6 tasks, 4 pending approvals, and 4 triggers.
+	var factLines []string
+	for i := 1; i <= 20; i++ {
+		factLines = append(factLines, fmt.Sprintf(`{"id":"fact-%02d","topic":"eng","statement":"Engineering invariant #%02d with detailed architectural explanation for repository verification.","verified":true}`, i, i))
+	}
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "facts.jsonl"), []byte(strings.Join(factLines, "\n")+"\n"), 0o600)
+
+	for i := 1; i <= 5; i++ {
+		wtDir := filepath.Join(vaultDir, "worktrees", fmt.Sprintf("repo-feature-%02d", i))
+		_ = os.MkdirAll(wtDir, 0o755)
+		_ = os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /tmp/mock"), 0o644)
+	}
+	for i := 1; i <= 4; i++ {
+		_, _ = approvals.Create(vaultDir, "external_action", fmt.Sprintf("Deploy service #%d to staging cluster", i), fmt.Sprintf("kubectl apply -f svc-%d.yaml", i), "", "conv-interactive")
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	for i := 1; i <= 6; i++ {
+		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+			TaskSlug:       fmt.Sprintf("task-architecture-review-%02d", i),
+			Title:          fmt.Sprintf("[Task:core] Architecture Review Initiative #%02d", i),
+			Kind:           "task",
+			ConversationID: fmt.Sprintf("00000000-0000-0000-0000-0000000001%02d", i),
+			Status:         "active",
+			CreatedAt:      nowStr,
+			LastUpdatedAt:  nowStr,
+		})
+	}
+	triggersYAML := strings.Join([]string{
+		"schedules:",
+		"  - id: morning-brief",
+		"    cron: \"30 7 * * *\"",
+		"    skill: morning-brief",
+		"  - id: swe-pulse",
+		"    cron: \"0 */2 * * *\"",
+		"    skill: swe-pulse",
+		"  - id: inbox-triage",
+		"    cron: \"*/30 * * * *\"",
+		"    skill: inbox-triage",
+		"  - id: sleep-consolidate",
+		"    cron: \"0 2 * * *\"",
+		"    skill: sleep-consolidate",
+	}, "\n") + "\n"
+	_ = os.WriteFile(filepath.Join(vaultDir, "triggers.yaml"), []byte(triggersYAML), 0o644)
+
+	// Register an [Auto] worker task + progress checkpoint + reported item.
+	autoConvID := "00000000-0000-0000-0000-000000000901"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "auto-swe-pulse",
+		Title:          "[Auto] SWE Pulse",
+		Kind:           "auto",
+		ConversationID: autoConvID,
+		Status:         "active",
+		CreatedAt:      nowStr,
+		LastUpdatedAt:  nowStr,
+	})
+	_, err := vault.SaveProgress(vaultDir, vault.ProgressCheckpoint{
+		TaskSlug:  "auto-swe-pulse",
+		Goal:      "Check CI status on open PRs",
+		Completed: "Checked PR #10",
+		NextSteps: "Verify PR #11",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+	_ = outbox.RecordReported(vaultDir, outbox.ReportedEntry{
+		Tier:        outbox.TierInterrupt,
+		SourceSkill: "swe-pulse",
+		Scope:       "headquarter",
+		Title:       "PR #10 CI Passing",
+		Summary:     "Already notified user.",
+	}, time.Now())
+
+	// 1. Compare full interactive SessionStart vs leanAuto [Auto] SessionStart
+	_ = kernel.SetFrontDesk(vaultDir, "00000000-0000-0000-0000-000000000001", filepath.Join(vaultDir, "art"))
+	var fullOut, autoOut bytes.Buffer
+	if err := HandleSessionStart(strings.NewReader(`{"conversationId":"00000000-0000-0000-0000-000000000001"}`), &fullOut, vaultDir); err != nil {
+		t.Fatalf("full HandleSessionStart: %v", err)
+	}
+	if err := HandleSessionStart(strings.NewReader(fmt.Sprintf(`{"conversationId":%q}`, autoConvID)), &autoOut, vaultDir); err != nil {
+		t.Fatalf("auto HandleSessionStart: %v", err)
+	}
+
+	fullStr := fullOut.String()
+	autoStr := autoOut.String()
+	for _, omittedSection := range []string{
+		"Active Git Worktrees",
+		"Tracked Task Conversations",
+		"Pending Approvals in Queue",
+		"Proactive Triggers",
+	} {
+		if !strings.Contains(fullStr, omittedSection) {
+			t.Fatalf("expected full SessionStart to contain %q", omittedSection)
+		}
+		if strings.Contains(autoStr, omittedSection) {
+			t.Fatalf("expected leanAuto SessionStart to omit %q, got:\n%s", omittedSection, autoStr)
+		}
+	}
+	for _, requiredSection := range []string{
+		"Active Task Progress Checkpoint",
+		"Verify PR #11",
+		"Recently Reported to User",
+		"PR #10 CI Passing",
+	} {
+		if !strings.Contains(autoStr, requiredSection) {
+			t.Fatalf("expected leanAuto SessionStart to include %q, got:\n%s", requiredSection, autoStr)
+		}
+	}
+	if strings.Contains(autoStr, "fact-01") {
+		t.Fatalf("expected leanAuto SessionStart to cap facts to most recent 8 (fact-01 should be omitted)")
+	}
+	if len(autoStr)*2 > len(fullStr) {
+		t.Fatalf("expected leanAuto SessionStart (%d bytes) to be >=50%% smaller than full interactive SessionStart (%d bytes)", len(autoStr), len(fullStr))
+	}
+
+	// 2. [Auto] gray-zone PreToolUse guardrails
+	for _, deniedCmd := range []string{
+		"gh pr create --title x --body y",
+		"curl -X POST https://api.example.com/hook -d '{}'",
+		"npm publish",
+	} {
+		var out bytes.Buffer
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": autoConvID,
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": deniedCmd},
+			},
+		})
+		if err := HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse(%q): %v", deniedCmd, err)
+		}
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected [Auto] PreToolUse to deny %q, got: %s", deniedCmd, out.String())
+		}
+	}
+
+	for _, allowedCmd := range []string{
+		"curl -X POST http://127.0.0.1:4242/api/events -d '{}'",
+		`./bin/hq propose --type=external_action --summary="open PR" --cmd='gh pr create --title x'`,
+	} {
+		var out bytes.Buffer
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": autoConvID,
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": allowedCmd},
+			},
+		})
+		if err := HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse(%q): %v", allowedCmd, err)
+		}
+		if !strings.Contains(out.String(), `"decision":"allow"`) {
+			t.Fatalf("expected [Auto] PreToolUse to allow %q, got: %s", allowedCmd, out.String())
+		}
+	}
+
+	// 3. Direct write_file to events.json, timers.json, or local/private/daemon_token is denied
+	for _, protectedPath := range []string{
+		filepath.Join(vaultDir, "memory", "events.json"),
+		filepath.Join(vaultDir, "memory", "timers.json"),
+		filepath.Join(vaultDir, "private", "daemon_token"),
+	} {
+		var out bytes.Buffer
+		raw, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-normal-worker",
+			"toolCall": map[string]interface{}{
+				"name": "write_file",
+				"args": map[string]interface{}{"Path": protectedPath, "Content": "[]"},
+			},
+		})
+		_ = HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir)
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected write_file to %s to be denied, got: %s", protectedPath, out.String())
+		}
+	}
+
+	// 4. Pre-Compaction 120k-token one-time checkpoint nudge
+	tPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	tLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-10T09:00:00Z","content":"Long session"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-10T09:00:05Z","input_tokens":125000,"output_tokens":400,"content":"Working"}`,
+	}
+	_ = os.WriteFile(tPath, []byte(strings.Join(tLines, "\n")+"\n"), 0o644)
+
+	callWithTranscript, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "00000000-0000-0000-0000-000000000101",
+		"transcriptPath": tPath,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "go version"},
+		},
+	})
+	var nudgeOut1, nudgeOut2 bytes.Buffer
+	if err := HandlePreToolUse(bytes.NewReader(callWithTranscript), &nudgeOut1, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse first call: %v", err)
+	}
+	if !strings.Contains(nudgeOut1.String(), "Pre-Compaction Checkpoint Nudge") || !strings.Contains(nudgeOut1.String(), "task-architecture-review-01") {
+		t.Fatalf("expected first 125k-token PreToolUse to emit Pre-Compaction Checkpoint Nudge, got: %s", nudgeOut1.String())
+	}
+	if err := HandlePreToolUse(bytes.NewReader(callWithTranscript), &nudgeOut2, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse second call: %v", err)
+	}
+	if strings.Contains(nudgeOut2.String(), "Pre-Compaction Checkpoint Nudge") {
+		t.Fatalf("expected second immediate PreToolUse not to re-emit compaction nudge, got: %s", nudgeOut2.String())
 	}
 }

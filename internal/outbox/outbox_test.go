@@ -1,10 +1,14 @@
 package outbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/approvals"
 )
 
 func TestAttentionQuietHoursCooldownAndIdeasLifecycle(t *testing.T) {
@@ -73,10 +77,13 @@ func TestAttentionQuietHoursCooldownAndIdeasLifecycle(t *testing.T) {
 		t.Fatalf("expected duplicate topic within 4h to hit cooldown, got cooled=%v item=%+v err=%v", cooledDup, itDup, err)
 	}
 
-	// 4. DrainBriefRollup returns item-1 once and marks it delivered
+	// 4. DrainBriefRollup returns item-1 once, marks it delivered, and logs to reported.jsonl
 	drained, err := DrainBriefRollup(vaultDir, nightTime.Add(8*time.Hour))
 	if err != nil || len(drained) != 1 || drained[0].ID != "item-1" {
 		t.Fatalf("expected 1 brief_rollup drained, got %+v (err=%v)", drained, err)
+	}
+	if digest := FormatReportedDigest(vaultDir, nightTime.Add(8*time.Hour), 10); !strings.Contains(digest, "ACME 8-K Minor Update") {
+		t.Fatalf("expected drained brief_rollup in FormatReportedDigest, got:\n%s", digest)
 	}
 	drainedAgain, _ := DrainBriefRollup(vaultDir, nightTime.Add(9*time.Hour))
 	if len(drainedAgain) != 0 {
@@ -136,5 +143,97 @@ func TestAttentionQuietHoursCooldownAndIdeasLifecycle(t *testing.T) {
 	}
 	if !foundNoisy {
 		t.Fatalf("expected inbox-triage with 100%% dismissal rate across 5 items, got: %+v", stats)
+	}
+}
+
+func TestDispatcherRetryReportedLedgerSemanticDedupAndEvalSuite(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 14, 15, 0, 0, 0, time.UTC)
+
+	// 1. Add initial CI failure interrupt
+	_, cooled1, err := Add(vaultDir, OutboxItem{
+		ID:          "ci-42",
+		SourceSkill: "swe-pulse",
+		Scope:       "headquarter",
+		Tier:        TierInterrupt,
+		Title:       "PR #42 CI Failing",
+		Summary:     "Unit test broken on branch.",
+	}, now)
+	if err != nil || cooled1 {
+		t.Fatalf("Add ci-42: err=%v cooled=%v", err, cooled1)
+	}
+
+	// 2. Reworded duplicate 5 hours later (>4h exact cooldown, within 12h semantic window) -> suppressed!
+	dup, cooledDup, err := Add(vaultDir, OutboxItem{
+		SourceSkill: "swe-pulse",
+		Scope:       "headquarter",
+		Tier:        TierInterrupt,
+		Title:       "CI Failure on PR #42",
+		Summary:     "Same failing run reworded.",
+	}, now.Add(5*time.Hour))
+	if err != nil || !cooledDup || dup.DowngradedBy != "semantic_dedup" {
+		t.Fatalf("expected reworded PR #42 duplicate to be suppressed by semantic_dedup, got cooled=%v item=%+v err=%v", cooledDup, dup, err)
+	}
+
+	// 3. Dispatcher: transient error backs off, then retry succeeds and writes to reported.jsonl
+	attempts := 0
+	delivered1, err := DispatchPendingInterrupts(vaultDir, now.Add(time.Minute), func(it OutboxItem, card string) error {
+		attempts++
+		return errors.New("temporary LS timeout")
+	})
+	if err != nil || len(delivered1) != 0 || attempts != 1 {
+		t.Fatalf("expected 0 delivered on transient error, got %d (attempts=%d err=%v)", len(delivered1), attempts, err)
+	}
+	// Immediate call before 30s backoff must skip
+	_, _ = DispatchPendingInterrupts(vaultDir, now.Add(time.Minute+5*time.Second), func(it OutboxItem, card string) error {
+		attempts++
+		return nil
+	})
+	if attempts != 1 {
+		t.Fatalf("expected backoff hold to skip immediate retry, got attempts=%d", attempts)
+	}
+	// After +35s backoff -> succeeds and records to reported.jsonl
+	delivered2, err := DispatchPendingInterrupts(vaultDir, now.Add(2*time.Minute), func(it OutboxItem, card string) error {
+		attempts++
+		return nil
+	})
+	if err != nil || len(delivered2) != 1 || attempts != 2 {
+		t.Fatalf("expected 1 delivered after retry backoff, got %d (attempts=%d err=%v)", len(delivered2), attempts, err)
+	}
+	if digest := FormatReportedDigest(vaultDir, now.Add(2*time.Minute), 10); !strings.Contains(digest, "PR #42 CI Failing") {
+		t.Fatalf("expected delivered interrupt in reported digest, got:\n%s", digest)
+	}
+
+	// 4. Proposal rejection attribution joins into ComputeSkillDismissalStats
+	prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+		ActionType:  "gchat_send",
+		Summary:     "Unnecessary ping",
+		CommandArgv: []string{"echo", "ping"},
+		OriginSkill: "gchat",
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions: %v", err)
+	}
+	if err := approvals.RejectProposal(vaultDir, prop.ID, "Too chatty"); err != nil {
+		t.Fatalf("RejectProposal: %v", err)
+	}
+	stats, err := ComputeSkillDismissalStats(vaultDir)
+	if err != nil {
+		t.Fatalf("ComputeSkillDismissalStats: %v", err)
+	}
+	foundGChat := false
+	for _, st := range stats {
+		if st.Skill == "gchat" && st.RejectedCount == 1 && st.DismissRate > 0.99 {
+			foundGChat = true
+		}
+	}
+	if !foundGChat {
+		t.Fatalf("expected rejected proposal joined into ComputeSkillDismissalStats, got: %+v", stats)
+	}
+
+	// 5. Built-in offline EvalSuite meets 100% of precision/recall/suppression thresholds
+	evalRep := RunEvalSuite(nil)
+	if !evalRep.AllThresholdsMet {
+		t.Fatalf("expected DefaultEvalFixtures to pass all thresholds, got: %+v", evalRep)
 	}
 }

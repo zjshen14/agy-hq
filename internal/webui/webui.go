@@ -18,12 +18,14 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -139,6 +141,120 @@ func NewHandler(vaultDir string) http.Handler {
 		sum := obs.BuildDashboardSummary(vaultDir, time.Now())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sum)
+	})
+
+	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if !isAllowedSameOriginRequest(r) {
+				http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+				return
+			}
+			now := time.Now()
+			incArch := r.URL.Query().Get("archived") == "1" || r.URL.Query().Get("archived") == "true"
+			list, _ := events.List(vaultDir, r.URL.Query().Get("status"), incArch, 50)
+			stats := events.GetSummaryStats(vaultDir, now)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"stats":  stats,
+				"events": list,
+			})
+		case http.MethodPost:
+			authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+			authed := false
+			if strings.HasPrefix(strings.ToLower(authHdr), "bearer ") {
+				tok := strings.TrimSpace(authHdr[7:])
+				authed = events.ValidateDaemonToken(vaultDir, tok)
+			} else if isAllowedSameOriginRequest(r) && validCSRFToken(csrfToken, r.Header.Get("X-HQ-CSRF-Token")) {
+				authed = true
+			}
+			if !authed {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "unauthorized: valid Authorization: Bearer <daemon_token> or X-HQ-CSRF-Token required",
+				})
+				return
+			}
+
+			r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+			var reqBody struct {
+				Source      string            `json:"source"`
+				DedupKey    string            `json:"dedupKey"`
+				ScopeKey    string            `json:"scopeKey"`
+				SessionID   string            `json:"sessionId"`
+				Skill       string            `json:"skill"`
+				Model       string            `json:"model"`
+				Title       string            `json:"title"`
+				Prompt      string            `json:"prompt"`
+				AvailableAt string            `json:"availableAt"`
+				Metadata    map[string]string `json:"metadata"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+				status := http.StatusBadRequest
+				if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+					status = http.StatusRequestEntityTooLarge
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			if strings.TrimSpace(reqBody.Title) == "" && strings.TrimSpace(reqBody.Prompt) == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "event requires non-empty title or prompt"})
+				return
+			}
+			src := strings.TrimSpace(reqBody.Source)
+			if src == "" {
+				src = "webhook"
+			}
+			ev, deduped, err := events.Enqueue(vaultDir, events.Event{
+				Source:      src,
+				DedupKey:    strings.TrimSpace(reqBody.DedupKey),
+				ScopeKey:    strings.TrimSpace(reqBody.ScopeKey),
+				SessionID:   strings.TrimSpace(reqBody.SessionID),
+				Skill:       strings.TrimSpace(reqBody.Skill),
+				Model:       strings.TrimSpace(reqBody.Model),
+				Title:       strings.TrimSpace(reqBody.Title),
+				Prompt:      strings.TrimSpace(reqBody.Prompt),
+				AvailableAt: strings.TrimSpace(reqBody.AvailableAt),
+				Metadata:    reqBody.Metadata,
+			}, time.Now())
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":       "accepted",
+				"deduplicated": deduped,
+				"event":        ev,
+			})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/timers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
+		incAll := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+		list, _ := timers.List(vaultDir, incAll)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"timers": list,
+		})
 	})
 
 	mux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
@@ -1618,6 +1734,12 @@ func SyncMarkdownConsole(vaultDir string) error {
 	lastHB := state.Quota.LastStatus
 	if lastHB == "" {
 		lastHB = "Not run yet today"
+	}
+	evStats := events.GetSummaryStats(vaultDir, time.Now())
+	armedTimers, _ := timers.List(vaultDir, false)
+	if evStats.PendingCount > 0 || evStats.LeasedCount > 0 || evStats.Dropped24h > 0 || len(armedTimers) > 0 {
+		fmt.Fprintf(&b, "- **Durable Event Inbox & Timers:** `pending=%d` · `leased=%d` · `dropped24h=%d` · `armedTimers=%d`\n",
+			evStats.PendingCount, evStats.LeasedCount, evStats.Dropped24h, len(armedTimers))
 	}
 	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 

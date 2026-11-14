@@ -12,17 +12,23 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 )
 
-// TriggerCursor tracks deterministic sidecar pre-check execution & SHA-256 deduplication
-// in local/memory/trigger_cursors.json so unchanged ticks consume 0 LLM tokens.
+// TriggerCursor tracks deterministic sidecar pre-check execution, SHA-256 deduplication,
+// and pre-check error health in local/memory/trigger_cursors.json so unchanged ticks consume 0 LLM tokens.
 type TriggerCursor struct {
-	ID               string `json:"id"`
-	LastCheckedAt    string `json:"lastCheckedAt,omitempty"`
-	LastCronSlot     string `json:"lastCronSlot,omitempty"`
-	LastTriggeredAt  string `json:"lastTriggeredAt,omitempty"`
-	LastStdoutSHA256 string `json:"lastStdoutSha256,omitempty"`
-	SkipsCount       int    `json:"skipsCount"`
+	ID                string `json:"id"`
+	LastCheckedAt     string `json:"lastCheckedAt,omitempty"`
+	LastCronSlot      string `json:"lastCronSlot,omitempty"`
+	LastTriggeredAt   string `json:"lastTriggeredAt,omitempty"`
+	LastStdoutSHA256  string `json:"lastStdoutSha256,omitempty"`
+	SkipsCount        int    `json:"skipsCount"`
+	ConsecutiveErrors int    `json:"consecutiveErrors,omitempty"`
+	LastError         string `json:"lastError,omitempty"`
+	LastErrorAt       string `json:"lastErrorAt,omitempty"`
 }
 
 func triggerCursorsPath(vaultDir string) string {
@@ -185,11 +191,12 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 
 		cur.ID = s.ID
 		cur.LastCheckedAt = now.UTC().Format(time.RFC3339)
-		cur.LastCronSlot = slotKey
 		dirtyCursors = true
 
 		shouldSpawn := false
 		precheckDigest := ""
+		nextStdoutSHA := cur.LastStdoutSHA256
+		shaHex := "no-precheck"
 
 		if len(s.PrecheckCmd) > 0 {
 			bin0 := s.PrecheckCmd[0]
@@ -219,23 +226,56 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 			cancel()
 
 			trimmedOut := strings.TrimSpace(string(outBytes))
+			if cmdErr != nil {
+				errMsg := cmdErr.Error()
+				if trimmedOut != "" {
+					errMsg = errMsg + ": " + trimmedOut
+				}
+				if runes := []rune(errMsg); len(runes) > 240 {
+					errMsg = string(runes[:240]) + "..."
+				}
+				cur.ConsecutiveErrors++
+				cur.LastError = errMsg
+				cur.LastErrorAt = now.UTC().Format(time.RFC3339)
+				cursors[s.ID] = cur
+				if cur.ConsecutiveErrors == 3 {
+					skillName := s.Skill
+					if skillName == "" {
+						skillName = s.ID
+					}
+					_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
+						Tier:        outbox.TierBriefRollup,
+						SourceSkill: skillName,
+						Scope:       s.ID,
+						Title:       "Gatekeeper precheck failing: " + s.ID,
+						Summary:     fmt.Sprintf("Schedule %q failed 3 consecutive pre-checks without advancing cursor. Last error: %s", s.ID, errMsg),
+					}, now)
+				}
+				continue
+			}
+
+			cur.ConsecutiveErrors = 0
+			cur.LastError = ""
+			cur.LastErrorAt = ""
+
 			sum := sha256.Sum256([]byte(trimmedOut))
-			shaHex := hex.EncodeToString(sum[:])
+			shaHex = hex.EncodeToString(sum[:])
 
 			dedup := s.EffectiveDedupMode()
 			switch dedup {
 			case "none":
-				shouldSpawn = cmdErr == nil
+				shouldSpawn = true
 			case "exit_zero_nonempty":
-				shouldSpawn = cmdErr == nil && trimmedOut != ""
+				shouldSpawn = trimmedOut != ""
 			default: // "stdout_sha256"
-				if cmdErr == nil && trimmedOut != "" && shaHex != cur.LastStdoutSHA256 {
+				if trimmedOut != "" && shaHex != cur.LastStdoutSHA256 {
 					shouldSpawn = true
-					cur.LastStdoutSHA256 = shaHex
+					nextStdoutSHA = shaHex
 				}
 			}
 
 			if !shouldSpawn {
+				cur.LastCronSlot = slotKey
 				cur.SkipsCount++
 				cursors[s.ID] = cur
 				zeroTokenSaves++
@@ -248,13 +288,13 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 			}
 		} else {
 			// isolated_worker without a precheck command (e.g., nightly sleep-consolidate)
+			cur.ConsecutiveErrors = 0
+			cur.LastError = ""
+			cur.LastErrorAt = ""
 			shouldSpawn = true
 		}
 
 		if shouldSpawn {
-			cur.LastTriggeredAt = now.UTC().Format(time.RFC3339)
-			cursors[s.ID] = cur
-
 			modelID, _, _ := ResolveModel(s.DefaultPrompt(), s.Model, "", "")
 			prompt := s.DefaultPrompt()
 			if precheckDigest != "" {
@@ -264,11 +304,26 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 				prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
 			}
 			title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, s.Skill)
-			out, spawnErr := SpawnTask(vaultDir, "gatekeeper:"+s.ID, s.Skill, title, prompt, modelID, dryRun)
-			if spawnErr != nil {
-				actions = append(actions, fmt.Sprintf("gatekeeper:%s -> /%s (deferred: %v)", s.ID, s.Skill, spawnErr))
-			} else {
-				actions = append(actions, fmt.Sprintf("gatekeeper:%s -> /%s (%s)", s.ID, s.Skill, out))
+			dedupKey := fmt.Sprintf("gatekeeper:%s:%s:%s", s.ID, slotKey, shaHex)
+			_, _, enqErr := events.Enqueue(vaultDir, events.Event{
+				Source:   "gatekeeper",
+				DedupKey: dedupKey,
+				ScopeKey: "gatekeeper:" + s.ID,
+				Skill:    s.Skill,
+				Model:    modelID,
+				Title:    title,
+				Prompt:   prompt,
+				Metadata: map[string]string{
+					"trigger":      "gatekeeper:" + s.ID,
+					"action_label": fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, s.Skill),
+					"schedule_id":  s.ID,
+				},
+			}, now)
+			if enqErr == nil {
+				cur.LastCronSlot = slotKey
+				cur.LastStdoutSHA256 = nextStdoutSHA
+				cur.LastTriggeredAt = now.UTC().Format(time.RFC3339)
+				cursors[s.ID] = cur
 			}
 		}
 	}
@@ -280,6 +335,9 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 		st := LoadQuota(vaultDir)
 		st.GatekeeperSavesToday += zeroTokenSaves
 		_ = SaveQuota(vaultDir, st)
+	}
+	if dispatched, dispErr := DispatchPendingEvents(vaultDir, now, dryRun); dispErr == nil && len(dispatched) > 0 {
+		actions = append(actions, dispatched...)
 	}
 	return actions, zeroTokenSaves, nil
 }

@@ -16,10 +16,13 @@ import (
 var Ring0ProtectedPaths = []string{
 	"internal/approvals/",
 	"internal/ci/",
+	"internal/events/",
 	"internal/plugin/",
 	"internal/rsi/tcb.go",
 	"internal/rsi/verifier.go",
 	"internal/rsi/proposer.go",
+	"internal/sandbox/",
+	"internal/timers/",
 	"internal/version/",
 	"internal/webui/",
 	"internal/vault/vault.go",

@@ -17,6 +17,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
@@ -24,6 +25,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/rsi"
+	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/webui"
@@ -337,6 +339,15 @@ func main() {
 		}
 
 	case "propose":
+		var proposeFlagArgs []string
+		var cmdArgv []string
+		for i, a := range os.Args[2:] {
+			if a == "--" {
+				cmdArgv = os.Args[2+i+1:]
+				break
+			}
+			proposeFlagArgs = append(proposeFlagArgs, a)
+		}
 		fs := flag.NewFlagSet("propose", flag.ExitOnError)
 		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, gchat_send, rsi_patch, rsi_skill_patch)")
 		summary := fs.String("summary", "", "Human-readable summary of the proposed action")
@@ -347,7 +358,13 @@ func main() {
 		workDir := fs.String("workdir", "", "Optional working directory for command execution")
 		convID := fs.String("conv", "", "Optional conversation ID")
 		ttlStr := fs.String("ttl", "", "Optional proposal expiration TTL duration (default 24h)")
-		_ = fs.Parse(os.Args[2:])
+		resumeOnDecide := fs.Bool("resume-on-decide", false, "Wake the originating conversation upon human approve or reject")
+		continuation := fs.String("continuation", "", "Optional continuation instruction injected when resuming")
+		originSkill := fs.String("skill", "", "Optional originating skill slug for signal-to-noise attribution")
+		_ = fs.Parse(proposeFlagArgs)
+		if *convID == "" {
+			*convID = vault.ResolveConversationID()
+		}
 		if *rsiID != "" {
 			hqBin := resolveProposalHQBin(rootDir)
 			prop, _, err := rsi.Propose(rootDir, vaultDir, *rsiID, *convID, hqBin)
@@ -383,8 +400,12 @@ func main() {
 				if *summary == "" {
 					*summary = gchat.ProposalSummary(spec)
 				}
-				if *cmdStr == "" {
+				if *cmdStr == "" && len(cmdArgv) == 0 {
 					*cmdStr = fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
+					cmdArgv = []string{hqBin, "gchat", "send-draft", "--account=" + spec.Account, "--draft=" + spec.DraftID, "--hash=" + hashShort}
+				}
+				if *originSkill == "" {
+					*originSkill = "gchat"
 				}
 				if *workDir == "" {
 					*workDir = resolveDefaultWorkDir(rootDir)
@@ -417,8 +438,12 @@ func main() {
 				if *summary == "" {
 					*summary = fmt.Sprintf("Send Gmail Draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", spec.DraftID, spec.From, spec.To, spec.Subject, hashShort)
 				}
-				if *cmdStr == "" {
+				if *cmdStr == "" && len(cmdArgv) == 0 {
 					*cmdStr = fmt.Sprintf("%s gmail send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
+					cmdArgv = []string{hqBin, "gmail", "send-draft", "--account=" + spec.Account, "--draft=" + spec.DraftID, "--hash=" + hashShort}
+				}
+				if *originSkill == "" {
+					*originSkill = "gmail"
 				}
 				if *workDir == "" {
 					*workDir = resolveDefaultWorkDir(rootDir)
@@ -440,8 +465,8 @@ func main() {
 				}
 			}
 		}
-		if *cmdStr == "" || *summary == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" --cmd=\"...\" (or --type=gmail_send --draft=<draftId>)")
+		if (*cmdStr == "" && len(cmdArgv) == 0) || *summary == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" [--resume-on-decide] [--continuation=\"...\"] --cmd=\"...\" (or -- <argv...> / --draft=<draftId>)")
 			os.Exit(1)
 		}
 		if strings.TrimSpace(*ttlStr) != "" {
@@ -452,7 +477,18 @@ func main() {
 				meta["expiresAt"] = time.Now().Add(d).UTC().Format(time.RFC3339Nano)
 			}
 		}
-		prop, err := approvals.CreateWithMetadata(vaultDir, *actionType, *summary, *cmdStr, *workDir, *convID, meta)
+		prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+			ActionType:       *actionType,
+			Summary:          *summary,
+			Command:          *cmdStr,
+			CommandArgv:      cmdArgv,
+			WorkDir:          *workDir,
+			ConversationID:   *convID,
+			ResumeOnDecide:   *resumeOnDecide,
+			ContinuationNote: *continuation,
+			OriginSkill:      *originSkill,
+			Metadata:         meta,
+		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", err)
 			os.Exit(1)
@@ -767,15 +803,20 @@ func main() {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		convID := ""
+		matchedSlug := target
 		if tasks, err := kernel.ListTasks(vaultDir); err == nil {
 			for _, t := range tasks {
 				if t.TaskSlug == target || t.ConversationID == target {
 					convID = t.ConversationID
+					matchedSlug = t.TaskSlug
 					break
 				}
 			}
 		}
 		fmt.Printf("Reopened task %q (status: active, link: conversation://%s)\n", target, convID)
+		if cp, _, found, _ := vault.LoadProgress(vaultDir, matchedSlug); found {
+			fmt.Printf("  Progress checkpoint ready: %s (updated %s)\n", cp.Path, cp.UpdatedAt)
+		}
 
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
@@ -1256,7 +1297,12 @@ func main() {
 			threadID := fs.String("thread", "", "Optional thread ID being replied to")
 			body := fs.String("body", "", "Plain-text message body")
 			convID := fs.String("conv", "", "Optional conversation ID")
+			resumeOnDecide := fs.Bool("resume-on-decide", false, "Wake the originating conversation upon human approve or reject")
+			continuation := fs.String("continuation", "", "Optional continuation instruction injected when resuming")
 			_ = fs.Parse(os.Args[3:])
+			if *convID == "" {
+				*convID = vault.ResolveConversationID()
+			}
 			target := strings.TrimSpace(*toSpace)
 			if target == "" {
 				target = strings.TrimSpace(*spaceID)
@@ -1280,6 +1326,7 @@ func main() {
 			summary := gchat.ProposalSummary(spec)
 			cmdStr := fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s",
 				hqBin, spec.Account, spec.DraftID, hashShort)
+			cmdArgv := []string{hqBin, "gchat", "send-draft", "--account=" + spec.Account, "--draft=" + spec.DraftID, "--hash=" + hashShort}
 			preview := spec.Body
 			if len(preview) > 500 {
 				preview = preview[:500] + "..."
@@ -1295,7 +1342,18 @@ func main() {
 				"draftPayload": spec.Body,
 				"contentHash":  spec.ContentHash,
 			}
-			prop, err := approvals.CreateWithMetadata(vaultDir, "gchat_send", summary, cmdStr, resolveDefaultWorkDir(rootDir), *convID, meta)
+			prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+				ActionType:       "gchat_send",
+				Summary:          summary,
+				Command:          cmdStr,
+				CommandArgv:      cmdArgv,
+				WorkDir:          resolveDefaultWorkDir(rootDir),
+				ConversationID:   *convID,
+				ResumeOnDecide:   *resumeOnDecide,
+				ContinuationNote: *continuation,
+				OriginSkill:      "gchat",
+				Metadata:         meta,
+			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", err)
 				os.Exit(1)
@@ -1424,6 +1482,8 @@ func main() {
 			os.Exit(1)
 		}
 		defer kernel.RecordDaemonStop(vaultDir)
+		_, _ = events.EnsureDaemonToken(vaultDir)
+		wakeCh := events.SubscribeWake()
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -1433,24 +1493,45 @@ func main() {
 			os.Exit(0)
 		}()
 
-		// Background 15s inbox watcher, 30s cron/coalescer tick, & 30m 0-token heartbeat loop
+		// Background event-driven wake channel, 15s fast timer/inbox/outbox tick, 30s gatekeeper tick, & 30m full heartbeat loop
 		go func() {
 			_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
 			_ = webui.SyncMarkdownConsole(vaultDir)
-			inboxTicker := time.NewTicker(15 * time.Second)
+			fastTicker := time.NewTicker(15 * time.Second)
 			cronTicker := time.NewTicker(30 * time.Second)
 			hbTicker := time.NewTicker(30 * time.Minute)
-			defer inboxTicker.Stop()
+			defer fastTicker.Stop()
 			defer cronTicker.Stop()
 			defer hbTicker.Stop()
 			for {
 				select {
-				case <-inboxTicker.C:
-					if out, _ := kernel.ProcessInbox(vaultDir, *dryRun); len(out) > 0 {
+				case <-wakeCh:
+					now := time.Now()
+					acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+					if dErr != nil {
+						fmt.Fprintf(os.Stderr, "hq daemon wake dispatch error: %v\n", dErr)
+					}
+					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+					if len(acts) > 0 || outDelivered > 0 {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				case <-fastTicker.C:
+					now := time.Now()
+					fired, _ := timers.EvaluateDue(vaultDir, now)
+					_ = kernel.EnqueueInboxFiles(vaultDir, now)
+					acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+					if dErr != nil {
+						fmt.Fprintf(os.Stderr, "hq daemon fast-tick dispatch error: %v\n", dErr)
+					}
+					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+					if len(fired) > 0 || len(acts) > 0 || outDelivered > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-cronTicker.C:
-					if gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, time.Now(), false, *dryRun); len(gkActs) > 0 {
+					now := time.Now()
+					gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
+					acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+					if len(gkActs) > 0 || len(acts) > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-hbTicker.C:
@@ -1773,6 +1854,18 @@ func main() {
 	case "outbox":
 		runOutboxCLI(vaultDir, os.Args[2:])
 
+	case "events":
+		runEventsCLI(vaultDir, os.Args[2:])
+
+	case "timers":
+		runTimersCLI(vaultDir, os.Args[2:])
+
+	case "progress":
+		runProgressCLI(vaultDir, os.Args[2:])
+
+	case "exec-sandboxed":
+		runExecSandboxedCLI(vaultDir, os.Args[2:])
+
 	case "ideas":
 		runIdeasCLI(vaultDir, os.Args[2:])
 
@@ -1950,6 +2043,51 @@ func runTasksCLI(vaultDir string, args []string) {
 				fmt.Printf("Pinned task %q to Tier 1 on the HQ Console\n", target)
 			} else {
 				fmt.Printf("Unpinned task %q\n", target)
+			}
+			return
+
+		case "reopen":
+			if len(args) < 2 {
+				fmt.Fprintln(os.Stderr, "usage: hq tasks reopen <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]")
+				os.Exit(1)
+			}
+			var target string
+			noWorktree := false
+			noSidebar := false
+			for _, arg := range args[1:] {
+				switch arg {
+				case "--no-worktree", "-no-worktree":
+					noWorktree = true
+				case "--no-sidebar", "-no-sidebar":
+					noSidebar = true
+				default:
+					if !strings.HasPrefix(arg, "-") && target == "" {
+						target = arg
+					}
+				}
+			}
+			if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
+				NoWorktree: noWorktree,
+				NoSidebar:  noSidebar,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "hq tasks reopen error: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			convID := ""
+			matchedSlug := target
+			if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+				for _, t := range tasks {
+					if t.TaskSlug == target || t.ConversationID == target {
+						convID = t.ConversationID
+						matchedSlug = t.TaskSlug
+						break
+					}
+				}
+			}
+			fmt.Printf("Reopened task %q (status: active, link: conversation://%s)\n", target, convID)
+			if cp, _, found, _ := vault.LoadProgress(vaultDir, matchedSlug); found {
+				fmt.Printf("  Progress checkpoint ready: %s (updated %s)\n", cp.Path, cp.UpdatedAt)
 			}
 			return
 		}
@@ -3045,7 +3183,11 @@ Commands:
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|sync-sidebar|pin|unpin>  Task Board telemetry, compaction, sidebar archive sync, and pinning
   goals <list|add|milestone|check-off|wait-on|mark-replied|due|complete>  Stateful multi-day goals & counterparty SLAs
-  outbox <add|list|drain>             4-tier attention outbox & quiet-hours DND governance
+  outbox <add|list|drain|eval>        4-tier attention outbox, quiet-hours DND & signal-to-noise eval
+  events <enqueue|list|inspect|retry|drop|dispatch|token>  Durable crash-safe Event Inbox & webhook token
+  timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
+  progress <save|show|list|archive>   Structured cross-run & pre-compaction task checkpoints
+  exec-sandboxed [--net-isolated] -- <cmd>  Execute subprocess inside OS credential sandbox
   ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions
   spaces <list|active|pin|hide|auto>  Manage schedule-aware Console Spaces
   obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability

@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -204,21 +206,31 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		_, _ = vault.Init(vaultDir, templateDir)
 	}
 
-	var sections []string
+	var zone1Sections []string
+	var zone2Sections []string
+
 	if plugRoot := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); plugRoot != "" {
 		if m, mErr := version.ReadPluginManifest(plugRoot); mErr == nil && m.Version != "" && m.Version != version.Version {
-			sections = append(sections, fmt.Sprintf(
+			zone2Sections = append(zone2Sections, fmt.Sprintf(
 				"> ⚠️ **[agy-hq Version Skew]:** Active plugin manifest is `v%s` (`%s`), while `hq` binary is `v%s`. Run `hq upgrade` or `hq plugin install` to synchronize.",
 				m.Version, plugRoot, version.Version,
 			))
 		}
 	}
+
+	var matchedTask kernel.ActiveTask
+	var hasMatchedTask bool
+	leanAuto := false
+
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
 
 		isSubagent := kernel.IsSubagentConversation(vaultDir, payload.ConversationID)
 		if !isSubagent {
-			if _, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); !alreadyTracked {
+			if t, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); alreadyTracked {
+				matchedTask = t
+				hasMatchedTask = true
+			} else {
 				if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
 					// Known nested descendant subagent: do NOT register into tasks.json!
 					isSubagent = true
@@ -232,7 +244,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					if modelName == "" {
 						modelName = payload.ModelName
 					}
-					_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+					t := kernel.ActiveTask{
 						TaskSlug:             sub.TaskSlug,
 						Title:                sub.Title,
 						Kind:                 "subagent",
@@ -245,14 +257,23 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 						LastSummary:          "Running in background...",
 						CreatedAt:            time.Now().Format(time.RFC3339),
 						LastUpdatedAt:        time.Now().Format(time.RFC3339),
-					})
-				} else {
-					_, _ = kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName)
+					}
+					_ = kernel.RegisterTask(vaultDir, t)
+					matchedTask = t
+					hasMatchedTask = true
+				} else if linked, okLink := kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName); okLink {
+					matchedTask = linked
+					hasMatchedTask = true
 				}
 			}
+		} else if t, found := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); found {
+			matchedTask = t
+			hasMatchedTask = true
 		}
 
-		isFrontDesk := !isSubagent && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
+		isAutoWorker := hasMatchedTask && matchedTask.EffectiveKind() == "auto"
+		leanAuto = isSubagent || isAutoWorker
+		isFrontDesk := !leanAuto && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
 
 		if isFrontDesk {
 			turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
@@ -287,7 +308,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				vaultDir,
 				kernel.FrontDeskPinTip,
 			)
-			sections = append(sections, roleBanner)
+			zone2Sections = append(zone2Sections, roleBanner)
 
 			if !ok || !fd.ConsolePinned || len(unarmedTriggers) > 0 {
 				artDir := strings.TrimSpace(payload.ArtifactDirectoryPath)
@@ -304,7 +325,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				initLines = append(initLines,
 					"## 🚀 New [HQ] Front Desk Initialization Required",
 					fmt.Sprintf("- Active Front Desk Conversation ID: `%s`.", payload.ConversationID),
-					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, tracked Task Conversations, and `local/triggers.yaml` schedules are already loaded below. Do **NOT** run shell commands or `read_file` to re-fetch them.",
+					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, tracked Task Conversations, and `local/triggers.yaml` schedules are already loaded in this session context. Do **NOT** run shell commands or `read_file` to re-fetch them.",
 				)
 				if !fd.ConsolePinned {
 					initLines = append(initLines, fmt.Sprintf(
@@ -333,21 +354,21 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					"- **Step 4 (Concise Welcome & Sidebar Pin):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations, and recommend the user pin this `[HQ] Front Desk` conversation to their Antigravity sidebar so it stays anchored at the top.",
 					artPath,
 				))
-				sections = append(sections, strings.Join(initLines, "\n"))
+				zone2Sections = append(zone2Sections, strings.Join(initLines, "\n"))
 			}
 			if _, _, nudgeBanner := obs.GetFrontDeskContextStatus(vaultDir, payload.TranscriptPath); nudgeBanner != "" {
-				sections = append(sections, nudgeBanner)
+				zone2Sections = append(zone2Sections, nudgeBanner)
 			}
 		} else {
-			// Subagent or secondary/external workspace conversation: never inject Front Desk notice or claim-desk instructions for subagents
-			if !isSubagent && existing.ConversationID != "" {
-				sections = append(sections, fmt.Sprintf(
+			// Subagent / [Auto] worker or secondary/external workspace conversation: never inject Front Desk notice or claim-desk instructions for subagents/[Auto] workers
+			if !leanAuto && existing.ConversationID != "" {
+				zone2Sections = append(zone2Sections, fmt.Sprintf(
 					"## ⚠️ Front Desk Notice\n- Active Vault: `%s`.\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s); coding and test execution in this workspace are unrestricted.\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.\n- **Tip:** %s",
 					vaultDir, existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
 					kernel.FrontDeskPinTip,
 				))
-			} else if !isSubagent && !ok {
-				sections = append(sections, fmt.Sprintf(
+			} else if !leanAuto && !ok {
+				zone2Sections = append(zone2Sections, fmt.Sprintf(
 					"## 🗂️ Active HQ Vault (`%s`)\n- Mode: Unrestricted Workspace Session (Front Desk coordinator lease is vacant; run `hq claim-desk --conv=%s` in a dedicated chat thread whenever you want to anchor `[HQ] Front Desk`).",
 					vaultDir, payload.ConversationID,
 				))
@@ -360,9 +381,10 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
+	// Zone 1: Byte-Stable Cacheable Prefix (USER.md + MEMORY.md + Deterministic Topic Index)
 	if userBytes, err := os.ReadFile(filepath.Join(vaultDir, "USER.md")); err == nil {
 		if s := strings.TrimSpace(string(userBytes)); s != "" {
-			sections = append(sections, "## HQ Vault: USER.md\n"+s)
+			zone1Sections = append(zone1Sections, "## HQ Vault: USER.md\n"+s)
 		}
 	}
 	if memBytes, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
@@ -372,7 +394,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				s = strings.Join(lines[:vault.MaxMemoryIndexLines], "\n") +
 					fmt.Sprintf("\n\n> ⚠️ **[Roadmap Index Budget Warning]:** `local/MEMORY.md` exceeds %d lines (%d lines). Run `/sleep-consolidate` or `./bin/hq memory status` to distill detailed notes into `local/memory/topics/<slug>.md`.", vault.MaxMemoryIndexLines, len(lines))
 			}
-			sections = append(sections, "## HQ Vault: MEMORY.md\n"+s)
+			zone1Sections = append(zone1Sections, "## HQ Vault: MEMORY.md\n"+s)
 		}
 	}
 	if topics, err := vault.LoadTopicIndex(vaultDir); err == nil && len(topics) > 0 {
@@ -385,9 +407,21 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`)", tp.Title, tp.Path, tp.Slug))
 			}
 		}
-		sections = append(sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
+		zone1Sections = append(zone1Sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
 	}
-	if facts, err := vault.LoadActiveFacts(vaultDir, 25); err == nil && len(facts) > 0 {
+
+	// Zone 2: Role-Scoped Dynamic Tail
+	if hasMatchedTask && matchedTask.TaskSlug != "" {
+		if _, rawProg, foundProg, pErr := vault.LoadProgress(vaultDir, matchedTask.TaskSlug); pErr == nil && foundProg && strings.TrimSpace(rawProg) != "" {
+			zone2Sections = append(zone2Sections, "## Active Task Progress Checkpoint\n"+strings.TrimSpace(rawProg))
+		}
+	}
+
+	factLimit := 25
+	if leanAuto {
+		factLimit = 8
+	}
+	if facts, err := vault.LoadActiveFacts(vaultDir, factLimit); err == nil && len(facts) > 0 {
 		var lines []string
 		for _, f := range facts {
 			meta := ""
@@ -400,56 +434,65 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			lines = append(lines, fmt.Sprintf("- [%s]%s %s", f.Topic, meta, f.Statement))
 		}
-		sections = append(sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
+		zone2Sections = append(zone2Sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
 	}
-	if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
-		var lines []string
-		for _, p := range pending {
-			short := p.SHA256
-			if len(short) > 12 {
-				short = short[:12]
-			}
-			lines = append(lines, fmt.Sprintf("- `%s` (%s · sha256:%s): %s — `%s`", p.ID, p.ActionType, short, p.Summary, p.Command))
-		}
-		sections = append(sections, "## Pending Approvals in Queue\n"+strings.Join(lines, "\n"))
+
+	if reportedDigest := outbox.FormatReportedDigest(vaultDir, time.Now(), 8); reportedDigest != "" {
+		zone2Sections = append(zone2Sections, "## Recently Reported to User\n"+reportedDigest)
 	}
-	if wts, err := worktree.List(vaultDir); err == nil && len(wts) > 0 {
-		var lines []string
-		for _, wt := range wts {
-			lines = append(lines, fmt.Sprintf("- `%s` (%s)", filepath.Base(wt), wt))
-		}
-		sections = append(sections, "## Active Git Worktrees\n"+strings.Join(lines, "\n"))
-	}
-	if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
-		now := time.Now()
-		layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
-		selected, omitted := kernel.SelectSessionStartTasks(layer1Tasks, now)
-		if len(selected) > 0 {
+
+	if !leanAuto {
+		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
 			var lines []string
-			for _, t := range selected {
-				cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
-				lines = append(lines, fmt.Sprintf("- **%s** (`%s`, kind: `%s`, status: `%s`, conv: `%s`)", cleanTitle, t.TaskSlug, t.EffectiveKind(), t.EffectiveStatus(now), t.ConversationID))
-			}
-			if omitted > 0 {
-				lines = append(lines, fmt.Sprintf("- *(+%d older completed/archived task(s) omitted from context; run `./bin/hq tasks` to inspect)*", omitted))
-			}
-			sections = append(sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
-		}
-	}
-	if cfg, err := kernel.LoadTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
-		fd, _ := kernel.GetFrontDesk(vaultDir)
-		var lines []string
-		for _, s := range cfg.Schedules {
-			status := "UNARMED"
-			if fd.ArmedTriggers != nil {
-				if _, ok := fd.ArmedTriggers[s.ID]; ok {
-					status = "ARMED"
+			for _, p := range pending {
+				short := p.SHA256
+				if len(short) > 12 {
+					short = short[:12]
 				}
+				lines = append(lines, fmt.Sprintf("- `%s` (%s · sha256:%s): %s — `%s`", p.ID, p.ActionType, short, p.Summary, p.Command))
 			}
-			lines = append(lines, fmt.Sprintf("- `%s` (`%s`, status: `%s`, skill: `%s`)", s.ID, s.Cron, status, s.Skill))
+			zone2Sections = append(zone2Sections, "## Pending Approvals in Queue\n"+strings.Join(lines, "\n"))
 		}
-		sections = append(sections, "## Proactive Triggers (`local/triggers.yaml`)\n"+strings.Join(lines, "\n"))
+		if wts, err := worktree.List(vaultDir); err == nil && len(wts) > 0 {
+			var lines []string
+			for _, wt := range wts {
+				lines = append(lines, fmt.Sprintf("- `%s` (%s)", filepath.Base(wt), wt))
+			}
+			zone2Sections = append(zone2Sections, "## Active Git Worktrees\n"+strings.Join(lines, "\n"))
+		}
+		if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
+			now := time.Now()
+			layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
+			selected, omitted := kernel.SelectSessionStartTasks(layer1Tasks, now)
+			if len(selected) > 0 {
+				var lines []string
+				for _, t := range selected {
+					cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
+					lines = append(lines, fmt.Sprintf("- **%s** (`%s`, kind: `%s`, status: `%s`, conv: `%s`)", cleanTitle, t.TaskSlug, t.EffectiveKind(), t.EffectiveStatus(now), t.ConversationID))
+				}
+				if omitted > 0 {
+					lines = append(lines, fmt.Sprintf("- *(+%d older completed/archived task(s) omitted from context; run `./bin/hq tasks` to inspect)*", omitted))
+				}
+				zone2Sections = append(zone2Sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
+			}
+		}
+		if cfg, err := kernel.LoadTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
+			fd, _ := kernel.GetFrontDesk(vaultDir)
+			var lines []string
+			for _, s := range cfg.Schedules {
+				status := "UNARMED"
+				if fd.ArmedTriggers != nil {
+					if _, ok := fd.ArmedTriggers[s.ID]; ok {
+						status = "ARMED"
+					}
+				}
+				lines = append(lines, fmt.Sprintf("- `%s` (`%s`, status: `%s`, skill: `%s`)", s.ID, s.Cron, status, s.Skill))
+			}
+			zone2Sections = append(zone2Sections, "## Proactive Triggers (`local/triggers.yaml`)\n"+strings.Join(lines, "\n"))
+		}
 	}
+
+	sections := append(zone1Sections, zone2Sections...)
 
 	if len(sections) == 0 {
 		_, err := w.Write([]byte("{}\n"))
@@ -490,13 +533,122 @@ var (
 
 	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|pii-denylist\.txt)(?:[\s"'/]|$)`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail|gchat)\s+read-quarantined\b`)
 	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
+
+	reCurlMutatingFlag = regexp.MustCompile(`(?i)(?:^|\s)(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b|(?:-d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form|--json|--upload-file|-T)(?:=|\s|$))`)
+	reWgetMutatingFlag = regexp.MustCompile(`(?i)(?:^|\s)(?:--post-data|--post-file|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)`)
+	reLoopbackURLOnly  = regexp.MustCompile(`(?i)https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/|\s|"|'|$)`)
+	reExternalURL      = regexp.MustCompile(`(?i)https?://([^\s/"':]+)`)
+	reAutoForgeMutate  = regexp.MustCompile(`(?i)\b(?:gh\s+(?:pr|issue)\s+(?:create|close|reopen|comment|edit|ready|review)\b|gh\s+api\b.*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)|(?:\s|^)-[fF]\s|--field\b|--raw-field\b)|git\s+push\b.*(?:--force\b|--force-with-lease\b|\s-f\b|--delete\b))`)
+	reAutoPkgPublish   = regexp.MustCompile(`(?i)\b(?:npm\s+publish|pnpm\s+publish|yarn\s+publish|cargo\s+publish|twine\s+upload|gem\s+push|docker\s+push|helm\s+push|terraform\s+apply|kubectl\s+(?:apply|delete|patch))\b`)
 )
+
+const PreCompactionFlushTokens int64 = 120000
+
+func isAutoConversation(vaultDir, convID string) bool {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return false
+	}
+	t, ok := kernel.FindTaskByConversationID(vaultDir, convID)
+	return ok && t.EffectiveKind() == "auto"
+}
+
+func hasNonLoopbackURL(cmdLine string) bool {
+	matches := reExternalURL.FindAllStringSubmatch(cmdLine, -1)
+	if len(matches) == 0 {
+		return !reLoopbackURLOnly.MatchString(cmdLine)
+	}
+	for _, m := range matches {
+		host := strings.ToLower(strings.TrimSpace(m[1]))
+		if host != "127.0.0.1" && host != "localhost" && host != "[::1]" {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyUnattendedAutoCommand inspects run_command strings executed inside autonomous
+// background (`kind: auto`) runs and blocks external mutating HTTP requests, forge mutations,
+// and package/deployment publishes unless staged via `hq propose`.
+func classifyUnattendedAutoCommand(checkLine string) (bool, string) {
+	if reAutoForgeMutate.MatchString(checkLine) {
+		return true, "external_forge_mutation"
+	}
+	if reAutoPkgPublish.MatchString(checkLine) {
+		return true, "package_or_infra_publish"
+	}
+	lower := strings.ToLower(checkLine)
+	if strings.Contains(lower, "curl") && reCurlMutatingFlag.MatchString(checkLine) && hasNonLoopbackURL(checkLine) {
+		return true, "mutating_external_http"
+	}
+	if strings.Contains(lower, "wget") && reWgetMutatingFlag.MatchString(checkLine) && hasNonLoopbackURL(checkLine) {
+		return true, "mutating_external_http"
+	}
+	return false, ""
+}
+
+func compactionNudgeMarkerPath(vaultDir, convID string) string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, strings.TrimSpace(convID))
+	return filepath.Join(vaultDir, "memory", ".compaction_nudged_"+safe)
+}
+
+func writeAllowWithOptionalCompactionNudge(w io.Writer, vaultDir string, payload ToolCallPayload) error {
+	if strings.TrimSpace(payload.ConversationID) != "" && strings.TrimSpace(payload.TranscriptPath) != "" {
+		marker := compactionNudgeMarkerPath(vaultDir, payload.ConversationID)
+		alreadyNudged := false
+		if st, err := os.Stat(marker); err == nil && time.Since(st.ModTime()) < 2*time.Hour {
+			alreadyNudged = true
+		}
+		if !alreadyNudged {
+			tm := obs.ParseSingleTurnSlice(payload.TranscriptPath, 0)
+			if tm.CurrentContextTokens >= PreCompactionFlushTokens {
+				_ = os.MkdirAll(filepath.Dir(marker), 0o700)
+				_ = os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)), 0o600)
+				slug := "current-task"
+				if t, ok := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); ok && t.TaskSlug != "" {
+					slug = t.TaskSlug
+				}
+				nudge := fmt.Sprintf(
+					"💡 [Pre-Compaction Checkpoint Nudge]: Context has reached %s tokens (threshold: 120k). Before running `/compact` or ending a long turn, save a structured checkpoint via `./bin/hq progress save --task=%s --goal=\"...\" --done=\"...\" --next=\"...\"` so progress survives compaction.",
+					obs.FormatTokensCompact(tm.CurrentContextTokens), slug,
+				)
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision":      "allow",
+					"systemMessage": nudge,
+				})
+			}
+		}
+	}
+	_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+	return err
+}
+
+func hasPendingResumableApproval(vaultDir, convID string) bool {
+	if strings.TrimSpace(convID) == "" {
+		return false
+	}
+	pending, err := approvals.List(vaultDir)
+	if err != nil {
+		return false
+	}
+	for _, p := range pending {
+		if p.ConversationID == convID && p.ResumeOnDecide {
+			return true
+		}
+	}
+	return false
+}
 
 func canonicalizeHookPath(vaultDir, rawPath string) string {
 	trimmed := strings.TrimSpace(rawPath)
@@ -538,15 +690,19 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		})
 	}
 
+	if payload.ConversationID != "" {
+		_ = events.RenewLeaseByConversation(vaultDir, payload.ConversationID, time.Now(), events.DefaultLeaseTTL)
+	}
+
 	if payload.ToolCall.Name == "run_command" {
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
-		if reHQClaimDesk.MatchString(cmdLine) && kernel.IsSubagentConversation(vaultDir, payload.ConversationID) {
+		if reHQClaimDesk.MatchString(cmdLine) && (kernel.IsSubagentConversation(vaultDir, payload.ConversationID) || isAutoConversation(vaultDir, payload.ConversationID)) {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by Front Desk Lease Subagent Invariant: subagents are ephemeral worker processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).",
+				"reason":   "Blocked by Front Desk Lease Subagent Invariant: subagents and autonomous background workers are ephemeral processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).",
 			})
 		}
-		// Universal Credential Vault Guard: block direct shell reads/mutations of raw OAuth tokens, Chrome cookies, credentials, or pii-denylist.txt across ALL sessions
+		// Universal Credential Vault Guard: block direct shell reads/mutations of raw OAuth tokens, Chrome cookies, credentials, daemon_token, or pii-denylist.txt across ALL sessions
 		cleanVault := filepath.Clean(vaultDir)
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 		credShellHit := reLocalCredentialShell.MatchString(cmdLine)
@@ -559,7 +715,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				if vBase == "" || vBase == "." {
 					continue
 				}
-				for _, sub := range []string{"gmail", "gchat", "credentials", "pii-denylist.txt"} {
+				for _, sub := range []string{"gmail", "gchat", "credentials", "pii-denylist.txt", "daemon_token"} {
 					if strings.Contains(cmdLine, filepath.Join(vBase, "private", sub)) {
 						credShellHit = true
 						break
@@ -576,6 +732,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				filepath.Join(canonVault, "private", "gchat"),
 				filepath.Join(canonVault, "private", "credentials"),
 				filepath.Join(canonVault, "private", "pii-denylist.txt"),
+				filepath.Join(canonVault, "private", "daemon_token"),
 			}
 			for _, tok := range strings.FieldsFunc(cmdLine, func(r rune) bool {
 				switch r {
@@ -602,7 +759,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		if credShellHit {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,pii-denylist.txt} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget` instead.",
+				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,pii-denylist.txt,daemon_token} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget` instead.",
 			})
 		}
 		checkLine := cmdLine
@@ -627,9 +784,20 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				return json.NewEncoder(w).Encode(resp)
 			}
 		}
+		if isAutoConversation(vaultDir, payload.ConversationID) {
+			if grayHit, grayCategory := classifyUnattendedAutoCommand(checkLine); grayHit {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason": fmt.Sprintf(
+						"Blocked by agy-hq Unattended [Auto] Gray-Zone policy (%s): autonomous background runs may not execute external mutating command %q directly. Stage it via `./bin/hq propose --type=external_action --summary=\"...\" --cmd=%q` for human review.",
+						grayCategory, cmdLine, cmdLine,
+					),
+				})
+			}
+		}
 	}
 
-	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, Chrome cookies, credentials, and pii-denylist.txt across ALL sessions (tainted or untainted)
+	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, Chrome cookies, credentials, daemon_token, and pii-denylist.txt across ALL sessions (tainted or untainted)
 	switch payload.ToolCall.Name {
 	case "read_file", "write_file", "edit_file", "grep_search", "find_by_name":
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
@@ -638,6 +806,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			filepath.Join(canonVault, "private", "gchat"),
 			filepath.Join(canonVault, "private", "credentials"),
 			filepath.Join(canonVault, "private", "pii-denylist.txt"),
+			filepath.Join(canonVault, "private", "daemon_token"),
 		}
 		for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
 			if rawArg, ok := payload.ToolCall.Args[key].(string); ok && strings.TrimSpace(rawArg) != "" {
@@ -646,7 +815,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					if canonP == cp || strings.HasPrefix(canonP, cp+string(filepath.Separator)) {
 						return json.NewEncoder(w).Encode(map[string]interface{}{
 							"decision": "deny",
-							"reason":   "Blocked by agy-hq Credential Vault policy: direct LLM access to local/private/{gmail,gchat,credentials,pii-denylist.txt} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget`.",
+							"reason":   "Blocked by agy-hq Credential Vault policy: direct LLM access to local/private/{gmail,gchat,credentials,pii-denylist.txt,daemon_token} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget`.",
 						})
 					}
 				}
@@ -654,7 +823,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Protect deterministic proposal & RSI verification stores from direct LLM file tampering across all sessions
+	// Protect deterministic proposal, RSI verification, and durable event/timer stores from direct LLM file tampering across all sessions
 	if payload.ToolCall.Name == "write_file" || payload.ToolCall.Name == "edit_file" {
 		if pathArg, ok := payload.ToolCall.Args["Path"].(string); ok && strings.TrimSpace(pathArg) != "" {
 			canonPath := canonicalizeHookPath(vaultDir, pathArg)
@@ -664,11 +833,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
 				filepath.Join(canonVault, "memory", "rsi", "archive.jsonl"),
 				filepath.Join(canonVault, "memory", "interventions.jsonl"),
+				filepath.Join(canonVault, "memory", "events.json"),
+				filepath.Join(canonVault, "memory", "events_archive.jsonl"),
+				filepath.Join(canonVault, "memory", "timers.json"),
 			} {
 				if canonPath == protectedSub || strings.HasPrefix(canonPath, protectedSub+string(filepath.Separator)) {
 					return json.NewEncoder(w).Encode(map[string]interface{}{
 						"decision": "deny",
-						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, RSI hypotheses, or intervention audit logs are prohibited. Use `./bin/hq propose` or `./bin/hq rsi`.",
+						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, RSI hypotheses, durable event/timer stores, or intervention audit logs are prohibited. Use `./bin/hq propose`, `./bin/hq events`, `./bin/hq timers`, or `./bin/hq rsi`.",
 					})
 				}
 			}
@@ -916,8 +1088,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
 
 	if !isFrontDesk {
-		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
-		return err
+		return writeAllowWithOptionalCompactionNudge(w, vaultDir, payload)
 	}
 
 	// Rule A: Block Direct Source/Worktree File Edits on the Front Desk (edit_file / write_file)
@@ -1219,10 +1390,11 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 
 					if alreadyTracked && matchedTask != nil {
-						// Subagent lifecycle transition: mark completed if it was a subagent task
+						// Subagent & [Auto] worker lifecycle transition: mark completed unless awaiting a resumable human approval
 						isSubagent := matchedTask.EffectiveKind() == "subagent" || strings.HasPrefix(matchedTask.TaskSlug, "subagent-") || strings.HasPrefix(matchedTask.Title, "[Subagent:")
+						isAuto := matchedTask.EffectiveKind() == "auto"
 						newStatus := matchedTask.Status
-						if isSubagent && matchedTask.Status == "active" {
+						if (isSubagent || (isAuto && !hasPendingResumableApproval(vaultDir, payload.ConversationID))) && matchedTask.Status == "active" {
 							newStatus = "completed"
 						}
 						newSummary := summary
@@ -1248,6 +1420,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							WorktreeDir:          matchedTask.WorktreeDir,
 							RepoRoot:             matchedTask.RepoRoot,
 							ConversationID:       payload.ConversationID,
+							EventIDs:             matchedTask.EventIDs,
 							Status:               newStatus,
 							TurnCount:            matchedTask.TurnCount + 1,
 							Pinned:               matchedTask.Pinned,
@@ -1276,6 +1449,11 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 				}
 			}
+
+			if obsTurn.CompactionCount > 0 {
+				_ = os.Remove(compactionNudgeMarkerPath(vaultDir, payload.ConversationID))
+			}
+			_, _ = kernel.CompleteConversationEvents(vaultDir, payload.ConversationID, time.Now())
 
 			if payload.TranscriptPath != "" {
 				_, _ = obs.ReconcileSubagentAttribution(vaultDir)

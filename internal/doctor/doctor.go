@@ -7,14 +7,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/ci"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
+	"github.com/zjshen14/agy-hq/internal/sandbox"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -425,6 +428,62 @@ func Run(vaultDir string) []CheckResult {
 			Name:   "Sidebar Archive Sync Queue",
 			Status: "PASS",
 			Detail: "0 pending retries (in sync)",
+		})
+	}
+
+	// 13. Check Event Inbox & Gatekeeper Precheck Health (RFC-0018)
+	evStats := events.GetSummaryStats(vaultDir, time.Now())
+	cursors := kernel.LoadTriggerCursors(vaultDir)
+	var degradedTriggers []string
+	for id, cur := range cursors {
+		if cur.ConsecutiveErrors >= 3 {
+			degradedTriggers = append(degradedTriggers, fmt.Sprintf("%s (errors=%d)", id, cur.ConsecutiveErrors))
+		}
+	}
+	sort.Strings(degradedTriggers)
+	if len(degradedTriggers) > 0 || evStats.Dropped24h > 0 {
+		var parts []string
+		if len(degradedTriggers) > 0 {
+			parts = append(parts, "degraded prechecks: "+strings.Join(degradedTriggers, ", "))
+		}
+		if evStats.Dropped24h > 0 {
+			parts = append(parts, fmt.Sprintf("dropped24h=%d", evStats.Dropped24h))
+		}
+		parts = append(parts, fmt.Sprintf("pending=%d, leased=%d", evStats.PendingCount, evStats.LeasedCount))
+		results = append(results, CheckResult{
+			Name:   "Event Inbox & Gatekeeper Health",
+			Status: "WARN",
+			Detail: strings.Join(parts, " · "),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Event Inbox & Gatekeeper Health",
+			Status: "PASS",
+			Detail: fmt.Sprintf("pending=%d, leased=%d, dropped24h=0, 0 degraded gatekeeper prechecks", evStats.PendingCount, evStats.LeasedCount),
+		})
+	}
+
+	// 14. Check OS Credential Sandbox (RFC-0018)
+	sbCfg := sandbox.LoadConfig(vaultDir)
+	sbCap := sandbox.DetectCapability()
+	switch {
+	case sbCfg.Mode == sandbox.ModeRequired && !sbCap.Available:
+		results = append(results, CheckResult{
+			Name:   "OS Credential Sandbox",
+			Status: "FAIL",
+			Detail: fmt.Sprintf("sandbox.mode=required, but OS sandbox is unavailable (%s)", sbCap.Detail),
+		})
+	case sbCfg.Mode == sandbox.ModeOff:
+		results = append(results, CheckResult{
+			Name:   "OS Credential Sandbox",
+			Status: "WARN",
+			Detail: "sandbox.mode=off in config.yaml (OS credential masking disabled)",
+		})
+	default:
+		results = append(results, CheckResult{
+			Name:   "OS Credential Sandbox",
+			Status: "PASS",
+			Detail: fmt.Sprintf("mode=%s · %s", sbCfg.Mode, sbCap.Detail),
 		})
 	}
 
