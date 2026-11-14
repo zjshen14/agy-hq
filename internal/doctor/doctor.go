@@ -405,5 +405,28 @@ func Run(vaultDir string) []CheckResult {
 		}
 	}
 
+	// 12. Check Sidebar Archive Sync Queue (RFC-0016)
+	sq := kernel.InspectSidebarSyncQueue(vaultDir)
+	if sq.HighAttemptCount > 0 || sq.PendingCount >= 10 {
+		results = append(results, CheckResult{
+			Name:   "Sidebar Archive Sync Queue",
+			Status: "WARN",
+			Detail: fmt.Sprintf("%d pending (%d with >=5 retries, oldest=%s); run 'hq tasks sync-sidebar' inside Antigravity",
+				sq.PendingCount, sq.HighAttemptCount, sq.OldestEnqueuedAt),
+		})
+	} else if sq.PendingCount > 0 {
+		results = append(results, CheckResult{
+			Name:   "Sidebar Archive Sync Queue",
+			Status: "PASS",
+			Detail: fmt.Sprintf("%d queued transition(s) awaiting next Antigravity LanguageServer sync", sq.PendingCount),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "Sidebar Archive Sync Queue",
+			Status: "PASS",
+			Detail: "0 pending retries (in sync)",
+		})
+	}
+
 	return results
 }

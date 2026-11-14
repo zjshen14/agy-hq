@@ -14,6 +14,13 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv("ANTIGRAVITY_LS_ADDRESS")
+	_ = os.Unsetenv("ANTIGRAVITY_CSRF_TOKEN")
+	_ = os.Unsetenv("ANTIGRAVITY_CONVERSATION_ID")
+	os.Exit(m.Run())
+}
+
 func TestHandleSessionStartAndPreToolUseAndStop(t *testing.T) {
 	vaultDir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(vaultDir, "USER.md"), []byte("Concise style"), 0o644)

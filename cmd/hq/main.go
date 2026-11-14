@@ -707,31 +707,61 @@ func main() {
 	case "archive":
 		var target string
 		force := false
+		noSidebar := false
 		for _, arg := range os.Args[2:] {
-			if arg == "--force" || arg == "-force" || arg == "-f" {
+			switch arg {
+			case "--force", "-force", "-f":
 				force = true
-			} else if !strings.HasPrefix(arg, "-") && target == "" {
-				target = arg
+			case "--no-sidebar", "-no-sidebar":
+				noSidebar = true
+			default:
+				if !strings.HasPrefix(arg, "-") && target == "" {
+					target = arg
+				}
 			}
 		}
 		if target == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq archive <task-slug-or-conv-id> [--force]")
+			fmt.Fprintln(os.Stderr, "usage: hq archive <task-slug-or-conv-id> [--force] [--no-sidebar]")
 			os.Exit(1)
 		}
-		if err := kernel.ArchiveTask(vaultDir, target, force); err != nil {
+		syncRes, err := kernel.ArchiveTaskWithOptions(vaultDir, target, kernel.ArchiveTaskOptions{
+			Force:     force,
+			NoSidebar: noSidebar,
+		})
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq archive error: %v\n", err)
 			os.Exit(1)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
+		if syncRes.SkippedReason == "ui_pinned" || syncRes.SkippedReason == "ui_starred" {
+			fmt.Fprintln(os.Stderr, "note: archived locally, but skipped Antigravity sidebar archive because conversation is pinned/starred in UI (unpin in UI or pass --force)")
+		}
 		fmt.Printf("Archived task %q (worktree cleaned up)\n", target)
 
 	case "reopen":
-		if len(os.Args) < 3 || strings.HasPrefix(os.Args[2], "-") {
-			fmt.Fprintln(os.Stderr, "usage: hq reopen <task-slug-or-conv-id>")
+		var target string
+		noWorktree := false
+		noSidebar := false
+		for _, arg := range os.Args[2:] {
+			switch arg {
+			case "--no-worktree", "-no-worktree":
+				noWorktree = true
+			case "--no-sidebar", "-no-sidebar":
+				noSidebar = true
+			default:
+				if !strings.HasPrefix(arg, "-") && target == "" {
+					target = arg
+				}
+			}
+		}
+		if target == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq reopen <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]")
 			os.Exit(1)
 		}
-		target := os.Args[2]
-		if err := kernel.ReopenTask(vaultDir, target); err != nil {
+		if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
+			NoWorktree: noWorktree,
+			NoSidebar:  noSidebar,
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "hq reopen error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1523,13 +1553,16 @@ func main() {
 			fmt.Printf("Pruned fact %s (valid_to=%s)\n", pruned.ID, *pruned.ValidTo)
 
 		case "compact":
+			fs := flag.NewFlagSet("memory compact", flag.ExitOnError)
+			noSidebar := fs.Bool("no-sidebar", false, "Skip Antigravity sidebar archive sync")
+			_ = fs.Parse(os.Args[3:])
 			before, after, err := vault.CompactFacts(vaultDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq memory compact failed: %v\n", err)
 				os.Exit(1)
 			}
 			fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", before, after)
-			if res, tErr := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{}); tErr == nil {
+			if res, tErr := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{NoSidebar: *noSidebar}); tErr == nil {
 				_ = webui.SyncMarkdownConsole(vaultDir)
 				fmt.Printf("Compacted tasks.json: %d -> %d hot tasks (rotated %d to tasks_archive.jsonl, total cold: %d)\n",
 					res.HotBefore, res.HotAfter, len(res.RotatedColdSlugs), res.TotalColdAfter)
@@ -1794,11 +1827,24 @@ func runTasksCLI(vaultDir string, args []string) {
 		case "compact":
 			fs := flag.NewFlagSet("tasks compact", flag.ExitOnError)
 			dryRun := fs.Bool("dry-run", false, "Preview compaction without writing files")
+			taskTTLStr := fs.String("task-ttl", "", "Override completed task auto-archive grace period (e.g. 24h)")
+			noSidebar := fs.Bool("no-sidebar", false, "Skip Antigravity sidebar archive synchronization")
 			asJSON := fs.Bool("json", false, "Output JSON")
 			_ = fs.Parse(args[1:])
+			var taskTTL time.Duration
+			if strings.TrimSpace(*taskTTLStr) != "" {
+				parsedTTL, pErr := time.ParseDuration(strings.TrimSpace(*taskTTLStr))
+				if pErr != nil {
+					fmt.Fprintf(os.Stderr, "hq tasks compact invalid --task-ttl %q: %v\n", *taskTTLStr, pErr)
+					os.Exit(1)
+				}
+				taskTTL = parsedTTL
+			}
 			res, err := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{
-				Now:    now,
-				DryRun: *dryRun,
+				Now:                  now,
+				TaskAutoArchiveAfter: taskTTL,
+				DryRun:               *dryRun,
+				NoSidebar:            *noSidebar,
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq tasks compact error: %v\n", err)
@@ -1819,8 +1865,72 @@ func runTasksCLI(vaultDir string, args []string) {
 			}
 			fmt.Printf("%s tasks.json: %d -> %d hot tasks (auto-archived: %d, rotated to cold archive: %d, total cold archive: %d)\n",
 				prefix, res.HotBefore, res.HotAfter, len(res.AutoArchivedSlugs), len(res.RotatedColdSlugs), res.TotalColdAfter)
+			if res.SidebarSyncedCount > 0 || res.SidebarQueuedCount > 0 || res.SidebarSkippedCount > 0 {
+				fmt.Printf("  sidebar sync: synced=%d, queued=%d, skipped=%d\n",
+					res.SidebarSyncedCount, res.SidebarQueuedCount, res.SidebarSkippedCount)
+			}
 			for _, slug := range res.RotatedColdSlugs {
 				fmt.Printf("  - rotated: %s\n", slug)
+			}
+			return
+
+		case "sync-sidebar":
+			fs := flag.NewFlagSet("tasks sync-sidebar", flag.ExitOnError)
+			dryRun := fs.Bool("dry-run", false, "Preview sidebar archive transitions without calling UpdateConversationAnnotations or mutating files")
+			backfill := fs.Bool("backfill", false, "Include historical cold-archived tasks from tasks_archive.jsonl")
+			limit := fs.Int("limit", kernel.DefaultSidebarBackfillLimit, "Maximum conversations to update per run (0 = unlimited)")
+			batchSize := fs.Int("batch-size", kernel.DefaultSidebarBatchSize, "Batch size for UpdateConversationAnnotations cascadeIds")
+			asJSON := fs.Bool("json", false, "Output structured JSON report")
+			_ = fs.Parse(args[1:])
+
+			rep, err := kernel.SyncSidebar(vaultDir, kernel.SyncSidebarOptions{
+				Now:       now,
+				DryRun:    *dryRun,
+				Backfill:  *backfill,
+				Limit:     *limit,
+				BatchSize: *batchSize,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq tasks sync-sidebar error: %v\n", err)
+				os.Exit(1)
+			}
+			if !*dryRun {
+				_ = webui.SyncMarkdownConsole(vaultDir)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(rep)
+				if *backfill && !rep.LSOnline {
+					fmt.Fprintf(os.Stderr, "hq tasks sync-sidebar --backfill requires an active Antigravity LanguageServerService session (ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN): %s\n", rep.LastError)
+					os.Exit(1)
+				}
+				return
+			}
+			if *backfill && !rep.LSOnline {
+				fmt.Fprintf(os.Stderr, "hq tasks sync-sidebar --backfill requires an active Antigravity LanguageServerService session (ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN): %s\n", rep.LastError)
+				os.Exit(1)
+			}
+			header := "Antigravity Sidebar Archive Sync"
+			if *dryRun {
+				header = "[DRY-RUN] Antigravity Sidebar Archive Sync"
+			}
+			fmt.Printf("%s (lsOnline=%v, backfill=%v)\n", header, rep.LSOnline, rep.Backfill)
+			if *dryRun {
+				fmt.Printf("  Evaluated: %d | WouldArchive: %d | WouldUnarchive: %d | AlreadySynced: %d | ProtectedSkipped: %d | MissingOrSubtrajectory: %d | PendingQueue: %d\n",
+					rep.CandidatesEvaluated, len(rep.WouldArchive), len(rep.WouldUnarchive), rep.AlreadySyncedCount, len(rep.ProtectedSkipped), rep.MissingOrSubtrajectoryCount, rep.PendingQueueRemaining)
+				for _, c := range rep.WouldArchive {
+					fmt.Printf("  + would archive: %s (%s) [%s]\n", c.ConversationID, c.TaskSlug, c.Source)
+				}
+				for _, c := range rep.WouldUnarchive {
+					fmt.Printf("  + would unarchive: %s (%s) [%s]\n", c.ConversationID, c.TaskSlug, c.Source)
+				}
+			} else {
+				fmt.Printf("  Evaluated: %d | Archived: %d | Unarchived: %d | AlreadySynced: %d | ProtectedSkipped: %d | MissingOrSubtrajectory: %d | PendingQueue: %d\n",
+					rep.CandidatesEvaluated, rep.ArchivedCount, rep.UnarchivedCount, rep.AlreadySyncedCount, len(rep.ProtectedSkipped), rep.MissingOrSubtrajectoryCount, rep.PendingQueueRemaining)
+			}
+			for _, sk := range rep.ProtectedSkipped {
+				fmt.Printf("  ! skipped [%s:%s]: %s (%s)\n", sk.Gate, sk.Reason, sk.ConversationID, sk.TaskSlug)
 			}
 			return
 
@@ -2933,7 +3043,7 @@ Commands:
   doctor [--json]                     Check Antigravity sandbox, CLI, plugin sync, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
-  tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
+  tasks <stats|compact|sync-sidebar|pin|unpin>  Task Board telemetry, compaction, sidebar archive sync, and pinning
   goals <list|add|milestone|check-off|wait-on|mark-replied|due|complete>  Stateful multi-day goals & counterparty SLAs
   outbox <add|list|drain>             4-tier attention outbox & quiet-hours DND governance
   ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions

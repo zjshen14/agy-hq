@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3097,4 +3100,208 @@ func copyDirRecursive(src, dst string) error {
 		}
 		return os.WriteFile(target, data, info.Mode())
 	})
+}
+
+// CUJ-16: Antigravity Sidebar Conversation Archive Sync (RFC-0016)
+func TestCUJ_SidebarConversationArchiveSync(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	const (
+		csrf     = "cuj-sidebar-csrf-token"
+		uFD      = "00000000-0000-0000-0000-000000000001"
+		uUIPin   = "00000000-0000-0000-0000-000000000002"
+		uRunning = "00000000-0000-0000-0000-000000000003"
+		uActive  = "00000000-0000-0000-0000-000000000004"
+		uTask    = "00000000-0000-0000-0000-000000000005"
+		uCold1   = "00000000-0000-0000-0000-000000000006"
+		uCold2   = "00000000-0000-0000-0000-000000000007"
+	)
+
+	var mu sync.Mutex
+	updateCalls := 0
+	trajectories := map[string]kernel.LSTrajectorySummary{
+		uFD:      {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: kernel.LSConversationAnnotations{Title: "[HQ] Front Desk"}},
+		uUIPin:   {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: kernel.LSConversationAnnotations{Title: "[Task:hq] UI Pinned", Pinned: true}},
+		uRunning: {Status: "CASCADE_RUN_STATUS_RUNNING", Annotations: kernel.LSConversationAnnotations{Title: "[Task:hq] Running Build"}},
+		uActive:  {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: kernel.LSConversationAnnotations{Title: "[Task:hq] Active Hot"}},
+		uTask:    {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: kernel.LSConversationAnnotations{Title: "[Task:hq] Completed Feature"}},
+		uCold1:   {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: kernel.LSConversationAnnotations{Title: "[Task:hq] Legacy Cold 1"}},
+		uCold2:   {Status: "CASCADE_RUN_STATUS_IDLE", Annotations: kernel.LSConversationAnnotations{Title: "[Task:hq] Legacy Cold 2"}},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != csrf {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"trajectorySummaries": trajectories})
+		case "/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations":
+			updateCalls++
+			var req struct {
+				CascadeID        string   `json:"cascadeId"`
+				CascadeIDs       []string `json:"cascadeIds"`
+				MergeAnnotations bool     `json:"mergeAnnotations"`
+				Annotations      struct {
+					Archived *bool `json:"archived"`
+					Pinned   *bool `json:"pinned"`
+				} `json:"annotations"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil || !req.MergeAnnotations {
+				http.Error(w, "bad update payload", http.StatusBadRequest)
+				return
+			}
+			ids := req.CascadeIDs
+			if len(ids) == 0 && req.CascadeID != "" {
+				ids = []string{req.CascadeID}
+			}
+			for _, id := range ids {
+				sum := trajectories[id]
+				if req.Annotations.Archived != nil {
+					sum.Annotations.Archived = *req.Annotations.Archived
+				}
+				if req.Annotations.Pinned != nil {
+					sum.Annotations.Pinned = *req.Annotations.Pinned
+				}
+				trajectories[id] = sum
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	lsEnv := []string{
+		"ANTIGRAVITY_LS_ADDRESS=" + srv.URL,
+		"ANTIGRAVITY_CSRF_TOKEN=" + csrf,
+	}
+	isArchived := func(id string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return trajectories[id].Annotations.Archived
+	}
+
+	if out, err := env.run("", "claim-desk", "--conv="+uFD); err != nil {
+		t.Fatalf("claim-desk failed: %v (%s)", err, out)
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		ConversationID: uActive,
+		TaskSlug:       "active-hot",
+		Status:         "active",
+		LastUpdatedAt:  nowStr,
+	})
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		ConversationID: uTask,
+		TaskSlug:       "completed-feature",
+		Status:         "completed",
+		LastUpdatedAt:  nowStr,
+	})
+
+	// 1. Live `hq archive` -> flips uTask to archived=true on mock LS; `hq reopen` -> flips back to archived=false
+	if out, err := env.runWithEnv("", lsEnv, "archive", "completed-feature"); err != nil {
+		t.Fatalf("hq archive online failed: %v (%s)", err, out)
+	}
+	if !isArchived(uTask) {
+		t.Fatalf("expected uTask to be archived on mock LS after online hq archive")
+	}
+	if out, err := env.runWithEnv("", lsEnv, "reopen", "completed-feature", "--no-worktree"); err != nil {
+		t.Fatalf("hq reopen online failed: %v (%s)", err, out)
+	}
+	if isArchived(uTask) {
+		t.Fatalf("expected uTask to be unarchived on mock LS after online hq reopen")
+	}
+
+	// 2. Offline `hq archive` enqueues locally -> online `hq tasks compact` drains retry queue
+	if out, err := env.run("", "archive", "completed-feature"); err != nil {
+		t.Fatalf("hq archive offline failed: %v (%s)", err, out)
+	}
+	if isArchived(uTask) || !kernel.HasPendingSidebarSyncQueue(env.vaultDir) {
+		t.Fatalf("expected offline hq archive to leave LS untouched and populate sidebar_sync_queue.json")
+	}
+	if out, err := env.runWithEnv("", lsEnv, "tasks", "compact"); err != nil {
+		t.Fatalf("hq tasks compact failed: %v (%s)", err, out)
+	}
+	if !isArchived(uTask) || kernel.HasPendingSidebarSyncQueue(env.vaultDir) {
+		t.Fatalf("expected hq tasks compact to drain queue and archive uTask")
+	}
+
+	// 3. Offline `hq reopen` enqueues unarchive -> online `hq hook stop` drains opportunistically
+	if out, err := env.run("", "reopen", "completed-feature", "--no-worktree"); err != nil {
+		t.Fatalf("hq reopen offline failed: %v (%s)", err, out)
+	}
+	stopOut, err := env.runWithEnv(`{"conversationId":"conv-other","executionNum":1,"terminationReason":"NO_TOOL_CALL"}`, lsEnv, "hook", "stop")
+	if err != nil || !strings.Contains(stopOut, `"decision":"stop"`) {
+		t.Fatalf("hq hook stop failed: %v (%s)", err, stopOut)
+	}
+	if isArchived(uTask) || kernel.HasPendingSidebarSyncQueue(env.vaultDir) {
+		t.Fatalf("expected hq hook stop to opportunistically drain reopen queue item")
+	}
+
+	// 4. Seed historical cold archive (including protected threads to test Gates S2, S4, S5, S6) and run `--backfill --dry-run --json`
+	if err := kernel.AppendTasksToColdArchive(env.vaultDir, []kernel.ActiveTask{
+		{ConversationID: uFD, TaskSlug: "cold-fd", Status: "archived"},
+		{ConversationID: uUIPin, TaskSlug: "cold-uipin", Status: "archived"},
+		{ConversationID: uRunning, TaskSlug: "cold-running", Status: "archived"},
+		{ConversationID: uActive, TaskSlug: "cold-active-dup", Status: "archived"},
+		{ConversationID: uCold1, TaskSlug: "cold-legacy-1", Status: "archived"},
+		{ConversationID: uCold2, TaskSlug: "cold-legacy-2", Status: "archived"},
+	}); err != nil {
+		t.Fatalf("AppendTasksToColdArchive: %v", err)
+	}
+
+	mu.Lock()
+	updatesBeforeDry := updateCalls
+	mu.Unlock()
+
+	dryJSON, err := env.runWithEnv("", lsEnv, "tasks", "sync-sidebar", "--backfill", "--dry-run", "--json")
+	if err != nil {
+		t.Fatalf("hq tasks sync-sidebar --backfill --dry-run --json failed: %v (%s)", err, dryJSON)
+	}
+	var dryRep kernel.SyncSidebarReport
+	if err := json.Unmarshal([]byte(dryJSON), &dryRep); err != nil {
+		t.Fatalf("unmarshal SyncSidebarReport: %v (%s)", err, dryJSON)
+	}
+	if len(dryRep.WouldArchive) != 2 || len(dryRep.ProtectedSkipped) != 4 {
+		t.Fatalf("expected 2 WouldArchive and 4 ProtectedSkipped in dry-run, got %+v", dryRep)
+	}
+	mu.Lock()
+	if updateCalls != updatesBeforeDry {
+		t.Fatalf("dry-run invoked UpdateConversationAnnotations %d times!", updateCalls-updatesBeforeDry)
+	}
+	mu.Unlock()
+
+	// 5. Execute live `hq tasks sync-sidebar --backfill` -> archives uCold1 & uCold2 while leaving protected threads unarchived
+	liveOut, err := env.runWithEnv("", lsEnv, "tasks", "sync-sidebar", "--backfill")
+	if err != nil {
+		t.Fatalf("hq tasks sync-sidebar --backfill failed: %v (%s)", err, liveOut)
+	}
+	if !isArchived(uCold1) || !isArchived(uCold2) {
+		t.Fatalf("expected uCold1 and uCold2 to be archived on mock LS after backfill")
+	}
+	for _, protID := range []string{uFD, uUIPin, uRunning, uActive, uTask} {
+		if isArchived(protID) {
+			t.Fatalf("protected/active thread %s must NOT be archived by backfill!", protID)
+		}
+	}
+
+	// 6. Verify `hq doctor --json` includes Sidebar Archive Sync Queue check in healthy OK state
+	docOut, err := env.runWithEnv("", lsEnv, "doctor", "--json")
+	if err != nil && !strings.Contains(docOut, "Sidebar Archive Sync Queue") {
+		t.Fatalf("hq doctor --json missing Sidebar Archive Sync Queue: err=%v out=%s", err, docOut)
+	}
+	if !strings.Contains(docOut, `"name": "Sidebar Archive Sync Queue"`) {
+		t.Fatalf("expected Sidebar Archive Sync Queue check in hq doctor --json, got: %s", docOut)
+	}
 }

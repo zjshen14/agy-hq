@@ -1255,6 +1255,8 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							LastUpdatedAt:        nowISO,
 							CompletedAt:          completedAt,
 							ArchivedAt:           matchedTask.ArchivedAt,
+							SidebarArchived:      matchedTask.SidebarArchived,
+							SidebarSyncedAt:      matchedTask.SidebarSyncedAt,
 							LastSummary:          newSummary,
 						})
 					} else if !alreadyTracked && !isNested {
@@ -1280,6 +1282,10 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				_, _ = obs.SyncDailyBudgetCircuitBreaker(vaultDir, time.Now())
 			}
 		}
+	}
+
+	if kernel.HasPendingSidebarSyncQueue(vaultDir) {
+		_, _ = kernel.DrainSidebarSyncQueue(vaultDir, kernel.DefaultSidebarStopHookTimeout)
 	}
 
 	_, err := w.Write([]byte(`{"decision":"stop"}` + "\n"))

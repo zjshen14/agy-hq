@@ -3,6 +3,7 @@ package kernel
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -163,6 +164,8 @@ type ActiveTask struct {
 	LastUpdatedAt        string `json:"lastUpdatedAt"`
 	CompletedAt          string `json:"completedAt,omitempty"`
 	ArchivedAt           string `json:"archivedAt,omitempty"`
+	SidebarArchived      bool   `json:"sidebarArchived,omitempty"`
+	SidebarSyncedAt      string `json:"sidebarSyncedAt,omitempty"`
 	LastSummary          string `json:"lastSummary,omitempty"`
 	Status               string `json:"status"` // active, idle, completed, archived, cancelled
 }
@@ -678,12 +681,19 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.Status == "active" {
 				task.ArchivedAt = ""
 				task.CompletedAt = ""
+				task.SidebarArchived = false
 			} else {
 				if task.CompletedAt == "" {
 					task.CompletedAt = tasks[i].CompletedAt
 				}
 				if task.ArchivedAt == "" {
 					task.ArchivedAt = tasks[i].ArchivedAt
+				}
+				if !task.SidebarArchived && tasks[i].SidebarArchived {
+					task.SidebarArchived = tasks[i].SidebarArchived
+				}
+				if task.SidebarSyncedAt == "" {
+					task.SidebarSyncedAt = tasks[i].SidebarSyncedAt
 				}
 			}
 			if task.Status == "" {
@@ -800,10 +810,12 @@ func SetTaskPinned(vaultDir, slugOrConvID string, pinned bool) error {
 		return err
 	}
 	found := false
+	convID := ""
 	for i := range tasks {
 		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
 			tasks[i].Pinned = pinned
 			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+			convID = tasks[i].ConversationID
 			found = true
 			break
 		}
@@ -815,35 +827,58 @@ func SetTaskPinned(vaultDir, slugOrConvID string, pinned bool) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
-}
-
-// ArchiveTask archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID).
-// If WorktreeDir exists on disk:
-//   - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !force, returns:
-//     refusing to archive %q: uncommitted changes in worktree (pass --force to override)
-//   - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if force is true).
-//
-// Sets task status to "archived", sets LastUpdatedAt to now, and saves tasks.json.
-func ArchiveTask(vaultDir, target string, force bool) error {
-	tasks, err := ListTasks(vaultDir)
-	if err != nil {
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
 		return err
 	}
+	if convID != "" {
+		SyncTaskPinnedBestEffort(vaultDir, convID, pinned, SidebarSyncConfig{})
+	}
+	return nil
+}
+
+// ArchiveTaskOptions configures task archival and Antigravity sidebar synchronization.
+type ArchiveTaskOptions struct {
+	Force         bool
+	NoSidebar     bool
+	SidebarConfig SidebarSyncConfig
+}
+
+// ArchiveTask archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID)
+// and synchronizes archival state to Antigravity's sidebar (falling back to the retry queue if offline).
+func ArchiveTask(vaultDir, target string, force bool) error {
+	_, err := ArchiveTaskWithOptions(vaultDir, target, ArchiveTaskOptions{Force: force})
+	return err
+}
+
+// ArchiveTaskWithOptions archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID).
+// If WorktreeDir exists on disk:
+//   - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !opts.Force, returns:
+//     refusing to archive %q: uncommitted changes in worktree (pass --force to override)
+//   - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if opts.Force is true).
+//
+// Sets task status to "archived", saves tasks.json locally first, and then syncs with Antigravity's sidebar unless NoSidebar is true.
+func ArchiveTaskWithOptions(vaultDir, target string, opts ArchiveTaskOptions) (SidebarSingleSyncResult, error) {
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return SidebarSingleSyncResult{}, err
+	}
 	nowStr := time.Now().Format(time.RFC3339)
-	found := false
+	archivedIdx := -1
 	for i := range tasks {
 		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
 			task := &tasks[i]
+			if task.Pinned && !opts.Force {
+				return SidebarSingleSyncResult{}, fmt.Errorf("refusing to archive %q: task is pinned (unpin first or pass --force)", target)
+			}
 			if task.WorktreeDir != "" {
 				if info, err := os.Stat(task.WorktreeDir); err == nil && info.IsDir() {
 					cmdStatus := sanitizedGitCmd("-C", task.WorktreeDir, "status", "--porcelain")
 					outStatus, err := cmdStatus.Output()
 					if err != nil {
-						return fmt.Errorf("git status check failed on %s: %w", task.WorktreeDir, err)
+						return SidebarSingleSyncResult{}, fmt.Errorf("git status check failed on %s: %w", task.WorktreeDir, err)
 					}
-					if len(strings.TrimSpace(string(outStatus))) > 0 && !force {
-						return fmt.Errorf("refusing to archive %q: uncommitted changes in worktree (pass --force to override)", target)
+					if len(strings.TrimSpace(string(outStatus))) > 0 && !opts.Force {
+						return SidebarSingleSyncResult{}, fmt.Errorf("refusing to archive %q: uncommitted changes in worktree (pass --force to override)", target)
 					}
 
 					repoRoot := task.RepoRoot
@@ -853,14 +888,14 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 					task.RepoRoot = repoRoot
 
 					var removeArgs []string
-					if force {
+					if opts.Force {
 						removeArgs = []string{"-C", repoRoot, "worktree", "remove", "--force", task.WorktreeDir}
 					} else {
 						removeArgs = []string{"-C", repoRoot, "worktree", "remove", task.WorktreeDir}
 					}
 					cmdRemove := sanitizedGitCmd(removeArgs...)
 					if out, err := cmdRemove.CombinedOutput(); err != nil {
-						return fmt.Errorf("git worktree remove failed: %w (%s)", err, string(out))
+						return SidebarSingleSyncResult{}, fmt.Errorf("git worktree remove failed: %w (%s)", err, string(out))
 					}
 					if _, err := os.Stat(task.WorktreeDir); err == nil {
 						_ = os.RemoveAll(task.WorktreeDir)
@@ -872,19 +907,32 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 			task.Status = "archived"
 			task.LastUpdatedAt = nowStr
 			task.ArchivedAt = nowStr
-			found = true
+			archivedIdx = i
 			break
 		}
 	}
-	if !found {
-		return fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	if archivedIdx < 0 {
+		return SidebarSingleSyncResult{}, fmt.Errorf("task %q not found in local/memory/tasks.json", target)
 	}
 
 	data, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
-		return err
+		return SidebarSingleSyncResult{}, err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		return SidebarSingleSyncResult{}, err
+	}
+
+	if opts.NoSidebar {
+		return SidebarSingleSyncResult{SkippedReason: "no_sidebar"}, nil
+	}
+	syncRes := syncSingleTaskArchiveState(context.Background(), vaultDir, &tasks[archivedIdx], true, true, opts.Force, opts.SidebarConfig)
+	if syncRes.Synced || syncRes.AlreadySynced {
+		if updatedBytes, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
+			_ = os.WriteFile(tasksFilePath(vaultDir), updatedBytes, 0o644)
+		}
+	}
+	return syncRes, nil
 }
 
 func restoreWorktreeForReopen(vaultDir string, task *ActiveTask) error {
@@ -917,27 +965,45 @@ func restoreWorktreeForReopen(vaultDir string, task *ActiveTask) error {
 	return nil
 }
 
+// ReopenTaskOptions configures cold/hot task recall and Antigravity sidebar unarchiving.
+type ReopenTaskOptions struct {
+	NoWorktree    bool
+	NoSidebar     bool
+	SidebarConfig SidebarSyncConfig
+}
+
 // ReopenTask restores a task in local/memory/tasks.json (or recalls it from cold storage
-// local/memory/tasks_archive.jsonl) back to active status, recreating its git worktree if needed.
+// local/memory/tasks_archive.jsonl) back to active status, recreating its git worktree if needed
+// and unarchiving the conversation in Antigravity's sidebar.
 func ReopenTask(vaultDir, target string) error {
+	_, err := ReopenTaskWithOptions(vaultDir, target, ReopenTaskOptions{})
+	return err
+}
+
+// ReopenTaskWithOptions restores a task back to active status and optionally restores its git worktree and sidebar state.
+func ReopenTaskWithOptions(vaultDir, target string, opts ReopenTaskOptions) (SidebarSingleSyncResult, error) {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil {
-		return err
+		return SidebarSingleSyncResult{}, err
 	}
 	nowStr := time.Now().Format(time.RFC3339)
-	found := false
+	reopenedIdx := -1
 	for i := range tasks {
 		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
-			if err := restoreWorktreeForReopen(vaultDir, &tasks[i]); err != nil {
-				return err
+			if !opts.NoWorktree {
+				if err := restoreWorktreeForReopen(vaultDir, &tasks[i]); err != nil {
+					return SidebarSingleSyncResult{}, err
+				}
 			}
 			tasks[i].Status = "active"
+			tasks[i].ArchivedAt = ""
+			tasks[i].SidebarArchived = false
 			tasks[i].LastUpdatedAt = nowStr
-			found = true
+			reopenedIdx = i
 			break
 		}
 	}
-	if !found {
+	if reopenedIdx < 0 {
 		// Check cold storage (local/memory/tasks_archive.jsonl)
 		archived, _, archErr := ListArchivedTasks(vaultDir, 0)
 		if archErr == nil && len(archived) > 0 {
@@ -953,13 +1019,17 @@ func ReopenTask(vaultDir, target string) error {
 				remaining = append(remaining, t)
 			}
 			if recalled != nil {
-				if err := restoreWorktreeForReopen(vaultDir, recalled); err != nil {
-					return err
+				if !opts.NoWorktree {
+					if err := restoreWorktreeForReopen(vaultDir, recalled); err != nil {
+						return SidebarSingleSyncResult{}, err
+					}
 				}
 				recalled.Status = "active"
+				recalled.ArchivedAt = ""
+				recalled.SidebarArchived = false
 				recalled.LastUpdatedAt = nowStr
 				tasks = append(tasks, *recalled)
-				found = true
+				reopenedIdx = len(tasks) - 1
 				var b strings.Builder
 				for _, rem := range remaining {
 					if line, mErr := json.Marshal(rem); mErr == nil {
@@ -971,15 +1041,29 @@ func ReopenTask(vaultDir, target string) error {
 			}
 		}
 	}
-	if !found {
-		return fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	if reopenedIdx < 0 {
+		return SidebarSingleSyncResult{}, fmt.Errorf("task %q not found in local/memory/tasks.json", target)
 	}
 
 	data, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
-		return err
+		return SidebarSingleSyncResult{}, err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		return SidebarSingleSyncResult{}, err
+	}
+
+	if opts.NoSidebar {
+		RemoveSidebarSyncQueueItem(vaultDir, tasks[reopenedIdx].ConversationID, time.Now())
+		return SidebarSingleSyncResult{SkippedReason: "no_sidebar"}, nil
+	}
+	syncRes := syncSingleTaskArchiveState(context.Background(), vaultDir, &tasks[reopenedIdx], false, false, false, opts.SidebarConfig)
+	if syncRes.Synced || syncRes.AlreadySynced {
+		if updatedBytes, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
+			_ = os.WriteFile(tasksFilePath(vaultDir), updatedBytes, 0o644)
+		}
+	}
+	return syncRes, nil
 }
 
 // CompactTasksOptions configures rolling auto-archiving and hot-to-cold storage rotation.
@@ -991,15 +1075,20 @@ type CompactTasksOptions struct {
 	IdleDormantArchiveAfter  time.Duration
 	ArchivedColdMaxAge       time.Duration
 	DryRun                   bool
+	NoSidebar                bool
+	SidebarConfig            SidebarSyncConfig
 }
 
 // CompactTasksReport summarizes what CompactTasks transitioned and rotated.
 type CompactTasksReport struct {
-	HotBefore         int      `json:"hotBefore"`
-	HotAfter          int      `json:"hotAfter"`
-	AutoArchivedSlugs []string `json:"autoArchivedSlugs,omitempty"`
-	RotatedColdSlugs  []string `json:"rotatedColdSlugs,omitempty"`
-	TotalColdAfter    int      `json:"totalColdAfter"`
+	HotBefore           int      `json:"hotBefore"`
+	HotAfter            int      `json:"hotAfter"`
+	AutoArchivedSlugs   []string `json:"autoArchivedSlugs,omitempty"`
+	RotatedColdSlugs    []string `json:"rotatedColdSlugs,omitempty"`
+	TotalColdAfter      int      `json:"totalColdAfter"`
+	SidebarSyncedCount  int      `json:"sidebarSyncedCount,omitempty"`
+	SidebarQueuedCount  int      `json:"sidebarQueuedCount,omitempty"`
+	SidebarSkippedCount int      `json:"sidebarSkippedCount,omitempty"`
 }
 
 func isWorktreeCleanOrAbsent(wtDir string) bool {
@@ -1018,11 +1107,12 @@ func isWorktreeCleanOrAbsent(wtDir string) bool {
 	return len(strings.TrimSpace(string(out))) == 0
 }
 
-// CompactTasks executes the RFC-0009 rolling lifecycle compaction:
-//  1. Auto-archives completed/cancelled top-level tasks older than TaskAutoArchiveAfter (24h) if their worktree is clean.
+// CompactTasks executes the RFC-0009 & RFC-0016 rolling lifecycle compaction:
+//  1. Auto-archives unpinned completed/cancelled top-level tasks older than TaskAutoArchiveAfter (24h) if their worktree is clean.
 //  2. Auto-archives unpinned idle top-level tasks untouched for > IdleDormantArchiveAfter (48h) if their worktree is clean.
 //  3. Flushes completed/cancelled subagents (>24h or beyond MaxHotCompletedSubagents) and archived tasks (>48h)
 //     from local/memory/tasks.json into append-only local/memory/tasks_archive.jsonl.
+//  4. Synchronizes archived/rotated conversations and drains the retry queue with Antigravity's sidebar.
 func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksReport, error) {
 	if opts.Now.IsZero() {
 		opts.Now = time.Now()
@@ -1052,10 +1142,35 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 	}
 	if len(tasks) == 0 {
 		rep.TotalColdAfter = CountColdArchivedTasks(vaultDir)
+		if !opts.NoSidebar && HasPendingSidebarSyncQueue(vaultDir) {
+			if sRep, _ := SyncSidebar(vaultDir, SyncSidebarOptions{
+				Now:          opts.Now,
+				DryRun:       opts.DryRun,
+				QueueOnly:    true,
+				ClientConfig: opts.SidebarConfig,
+			}); sRep != nil {
+				if opts.DryRun {
+					rep.SidebarSyncedCount = len(sRep.WouldArchive) + len(sRep.WouldUnarchive)
+				} else {
+					rep.SidebarSyncedCount = sRep.ArchivedCount + sRep.UnarchivedCount
+				}
+				rep.SidebarQueuedCount = sRep.QueuedCount
+				rep.SidebarSkippedCount = len(sRep.ProtectedSkipped)
+			}
+		}
 		return rep, nil
 	}
 
 	nowStr := opts.Now.Format(time.RFC3339)
+	var explicitSidebarIDs []string
+	seenSidebarID := make(map[string]bool)
+	addSidebarCandidate := func(convID string) {
+		cid := normalizeUUID(convID)
+		if IsCanonicalUUID(cid) && !seenSidebarID[cid] {
+			seenSidebarID[cid] = true
+			explicitSidebarIDs = append(explicitSidebarIDs, cid)
+		}
+	}
 
 	// Step 1: Auto-archive eligible completed (>24h) or dormant (>48h) top-level tasks with clean worktrees
 	for i := range tasks {
@@ -1068,7 +1183,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		}
 		st := strings.ToLower(strings.TrimSpace(t.Status))
 		shouldArchive := false
-		if kind == "task" && (st == "completed" || st == "cancelled") && age >= opts.TaskAutoArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
+		if kind == "task" && (st == "completed" || st == "cancelled") && !t.Pinned && age >= opts.TaskAutoArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
 			shouldArchive = true
 		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
 			shouldArchive = true
@@ -1089,6 +1204,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 				t.ArchivedAt = nowStr
 			}
 			rep.AutoArchivedSlugs = append(rep.AutoArchivedSlugs, t.TaskSlug)
+			addSidebarCandidate(t.ConversationID)
 		}
 	}
 
@@ -1100,7 +1216,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 	var compSubs []subIdx
 	for i, t := range tasks {
 		st := strings.ToLower(strings.TrimSpace(t.Status))
-		if (t.EffectiveKind() == "subagent" || t.EffectiveKind() == "auto") && (st == "completed" || st == "cancelled") {
+		if !t.Pinned && (t.EffectiveKind() == "subagent" || t.EffectiveKind() == "auto") && (st == "completed" || st == "cancelled") {
 			compSubs = append(compSubs, subIdx{idx: i, ts: t.UpdatedTime()})
 		}
 	}
@@ -1129,19 +1245,25 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		}
 
 		rotate := false
-		if (kind == "subagent" || kind == "auto") && (st == "completed" || st == "cancelled") {
+		if !t.Pinned && (kind == "subagent" || kind == "auto") && (st == "completed" || st == "cancelled") {
 			if age >= opts.SubagentHotMaxAge || subOverCap[i] {
 				rotate = true
 			}
-		} else if st == "archived" && age >= opts.ArchivedColdMaxAge {
+		} else if !t.Pinned && st == "archived" && age >= opts.ArchivedColdMaxAge {
 			rotate = true
 		}
 
 		if rotate {
 			rotatedCold = append(rotatedCold, t)
 			rep.RotatedColdSlugs = append(rep.RotatedColdSlugs, t.TaskSlug)
+			if !t.SidebarArchived {
+				addSidebarCandidate(t.ConversationID)
+			}
 		} else {
 			keptHot = append(keptHot, t)
+			if st == "archived" && !t.SidebarArchived {
+				addSidebarCandidate(t.ConversationID)
+			}
 		}
 	}
 
@@ -1166,6 +1288,25 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 	if opts.DryRun {
 		rep.TotalColdAfter += len(rotatedCold)
 	}
+
+	if !opts.NoSidebar && (len(explicitSidebarIDs) > 0 || HasPendingSidebarSyncQueue(vaultDir)) {
+		if sRep, _ := SyncSidebar(vaultDir, SyncSidebarOptions{
+			Now:                opts.Now,
+			DryRun:             opts.DryRun,
+			QueueOnly:          true,
+			ExplicitArchiveIDs: explicitSidebarIDs,
+			ClientConfig:       opts.SidebarConfig,
+		}); sRep != nil {
+			if opts.DryRun {
+				rep.SidebarSyncedCount = len(sRep.WouldArchive) + len(sRep.WouldUnarchive)
+			} else {
+				rep.SidebarSyncedCount = sRep.ArchivedCount + sRep.UnarchivedCount
+			}
+			rep.SidebarQueuedCount = sRep.QueuedCount
+			rep.SidebarSkippedCount = len(sRep.ProtectedSkipped)
+		}
+	}
+
 	return rep, nil
 }
 
@@ -2276,6 +2417,10 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 
 	if goalActions, gErr := SweepWaitingOnObligations(vaultDir, now); gErr == nil && len(goalActions) > 0 {
 		inboxActions = append(inboxActions, goalActions...)
+	}
+
+	if !dryRun && HasPendingSidebarSyncQueue(vaultDir) {
+		_, _ = DrainSidebarSyncQueue(vaultDir, DefaultSidebarBatchTimeout)
 	}
 
 	state := LoadQuota(vaultDir)

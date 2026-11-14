@@ -58,8 +58,8 @@ description: >-
      hq rsi verify <rsi-id> && hq rsi propose <rsi-id>
      ```
    - When upgrading to a new frontier model, run `hq rsi ablate --model=<new-model>`.
-2. **Task Lifecycle Consolidation & Hot/Cold Archive Rotation:**
-   - Run `hq tasks compact` (and `hq archive <slug>` if explicit worktree cleanup is needed).
+2. **Task Lifecycle Consolidation, Hot/Cold Rotation & Sidebar Archive Sync:**
+   - Run `hq tasks compact` (automatically rotates eligible completed tasks/subagents to cold storage, archives their threads in Antigravity's sidebar, and drains any queued offline transitions; use `hq archive <slug>` if explicit worktree cleanup is needed).
 3. **Verify Budget, Commit Vault & Silent Completion:**
    - Run `hq memory compact`, `hq memory status`, and `hq rsi status` to confirm `local/MEMORY.md` is $\le 80$ lines (`[OK]`).
    - Commit changes to the private Vault repository (workspace-agnostic across `~/.gemini/antigravity/hq/vault` and `./local`):

@@ -1,6 +1,6 @@
 # RFC-0016: Antigravity Sidebar Conversation Archive Synchronization
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-11-14
 - **Companion Research:** [12 — Antigravity Sidebar Conversation Archive Synchronization Audit](../research/12_conversation_archive_sync_audit.md)
 - **Related Designs:** [RFC-0002 (Sleep-Time Consolidation)](0002-memory-and-consolidation.md) · [RFC-0007 (Front Desk Initialization Hardening)](0007-front-desk-initialization-hardening.md) · [RFC-0009 (Task Board & Hot/Cold Lifecycle)](0009-task-board-redesign.md) · [RFC-0011 (CI Pipeline & Regression Harness)](0011-ci-pipeline-and-regression-harness.md)
