@@ -20,7 +20,7 @@ Produce a concise, actionable daily brief covering life admin, engineering proje
    - Run `hq goals due --within=72h` to highlight approaching multi-day goal deadlines and overdue counterparty `WaitingOn` SLAs.
    - Run `hq obs tokens --since=24h` to check 24h uncached token burn, Prefix Cache Hit Ratio (`CHR %`), `[HQ] Front Desk` context watermark (recommending `/compact` if $\ge 120\text{k}$ tokens), and any active `A1`–`A5` anomaly alerts.
 2. **Calendar, Gmail, Google Chat & Life Admin:**
-   - If the `gcalendar` skill/plugin is available, check today's schedule and highlight time-sensitive meetings or conflicts.
+   - If the `gcalendar` skill/plugin is available, check today's schedule and highlight time-sensitive meetings or conflicts. (If morning tennis / clinics are scheduled, check NorCal Tennis Academy's green top announcement bar on `https://www.norcaltennisacademy.com/` for rain/wet court cancellation notices in addition to checking Gmail and Fremont weather).
    - Check Gmail via `hq gmail search` and Google Chat via `hq gchat search --query="is:unread"` (plus any overnight digests in `local/notes/inbox/`) to summarize high-priority unread threads, DMs, and any auto-drafted replies awaiting approval.
    - Check `local/inbox/` for any unprocessed files dropped overnight.
 3. **Engineering Projects (`swe-pulse`):**
