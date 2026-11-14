@@ -283,10 +283,27 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 	}
 	defer os.RemoveAll(vaultDir)
 
+	validPreToolProtoKeys := map[string]bool{
+		"decision":            true,
+		"reason":              true,
+		"permissionOverrides": true,
+		"overwrite":           true,
+	}
+	var protoSchemaErr string
 	runHook := func(payload map[string]interface{}) (string, error) {
 		raw, _ := json.Marshal(payload)
 		var out bytes.Buffer
 		err := hooks.HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir)
+		var decoded map[string]interface{}
+		if uErr := json.Unmarshal(out.Bytes(), &decoded); uErr != nil {
+			protoSchemaErr = fmt.Sprintf("PreToolUse returned invalid JSON %q: %v", out.String(), uErr)
+		} else {
+			for k := range decoded {
+				if !validPreToolProtoKeys[k] {
+					protoSchemaErr = fmt.Sprintf("PreToolUse returned unknown protojson field %q in %s", k, strings.TrimSpace(out.String()))
+				}
+			}
+		}
 		return out.String(), err
 	}
 
@@ -472,7 +489,25 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		return false, "Untainted worker should still be allowed to read private/ledger/"
 	}
 
-	// 6. Verify SKILL.md CLI subcommands against valid top-level hq commands
+	// 6. Verify 125k-token PreToolUse compaction nudge conforms strictly to PreToolUse protojson schema
+	nudgeTranscript := filepath.Join(vaultDir, "compaction-probe.jsonl")
+	_ = os.WriteFile(nudgeTranscript, []byte(
+		"{\"step_index\":0,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-10T09:00:00Z\",\"content\":\"Long run\"}\n"+
+			"{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-10T09:00:05Z\",\"input_tokens\":125000,\"output_tokens\":200,\"content\":\"Step\"}\n",
+	), 0o600)
+	_, _ = runHook(map[string]interface{}{
+		"conversationId": "conv-compaction-probe",
+		"transcriptPath": nudgeTranscript,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "go version"},
+		},
+	})
+	if protoSchemaErr != "" {
+		return false, protoSchemaErr
+	}
+
+	// 7. Verify SKILL.md CLI subcommands against valid top-level hq commands
 	for _, skPath := range rsi.DiscoverAllSkillFiles(rootDir) {
 		b, rErr := os.ReadFile(skPath)
 		if rErr != nil {
@@ -486,7 +521,7 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		}
 	}
 
-	return true, "29/29 PreToolUse security, bare-hq parity, credential-guard, quarantine, Front Desk & SKILL CLI probes passed"
+	return true, "30/30 PreToolUse security, protojson schema, bare-hq parity, credential-guard, quarantine, Front Desk & SKILL CLI probes passed"
 }
 
 func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {

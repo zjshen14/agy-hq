@@ -624,8 +624,8 @@ func writeAllowWithOptionalCompactionNudge(w io.Writer, vaultDir string, payload
 					obs.FormatTokensCompact(tm.CurrentContextTokens), slug,
 				)
 				return json.NewEncoder(w).Encode(map[string]interface{}{
-					"decision":      "allow",
-					"systemMessage": nudge,
+					"decision": "allow",
+					"reason":   nudge,
 				})
 			}
 		}
@@ -1450,6 +1450,27 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				}
 			}
 
+			if obsTurn.CurrentContextTokens >= PreCompactionFlushTokens {
+				if activeTask, ok := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); ok && activeTask.TaskSlug != "" {
+					if _, _, found, _ := vault.LoadProgress(vaultDir, activeTask.TaskSlug); !found {
+						goalText := strings.TrimSpace(activeTask.Title)
+						if goalText == "" {
+							goalText = strings.TrimSpace(userPrompt)
+						}
+						doneText := strings.TrimSpace(summary)
+						if doneText == "" {
+							doneText = "Context reached 120k+ tokens; auto-checkpointed from turn journal."
+						}
+						_, _ = vault.SaveProgress(vaultDir, vault.ProgressCheckpoint{
+							TaskSlug:  activeTask.TaskSlug,
+							Goal:      goalText,
+							Completed: doneText,
+							NextSteps: "Continue from latest turn journal or refine with `hq progress save`.",
+							Pointers:  strings.Join(filesModified, ", "),
+						}, time.Now())
+					}
+				}
+			}
 			if obsTurn.CompactionCount > 0 {
 				_ = os.Remove(compactionNudgeMarkerPath(vaultDir, payload.ConversationID))
 			}

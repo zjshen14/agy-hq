@@ -594,6 +594,16 @@ func TestLeanAutoSessionStartGrayZoneGuardAndCompactionNudge(t *testing.T) {
 	if !strings.Contains(nudgeOut1.String(), "Pre-Compaction Checkpoint Nudge") || !strings.Contains(nudgeOut1.String(), "task-architecture-review-01") {
 		t.Fatalf("expected first 125k-token PreToolUse to emit Pre-Compaction Checkpoint Nudge, got: %s", nudgeOut1.String())
 	}
+	var parsedNudge map[string]interface{}
+	if err := json.Unmarshal(nudgeOut1.Bytes(), &parsedNudge); err != nil {
+		t.Fatalf("unmarshal PreToolUse JSON: %v", err)
+	}
+	allowedProtoKeys := map[string]bool{"decision": true, "reason": true, "permissionOverrides": true, "overwrite": true}
+	for k := range parsedNudge {
+		if !allowedProtoKeys[k] {
+			t.Fatalf("PreToolUse output contains invalid protojson field %q (breaks Antigravity hook unmarshaling): %s", k, nudgeOut1.String())
+		}
+	}
 	if err := HandlePreToolUse(bytes.NewReader(callWithTranscript), &nudgeOut2, vaultDir); err != nil {
 		t.Fatalf("HandlePreToolUse second call: %v", err)
 	}
