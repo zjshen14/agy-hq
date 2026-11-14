@@ -157,6 +157,12 @@ func checkGateH1Skills(rootDir string) (bool, string) {
 				return false, fmt.Sprintf("%s contains forbidden safety bypass phrase %q", rel, forbidden)
 			}
 		}
+
+		for _, m := range reSkillExternalURL.FindAllStringSubmatch(content, -1) {
+			if len(m) >= 2 && !isAllowedSkillURLHost(m[1]) {
+				return false, fmt.Sprintf("%s contains non-allowlisted external URL host %q (move personal, regional, or enterprise URLs into untracked local/brief.d/ or local/connectors/)", rel, m[1])
+			}
+		}
 	}
 
 	estTokens := totalFrontmatterChars / 4
@@ -220,8 +226,9 @@ func checkGateH2HooksJSONParity(rootDir string) (bool, string) {
 }
 
 var (
-	reSkillHQCmd     = regexp.MustCompile("(?:^|[`\\s\"'(])hq\\s+([a-z][a-z0-9-]*)")
-	validHQTopSubcmd = map[string]bool{
+	reSkillExternalURL = regexp.MustCompile(`https?://([A-Za-z0-9.\-]+)`)
+	reSkillHQCmd       = regexp.MustCompile("(?:^|[`\\s\"'(])hq\\s+([a-z][a-z0-9-]*)")
+	validHQTopSubcmd   = map[string]bool{
 		"version": true, "vault-path": true, "plugin": true,
 		"init": true, "console": true, "migrate": true, "upgrade": true,
 		"doctor": true, "status": true, "hook": true,
@@ -238,7 +245,35 @@ var (
 		// Prose words that can follow `hq` in descriptive sentences
 		"daemon_gatekeeper": true, "binary": true, "cli": true, "microkernel": true,
 	}
+
+	allowedSkillURLDomains = []string{
+		"example.com",
+		"example.org",
+		"example.net",
+		"localhost",
+		"127.0.0.1",
+		"google.com",
+		"googleapis.com",
+		"github.com",
+		"github.io",
+		"sec.gov",
+		"hledger.org",
+		"web.dev",
+	}
 )
+
+func isAllowedSkillURLHost(rawHost string) bool {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawHost)), ".")
+	if h == "" {
+		return false
+	}
+	for _, allow := range allowedSkillURLDomains {
+		if h == allow || strings.HasSuffix(h, "."+allow) {
+			return true
+		}
+	}
+	return false
+}
 
 func checkGateH2CGlobalPluginBundle(rootDir string, runAgyCLI bool) (bool, string) {
 	pluginDir := filepath.Join(rootDir, ".agents", "plugins", "agy-hq")

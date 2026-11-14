@@ -315,3 +315,64 @@ func TestCheckPIIHistoryAndReplacementEngine(t *testing.T) {
 		t.Fatalf("unexpected scrubbed file content: %q", string(updatedBytes))
 	}
 }
+
+func TestWorktreeAncestorPIIDenylistAndSkillURLGuard(t *testing.T) {
+	base := t.TempDir()
+	vaultDir := filepath.Join(base, "local")
+	wtDir := filepath.Join(vaultDir, "worktrees", "headquarter-privacy-test")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("mkdir wtDir: %v", err)
+	}
+
+	added, err := AddPIIDenylistTerms(vaultDir, []string{"synthetic-regional-club", "synthetic-city-weather"})
+	if err != nil || added != 2 {
+		t.Fatalf("expected AddPIIDenylistTerms to add 2 terms, got %d (%v)", added, err)
+	}
+	// Idempotent re-add should add 0
+	addedAgain, err := AddPIIDenylistTerms(vaultDir, []string{"SYNTHETIC-REGIONAL-CLUB"})
+	if err != nil || addedAgain != 0 {
+		t.Fatalf("expected idempotent AddPIIDenylistTerms to add 0 terms, got %d (%v)", addedAgain, err)
+	}
+
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = wtDir
+		if out, gErr := cmd.CombinedOutput(); gErr != nil {
+			t.Fatalf("git %v: %v (%s)", args, gErr, string(out))
+		}
+	}
+	runGit("init", "-b", "main")
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@agy-hq.local")
+	_ = os.WriteFile(filepath.Join(wtDir, ".gitignore"), []byte("/local/\n/vault/\n"), 0o644)
+
+	skillDir := filepath.Join(wtDir, ".agents", "plugins", "agy-hq", "skills", "morning-brief")
+	_ = os.MkdirAll(skillDir, 0o755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(strings.Join([]string{
+		"---",
+		"name: morning-brief",
+		"description: test skill",
+		"---",
+		"# Morning Brief",
+		"Check https://www.local-venue-test.io/ and synthetic-city-weather.",
+	}, "\n")+"\n"), 0o644)
+
+	runGit("add", ".gitignore", ".agents/plugins/agy-hq/skills/morning-brief/SKILL.md")
+	runGit("commit", "-m", "seed worktree skill")
+
+	// 1. CheckPII inside `<vault>/worktrees/<slug>` must pick up `<vault>/private/pii-denylist.txt`
+	violations, err := CheckPII(wtDir, false)
+	if err != nil {
+		t.Fatalf("CheckPII in worktree failed: %v", err)
+	}
+	if len(violations) != 1 || violations[0].Invariant != "P6-ContextualPII" {
+		t.Fatalf("expected 1 P6-ContextualPII violation from parent Vault denylist, got %+v", violations)
+	}
+
+	// 2. Gate H1 must deterministically reject non-allowlisted external URLs in SKILL.md even on clean CI
+	ok, detail := checkGateH1Skills(wtDir)
+	if ok || !strings.Contains(detail, "non-allowlisted external URL host") {
+		t.Fatalf("expected checkGateH1Skills to reject non-allowlisted external URL, got ok=%v detail=%q", ok, detail)
+	}
+}

@@ -369,12 +369,34 @@ func IsAllowedSyntheticGChatSpaceID(spaceLit string) bool {
 	return false
 }
 
+func findEnclosingWorktreeVault(startDir string) string {
+	dir := filepath.Clean(startDir)
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		if filepath.Base(parent) == "worktrees" {
+			return filepath.Dir(parent)
+		}
+		dir = parent
+	}
+}
+
 func loadLocalPIIDenylist(rootDir string) []string {
 	candidates := []string{
 		filepath.Join(rootDir, "local", "private", "pii-denylist.txt"),
 	}
+	if wtVault := findEnclosingWorktreeVault(rootDir); wtVault != "" {
+		candidates = append(candidates, filepath.Join(wtVault, "private", "pii-denylist.txt"))
+	}
 	if envVault := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); envVault != "" {
 		candidates = append(candidates, filepath.Join(envVault, "private", "pii-denylist.txt"))
+	}
+	if !vault.IsTempPath(rootDir) {
+		if cfg, err := vault.LoadGlobalConfig(); err == nil && cfg != nil && strings.TrimSpace(cfg.VaultDir) != "" {
+			candidates = append(candidates, filepath.Join(cfg.VaultDir, "private", "pii-denylist.txt"))
+		}
 	}
 	seen := make(map[string]bool)
 	var terms []string
@@ -396,6 +418,63 @@ func loadLocalPIIDenylist(rootDir string) []string {
 		}
 	}
 	return terms
+}
+
+// AddPIIDenylistTerms atomically appends one or more private contextual terms (len >= 3)
+// to `<vaultDir>/private/pii-denylist.txt` (0600) without erasing Vault notes or memory.
+func AddPIIDenylistTerms(vaultDir string, rawTerms []string) (int, error) {
+	if strings.TrimSpace(vaultDir) == "" {
+		return 0, fmt.Errorf("vaultDir is required")
+	}
+	privDir := filepath.Join(vaultDir, "private")
+	if err := os.MkdirAll(privDir, 0o700); err != nil {
+		return 0, fmt.Errorf("mkdir %s: %w", privDir, err)
+	}
+	denyPath := filepath.Join(privDir, "pii-denylist.txt")
+	existingBytes, _ := os.ReadFile(denyPath)
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(string(existingBytes), "\n") {
+		trimmed := strings.ToLower(strings.TrimSpace(line))
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			seen[trimmed] = true
+		}
+	}
+
+	var toAdd []string
+	for _, raw := range rawTerms {
+		t := strings.TrimSpace(raw)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if len(t) < 3 {
+			return 0, fmt.Errorf("denylist term must be at least 3 characters")
+		}
+		lower := strings.ToLower(t)
+		if !seen[lower] {
+			seen[lower] = true
+			toAdd = append(toAdd, t)
+		}
+	}
+	if len(toAdd) == 0 {
+		return 0, nil
+	}
+
+	prefix := strings.TrimRight(string(existingBytes), "\n")
+	var next string
+	if strings.TrimSpace(prefix) == "" {
+		next = "# Private contextual & regional terms denied in tracked OSS files (P6-ContextualPII)\n" + strings.Join(toAdd, "\n") + "\n"
+	} else {
+		next = prefix + "\n" + strings.Join(toAdd, "\n") + "\n"
+	}
+	tmpPath := denyPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(next), 0o600); err != nil {
+		return 0, fmt.Errorf("write %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, denyPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("rename %s: %w", denyPath, err)
+	}
+	return len(toAdd), nil
 }
 
 // CheckPIIHistory audits the entire git commit history (`git log --all -p`), commit author metadata,

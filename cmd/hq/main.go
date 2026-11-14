@@ -2618,6 +2618,22 @@ func runCICLI(rootDir string, args []string) {
 			os.Exit(1)
 		}
 
+	case "denylist-add":
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq ci denylist-add <term> [<term>...]")
+			os.Exit(1)
+		}
+		vaultDir, _, vErr := vault.ResolveVaultDirWithSource()
+		if vErr != nil || strings.TrimSpace(vaultDir) == "" {
+			vaultDir = filepath.Join(rootDir, "local")
+		}
+		added, err := ci.AddPIIDenylistTerms(vaultDir, args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq ci denylist-add failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("[OK] Added %d term(s) to private PII denylist\n", added)
+
 	case "pre-commit":
 		if err := ci.RunPreCommit(rootDir); err != nil {
 			fmt.Fprintf(os.Stderr, "hq ci pre-commit failed: %v\n", err)
