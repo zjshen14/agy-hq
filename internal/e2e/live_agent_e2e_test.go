@@ -34,19 +34,25 @@ func TestLiveAgentE2E(t *testing.T) {
 	}
 	repoRoot := filepath.Clean(filepath.Join(wd, "..", ".."))
 
-	// Set up an isolated temporary workspace with AGENTS.md, .agents/hooks.json, templates/, bin/hq, and local/
+	// Set up an isolated temporary workspace with AGENTS.md, .agents/plugins/agy-hq/, templates/, bin/hq, and local/
 	wsDir := t.TempDir()
-	for _, sub := range []string{"bin", ".agents", "templates"} {
+	for _, sub := range []string{
+		"bin",
+		filepath.Join(".agents", "plugins", "agy-hq", "rules"),
+		"templates",
+	} {
 		if err := os.MkdirAll(filepath.Join(wsDir, sub), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", sub, err)
 		}
 	}
 
-	// Copy AGENTS.md, .agents/hooks.json, go.mod, and templates/*
+	// Copy AGENTS.md, .agents/plugins/agy-hq/{plugin.json,hooks.json,rules/AGENTS.md}, go.mod, and templates/*
 	for _, rel := range []string{
 		"AGENTS.md",
 		"go.mod",
-		".agents/hooks.json",
+		".agents/plugins/agy-hq/plugin.json",
+		".agents/plugins/agy-hq/hooks.json",
+		".agents/plugins/agy-hq/rules/AGENTS.md",
 		"templates/USER.md",
 		"templates/MEMORY.md",
 		"templates/config.yaml",

@@ -1,7 +1,7 @@
 {
   "name": "agy-hq",
   "displayName": "agy-hq (Headquarter)",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Personal Agent OS for Google Antigravity — 24/7 Front Desk coordinator, zero-token lifecycle hooks, isolated private Vault, and 1-tap approval-bound execution.",
   "logo": "assets/logo.svg",
   "author": {
@@ -10,6 +10,15 @@
   },
   "homepage": "https://github.com/zjshen14/agy-hq",
   "repository": "https://github.com/zjshen14/agy-hq",
+  "license": "Apache-2.0",
+  "keywords": [
+    "agent-os",
+    "personal-assistant",
+    "memory",
+    "worktrees",
+    "approvals",
+    "console"
+  ],
   "suggestedPrompts": [
     "Run my Morning Brief across calendar, inbox, and active tasks",
     "Check open PRs, CI status, and active worktrees across my repos",

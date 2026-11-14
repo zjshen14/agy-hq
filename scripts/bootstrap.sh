@@ -7,10 +7,14 @@ cd "$ROOT_DIR"
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
 INIT_FLAGS=()
+INSTALL_GLOBAL=0
 for arg in "$@"; do
   case "$arg" in
     --demo|--with-sample-data)
       INIT_FLAGS+=("--demo")
+      ;;
+    --global)
+      INSTALL_GLOBAL=1
       ;;
   esac
 done
@@ -28,11 +32,17 @@ fi
 
 echo "==> [2/5] Building ./bin/hq microkernel..."
 mkdir -p bin
-go build -o ./bin/hq ./cmd/hq
+GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo dev)"
+go build -ldflags "-X github.com/zjshen14/agy-hq/internal/version.GitCommit=${GIT_SHA}" -o ./bin/hq ./cmd/hq
 
 echo "==> [3/5] Initializing private Vault (./local/) & CI git hooks (pre-commit + pre-push)..."
 ./bin/hq init "${INIT_FLAGS[@]}"
 ./bin/hq ci install-hooks 2>/dev/null || true
+
+if [ "$INSTALL_GLOBAL" -eq 1 ]; then
+  echo "==> [3b/5] Installing global plugin (~/.gemini/config/plugins/agy-hq/) & ~/.local/bin/hq..."
+  ./bin/hq plugin install
+fi
 
 echo "==> [4/5] Auto-arming background daemon & scheduled triggers..."
 ./bin/hq daemon install 2>/dev/null || true

@@ -150,7 +150,7 @@ func TestCheckHarness_RealRepositoryAndMutations(t *testing.T) {
 			failedGates[r.Gate] = true
 		}
 	}
-	for _, wantFail := range []string{"H1", "H2-A", "H3", "H4-A", "H4-B"} {
+	for _, wantFail := range []string{"H1", "H2-A", "H2-C", "H3", "H4-A", "H4-B"} {
 		if !failedGates[wantFail] {
 			t.Errorf("expected gate %s to fail on mutated workspace, got results: %+v", wantFail, badResults)
 		}

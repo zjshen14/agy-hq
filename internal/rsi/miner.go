@@ -624,7 +624,9 @@ func mineTranscript(
 					lastPlannerHadRunCmd = true
 					if c, ok := tc.Args["CommandLine"].(string); ok {
 						lastCmdLine = strings.TrimSpace(c)
-						if strings.HasPrefix(lastCmdLine, "./bin/hq gmail read-quarantined") ||
+						if strings.HasPrefix(lastCmdLine, "hq gmail read-quarantined") ||
+							strings.HasPrefix(lastCmdLine, "hq gchat read-quarantined") ||
+							strings.HasPrefix(lastCmdLine, "./bin/hq gmail read-quarantined") ||
 							strings.HasPrefix(lastCmdLine, "./bin/hq gchat read-quarantined") ||
 							strings.HasPrefix(lastCmdLine, "bin/hq gmail read-quarantined") ||
 							strings.HasPrefix(lastCmdLine, "bin/hq gchat read-quarantined") {

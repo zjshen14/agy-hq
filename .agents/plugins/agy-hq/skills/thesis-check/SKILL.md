@@ -26,9 +26,9 @@ Evaluate new filings or news against an explicit investment thesis and falsifica
    - Explicitly score each falsification criterion (`INTACT`, `WATCH`, or `BREACHED`) and append a dated entry to `local/notes/investing/tickers/<TICKER>/journal.md`.
    - **Routine `INTACT` Checks (Zero Interrupt):** When running from a scheduled gatekeeper (`edgar-close-watch`) and all kill criteria remain `INTACT`, do **not** interrupt the user; queue a 1-line summary for the next Morning Brief via:
      ```sh
-     ./bin/hq outbox add --tier=brief_rollup --scope=investing --skill=thesis-check --title="<TICKER> filing check: INTACT" --summary="..."
+     hq outbox add --tier=brief_rollup --scope=investing --skill=thesis-check --title="<TICKER> filing check: INTACT" --summary="..."
      ```
-   - **`WATCH` or `BREACHED` Alerts:** Immediately surface via `./bin/hq outbox add --tier=interrupt --critical --scope=investing --skill=thesis-check --title="<TICKER> Thesis Alert" --summary="..."` (and stage any follow-up action via `./bin/hq propose`).
+   - **`WATCH` or `BREACHED` Alerts:** Immediately surface via `hq outbox add --tier=interrupt --critical --scope=investing --skill=thesis-check --title="<TICKER> Thesis Alert" --summary="..."` (and stage any follow-up action via `hq propose`).
 
 ## Pre-IPO Secondary Opportunities & Deal-Flow Watchdog
 

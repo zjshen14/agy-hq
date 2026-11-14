@@ -192,8 +192,27 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 		precheckDigest := ""
 
 		if len(s.PrecheckCmd) > 0 {
+			bin0 := s.PrecheckCmd[0]
+			if bin0 == "hq" || bin0 == "./bin/hq" || bin0 == "bin/hq" {
+				cand := filepath.Join(rootDir, bin0)
+				if bin0 != "hq" {
+					if st, sErr := os.Stat(cand); sErr == nil && !st.IsDir() {
+						bin0 = cand
+					} else if exe, eErr := os.Executable(); eErr == nil && exe != "" && strings.HasPrefix(filepath.Base(exe), "hq") {
+						bin0 = exe
+					} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
+						bin0 = lp
+					}
+				} else if exe, eErr := os.Executable(); eErr == nil && exe != "" && strings.HasPrefix(filepath.Base(exe), "hq") {
+					bin0 = exe
+				} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
+					bin0 = lp
+				} else if st, sErr := os.Stat(filepath.Join(rootDir, "bin", "hq")); sErr == nil && !st.IsDir() {
+					bin0 = filepath.Join(rootDir, "bin", "hq")
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			cmd := exec.CommandContext(ctx, s.PrecheckCmd[0], s.PrecheckCmd[1:]...)
+			cmd := exec.CommandContext(ctx, bin0, s.PrecheckCmd[1:]...)
 			cmd.Dir = rootDir
 			cmd.Env = append(sanitizedGitCmd().Env, "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
 			outBytes, cmdErr := cmd.CombinedOutput()
@@ -242,7 +261,7 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 				prompt += fmt.Sprintf("\n\nGatekeeper Delta Output:\n%s", precheckDigest)
 			}
 			if deliv := s.EffectiveDelivery(); deliv != "" {
-				prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `./bin/hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
+				prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
 			}
 			title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, s.Skill)
 			out, spawnErr := SpawnTask(vaultDir, "gatekeeper:"+s.ID, s.Skill, title, prompt, modelID, dryRun)

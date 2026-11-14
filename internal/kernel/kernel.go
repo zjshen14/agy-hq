@@ -2138,10 +2138,10 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 		title := fmt.Sprintf("[Auto] Gmail Triage (%s · %s)", entry.Account, batchLabel)
 		prompt := fmt.Sprintf(
 			"Activate the inbox-triage skill to process Gmail triage batch %s (account=%s, threads=%s). "+
-				"Read each thread via `./bin/hq gmail read-quarantined --account=%s --thread=<threadId>`, "+
-				"create a plain-text draft reply via `./bin/hq gmail draft` if a reply is needed, "+
-				"stage a send proposal via `./bin/hq propose --type=gmail_send --draft=<draftId>`, "+
-				"and save your structured summary via `./bin/hq gmail triage-result --batch=%s`.",
+				"Read each thread via `hq gmail read-quarantined --account=%s --thread=<threadId>`, "+
+				"create a plain-text draft reply via `hq gmail draft` if a reply is needed, "+
+				"stage a send proposal via `hq propose --type=gmail_send --draft=<draftId>`, "+
+				"and save your structured summary via `hq gmail triage-result --batch=%s`.",
 			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
 		)
 		out, spawnErr := SpawnFlashTask(vaultDir, "gmail-precheck:"+batchLabel, "inbox-triage", title, prompt, dryRun)
@@ -2165,10 +2165,10 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 		title := fmt.Sprintf("[Auto] GChat Triage (%s · %s)", entry.Account, batchLabel)
 		prompt := fmt.Sprintf(
 			"Activate the inbox-triage skill to process Google Chat triage batch %s (account=%s, spaces=%s). "+
-				"Read each space/thread via `./bin/hq gchat read-quarantined --account=%s --space=<spaceId>`, "+
-				"create a plain-text draft reply via `./bin/hq gchat draft` if a reply is needed, "+
-				"stage a send proposal via `./bin/hq propose --type=gchat_send --draft=<draftId>`, "+
-				"and save your structured summary via `./bin/hq gchat triage-result --batch=%s`.",
+				"Read each space/thread via `hq gchat read-quarantined --account=%s --space=<spaceId>`, "+
+				"create a plain-text draft reply via `hq gchat draft` if a reply is needed, "+
+				"stage a send proposal via `hq propose --type=gchat_send --draft=<draftId>`, "+
+				"and save your structured summary via `hq gchat triage-result --batch=%s`.",
 			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
 		)
 		out, spawnErr := SpawnFlashTask(vaultDir, "gchat-precheck:"+batchLabel, "inbox-triage", title, prompt, dryRun)

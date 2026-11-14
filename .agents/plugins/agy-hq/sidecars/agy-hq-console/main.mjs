@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -11,21 +11,50 @@ const homeDir = process.env.HOME || homedir();
 const TARGET_PORT = 4242;
 const TARGET_HOST = '127.0.0.1';
 
-function resolveHQBin() {
-  if (process.env.HQ_BIN_PATH && existsSync(process.env.HQ_BIN_PATH)) {
-    return process.env.HQ_BIN_PATH;
+function isExecutable(p) {
+  if (!p) return false;
+  try {
+    accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
-  let dir = __dirname;
-  for (let i = 0; i < 8; i++) {
-    const candidate = join(dir, 'bin', 'hq');
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return join(process.cwd(), 'bin', 'hq');
 }
-const HQ_BIN = resolveHQBin();
+
+function resolveHQBin() {
+  if (process.env.HQ_BIN_PATH && isExecutable(process.env.HQ_BIN_PATH)) {
+    return { bin: process.env.HQ_BIN_PATH, cwd: homeDir };
+  }
+  const pluginRoot = process.env.PLUGIN_ROOT || resolve(__dirname, '../..');
+  const devRoot = resolve(pluginRoot, '../../..');
+  if (existsSync(join(devRoot, 'cmd', 'hq', 'main.go'))) {
+    const devBin = join(devRoot, 'bin', 'hq');
+    if (isExecutable(devBin)) {
+      return { bin: devBin, cwd: devRoot };
+    }
+  }
+  const bundledBin = join(pluginRoot, 'bin', 'hq');
+  if (isExecutable(bundledBin)) {
+    return { bin: bundledBin, cwd: homeDir };
+  }
+  const localBin = join(homeDir, '.local', 'bin', 'hq');
+  if (isExecutable(localBin)) {
+    return { bin: localBin, cwd: homeDir };
+  }
+  const pathDirs = [
+    ...(process.env.PATH ? process.env.PATH.split(delimiter) : []),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ];
+  for (const d of pathDirs) {
+    if (!d) continue;
+    const cand = join(d, 'hq');
+    if (isExecutable(cand)) {
+      return { bin: cand, cwd: homeDir };
+    }
+  }
+  return { bin: localBin, cwd: homeDir };
+}
 
 // Preload JS location or fallback
 let preloadJS = '';
@@ -72,13 +101,15 @@ function ensureDaemon() {
     path: '/healthz',
     method: 'GET',
     timeout: 1000,
-  }, (res) => {
+  }, () => {
     // Daemon is alive
   });
   req.on('error', () => {
-    if (existsSync(HQ_BIN)) {
+    const { bin, cwd } = resolveHQBin();
+    if (isExecutable(bin)) {
       try {
-        const p = spawn(HQ_BIN, ['daemon', `--addr=${TARGET_HOST}:${TARGET_PORT}`], {
+        const p = spawn(bin, ['daemon', `--addr=${TARGET_HOST}:${TARGET_PORT}`], {
+          cwd,
           detached: true,
           stdio: 'ignore',
         });
@@ -116,7 +147,7 @@ function proxy(req, res, targetPath) {
     pRes.pipe(res, { end: true });
   });
 
-  pReq.on('error', (err) => {
+  pReq.on('error', () => {
     res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html><html><body style="background:#0b0f19;color:#e6edf3;font-family:sans-serif;padding:24px;">
       <h2>Connecting to agy-hq daemon...</h2>

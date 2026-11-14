@@ -1,6 +1,6 @@
 # RFC-0015: Standalone Global Antigravity Plugin Packaging, Embedded Templates & Workspace-Agnostic Vault Resolution
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Author:** `[Task:agy-hq] Package agy-hq as Global Plugin` (`gemini-4-carbon-high`)
 - **Created:** 2026-11-13
 - **Companion Research:** [11 — Antigravity Global Plugin Packaging & Vault Isolation Audit](../research/11_plugin_packaging_audit.md)
@@ -15,9 +15,9 @@
 As documented in [Research 11](../research/11_plugin_packaging_audit.md), running `agy plugin validate --strict .agents/plugins/agy-hq` against `HEAD` (`bdcd98d`) fails with **1 error and 2 warnings**, and a deeper preflight audit uncovered **seven coupled defects** blocking global installation (`~/.gemini/config/plugins/agy-hq/` + `~/.local/bin/hq`):
 
 1. **Malformed `sidecars.json` Breaks Plugin Validation:**
-   - [`.agents/plugins/agy-hq/sidecars.json`](../../.agents/plugins/agy-hq/sidecars.json) contains a JSON array (`[{...}]`), whereas Antigravity's customization loader parses `sidecars.json` as `customizations.JSONConfig` (`{"entries": [...]}`) for external paths and ignores the malformed file with an unmarshal error. Meanwhile, [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) already provides native sidecar auto-discovery (`agy-hq/agy-hq-console`).
+   - Legacy `.agents/plugins/agy-hq/sidecars.json` contained a JSON array (`[{...}]`), whereas Antigravity's customization loader parses `sidecars.json` as `customizations.JSONConfig` (`{"entries": [...]}`) for external paths and ignores the malformed file with an unmarshal error. Meanwhile, [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) already provides native sidecar auto-discovery (`agy-hq/agy-hq-console`).
 2. **Live 2x Hook Execution Inside `headquarter` (`.agents/hooks.json` + Plugin `hooks.json`):**
-   - Antigravity merges named hooks across distinct active customization sources. Having both root [`.agents/hooks.json`](../../.agents/hooks.json) and [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) fires `SessionStart`, `PreToolUse`, and `Stop` **twice** per turn inside `headquarter`—doubling `SessionStart` context tokens (`~3,000` extra prompt tokens) and incrementing the Front Desk `PreToolUse` lookup counter by `+2` per read!
+   - Antigravity merges named hooks across distinct active customization sources. Having both root `.agents/hooks.json` and [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) fired `SessionStart`, `PreToolUse`, and `Stop` **twice** per turn inside `headquarter`—doubling `SessionStart` context tokens (`~3,000` extra prompt tokens) and incrementing the Front Desk `PreToolUse` lookup counter by `+2` per read!
 3. **Workspace-Relative `./bin/hq` Paths Across Hooks, Sidecar, Skills & Security Regexes:**
    - Plugin hooks run with `cwd = <plugin_dir>` (`~/.gemini/config/plugins/agy-hq/`), where `./bin/hq` and `../../../bin/hq` do not exist.
    - All 9 bundled `SKILL.md` files instruct the model to invoke `./bin/hq`.
@@ -86,9 +86,9 @@ flowchart TB
 
 1. **Delete `.agents/plugins/agy-hq/sidecars.json`:**
    - Upstream Antigravity discovers sidecars inside plugins automatically by scanning `<plugin_root>/sidecars/*/sidecar.json`.
-   - Removing [`.agents/plugins/agy-hq/sidecars.json`](../../.agents/plugins/agy-hq/sidecars.json) eliminates the `customizations.JSONConfig` unmarshal error while keeping [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) auto-discovered as `agy-hq/agy-hq-console` (`sidecar://agy-hq/agy-hq-console/`).
+   - Removing `.agents/plugins/agy-hq/sidecars.json` eliminates the `customizations.JSONConfig` unmarshal error while keeping [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) auto-discovered as `agy-hq/agy-hq-console` (`sidecar://agy-hq/agy-hq-console/`).
 2. **Delete Root `.agents/hooks.json` (Single-Source Hook Registration):**
-   - Removing [`.agents/hooks.json`](../../.agents/hooks.json) makes [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) the single source of truth inside the `headquarter` workspace as well as globally.
+   - Removing `.agents/hooks.json` makes [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) the single source of truth inside the `headquarter` workspace as well as globally.
    - This immediately fixes the 2x `SessionStart` token injection and 2x `PreToolUse` Front Desk lookup counter increment documented in [Research 11](../research/11_plugin_packaging_audit.md).
 3. **Defense-in-Depth Hook Idempotency Guard (`internal/hooks/hooks.go`):**
    - Even if a user ever manually registers a duplicate hook entry, `HandleSessionStart` and `HandlePreToolUse` will check a lightweight `(conversationId, event, toolName, turnStepKey)` stamp with a `1500ms` window inside `<vault>/memory/.hook_dedup/` (or inside `front_desk_turn.json`), ensuring duplicate invocations within the same millisecond burst emit `{}` without double-injecting context or double-incrementing `turnState.Count`.
@@ -118,28 +118,21 @@ Per Antigravity's hook specification, command hooks execute with `cwd = <plugin_
 
 ```json
 {
-  "hooks": {
+  "hq-kernel": {
     "SessionStart": [
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "name": "hq-kernel",
-            "type": "command",
-            "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; if [ -f \"$R/cmd/hq/main.go\" ]; then if [ ! -x \"$R/bin/hq\" ] || [ -n \"$(find \"$R/cmd\" \"$R/internal\" \"$R/templates\" -name '*.go' -newer \"$R/bin/hq\" -print -quit 2>/dev/null)\" ]; then (cd \"$R\" && go build -o ./bin/hq ./cmd/hq) >/dev/null 2>&1 || true; fi; [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook session-start; fi; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook session-start; command -v hq >/dev/null 2>&1 && exec hq hook session-start; exit 0",
-            "timeout": 15
-          }
-        ]
+        "type": "command",
+        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; if [ -f \"$R/cmd/hq/main.go\" ]; then if [ ! -x \"$R/bin/hq\" ] || [ -n \"$(find \"$R/cmd\" \"$R/internal\" \"$R/templates\" -name '*.go' -newer \"$R/bin/hq\" -print -quit 2>/dev/null)\" ]; then (cd \"$R\" && go build -o ./bin/hq ./cmd/hq && ./bin/hq migrate --quiet) >/dev/null 2>&1 || true; fi; [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook session-start; fi; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook session-start; command -v hq >/dev/null 2>&1 && exec hq hook session-start; exit 0",
+        "timeout": 15
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "*",
+        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents|schedule|manage_task",
         "hooks": [
           {
-            "name": "hq-kernel",
             "type": "command",
-            "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook pre-tool-use; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook pre-tool-use; command -v hq >/dev/null 2>&1 && exec hq hook pre-tool-use; printf '{}\\n'",
+            "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook pre-tool; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook pre-tool; command -v hq >/dev/null 2>&1 && exec hq hook pre-tool; printf '{}\\n'",
             "timeout": 5
           }
         ]
@@ -147,15 +140,9 @@ Per Antigravity's hook specification, command hooks execute with `cwd = <plugin_
     ],
     "Stop": [
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "name": "hq-kernel",
-            "type": "command",
-            "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook stop; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook stop; command -v hq >/dev/null 2>&1 && exec hq hook stop; exit 0",
-            "timeout": 10
-          }
-        ]
+        "type": "command",
+        "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook stop; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook stop; command -v hq >/dev/null 2>&1 && exec hq hook stop; exit 0",
+        "timeout": 10
       }
     ]
   }
@@ -303,6 +290,23 @@ To prevent silent staleness when a contributor edits `.agents/plugins/agy-hq/` i
 
 ---
 
+### 4.6 Three-Layer Versioning (`0.1.0`), Binary Parity & Daemon Skew Protection
+
+Once `agy-hq` is distributed globally as a plugin, three artifacts evolve on a user's workstation and must never silently drift apart:
+
+1. **Single-Source SemVer (`0.1.0`) & `hq version [--json]` (`internal/version/version.go`):**
+   - Set canonical initial pre-1.0 SemVer to `"0.1.0"` (matching upstream Antigravity plugin SemVer conventions without a `v` prefix) in both [`.agents/plugins/agy-hq/plugin.json`](../../.agents/plugins/agy-hq/plugin.json) and `internal/version.Version`.
+   - Expose `hq version [--json]` (and `hq --version` / `-v`), reporting `version`, VCS `commit` (from `-ldflags` or Go `runtime/debug.ReadBuildInfo`), and `vaultSchemaVersion` (`v8`).
+   - CI Gate `H2-C` enforces strict SemVer syntax and exact equality between `.agents/plugins/agy-hq/plugin.json` `"version"` and `internal/version.Version` (plus git tag `vX.Y.Z` parity when `GITHUB_REF_NAME` is a release tag).
+2. **Plugin ↔ Binary ↔ Running Daemon Skew Guards:**
+   - **Plugin vs. Binary:** During `HandleSessionStart`, `hq plugin status`, and `hq doctor`, `hq` inspects `$PLUGIN_ROOT/plugin.json` (when `PLUGIN_ROOT` is set or global plugin is installed) and emits a 1-line warning if the active plugin manifest version diverges from `internal/version.Version`.
+   - **Binary vs. `:4242` `hq daemon`:** `/healthz` in [`internal/webui/webui.go`](../../internal/webui/webui.go) includes `"version"` and `"vaultSchemaVersion"`; when `hq plugin install` or `hq upgrade` updates `~/.local/bin/hq`, it probes `:4242/healthz` and gracefully restarts a running background `hq daemon` if its live version or commit differs.
+3. **Decoupled Monotonic Vault Schema (`CurrentSchemaVersion = 8`) & Forward-Safe Guard:**
+   - Prompt/skill patch releases bump SemVer (`0.1.0` → `0.1.1`) without forcing Vault migrations, while structural Vault changes increment `CurrentSchemaVersion` (`7` → `8`).
+   - If `vault.Migrate` encounters `prev.Version > CurrentSchemaVersion` (e.g., user ran an older `hq` binary against a newer Vault), it returns an explicit forward-compatibility error rather than downgrading `schema_version.json`.
+
+---
+
 ## 5. Security, CI Harness (`H2-A/B/C`) & Ring-0 TCB Verification
 
 ### 5.1 Harness Contract Updates (`internal/ci/harness.go`)
@@ -340,7 +344,7 @@ Upon approval of RFC-0015, Phase 2 executes in a single atomic, CI-verified comm
    - Update [`internal/vault/vault.go`](../../internal/vault/vault.go) and [`internal/vault/migrate.go`](../../internal/vault/migrate.go) (`IsAgyHQRepo`, 5-step `ResolveVaultDir`, `~/.gemini/antigravity/hq/config.json` helper, embedded `templates.FS` fallback, Schema `v8` `triggers.yaml` `./bin/hq` -> `hq` migration, guarded `InstallGitHooks`).
    - Update [`internal/worktree/worktree.go`](../../internal/worktree/worktree.go) and [`cmd/hq/main.go`](../../cmd/hq/main.go) for external `--repo` resolution and `IsAgyHQRepo`-guarded git hook installation.
 2. **Plugin Bundle, Rules Split, Sidecar & 9 Skills:**
-   - Delete [`.agents/plugins/agy-hq/sidecars.json`](../../.agents/plugins/agy-hq/sidecars.json) and root [`.agents/hooks.json`](../../.agents/hooks.json).
+   - Delete `.agents/plugins/agy-hq/sidecars.json` and root `.agents/hooks.json`.
    - Update [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) and [`.agents/plugins/agy-hq/plugin.json`](../../.agents/plugins/agy-hq/plugin.json) / `.agents/plugins/agy-hq/README.md`.
    - Author `.agents/plugins/agy-hq/rules/AGENTS.md` (workspace-agnostic OS rules) and slim root [`AGENTS.md`](../../AGENTS.md) to `agy-hq` contributor/RFC/CI rules.
    - Update [`main.mjs`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/main.mjs) + `templates/sidecars/agy-hq-console/main.mjs`, all 9 `.agents/plugins/agy-hq/skills/*/SKILL.md` files, and `templates/{USER.md,triggers.yaml}` to use `hq` / `$PLUGIN_ROOT`.

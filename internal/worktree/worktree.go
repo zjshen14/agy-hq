@@ -24,11 +24,27 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 	var gitRepoDir string
 	var repoBase string
 
-	// Check if repoSpec is an existing local directory
-	if info, err := os.Stat(repoSpec); err == nil && info.IsDir() {
-		absRepo, err := filepath.Abs(repoSpec)
+	// Check if repoSpec is an existing local directory (or sibling workspace name)
+	localCandidate := repoSpec
+	if info, err := os.Stat(localCandidate); err != nil || !info.IsDir() {
+		if !strings.Contains(repoSpec, "/") && !strings.Contains(repoSpec, ":") {
+			if cwd, cErr := os.Getwd(); cErr == nil && cwd != "" {
+				sibling := filepath.Join(filepath.Dir(cwd), repoSpec)
+				if st, sErr := os.Stat(sibling); sErr == nil && st.IsDir() {
+					localCandidate = sibling
+				}
+			}
+		}
+	}
+	if info, err := os.Stat(localCandidate); err == nil && info.IsDir() {
+		absRepo, err := filepath.Abs(localCandidate)
 		if err != nil {
 			return "", err
+		}
+		if topOut, tErr := vault.SanitizedGitCommand(absRepo, "rev-parse", "--show-toplevel").Output(); tErr == nil {
+			if top := strings.TrimSpace(string(topOut)); top != "" {
+				absRepo = filepath.Clean(top)
+			}
 		}
 		gitRepoDir = absRepo
 		repoBase = filepath.Base(absRepo)

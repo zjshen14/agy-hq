@@ -10,7 +10,7 @@ schedules:
     cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
     mode: daemon_gatekeeper
     model: gemini-4-hydrogen-medium
-    precheck_cmd: ["./bin/hq", "status", "--quiet"]
+    precheck_cmd: ["hq", "status", "--quiet"]
     dedup_mode: stdout_sha256
     delivery: interrupt_on_breach
     skill: thesis-check

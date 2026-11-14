@@ -35,7 +35,7 @@ Running `agy plugin validate --strict .agents/plugins/agy-hq` on `HEAD` (`bdcd98
 - `⚠ hooks.json: hook "hq-kernel": ./bin/hq doesn't exist. Hook commands run in the plugin folder` (`PreToolUse` and `Stop`)
 
 ### Defect 2: Live Double-Hook Execution Inside `headquarter` (`.agents/hooks.json` + Plugin `hooks.json`)
-Because both [`.agents/hooks.json`](../../.agents/hooks.json) and [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) are active inside the `headquarter` workspace, Antigravity merges and executes both:
+Because both `.agents/hooks.json` and [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) were active inside the `headquarter` workspace prior to `RFC-0015`, Antigravity merged and executed both:
 1. **`SessionStart` 2x Token Tax:** `[agy-hq Session Context Loaded]` (`USER.md`, `MEMORY.md`, Wiki index, 25 facts, worktrees, tasks, triggers) is injected **twice** at the start of every `headquarter` session (~2,500–3,500 wasted prompt tokens).
 2. **`PreToolUse` 2x Lookup Counter Increment:** On `[HQ] Front Desk`, `turnState.Count++` in [`internal/hooks/hooks.go`](../../internal/hooks/hooks.go) increments twice for a single `read_file`, prematurely tripping the 3-lookup cap on the 2nd lookup (`count = 4 > 3`).
 

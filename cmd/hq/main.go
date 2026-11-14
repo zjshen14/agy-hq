@@ -22,8 +22,10 @@ import (
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/webui"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
@@ -39,23 +41,71 @@ func main() {
 		fmt.Fprintf(os.Stderr, "hq: resolve root: %v\n", err)
 		os.Exit(1)
 	}
-	vaultDir, err := vault.ResolveVaultDir()
+	vaultDir, vaultSource, err := vault.ResolveVaultDirWithSource()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hq: resolve vault: %v\n", err)
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
+	case "version", "--version", "-v":
+		fs := flag.NewFlagSet("version", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output version metadata as JSON")
+		_ = fs.Parse(os.Args[2:])
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"version":            version.Version,
+				"gitCommit":          version.EffectiveCommit(),
+				"vaultSchemaVersion": vault.CurrentSchemaVersion,
+				"vaultDir":           vaultDir,
+				"vaultSource":        vaultSource,
+			})
+			return
+		}
+		fmt.Printf("hq v%s (commit %s, vault-schema v%d)\n", version.Version, version.EffectiveCommit(), vault.CurrentSchemaVersion)
+
+	case "vault-path":
+		fs := flag.NewFlagSet("vault-path", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output resolved Vault path and source as JSON")
+		_ = fs.Parse(os.Args[2:])
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]string{
+				"vaultDir": vaultDir,
+				"source":   vaultSource,
+			})
+			return
+		}
+		fmt.Println(vaultDir)
+
+	case "plugin":
+		runPluginCLI(rootDir, vaultDir, os.Args[2:])
+
 	case "init":
 		fs := flag.NewFlagSet("init", flag.ExitOnError)
 		demo := fs.Bool("demo", false, "Seed synthetic [Sample] ACME 10-Q inbox filing, thesis, tasks, approval, and facts")
 		withSample := fs.Bool("with-sample-data", false, "Alias for --demo: seed synthetic [Sample] dataset")
+		globalVault := fs.Bool("global-vault", false, "Initialize and register the canonical global Vault (~/.gemini/antigravity/hq/vault)")
 		_ = fs.Parse(os.Args[2:])
-		templateDir := filepath.Join(rootDir, "templates")
+		if *globalVault {
+			if gv, gErr := vault.DefaultGlobalVaultDir(); gErr == nil && gv != "" {
+				vaultDir = gv
+			}
+		}
+		templateDir := resolveTemplateDir(rootDir)
 		created, err := vault.Init(vaultDir, templateDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
 			os.Exit(1)
+		}
+		if *globalVault {
+			_ = vault.SaveGlobalConfig(vault.GlobalConfig{
+				VaultDir:  vaultDir,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			})
 		}
 		if *demo || *withSample {
 			demoSeeded, dErr := vault.SeedDemoData(vaultDir)
@@ -73,7 +123,9 @@ func main() {
 				_ = kernel.SetFrontDesk(vaultDir, convID, artDir)
 			}
 		}
-		_, _ = ci.InstallGitHooks(rootDir)
+		if vault.IsAgyHQRepo(rootDir) {
+			_, _ = ci.InstallGitHooks(rootDir)
+		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
 		for _, item := range created {
@@ -95,13 +147,15 @@ func main() {
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		quiet := fs.Bool("quiet", false, "Suppress normal migration output")
 		_ = fs.Parse(os.Args[2:])
-		templateDir := filepath.Join(rootDir, "templates")
+		templateDir := resolveTemplateDir(rootDir)
 		rep, err := vault.Migrate(vaultDir, templateDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq migrate failed: %v\n", err)
 			os.Exit(1)
 		}
-		_, _ = ci.InstallGitHooks(rootDir)
+		if vault.IsAgyHQRepo(rootDir) {
+			_, _ = ci.InstallGitHooks(rootDir)
+		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if !*quiet {
 			fmt.Printf("Vault Schema Migration: v%d -> v%d (snapshotCommitted=%v)\n", rep.PreviousVersion, rep.CurrentVersion, rep.SnapshotCommitted)
@@ -120,10 +174,14 @@ func main() {
 		fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
 		noPull := fs.Bool("no-pull", false, "Skip git pull on root repository (offline/test mode)")
 		_ = fs.Parse(os.Args[2:])
+		if _, sErr := os.Stat(filepath.Join(rootDir, "cmd", "hq")); sErr != nil {
+			fmt.Fprintf(os.Stderr, "hq upgrade: %s is not an agy-hq source checkout (cd into your agy-hq repository or set HQ_ROOT_DIR)\n", rootDir)
+			os.Exit(1)
+		}
 
 		// 1. Pre-upgrade snapshot of uncommitted private Vault changes
 		if vault.SnapshotVault(vaultDir, "hq upgrade") {
-			fmt.Println("==> [1/5] Committed pre-upgrade restore point in local/.git")
+			fmt.Println("==> [1/5] Committed pre-upgrade restore point in Vault .git")
 		} else {
 			fmt.Println("==> [1/5] Private Vault working tree clean (or no uncommitted changes)")
 		}
@@ -145,14 +203,21 @@ func main() {
 			fmt.Println("==> [2/5] Skipping git pull (--no-pull)")
 		}
 
-		// 3. Recompile ./bin/hq from the updated Go source
+		// 3. Recompile ./bin/hq from the updated Go source (embedding GitCommit via -ldflags)
 		targetBin := filepath.Join(rootDir, "bin", "hq")
 		if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
 			targetBin = exe
 		}
 		fmt.Printf("==> [3/5] Rebuilding hq microkernel (%s)...\n", targetBin)
 		_ = os.MkdirAll(filepath.Dir(targetBin), 0o755)
-		buildCmd := exec.Command("go", "build", "-o", targetBin, "./cmd/hq")
+		buildArgs := []string{"build"}
+		if out, cErr := vault.SanitizedGitCommand(rootDir, "rev-parse", "--short=12", "HEAD").Output(); cErr == nil {
+			if sha := strings.TrimSpace(string(out)); sha != "" {
+				buildArgs = append(buildArgs, "-ldflags", "-X github.com/zjshen14/agy-hq/internal/version.GitCommit="+sha)
+			}
+		}
+		buildArgs = append(buildArgs, "-o", targetBin, "./cmd/hq")
+		buildCmd := exec.Command("go", buildArgs...)
 		buildCmd.Dir = rootDir
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "hq upgrade: go build failed (%v):\n%s\n", err, string(out))
@@ -174,6 +239,20 @@ func main() {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				if line != "" {
 					fmt.Printf("    %s\n", line)
+				}
+			}
+		}
+		if !vault.IsTempPath(targetBin) {
+			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && (st.GlobalPluginInstalled || st.GlobalBinaryInstalled) {
+				syncCmd := exec.Command(targetBin, "plugin", "install", "--vault-dir="+vaultDir)
+				syncCmd.Dir = rootDir
+				syncCmd.Env = append(os.Environ(), "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
+				if out, syncErr := syncCmd.CombinedOutput(); syncErr == nil {
+					for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+						if line != "" {
+							fmt.Printf("    %s\n", line)
+						}
+					}
 				}
 			}
 		}
@@ -227,7 +306,7 @@ func main() {
 				os.Exit(1)
 			}
 			_ = webui.SyncMarkdownConsole(vaultDir)
-		case "pre-tool":
+		case "pre-tool", "pre-tool-use":
 			if err := hooks.HandlePreToolUse(os.Stdin, os.Stdout, vaultDir); err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
 				os.Exit(1)
@@ -257,10 +336,7 @@ func main() {
 		ttlStr := fs.String("ttl", "", "Optional proposal expiration TTL duration (default 24h)")
 		_ = fs.Parse(os.Args[2:])
 		if *rsiID != "" {
-			hqBin := "./bin/hq"
-			if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
-				hqBin = exe
-			}
+			hqBin := resolveProposalHQBin(rootDir)
 			prop, _, err := rsi.Propose(rootDir, vaultDir, *rsiID, *convID, hqBin)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq propose --rsi-id=%s failed: %v\n", *rsiID, err)
@@ -268,7 +344,7 @@ func main() {
 			}
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
-			fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+			fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 			return
 		}
 		var meta map[string]string
@@ -280,10 +356,7 @@ func main() {
 					*actionType = "gmail_send"
 				}
 			}
-			hqBin := "./bin/hq"
-			if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
-				hqBin = exe
-			}
+			hqBin := resolveProposalHQBin(rootDir)
 			if *actionType == "gchat_send" {
 				spec, err := gchat.GetDraft(vaultDir, *account, *draftID)
 				if err != nil {
@@ -301,7 +374,7 @@ func main() {
 					*cmdStr = fmt.Sprintf("%s gchat send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
 				}
 				if *workDir == "" {
-					*workDir = rootDir
+					*workDir = resolveDefaultWorkDir(rootDir)
 				}
 				preview := spec.Body
 				if len(preview) > 500 {
@@ -335,7 +408,7 @@ func main() {
 					*cmdStr = fmt.Sprintf("%s gmail send-draft --account=%s --draft=%s --hash=%s", hqBin, spec.Account, spec.DraftID, hashShort)
 				}
 				if *workDir == "" {
-					*workDir = rootDir
+					*workDir = resolveDefaultWorkDir(rootDir)
 				}
 				preview := spec.Body
 				if len(preview) > 500 {
@@ -376,7 +449,7 @@ func main() {
 		if len(prop.RiskFlags) > 0 {
 			fmt.Printf("  ⚠️ Contextual PII Warning: %s\n", strings.Join(prop.RiskFlags, ", "))
 		}
-		fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 	case "approve":
 		if len(os.Args) < 3 {
@@ -723,7 +796,7 @@ func main() {
 			}
 			workDir := wtDir
 			if workDir == "" {
-				workDir = rootDir
+				workDir = resolveDefaultWorkDir(rootDir)
 			}
 			out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun, isForced)
 			_ = webui.SyncMarkdownConsole(vaultDir)
@@ -804,7 +877,7 @@ func main() {
 			subRole = fmt.Sprintf("[%s] general: %s", resolvedTier, *taskName)
 		}
 		fullPrompt := *prompt
-		workDir := rootDir
+		workDir := resolveDefaultWorkDir(rootDir)
 		if *repoSpec != "" {
 			wtSlug := *taskName
 			if wtSlug == "" {
@@ -1156,10 +1229,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", err)
 				os.Exit(1)
 			}
-			hqBin := "./bin/hq"
-			if exe, eErr := os.Executable(); eErr == nil && vault.IsTempPath(exe) {
-				hqBin = exe
-			}
+			hqBin := resolveProposalHQBin(rootDir)
 			hashShort := spec.ContentHash
 			if len(hashShort) > 12 {
 				hashShort = hashShort[:12]
@@ -1182,7 +1252,7 @@ func main() {
 				"draftPayload": spec.Body,
 				"contentHash":  spec.ContentHash,
 			}
-			prop, err := approvals.CreateWithMetadata(vaultDir, "gchat_send", summary, cmdStr, rootDir, *convID, meta)
+			prop, err := approvals.CreateWithMetadata(vaultDir, "gchat_send", summary, cmdStr, resolveDefaultWorkDir(rootDir), *convID, meta)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", err)
 				os.Exit(1)
@@ -1190,7 +1260,7 @@ func main() {
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Staged Google Chat proposal %s (draft: %s, space: %s [%s], sha256: %s)\n",
 				prop.ID, spec.DraftID, spec.SpaceName, spec.SpaceID, prop.SHA256[:12])
-			fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+			fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 		case "send-draft", "send":
 			fs := flag.NewFlagSet("gchat send-draft", flag.ExitOnError)
@@ -1611,8 +1681,43 @@ func main() {
 				}
 			}
 
+		case "commit":
+			fs := flag.NewFlagSet("memory commit", flag.ExitOnError)
+			msg := fs.String("message", "", "Optional commit message for the private Vault git repository")
+			msgShort := fs.String("m", "", "Alias for --message")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(os.Args[3:])
+			m := strings.TrimSpace(*msg)
+			if m == "" {
+				m = strings.TrimSpace(*msgShort)
+			}
+			committed, err := vault.CommitVault(vaultDir, m)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory commit failed: %v\n", err)
+				os.Exit(1)
+			}
+			sha := ""
+			if out, sErr := vault.SanitizedGitCommand(vaultDir, "rev-parse", "--short=12", "HEAD").Output(); sErr == nil {
+				sha = strings.TrimSpace(string(out))
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(map[string]interface{}{
+					"vaultDir":  vaultDir,
+					"committed": committed,
+					"commit":    sha,
+				})
+				return
+			}
+			if committed {
+				fmt.Printf("Committed private Vault changes (%s) in %s\n", sha, vaultDir)
+			} else {
+				fmt.Printf("Private Vault working tree clean (HEAD %s) in %s\n", sha, vaultDir)
+			}
+
 		default:
-			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup)\n", sub)
+			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup, commit)\n", sub)
 			os.Exit(1)
 		}
 
@@ -1935,10 +2040,7 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 		fs := flag.NewFlagSet("rsi propose", flag.ExitOnError)
 		convID := fs.String("conv", "", "Optional conversation ID")
 		_ = fs.Parse(args[1:])
-		hqBin := "./bin/hq"
-		if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
-			hqBin = exe
-		}
+		hqBin := resolveProposalHQBin(rootDir)
 		prop, h, err := rsi.Propose(rootDir, vaultDir, rsiID, *convID, hqBin)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq rsi propose failed: %v\n", err)
@@ -1946,7 +2048,7 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Staged RSI proposal %s for %s (type: %s, sha256: %s)\n", prop.ID, h.ID, prop.ActionType, prop.SHA256[:12])
-		fmt.Printf("  Approve with: ./bin/hq approve %s --sha256=%s\n", prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 	case "apply":
 		if len(args) == 0 {
@@ -2586,14 +2688,207 @@ func truncateDisplay(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
+func resolveTemplateDir(rootDir string) string {
+	if vault.IsAgyHQRepo(rootDir) || strings.TrimSpace(os.Getenv("HQ_ROOT_DIR")) != "" {
+		dir := filepath.Join(rootDir, "templates")
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	return ""
+}
+
+func resolveDefaultWorkDir(rootDir string) string {
+	if vault.IsAgyHQRepo(rootDir) {
+		return rootDir
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		return cwd
+	}
+	return rootDir
+}
+
+func resolveProposalHQBin(rootDir string) string {
+	if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
+		return exe
+	}
+	if vault.IsAgyHQRepo(rootDir) {
+		if st, err := os.Stat(filepath.Join(rootDir, "bin", "hq")); err == nil && !st.IsDir() {
+			return "./bin/hq"
+		}
+	}
+	if _, err := exec.LookPath("hq"); err == nil {
+		return "hq"
+	}
+	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
+		return exe
+	}
+	return "hq"
+}
+
+func displayHQCmd(rootDir string) string {
+	if vault.IsAgyHQRepo(rootDir) {
+		if st, err := os.Stat(filepath.Join(rootDir, "bin", "hq")); err == nil && !st.IsDir() {
+			return "./bin/hq"
+		}
+	}
+	return "hq"
+}
+
+func runPluginCLI(rootDir, vaultDir string, args []string) {
+	sub := "status"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+
+	switch sub {
+	case "install":
+		fs := flag.NewFlagSet("plugin install", flag.ExitOnError)
+		_ = fs.Bool("force", false, "Force reinstall even if already at the same version")
+		globalVault := fs.Bool("global-vault", false, "Use canonical global Vault (~/.gemini/antigravity/hq/vault)")
+		vaultFlag := fs.String("vault-dir", "", "Explicit default Vault directory to register in ~/.gemini/antigravity/hq/config.json")
+		pluginSrcFlag := fs.String("plugin-dir", "", "Optional explicit source plugin directory")
+		binDirFlag := fs.String("bin-dir", "", "Optional destination bin directory (defaults to ~/.local/bin)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		targetVault := strings.TrimSpace(*vaultFlag)
+		if targetVault == "" && !*globalVault {
+			targetVault = vaultDir
+		}
+		res, err := plugin.Install(plugin.InstallOptions{
+			SourceRepoDir: rootDir,
+			PluginSrcDir:  *pluginSrcFlag,
+			BinDir:        *binDirFlag,
+			VaultDir:      targetVault,
+			GlobalVault:   *globalVault,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq plugin install failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(res)
+			return
+		}
+		shaShort := res.BinarySHA256
+		if len(shaShort) > 12 {
+			shaShort = shaShort[:12]
+		}
+		digShort := res.BundleDigest
+		if len(digShort) > 12 {
+			digShort = digShort[:12]
+		}
+		fmt.Printf("Installed agy-hq global plugin v%s (commit %s)\n", res.Version, res.Commit)
+		fmt.Printf("  Binary:       %s (sha256:%s)\n", res.BinaryPath, shaShort)
+		fmt.Printf("  Plugin Dir:   %s (%d files, bundle:%s)\n", res.PluginDir, res.FileCount, digShort)
+		fmt.Printf("  Vault Dir:    %s\n", res.VaultDir)
+		fmt.Printf("  Global Cfg:   %s\n", res.GlobalConfigPath)
+		if res.DaemonRestarted {
+			fmt.Printf("  Daemon Sync:  restarted skewed background daemon\n")
+		}
+		if !res.BinDirOnPath {
+			fmt.Printf("  Tip:          Add %s to your shell PATH so bare `hq` resolves in interactive shells.\n", filepath.Dir(res.BinaryPath))
+		}
+
+	case "uninstall":
+		fs := flag.NewFlagSet("plugin uninstall", flag.ExitOnError)
+		purgeBin := fs.Bool("purge-bin", false, "Also remove ~/.local/bin/hq binary")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		rep, err := plugin.Uninstall(*purgeBin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq plugin uninstall failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+		fmt.Printf("Uninstalled agy-hq global plugin (removedPlugin=%q, removedBinary=%q, preservedVault=%s)\n",
+			rep.RemovedPluginDir, rep.RemovedBinaryPath, rep.PreservedVaultDir)
+
+	case "status":
+		fs := flag.NewFlagSet("plugin status", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		st, err := plugin.Status(vaultDir, rootDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq plugin status failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(st)
+			return
+		}
+		fmt.Printf("HQ Global Plugin & Binary Status (v%s · commit %s · schema v%d)\n", st.EngineVersion, st.EngineCommit, st.VaultSchemaVersion)
+		fmt.Printf("  Active Vault:      %s (source: %s)\n", st.VaultDir, st.VaultResolutionSource)
+		fmt.Printf("  Global Binary:     %s (installed=%v, synced=%v, inPATH=%v)\n",
+			st.GlobalBinaryPath, st.GlobalBinaryInstalled, st.BinaryInSync, st.BinDirOnPath)
+		fmt.Printf("  Global Plugin Dir: %s (installed=%v, version=%s, bundleSynced=%v)\n",
+			st.GlobalPluginDir, st.GlobalPluginInstalled, st.GlobalPluginVersion, st.BundleInSync)
+		if st.WorkspacePluginFound {
+			fmt.Printf("  Workspace Plugin:  %s (version=%s, activePrecedence=%s)\n",
+				st.WorkspacePluginDir, st.WorkspacePluginVer, "workspace-first")
+		}
+		if st.DaemonRunning {
+			fmt.Printf("  Live Daemon:       running (version=%s, commit=%s, skewed=%v)\n",
+				st.DaemonVersion, st.DaemonCommit, st.DaemonSkewed)
+		} else {
+			fmt.Printf("  Live Daemon:       inactive\n")
+		}
+
+	case "validate":
+		fs := flag.NewFlagSet("plugin validate", flag.ExitOnError)
+		strict := fs.Bool("strict", true, "Treat warnings as errors")
+		_ = fs.Parse(args)
+		targetDir := filepath.Join(rootDir, ".agents", "plugins", "agy-hq")
+		if !vault.IsAgyHQRepo(rootDir) {
+			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && st.GlobalPluginInstalled {
+				targetDir = st.GlobalPluginDir
+			}
+		}
+		if len(fs.Args()) > 0 {
+			targetDir = fs.Args()[0]
+		}
+		if err := plugin.ValidateBundle(targetDir, *strict); err != nil {
+			fmt.Fprintf(os.Stderr, "hq plugin validate failed: %v\n", err)
+			os.Exit(1)
+		}
+		agyChecked := false
+		if os.Getenv("HQ_SKIP_AGY_PLUGIN_VALIDATE") != "1" {
+			ran, out, vErr := plugin.ValidateWithAgyCLI(targetDir)
+			if vErr != nil {
+				fmt.Fprintf(os.Stderr, "hq plugin validate (agy CLI) failed: %v\n%s\n", vErr, out)
+				os.Exit(1)
+			}
+			agyChecked = ran
+		}
+		fmt.Printf("Validated plugin bundle at %s (strict=%v, agyCLI=%v)\n", targetDir, *strict, agyChecked)
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown plugin subcommand: %s (expected install, uninstall, status, validate)\n", sub)
+		os.Exit(1)
+	}
+}
+
 func printUsage() {
 	fmt.Println(`Usage: hq <command> [args]
 
 Commands:
-  init [--demo]                       Initialize local/ private Vault (optionally seed [Sample] dataset)
-  upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, and migrate Vault
+  version [--json]                    Show hq binary SemVer, git commit, and Vault schema version
+  vault-path [--json]                 Print the resolved private Vault path and resolution source
+  plugin <install|uninstall|status|validate>  Manage global ~/.gemini/config/plugins/agy-hq/ installation
+  init [--demo] [--global-vault]      Initialize private Vault (optionally seed [Sample] dataset)
+  upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, sync global plugin & migrate Vault
   migrate [--quiet]                   Run non-destructive Vault schema & template migrations
-  doctor [--json]                     Check Antigravity sandbox, CLI, and Vault health
+  doctor [--json]                     Check Antigravity sandbox, CLI, plugin sync, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|pin|unpin>     Task Board telemetry, hot/cold compaction, and pinning
@@ -2602,7 +2897,7 @@ Commands:
   ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions
   spaces <list|active|pin|hide|auto>  Manage schedule-aware Console Spaces
   obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability
-  memory <status|topics|add-fact|prune-fact|forget|entities|add-entity|lookup|compact|verify-transcript>  5-layer living memory engine
+  memory <status|topics|add-fact|prune-fact|forget|entities|add-entity|lookup|compact|verify-transcript|commit>  5-layer living memory engine
   rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
   ci <check-pii|check-harness|scrub-history|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
@@ -2612,7 +2907,7 @@ Commands:
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
-  worktree add <repo> <task>          Checkout an isolated git worktree in local/worktrees/
+  worktree add <repo> <task>          Checkout an isolated git worktree in <vault>/worktrees/
   gmail <init|status|list|read|draft|triage>  Layer 1 Gmail primitives & sidecar precheck
   gchat <init|spaces|search|read|draft|triage> Layer 1 Google Chat primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree

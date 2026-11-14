@@ -3,17 +3,17 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"; if [ ! -x \"./bin/hq\" ] && [ ! -x \"../bin/hq\" ] && [ ! -x \"../../../bin/hq\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null; elif [ -d \"./cmd/hq\" ] && [ -n \"$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null)\" ]; then go build -o ./bin/hq ./cmd/hq 2>/dev/null && ./bin/hq migrate --quiet 2>/dev/null; fi; (\"./bin/hq\" hook session-start 2>/dev/null || \"../bin/hq\" hook session-start 2>/dev/null || \"../../../bin/hq\" hook session-start)",
+        "command": "export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; if [ -f \"$R/cmd/hq/main.go\" ]; then if [ ! -x \"$R/bin/hq\" ] || [ -n \"$(find \"$R/cmd\" \"$R/internal\" \"$R/templates\" -name '*.go' -newer \"$R/bin/hq\" -print -quit 2>/dev/null)\" ]; then (cd \"$R\" && go build -o \"$R/bin/hq\" ./cmd/hq && \"$R/bin/hq\" migrate --quiet) >/dev/null 2>&1 || true; fi; [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook session-start; fi; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook session-start; command -v hq >/dev/null 2>&1 && exec hq hook session-start; exit 0",
         "timeout": 15
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents|schedule|manage_task",
+        "matcher": "run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents|schedule|manage_task|ask_question|search_web|define_subagent|send_message|call_mcp_tool|mcp_.*",
         "hooks": [
           {
             "type": "command",
-            "command": "(\"./bin/hq\" hook pre-tool 2>/dev/null || \"../bin/hq\" hook pre-tool 2>/dev/null || \"../../../bin/hq\" hook pre-tool)",
+            "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook pre-tool; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook pre-tool; command -v hq >/dev/null 2>&1 && exec hq hook pre-tool; printf '{}\\n'",
             "timeout": 5
           }
         ]
@@ -22,8 +22,8 @@
     "Stop": [
       {
         "type": "command",
-        "command": "(\"./bin/hq\" hook stop 2>/dev/null || \"../bin/hq\" hook stop 2>/dev/null || \"../../../bin/hq\" hook stop)",
-        "timeout": 5
+        "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook stop; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook stop; command -v hq >/dev/null 2>&1 && exec hq hook stop; exit 0",
+        "timeout": 10
       }
     ]
   }

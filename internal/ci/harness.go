@@ -15,7 +15,9 @@ import (
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/rsi"
+	"github.com/zjshen14/agy-hq/internal/version"
 )
 
 // HarnessCheckResult captures the pass/fail result of a single harness contract gate.
@@ -50,12 +52,15 @@ func CheckHarness(rootDir string) ([]HarnessCheckResult, bool) {
 	h1OK, h1Detail := checkGateH1Skills(rootDir)
 	add("H1", "Skill Catalog, YAML Frontmatter & RSI Rule Schema", h1OK, h1Detail)
 
-	// Gate H2: Hook Configuration Parity & PreToolUse Security Matrix
+	// Gate H2: Single-Source Plugin Hook Contract, Security Matrix & Bundle Parity
 	h2ParityOK, h2ParityDetail := checkGateH2HooksJSONParity(rootDir)
-	add("H2-A", "Workspace vs. Plugin hooks.json Parity", h2ParityOK, h2ParityDetail)
+	add("H2-A", "Single-Source Plugin hooks.json Contract", h2ParityOK, h2ParityDetail)
 
-	h2MatrixOK, h2MatrixDetail := checkGateH2PreToolUseMatrix()
+	h2MatrixOK, h2MatrixDetail := checkGateH2PreToolUseMatrix(rootDir)
 	add("H2-B", "PreToolUse Security & Non-Blocking Front Desk Matrix", h2MatrixOK, h2MatrixDetail)
+
+	h2BundleOK, h2BundleDetail := checkGateH2CGlobalPluginBundle(rootDir, true)
+	add("H2-C", "Global Plugin Manifest, SemVer Parity & Sidecar Bundle", h2BundleOK, h2BundleDetail)
 
 	// Gate H3: Model Routing, Inbox Classification & Proactive Trigger Matrix
 	h3RouteOK, h3RouteDetail := checkGateH3RoutingAndTriggers(rootDir)
@@ -164,27 +169,29 @@ func checkGateH1Skills(rootDir string) (bool, string) {
 
 func checkGateH2HooksJSONParity(rootDir string) (bool, string) {
 	wsHooksPath := filepath.Join(rootDir, ".agents", "hooks.json")
-	pluginHooksPath := filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "hooks.json")
-
-	wsBytes, err := os.ReadFile(wsHooksPath)
-	if err != nil {
-		return false, fmt.Sprintf("missing .agents/hooks.json: %v", err)
+	if _, err := os.Stat(wsHooksPath); err == nil {
+		return false, "duplicate root .agents/hooks.json must not exist (use single-source .agents/plugins/agy-hq/hooks.json)"
 	}
+
+	pluginHooksPath := filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "hooks.json")
 	plugBytes, err := os.ReadFile(pluginHooksPath)
 	if err != nil {
 		return false, fmt.Sprintf("missing .agents/plugins/agy-hq/hooks.json: %v", err)
 	}
 
-	if !bytes.Equal(bytes.TrimSpace(wsBytes), bytes.TrimSpace(plugBytes)) {
-		return false, ".agents/hooks.json and .agents/plugins/agy-hq/hooks.json have drifted and must remain byte-for-byte identical"
-	}
-
 	var parsed map[string]interface{}
-	if err := json.Unmarshal(wsBytes, &parsed); err != nil {
-		return false, fmt.Sprintf("invalid JSON in .agents/hooks.json: %v", err)
+	if err := json.Unmarshal(plugBytes, &parsed); err != nil {
+		return false, fmt.Sprintf("invalid JSON in .agents/plugins/agy-hq/hooks.json: %v", err)
 	}
 
-	rawStr := string(wsBytes)
+	rawStr := string(plugBytes)
+	if strings.Contains(rawStr, "./bin/hq") || strings.Contains(rawStr, "../../../bin/hq") {
+		return false, ".agents/plugins/agy-hq/hooks.json must not contain workspace-relative ./bin/hq or ../../../bin/hq paths"
+	}
+	if (!strings.Contains(rawStr, "$PLUGIN_ROOT") && !strings.Contains(rawStr, "${PLUGIN_ROOT")) || !strings.Contains(rawStr, "hq hook") {
+		return false, ".agents/plugins/agy-hq/hooks.json must use $PLUGIN_ROOT and PATH-resolved `hq hook`"
+	}
+
 	requiredMatchers := []string{
 		"run_command",
 		"edit_file",
@@ -196,17 +203,79 @@ func checkGateH2HooksJSONParity(rootDir string) (bool, string) {
 		"manage_subagents",
 		"schedule",
 		"manage_task",
+		"ask_question",
+		"search_web",
+		"define_subagent",
+		"send_message",
+		"call_mcp_tool",
+		"mcp_.*",
 	}
 	for _, m := range requiredMatchers {
 		if !strings.Contains(rawStr, m) {
-			return false, fmt.Sprintf(".agents/hooks.json PreToolUse matcher is missing required tool %q", m)
+			return false, fmt.Sprintf(".agents/plugins/agy-hq/hooks.json PreToolUse matcher is missing required tool %q", m)
 		}
 	}
 
-	return true, "Workspace and plugin hooks.json are valid and byte-identical (10/10 tool matchers present)"
+	return true, fmt.Sprintf("Single-source .agents/plugins/agy-hq/hooks.json verified (%d/%d tool matchers, zero ./bin/hq paths)", len(requiredMatchers), len(requiredMatchers))
 }
 
-func checkGateH2PreToolUseMatrix() (bool, string) {
+var (
+	reSkillHQCmd     = regexp.MustCompile("(?:^|[`\\s\"'(])hq\\s+([a-z][a-z0-9-]*)")
+	validHQTopSubcmd = map[string]bool{
+		"version": true, "vault-path": true, "plugin": true,
+		"init": true, "console": true, "migrate": true, "upgrade": true,
+		"doctor": true, "status": true, "hook": true,
+		"propose": true, "approve": true, "reject": true,
+		"worktree": true, "heartbeat": true,
+		"claim-desk": true, "release-desk": true, "adopt": true,
+		"complete": true, "archive": true, "reopen": true,
+		"spawn": true, "subagent": true,
+		"gmail": true, "gchat": true,
+		"daemon": true, "webui": true, "memory": true,
+		"tasks": true, "outbox": true, "ideas": true, "goals": true,
+		"spaces": true, "obs": true, "rsi": true, "ci": true,
+		// Prose words that can follow `hq` in descriptive sentences
+		"daemon_gatekeeper": true, "binary": true, "cli": true, "microkernel": true,
+	}
+)
+
+func checkGateH2CGlobalPluginBundle(rootDir string, runAgyCLI bool) (bool, string) {
+	pluginDir := filepath.Join(rootDir, ".agents", "plugins", "agy-hq")
+	if err := plugin.ValidateBundle(pluginDir, true); err != nil {
+		return false, err.Error()
+	}
+
+	pluginMain := filepath.Join(pluginDir, "sidecars", "agy-hq-console", "main.mjs")
+	tmplMain := filepath.Join(rootDir, "templates", "sidecars", "agy-hq-console", "main.mjs")
+	pBytes, pErr := os.ReadFile(pluginMain)
+	tBytes, tErr := os.ReadFile(tmplMain)
+	if pErr != nil || tErr != nil {
+		return false, fmt.Sprintf("missing sidecar main.mjs for parity check (pluginErr=%v, tmplErr=%v)", pErr, tErr)
+	}
+	if !bytes.Equal(bytes.TrimSpace(pBytes), bytes.TrimSpace(tBytes)) {
+		return false, ".agents/plugins/agy-hq/sidecars/agy-hq-console/main.mjs and templates/sidecars/agy-hq-console/main.mjs have drifted"
+	}
+
+	if ref := strings.TrimSpace(os.Getenv("GITHUB_REF_NAME")); strings.HasPrefix(ref, "v") && len(ref) > 1 && ref[1] >= '0' && ref[1] <= '9' {
+		tagVer := strings.TrimPrefix(ref, "v")
+		if tagVer != version.Version {
+			return false, fmt.Sprintf("git release tag %q does not match internal/version.Version %q", ref, version.Version)
+		}
+	}
+
+	agyDetail := "agy CLI skipped"
+	if runAgyCLI && os.Getenv("HQ_SKIP_AGY_PLUGIN_VALIDATE") != "1" {
+		if ran, out, vErr := plugin.ValidateWithAgyCLI(pluginDir); vErr != nil {
+			return false, fmt.Sprintf("agy plugin validate --strict failed: %v (%s)", vErr, out)
+		} else if ran {
+			agyDetail = "agy plugin validate --strict passed"
+		}
+	}
+
+	return true, fmt.Sprintf("plugin.json v%s == hq v%s, rules/AGENTS.md valid, sidecar main.mjs synced (%s)", version.Version, version.Version, agyDetail)
+}
+
+func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 	vaultDir, err := os.MkdirTemp("", "hq-ci-hook-matrix-*")
 	if err != nil {
 		return false, fmt.Sprintf("mkdirtemp: %v", err)
@@ -220,7 +289,7 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		return out.String(), err
 	}
 
-	// 1. Outbound commands must be denied; hq propose must be allowed
+	// 1. Outbound commands must be denied (both ./bin/hq and bare hq); hq propose must be allowed
 	deniedCmds := []string{
 		"gh pr merge 42 --squash",
 		"gh release create v1.0.0",
@@ -229,6 +298,9 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		"./bin/hq gmail send-draft --draft=d1",
 		"./bin/hq gchat send-draft --draft=gchat-draft-1",
 		"./bin/hq rsi apply rsi-123",
+		"hq gmail send-draft --draft=d1",
+		"hq gchat send-draft --draft=gchat-draft-1",
+		"hq rsi apply rsi-123",
 	}
 	for _, cmd := range deniedCmds {
 		out, _ := runHook(map[string]interface{}{
@@ -243,15 +315,20 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		}
 	}
 
-	proposeOut, _ := runHook(map[string]interface{}{
-		"conversationId": "conv-worker",
-		"toolCall": map[string]interface{}{
-			"name": "run_command",
-			"args": map[string]interface{}{"CommandLine": `./bin/hq propose --type=pr_merge --summary="Merge 42" --cmd="gh pr merge 42 --squash"`},
-		},
-	})
-	if !strings.Contains(proposeOut, `"decision":"allow"`) {
-		return false, fmt.Sprintf("PreToolUse failed to allow hq propose command (got %s)", strings.TrimSpace(proposeOut))
+	for _, proposeCmd := range []string{
+		`./bin/hq propose --type=pr_merge --summary="Merge 42" --cmd="gh pr merge 42 --squash"`,
+		`hq propose --type=pr_merge --summary="Merge 42" --cmd="gh pr merge 42 --squash"`,
+	} {
+		proposeOut, _ := runHook(map[string]interface{}{
+			"conversationId": "conv-worker",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": proposeCmd},
+			},
+		})
+		if !strings.Contains(proposeOut, `"decision":"allow"`) {
+			return false, fmt.Sprintf("PreToolUse failed to allow propose command %q (got %s)", proposeCmd, strings.TrimSpace(proposeOut))
+		}
 	}
 
 	// 2. Direct chrome-devtools navigation to chat.google.com must be denied
@@ -266,7 +343,7 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		return false, "PreToolUse failed to deny direct chrome-devtools navigation to chat.google.com"
 	}
 
-	// 3. Quarantined (tainted) session matrix
+	// 3. Quarantined (tainted) session matrix (both ./bin/hq and bare hq allowed for safe draft/propose)
 	_ = gmail.MarkSessionTainted(vaultDir, "conv-tainted", "gmail:thread:t1")
 	taintedDenied := []map[string]interface{}{
 		{"name": "search_web", "args": map[string]interface{}{"query": "leak"}},
@@ -283,18 +360,24 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 			return false, fmt.Sprintf("Quarantined session failed to deny %v", tc["name"])
 		}
 	}
-	taintedAllowOut, _ := runHook(map[string]interface{}{
-		"conversationId": "conv-tainted",
-		"toolCall": map[string]interface{}{
-			"name": "run_command",
-			"args": map[string]interface{}{"CommandLine": `./bin/hq gmail draft --thread=t1 --to="alice@example.com" --subject="Re" --body="OK"`},
-		},
-	})
-	if !strings.Contains(taintedAllowOut, `"decision":"allow"`) {
-		return false, "Quarantined session failed to allow ./bin/hq gmail draft"
+	for _, safeTaintedCmd := range []string{
+		`./bin/hq gmail draft --thread=t1 --to="alice@example.com" --subject="Re" --body="OK"`,
+		`hq gmail draft --thread=t1 --to="alice@example.com" --subject="Re" --body="OK"`,
+		`hq propose --type=gmail_send --draft=draft-1`,
+	} {
+		taintedAllowOut, _ := runHook(map[string]interface{}{
+			"conversationId": "conv-tainted",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": safeTaintedCmd},
+			},
+		})
+		if !strings.Contains(taintedAllowOut, `"decision":"allow"`) {
+			return false, fmt.Sprintf("Quarantined session failed to allow %q", safeTaintedCmd)
+		}
 	}
 
-	// 4. Front Desk non-blocking guardrails (no code edits, no inline go test, max 3 lookups)
+	// 4. Front Desk non-blocking guardrails (no code edits, no inline go test, bare hq exempt, max 3 lookups)
 	_ = kernel.SetFrontDesk(vaultDir, "conv-fd", filepath.Join(vaultDir, "art-fd"))
 	fdEditOut, _ := runHook(map[string]interface{}{
 		"conversationId": "conv-fd",
@@ -316,6 +399,20 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 	})
 	if !strings.Contains(fdTestOut, `"decision":"deny"`) {
 		return false, "Front Desk guardrail failed to deny inline `go test ./...`"
+	}
+
+	// Bare `hq` coordination commands on Front Desk must NOT consume any of the 3 lookup slots
+	for _, fdHQCmd := range []string{`hq status`, `hq gchat propose --to="Alice" --body="Hello"`} {
+		out, _ := runHook(map[string]interface{}{
+			"conversationId": "conv-fd",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": fdHQCmd},
+			},
+		})
+		if !strings.Contains(out, `"decision":"allow"`) {
+			return false, fmt.Sprintf("Front Desk should allow bare hq coordination command %q", fdHQCmd)
+		}
 	}
 
 	// 3 inline lookups allowed, 4th denied
@@ -342,7 +439,7 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		return false, "Front Desk 4th inline lookup tool call was not denied"
 	}
 
-	// 5. Universal Credential Vault guard across untainted sessions (gmail/gchat/credentials/pii-denylist blocked; taxes/ledger permitted)
+	// 5. Universal Credential Vault guard across untainted sessions
 	credReadOut, _ := runHook(map[string]interface{}{
 		"conversationId": "conv-worker",
 		"toolCall": map[string]interface{}{
@@ -374,7 +471,21 @@ func checkGateH2PreToolUseMatrix() (bool, string) {
 		return false, "Untainted worker should still be allowed to read private/ledger/"
 	}
 
-	return true, "21/21 PreToolUse security, credential-guard, quarantine, and Front Desk non-blocking probes passed"
+	// 6. Verify SKILL.md CLI subcommands against valid top-level hq commands
+	for _, skPath := range rsi.DiscoverAllSkillFiles(rootDir) {
+		b, rErr := os.ReadFile(skPath)
+		if rErr != nil {
+			continue
+		}
+		for _, m := range reSkillHQCmd.FindAllStringSubmatch(string(b), -1) {
+			if len(m) == 2 && !validHQTopSubcmd[m[1]] {
+				rel, _ := filepath.Rel(rootDir, skPath)
+				return false, fmt.Sprintf("%s references unknown hq subcommand %q", filepath.ToSlash(rel), m[1])
+			}
+		}
+	}
+
+	return true, "29/29 PreToolUse security, bare-hq parity, credential-guard, quarantine, Front Desk & SKILL CLI probes passed"
 }
 
 func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {
@@ -466,7 +577,7 @@ func CheckGoFormatting(rootDir string, relPaths ...string) (bool, string) {
 			}
 		}
 	} else {
-		for _, dir := range []string{"cmd", "internal"} {
+		for _, dir := range []string{"cmd", "internal", "templates"} {
 			if st, err := os.Stat(filepath.Join(rootDir, dir)); err == nil && st.IsDir() {
 				targets = append(targets, dir)
 			}

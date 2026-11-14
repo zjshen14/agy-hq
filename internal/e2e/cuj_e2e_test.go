@@ -814,8 +814,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v7") {
-		t.Fatalf("expected v0 -> v7 migration output, got:\n%s", upOut)
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v8") {
+		t.Fatalf("expected v0 -> v8 migration output, got:\n%s", upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -846,8 +846,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v7 -> v7") {
-		t.Fatalf("expected idempotent v7 -> v7 on second run, got:\n%s", migOut2)
+	if !strings.Contains(migOut2, "Vault Schema Migration: v8 -> v8") {
+		t.Fatalf("expected idempotent v8 -> v8 on second run, got:\n%s", migOut2)
 	}
 }
 
@@ -2838,6 +2838,189 @@ func TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge(t *testi
 	expAppOut, expErr := env.run("", "approve", ttlProp.ID, "--sha256="+ttlProp.SHA256[:12])
 	if expErr == nil || !strings.Contains(expAppOut, "expired") {
 		t.Fatalf("expected hq approve on expired proposal to fail with expired error, got err=%v out=\n%s", expErr, expAppOut)
+	}
+}
+
+// CUJ-25: Global Plugin Packaging, Standalone Vault Resolution & External Workspace Safety (RFC-0015)
+func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
+	env := setupHQEnv(t)
+
+	fakeHome := t.TempDir()
+	localBin := filepath.Join(fakeHome, ".local", "bin")
+	baseEnv := []string{
+		"HOME=" + fakeHome,
+		"HQ_HOME_DIR=" + fakeHome,
+		"PATH=" + localBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runStandalone := func(workDir, stdin string, extra []string, args ...string) (string, error) {
+		t.Helper()
+		binToRun := filepath.Join(localBin, "hq")
+		if _, err := os.Stat(binToRun); err != nil {
+			binToRun = env.binPath
+		}
+		cmd := exec.Command(binToRun, args...)
+		cmd.Dir = workDir
+		var cleanEnv []string
+		for _, kv := range os.Environ() {
+			if strings.HasPrefix(kv, "HQ_VAULT_DIR=") ||
+				strings.HasPrefix(kv, "HQ_ROOT_DIR=") ||
+				strings.HasPrefix(kv, "HOME=") ||
+				strings.HasPrefix(kv, "HQ_HOME_DIR=") ||
+				strings.HasPrefix(kv, "PATH=") ||
+				strings.HasPrefix(kv, "ANTIGRAVITY_CONVERSATION_ID=") ||
+				strings.HasPrefix(kv, "ANTIGRAVITY_APP_DATA_DIR=") ||
+				strings.HasPrefix(kv, "ANTIGRAVITY_SOURCE_METADATA=") ||
+				strings.HasPrefix(kv, "PLUGIN_ROOT=") ||
+				strings.HasPrefix(kv, "GIT_") {
+				continue
+			}
+			cleanEnv = append(cleanEnv, kv)
+		}
+		cleanEnv = append(cleanEnv, baseEnv...)
+		cleanEnv = append(cleanEnv, extra...)
+		cmd.Env = cleanEnv
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		return out.String(), err
+	}
+
+	// 1. Run `hq plugin install --global-vault --json` from repoRoot into isolated fakeHome
+	instOut, err := runStandalone(env.rootDir, "", []string{"HQ_ROOT_DIR=" + env.rootDir}, "plugin", "install", "--global-vault", "--json")
+	if err != nil {
+		t.Fatalf("hq plugin install --global-vault failed: %v (%s)", err, instOut)
+	}
+	var instRes map[string]interface{}
+	if err := json.Unmarshal([]byte(instOut), &instRes); err != nil {
+		t.Fatalf("unmarshal plugin install JSON: %v (%s)", err, instOut)
+	}
+	globalVault := filepath.Join(fakeHome, ".gemini", "antigravity", "hq", "vault")
+	globalPlugin := filepath.Join(fakeHome, ".gemini", "config", "plugins", "agy-hq")
+	if instRes["version"] != "0.1.0" || instRes["vaultDir"] != globalVault {
+		t.Fatalf("unexpected install result: %+v", instRes)
+	}
+	if _, err := os.Stat(filepath.Join(globalPlugin, "rules", "AGENTS.md")); err != nil {
+		t.Fatalf("expected installed global plugin rules/AGENTS.md: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(globalPlugin, "sidecars.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected deprecated sidecars.json to be absent in installed plugin")
+	}
+
+	// 2. Verify `hq version --json` and `hq plugin validate` from a directory with ZERO templates/ on disk
+	extRepo := filepath.Join(t.TempDir(), "external-webapp")
+	_ = os.MkdirAll(extRepo, 0o755)
+	_ = os.WriteFile(filepath.Join(extRepo, "go.mod"), []byte("module example.com/webapp\n\ngo 1.25.0\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(extRepo, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644)
+	gitInit := exec.Command("git", "init", "-b", "main")
+	gitInit.Dir = extRepo
+	if out, gErr := gitInit.CombinedOutput(); gErr != nil {
+		t.Fatalf("git init extRepo: %v (%s)", gErr, string(out))
+	}
+
+	verOut, err := runStandalone(extRepo, "", nil, "version", "--json")
+	if err != nil {
+		t.Fatalf("hq version --json in extRepo failed: %v (%s)", err, verOut)
+	}
+	if !strings.Contains(verOut, `"version": "0.1.0"`) || !strings.Contains(verOut, `"vaultSchemaVersion": 8`) {
+		t.Fatalf("unexpected version --json output:\n%s", verOut)
+	}
+
+	valOut, err := runStandalone(extRepo, "", []string{"HQ_SKIP_AGY_PLUGIN_VALIDATE=1"}, "plugin", "validate")
+	if err != nil {
+		t.Fatalf("hq plugin validate failed: %v (%s)", err, valOut)
+	}
+
+	// 3. External Go repo with VACANT front_desk.json:
+	//    - SessionStart must resolve globalVault, NOT create <extRepo>/local, NOT touch <extRepo>/.git/hooks,
+	//      and MUST NOT hijack the vacant Front Desk lease!
+	extConv := "conv-ext-webapp-1"
+	ssPayload := fmt.Sprintf(`{"conversationId":%q,"workspacePaths":[%q]}`, extConv, extRepo)
+	ssOut, err := runStandalone(extRepo, ssPayload, []string{"PLUGIN_ROOT=" + globalPlugin}, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("external repo SessionStart failed: %v (%s)", err, ssOut)
+	}
+	if _, err := os.Stat(filepath.Join(extRepo, "local")); !os.IsNotExist(err) {
+		t.Fatalf("SessionStart polluted external repo with ./local directory!")
+	}
+	if _, err := os.Stat(filepath.Join(extRepo, ".git", "hooks", "pre-commit")); !os.IsNotExist(err) {
+		t.Fatalf("SessionStart polluted external repo .git/hooks/pre-commit!")
+	}
+	if fd, ok := kernel.GetFrontDesk(globalVault); ok && fd.ConversationID != "" {
+		t.Fatalf("external repo hijacked vacant Front Desk lease: %+v", fd)
+	}
+
+	// 4. External Go repo PreToolUse: normal `edit_file` and `go test ./...` MUST be allowed,
+	//    while outbound `gh pr merge` and Vault credential reads MUST still be blocked!
+	editIn := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"edit_file","args":{"Path":%q}}}`, extConv, filepath.Join(extRepo, "main.go"))
+	editOut, err := runStandalone(extRepo, editIn, nil, "hook", "pre-tool-use")
+	if err != nil || !strings.Contains(editOut, `"decision":"allow"`) {
+		t.Fatalf("expected edit_file in external repo to be allowed, got err=%v out=%s", err, editOut)
+	}
+	testIn := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`, extConv)
+	testOut, err := runStandalone(extRepo, testIn, nil, "hook", "pre-tool")
+	if err != nil || !strings.Contains(testOut, `"decision":"allow"`) {
+		t.Fatalf("expected go test ./... in external repo to be allowed, got err=%v out=%s", err, testOut)
+	}
+	mergeIn := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"run_command","args":{"CommandLine":"gh pr merge 99 --squash"}}}`, extConv)
+	mergeOut, err := runStandalone(extRepo, mergeIn, nil, "hook", "pre-tool")
+	if err != nil || !strings.Contains(mergeOut, `"decision":"deny"`) {
+		t.Fatalf("expected gh pr merge in external repo to be denied, got err=%v out=%s", err, mergeOut)
+	}
+	credIn := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"read_file","args":{"Path":%q}}}`, extConv, filepath.Join(globalVault, "private", "gmail", "tokens.json"))
+	credOut, err := runStandalone(extRepo, credIn, nil, "hook", "pre-tool")
+	if err != nil || !strings.Contains(credOut, `"decision":"deny"`) {
+		t.Fatalf("expected credential vault read in external repo to be denied, got err=%v out=%s", err, credOut)
+	}
+
+	// Stop hook in external repo must journal cleanly without claiming Front Desk
+	stopOut, err := runStandalone(extRepo, fmt.Sprintf(`{"conversationId":%q,"summary":"Implemented webapp handler"}`, extConv), nil, "hook", "stop")
+	if err != nil {
+		t.Fatalf("external repo Stop hook failed: %v (%s)", err, stopOut)
+	}
+	if fd, ok := kernel.GetFrontDesk(globalVault); ok && fd.ConversationID != "" {
+		t.Fatalf("Stop hook in external repo unexpectedly claimed Front Desk: %+v", fd)
+	}
+
+	// 5. Version-skew warning banner on SessionStart when $PLUGIN_ROOT/plugin.json differs from binary
+	skewedPlugin := filepath.Join(t.TempDir(), "skewed-plugin")
+	_ = os.MkdirAll(skewedPlugin, 0o755)
+	_ = os.WriteFile(filepath.Join(skewedPlugin, "plugin.json"), []byte(`{"name":"agy-hq","version":"0.0.9","description":"old"}`), 0o644)
+	skewSSOut, err := runStandalone(extRepo, fmt.Sprintf(`{"conversationId":%q}`, extConv), []string{"PLUGIN_ROOT=" + skewedPlugin}, "hook", "session-start")
+	if err != nil || !strings.Contains(skewSSOut, "[agy-hq Version Skew]") {
+		t.Fatalf("expected SessionStart version-skew warning banner, got err=%v out=%s", err, skewSSOut)
+	}
+
+	// 6. Worktree ancestor resolution (`hq vault-path --json`) & `hq memory commit` + `hq plugin uninstall --purge-bin`
+	wtChild := filepath.Join(globalVault, "worktrees", "webapp-fix")
+	_ = os.MkdirAll(wtChild, 0o755)
+	vpOut, err := runStandalone(wtChild, "", nil, "vault-path", "--json")
+	if err != nil || !strings.Contains(vpOut, `"source": "worktree-ancestor"`) {
+		t.Fatalf("expected worktree-ancestor vault resolution, got err=%v out=%s", err, vpOut)
+	}
+
+	_ = os.WriteFile(filepath.Join(globalVault, "notes", "standalone-note.md"), []byte("# Standalone Test Note\n"), 0o644)
+	mcOut, err := runStandalone(extRepo, "", nil, "memory", "commit", "--message=chore(vault): test standalone commit")
+	if err != nil || !strings.Contains(mcOut, "Committed private Vault changes") {
+		t.Fatalf("expected hq memory commit to commit standalone Vault note, got err=%v out=%s", err, mcOut)
+	}
+
+	uninstOut, err := runStandalone(extRepo, "", nil, "plugin", "uninstall", "--purge-bin")
+	if err != nil {
+		t.Fatalf("hq plugin uninstall --purge-bin failed: %v (%s)", err, uninstOut)
+	}
+	if _, err := os.Stat(globalPlugin); !os.IsNotExist(err) {
+		t.Fatalf("expected globalPlugin directory to be removed after uninstall")
+	}
+	if _, err := os.Stat(filepath.Join(localBin, "hq")); !os.IsNotExist(err) {
+		t.Fatalf("expected ~/.local/bin/hq to be removed with --purge-bin")
+	}
+	if _, err := os.Stat(filepath.Join(globalVault, "USER.md")); err != nil {
+		t.Fatalf("expected private globalVault to remain untouched after plugin uninstall: %v", err)
 	}
 }
 

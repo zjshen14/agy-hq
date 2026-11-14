@@ -30,16 +30,16 @@ if [ -n "$USER_EMAIL" ] && git diff --cached -U0 | grep -E '^\+' | grep -qFi "$U
   exit 1
 fi
 
-# 2. Auto-rebuild ./bin/hq if missing or older than cmd/ or internal/ .go sources
+# 2. Auto-rebuild ./bin/hq if missing or older than cmd/, internal/, or templates/ .go sources
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 if command -v go >/dev/null 2>&1 && [ -d "./cmd/hq" ]; then
-  if [ ! -x "./bin/hq" ] || [ -n "$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null | head -n 1)" ]; then
+  if [ ! -x "./bin/hq" ] || [ -n "$(find cmd internal templates -name '*.go' -newer ./bin/hq 2>/dev/null | head -n 1)" ]; then
     mkdir -p ./bin
     go build -o ./bin/hq ./cmd/hq
   fi
 fi
 
-# 3. Full 5-invariant staged PII, hooks.json parity, gofmt & Markdown check via ./bin/hq
+# 3. Full staged PII, plugin/hooks contract, gofmt & Markdown check via ./bin/hq
 if [ -x "./bin/hq" ]; then
   ./bin/hq ci pre-commit
 fi
@@ -58,7 +58,7 @@ export HQ_IN_PRE_PUSH=1
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
 if command -v go >/dev/null 2>&1 && [ -d "./cmd/hq" ]; then
-  if [ ! -x "./bin/hq" ] || [ -n "$(find cmd internal -name '*.go' -newer ./bin/hq 2>/dev/null | head -n 1)" ]; then
+  if [ ! -x "./bin/hq" ] || [ -n "$(find cmd internal templates -name '*.go' -newer ./bin/hq 2>/dev/null | head -n 1)" ]; then
     mkdir -p ./bin
     go build -o ./bin/hq ./cmd/hq
   fi
@@ -163,10 +163,15 @@ func RunPreCommit(rootDir string) error {
 		return fmt.Errorf("pre-commit PII & Vault boundary check failed (%d violation(s)):\n%s", len(violations), strings.Join(lines, "\n"))
 	}
 
-	// If .agents/hooks.json or .agents/plugins/agy-hq/hooks.json exists, verify parity
-	if _, err := os.Stat(filepath.Join(rootDir, ".agents", "hooks.json")); err == nil {
+	// Verify single-source plugin hooks.json & bundle parity if .agents/ exists
+	_, hasLegacyHooks := os.Stat(filepath.Join(rootDir, ".agents", "hooks.json"))
+	_, hasPluginDir := os.Stat(filepath.Join(rootDir, ".agents", "plugins", "agy-hq"))
+	if hasLegacyHooks == nil || hasPluginDir == nil {
 		if ok, detail := checkGateH2HooksJSONParity(rootDir); !ok {
-			return fmt.Errorf("pre-commit hook parity check failed: %s", detail)
+			return fmt.Errorf("pre-commit hook contract check failed: %s", detail)
+		}
+		if ok, detail := checkGateH2CGlobalPluginBundle(rootDir, false); !ok {
+			return fmt.Errorf("pre-commit global plugin bundle check failed: %s", detail)
 		}
 	}
 

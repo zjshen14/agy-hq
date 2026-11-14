@@ -351,6 +351,22 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	if prop.WorkDir != "" {
 		cmd.Dir = prop.WorkDir
 	}
+	env := os.Environ()
+	pathVal := os.Getenv("PATH")
+	var extraDirs []string
+	if exe, eErr := os.Executable(); eErr == nil && exe != "" {
+		extraDirs = append(extraDirs, filepath.Dir(exe))
+	}
+	if home, hErr := os.UserHomeDir(); hErr == nil && home != "" {
+		extraDirs = append(extraDirs, filepath.Join(home, ".local", "bin"))
+	}
+	if len(extraDirs) > 0 {
+		env = append(env, "PATH="+strings.Join(extraDirs, string(os.PathListSeparator))+string(os.PathListSeparator)+pathVal)
+	}
+	if os.Getenv("HQ_VAULT_DIR") == "" && strings.TrimSpace(vaultDir) != "" {
+		env = append(env, "HQ_VAULT_DIR="+vaultDir)
+	}
+	cmd.Env = env
 	outBytes, execErr := cmd.CombinedOutput()
 	output := string(outBytes)
 

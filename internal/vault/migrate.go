@@ -12,7 +12,7 @@ import (
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 8
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -45,6 +45,15 @@ func LoadSchemaState(vaultDir string) SchemaState {
 	return st
 }
 
+// CurrentSchemaStateVersion returns the persisted schema version for vaultDir, or CurrentSchemaVersion if unmigrated.
+func CurrentSchemaStateVersion(vaultDir string) int {
+	st := LoadSchemaState(vaultDir)
+	if st.Version > 0 {
+		return st.Version
+	}
+	return CurrentSchemaVersion
+}
+
 // SnapshotVault commits any uncommitted changes in local/.git as a restore point before migration/upgrade.
 func SnapshotVault(vaultDir, reason string) bool {
 	gitDir := filepath.Join(vaultDir, ".git")
@@ -69,6 +78,9 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	report := &MigrationReport{
 		PreviousVersion: prev.Version,
 		CurrentVersion:  CurrentSchemaVersion,
+	}
+	if prev.Version > CurrentSchemaVersion {
+		return report, fmt.Errorf("vault schema version v%d is newer than this hq binary (supports up to v%d); run 'hq upgrade' or install a newer hq binary", prev.Version, CurrentSchemaVersion)
 	}
 
 	// 1. If the Vault already exists and has uncommitted changes, create a restore-point commit in local/.git
@@ -98,8 +110,9 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 
 	// Migration v1 -> v2: Additive .gitignore merge & notes/briefs directory
 	if prev.Version < 2 {
-		mergedLines := mergeGitignoreAdditive(
-			filepath.Join(templateDir, "gitignore.tmpl"),
+		mergedLines := mergeGitignoreAdditiveFromTemplate(
+			templateDir,
+			"gitignore.tmpl",
 			filepath.Join(vaultDir, ".gitignore"),
 		)
 		if mergedLines > 0 {
@@ -139,18 +152,31 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 
 	// Migration v6 -> v7: Proactive Engine v2 (RFC-0014) — credential gitignore rules, trigger modes/delivery, entities & console_spaces dirs
 	if prev.Version < 7 {
-		mergedIgnore := mergeGitignoreAdditive(
-			filepath.Join(templateDir, "gitignore.tmpl"),
+		mergedIgnore := mergeGitignoreAdditiveFromTemplate(
+			templateDir,
+			"gitignore.tmpl",
 			filepath.Join(vaultDir, ".gitignore"),
 		)
 		upgradedTriggers := upgradeV7ProactiveTriggers(vaultDir)
 		recordStep("v7_proactive_engine_v2", fmt.Sprintf("Upgraded Proactive Engine v2 (gitignoreRulesAdded=%d, triggersUpgraded=%v, entitiesAndSpacesReady=true)", mergedIgnore, upgradedTriggers))
 	}
 
+	// Migration v7 -> v8: Global Plugin Packaging (RFC-0015) — workspace-agnostic PATH trigger precheck_cmd ("hq")
+	if prev.Version < 8 {
+		rewrittenTriggers := upgradeV8GlobalPluginTriggers(vaultDir)
+		mergedIgnore := mergeGitignoreAdditiveFromTemplate(
+			templateDir,
+			"gitignore.tmpl",
+			filepath.Join(vaultDir, ".gitignore"),
+		)
+		recordStep("v8_global_plugin_packaging", fmt.Sprintf("Upgraded triggers for standalone global plugin PATH execution (rewrittenPrecheck=%v, gitignoreRulesAdded=%d)", rewrittenTriggers, mergedIgnore))
+	}
+
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml
 	for _, fname := range []string{"config.yaml", "triggers.yaml"} {
-		added := mergeMissingTopLevelYAMLBlocks(
-			filepath.Join(templateDir, fname),
+		added := mergeMissingTopLevelYAMLBlocksFromTemplate(
+			templateDir,
+			fname,
 			filepath.Join(vaultDir, fname),
 		)
 		for _, k := range added {
@@ -172,12 +198,25 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	return report, nil
 }
 
+func mergeGitignoreAdditiveFromTemplate(templateDir, tmplName, dstPath string) int {
+	tmplBytes, err1 := ReadTemplateFile(templateDir, tmplName)
+	dstBytes, err2 := os.ReadFile(dstPath)
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+	return mergeGitignoreAdditiveBytes(tmplBytes, dstBytes, dstPath)
+}
+
 func mergeGitignoreAdditive(tmplPath, dstPath string) int {
 	tmplBytes, err1 := os.ReadFile(tmplPath)
 	dstBytes, err2 := os.ReadFile(dstPath)
 	if err1 != nil || err2 != nil {
 		return 0
 	}
+	return mergeGitignoreAdditiveBytes(tmplBytes, dstBytes, dstPath)
+}
+
+func mergeGitignoreAdditiveBytes(tmplBytes, dstBytes []byte, dstPath string) int {
 	existing := make(map[string]bool)
 	for _, line := range strings.Split(string(dstBytes), "\n") {
 		existing[strings.TrimSpace(line)] = true
@@ -313,7 +352,7 @@ func ensureStarterTopicPage(vaultDir string) bool {
 		"> **Summary:** Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory hierarchy.\n\n" +
 		"## Core Invariants\n" +
 		"- **Two-Layer Vault Split:** Never commit PII or `local/` files to the public root repository; store personal notes in `local/notes/` and financial/tax records in `local/private/`.\n" +
-		"- **Non-Blocking Front Desk:** The single Front Desk thread is strictly for coordination and quick answers (<= 3 lookup tool calls). Delegate coding, debugging, and open-ended research to background subagents (`invoke_subagent`) or dedicated task conversations (`./bin/hq spawn`).\n" +
+		"- **Non-Blocking Front Desk:** The single Front Desk thread is strictly for coordination and quick answers (<= 3 lookup tool calls). Delegate coding, debugging, and open-ended research to background subagents (`invoke_subagent`) or dedicated task conversations (`hq spawn`).\n" +
 		"- **Four-Layer Memory Stack (RFC-0006):** Keep `local/MEMORY.md` under 80 lines as a Roadmap Index; distill deep technical or domain lessons into `local/memory/topics/<slug>.md` and verify turn claims against `transcript.jsonl` during `/sleep-consolidate`.\n"
 	if err := os.WriteFile(starterPath, []byte(content), 0o644); err != nil {
 		return false
@@ -422,6 +461,32 @@ func migrateV5TaskBoardHierarchy(vaultDir string) (int, int) {
 	return backfilled, len(rep.RotatedColdSlugs)
 }
 
+func upgradeV8GlobalPluginTriggers(vaultDir string) bool {
+	trigPath := filepath.Join(vaultDir, "triggers.yaml")
+	b, err := os.ReadFile(trigPath)
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	updated := strings.ReplaceAll(s, `"./bin/hq"`, `"hq"`)
+	updated = strings.ReplaceAll(updated, `'./bin/hq'`, `'hq'`)
+	if updated == s {
+		return false
+	}
+	return os.WriteFile(trigPath, []byte(updated), 0o600) == nil
+}
+
+// mergeMissingTopLevelYAMLBlocksFromTemplate checks if template YAML (from disk or embedded FS)
+// has top-level keys ("key:") absent from the user's local YAML, and appends their block non-destructively.
+func mergeMissingTopLevelYAMLBlocksFromTemplate(templateDir, tmplName, dstPath string) []string {
+	tmplBytes, err1 := ReadTemplateFile(templateDir, tmplName)
+	dstBytes, err2 := os.ReadFile(dstPath)
+	if err1 != nil || err2 != nil {
+		return nil
+	}
+	return mergeMissingTopLevelYAMLBlocksBytes(tmplBytes, dstBytes, dstPath)
+}
+
 // mergeMissingTopLevelYAMLBlocks checks if template YAML has top-level keys ("key:")
 // that are absent from the user's local YAML, and appends their block non-destructively.
 func mergeMissingTopLevelYAMLBlocks(tmplPath, dstPath string) []string {
@@ -430,6 +495,10 @@ func mergeMissingTopLevelYAMLBlocks(tmplPath, dstPath string) []string {
 	if err1 != nil || err2 != nil {
 		return nil
 	}
+	return mergeMissingTopLevelYAMLBlocksBytes(tmplBytes, dstBytes, dstPath)
+}
+
+func mergeMissingTopLevelYAMLBlocksBytes(tmplBytes, dstBytes []byte, dstPath string) []string {
 	dstKeys := parseTopLevelYAMLKeys(string(dstBytes))
 	blocks := splitTopLevelYAMLBlocks(string(tmplBytes))
 

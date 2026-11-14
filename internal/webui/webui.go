@@ -24,6 +24,8 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -106,7 +108,12 @@ func NewHandler(vaultDir string) http.Handler {
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":             "ok",
+			"version":            version.Version,
+			"commit":             version.EffectiveCommit(),
+			"vaultSchemaVersion": vault.CurrentSchemaVersion,
+		})
 	})
 
 	mux.HandleFunc("/preload.js", func(w http.ResponseWriter, r *http.Request) {

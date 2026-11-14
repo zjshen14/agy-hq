@@ -18,6 +18,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -107,24 +108,111 @@ type TranscriptVerificationDigest struct {
 	DiscrepancyWarnings []string              `json:"discrepancyWarnings,omitempty"`
 }
 
+// shouldAutoClaimVacantFrontDesk decides whether a conversation starting while front_desk.json
+// is vacant should automatically claim the [HQ] Front Desk lease.
+// External third-party repositories and isolated task worktrees remain normal unblocked coding sessions
+// unless explicitly promoted via `hq claim-desk`.
+func isPathInsideVaultWorktrees(targetPath, vaultDir string) bool {
+	if strings.TrimSpace(targetPath) == "" || strings.TrimSpace(vaultDir) == "" {
+		return false
+	}
+	wtRoot := filepath.Clean(filepath.Join(vaultDir, "worktrees"))
+	cleanTarget := filepath.Clean(targetPath)
+	return cleanTarget == wtRoot || strings.HasPrefix(cleanTarget, wtRoot+string(filepath.Separator))
+}
+
+func shouldAutoClaimVacantFrontDesk(payload CommonPayload, vaultDir string) bool {
+	if os.Getenv("HQ_AUTO_CLAIM_DESK") == "1" {
+		return true
+	}
+	ws := ""
+	if len(payload.WorkspacePaths) > 0 {
+		ws = strings.TrimSpace(payload.WorkspacePaths[0])
+	}
+	if ws == "" {
+		if cwd, err := os.Getwd(); err == nil && cwd != "" {
+			cleanCWD := filepath.Clean(cwd)
+			if isPathInsideVaultWorktrees(cleanCWD, vaultDir) {
+				return false
+			}
+			if vault.IsAgyHQRepo(cleanCWD) {
+				return true
+			}
+			cleanVault := filepath.Clean(vaultDir)
+			if cleanCWD == cleanVault || cleanCWD == filepath.Dir(cleanVault) {
+				return true
+			}
+			// If cwd is an external project repository (.git, go.mod, or package.json) that is not agy-hq, do not hijack it.
+			for _, marker := range []string{".git", "go.mod", "package.json", "Cargo.toml", "pyproject.toml"} {
+				if _, sErr := os.Stat(filepath.Join(cleanCWD, marker)); sErr == nil {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	cleanWS := filepath.Clean(ws)
+	if isPathInsideVaultWorktrees(cleanWS, vaultDir) {
+		return false
+	}
+	if vault.IsAgyHQRepo(cleanWS) {
+		return true
+	}
+	cleanVault := filepath.Clean(vaultDir)
+	if cleanWS == cleanVault || cleanWS == filepath.Dir(cleanVault) {
+		return true
+	}
+	return false
+}
+
+// isSingleHQCommand returns true when cmdLine is a single non-chained invocation of `hq`
+// (via PATH, ./bin/hq, bin/hq, or an absolute path) or scripts/bootstrap.sh.
+func isSingleHQCommand(cmdLine string) bool {
+	trimmed := strings.TrimSpace(cmdLine)
+	if trimmed == "" || strings.ContainsAny(trimmed, "\n\r;|&`") {
+		return false
+	}
+	fields := strings.Fields(trimmed)
+	for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") && !strings.Contains(fields[0], "/") {
+		fields = fields[1:]
+	}
+	if len(fields) == 0 {
+		return false
+	}
+	first := filepath.ToSlash(fields[0])
+	return first == "hq" ||
+		first == "./bin/hq" ||
+		first == "bin/hq" ||
+		strings.HasSuffix(first, "/hq") ||
+		first == "./scripts/bootstrap.sh" ||
+		first == "scripts/bootstrap.sh"
+}
+
 // HandleSessionStart reads local/USER.md, local/MEMORY.md, and active facts,
 // returning an injectSteps systemMessage JSON object on stdout.
 func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
 
-	// Zero-touch auto-bootstrap: if local/USER.md does not exist yet on a fresh clone,
-	// automatically initialize the private Vault from templates/.
+	// Zero-touch auto-bootstrap: if USER.md does not exist yet in the target Vault,
+	// automatically initialize the private Vault from disk templates/ or embedded templates.FS.
 	if _, err := os.Stat(filepath.Join(vaultDir, "USER.md")); os.IsNotExist(err) {
-		if rootDir, err := vault.ResolveRoot(); err == nil {
-			templateDir := filepath.Join(rootDir, "templates")
-			if _, statErr := os.Stat(templateDir); statErr == nil {
-				_, _ = vault.Init(vaultDir, templateDir)
-			}
+		templateDir := ""
+		if rootDir, rErr := vault.ResolveRoot(); rErr == nil && vault.IsAgyHQRepo(rootDir) {
+			templateDir = filepath.Join(rootDir, "templates")
 		}
+		_, _ = vault.Init(vaultDir, templateDir)
 	}
 
 	var sections []string
+	if plugRoot := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); plugRoot != "" {
+		if m, mErr := version.ReadPluginManifest(plugRoot); mErr == nil && m.Version != "" && m.Version != version.Version {
+			sections = append(sections, fmt.Sprintf(
+				"> ⚠️ **[agy-hq Version Skew]:** Active plugin manifest is `v%s` (`%s`), while `hq` binary is `v%s`. Run `hq upgrade` or `hq plugin install` to synchronize.",
+				m.Version, plugRoot, version.Version,
+			))
+		}
+	}
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
 
@@ -164,7 +252,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 		}
 
-		isFrontDesk := !isSubagent && (!ok || existing.ConversationID == payload.ConversationID)
+		isFrontDesk := !isSubagent && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
 
 		if isFrontDesk {
 			turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
@@ -188,11 +276,12 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 
 			roleBanner := fmt.Sprintf(
 				"## 🎯 Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)\n"+
-					"- You are the single Front Desk intake coordinator (`%s`).\n"+
+					"- You are the single Front Desk intake coordinator (`%s`) · Active Vault: `%s`.\n"+
 					"- **Hard Mechanical Limit:** You have at most **3 inline lookup tool calls** per turn, and direct code/worktree edits or test runs are mechanically blocked by PreToolUse hooks on this thread.\n"+
-					"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `local/worktrees/<repo>-<task>/`) or `./bin/hq spawn` so the user can keep chatting without waiting.\n"+
+					"- For ANY bug investigation, root-cause analysis, or code change, **delegate immediately on Turn 1** via `invoke_subagent` (working in `<vault>/worktrees/<repo>-<task>/`) or `hq spawn` so the user can keep chatting without waiting.\n"+
 					"- **Sidebar Pin Recommendation:** %s",
 				payload.ConversationID,
+				vaultDir,
 				kernel.FrontDeskPinTip,
 			)
 			sections = append(sections, roleBanner)
@@ -247,16 +336,21 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				sections = append(sections, nudgeBanner)
 			}
 		} else {
-			// Subagent or secondary conversation: never inject Front Desk notice or claim-desk instructions for subagents
+			// Subagent or secondary/external workspace conversation: never inject Front Desk notice or claim-desk instructions for subagents
 			if !isSubagent && existing.ConversationID != "" {
 				sections = append(sections, fmt.Sprintf(
-					"## ⚠️ Front Desk Notice\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s).\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `./bin/hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.\n- **Tip:** %s",
-					existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
+					"## ⚠️ Front Desk Notice\n- Active Vault: `%s`.\n- Another conversation (`%s`) currently holds the Front Desk intake lease (since %s); coding and test execution in this workspace are unrestricted.\n- To avoid split-brain race conditions, either use `%s` as your main intake desk, or if you are replacing/archiving it, run `hq claim-desk --conv=%s` to transfer the Front Desk lease to this thread.\n- **Tip:** %s",
+					vaultDir, existing.ConversationID, existing.UpdatedAt, existing.ConversationID, payload.ConversationID,
 					kernel.FrontDeskPinTip,
+				))
+			} else if !isSubagent && !ok {
+				sections = append(sections, fmt.Sprintf(
+					"## 🗂️ Active HQ Vault (`%s`)\n- Mode: Unrestricted Workspace Session (Front Desk coordinator lease is vacant; run `hq claim-desk --conv=%s` in a dedicated chat thread whenever you want to anchor `[HQ] Front Desk`).",
+					vaultDir, payload.ConversationID,
 				))
 			}
 		}
-	} else if payload.ArtifactDirectoryPath != "" {
+	} else if payload.ArtifactDirectoryPath != "" && shouldAutoClaimVacantFrontDesk(payload, vaultDir) {
 		if _, ok := kernel.GetFrontDesk(vaultDir); !ok {
 			_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
 			_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(payload.ArtifactDirectoryPath)), 0o644)
@@ -392,13 +486,13 @@ var (
 	}
 
 	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
-	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|outbox\s+add|propose|status)\b`)
+	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
 	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|pii-denylist\.txt)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
-	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:\./)?bin/hq\s+(?:gmail|gchat)\s+read-quarantined\b`)
-	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\./)?bin/hq|hq)\s+claim-desk\b`)
+	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail|gchat)\s+read-quarantined\b`)
+	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
 )
 
 func canonicalizeHookPath(vaultDir, rawPath string) string {
@@ -867,15 +961,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	// Rule B: Block Heavy Build/Test Commands Inline on the Front Desk (run_command)
 	if payload.ToolCall.Name == "run_command" {
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
-		trimmed := strings.TrimSpace(cmdLine)
-		isHQCmd := strings.HasPrefix(trimmed, "./bin/hq") || strings.HasPrefix(trimmed, "bin/hq") ||
-			strings.HasPrefix(trimmed, "./scripts/bootstrap.sh") || strings.HasPrefix(trimmed, "scripts/bootstrap.sh") ||
-			strings.Contains(cmdLine, "bootstrap.sh")
+		isHQCmd := isSingleHQCommand(cmdLine) || strings.Contains(cmdLine, "bootstrap.sh")
 
 		if !isHQCmd && reHeavyBuildTest.MatchString(cmdLine) {
 			resp := map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Front Desk non-blocking policy: Do not run build or test suites inline on the [HQ] Front Desk thread. Delegate to a background subagent via invoke_subagent or use ./bin/hq upgrade.",
+				"reason":   "Blocked by agy-hq Front Desk non-blocking policy: Do not run build or test suites inline on the [HQ] Front Desk thread. Delegate to a background subagent via invoke_subagent or use `hq upgrade`.",
 			}
 			return json.NewEncoder(w).Encode(resp)
 		}
@@ -895,10 +986,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		isResearchTool = true
 	case "run_command":
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
-		trimmed := strings.TrimSpace(cmdLine)
-		isHQCmd := strings.HasPrefix(trimmed, "./bin/hq") || strings.HasPrefix(trimmed, "bin/hq") ||
-			strings.HasPrefix(trimmed, "./scripts/bootstrap.sh") || strings.HasPrefix(trimmed, "scripts/bootstrap.sh")
-		if !isHQCmd {
+		if !isSingleHQCommand(cmdLine) {
 			isResearchTool = true
 		}
 	}
@@ -908,6 +996,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		var turnState struct {
 			ConversationID string `json:"conversationId"`
 			Count          int    `json:"count"`
+			LastStepIdx    int    `json:"lastStepIdx,omitempty"`
 			UpdatedAt      string `json:"updatedAt"`
 		}
 		if data, err := os.ReadFile(turnFile); err == nil {
@@ -916,12 +1005,24 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		if turnState.ConversationID != payload.ConversationID {
 			turnState.ConversationID = payload.ConversationID
 			turnState.Count = 0
+			turnState.LastStepIdx = 0
 		}
-		turnState.Count++
-		turnState.UpdatedAt = time.Now().Format(time.RFC3339)
-		_ = os.MkdirAll(filepath.Dir(turnFile), 0o755)
-		if data, err := json.MarshalIndent(turnState, "", "  "); err == nil {
-			_ = os.WriteFile(turnFile, data, 0o644)
+		duplicateStep := false
+		if payload.StepIdx > 0 && turnState.LastStepIdx == payload.StepIdx {
+			if prevT, tErr := time.Parse(time.RFC3339, turnState.UpdatedAt); tErr == nil && time.Since(prevT) < 2*time.Second {
+				duplicateStep = true
+			}
+		}
+		if !duplicateStep {
+			turnState.Count++
+			if payload.StepIdx > 0 {
+				turnState.LastStepIdx = payload.StepIdx
+			}
+			turnState.UpdatedAt = time.Now().Format(time.RFC3339)
+			_ = os.MkdirAll(filepath.Dir(turnFile), 0o755)
+			if data, err := json.MarshalIndent(turnState, "", "  "); err == nil {
+				_ = os.WriteFile(turnFile, data, 0o644)
+			}
 		}
 
 		if turnState.Count > 3 {
@@ -1064,7 +1165,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				vacatedMarker := filepath.Join(vaultDir, "memory", ".vacated")
 				_, vacatedExists := os.Stat(vacatedMarker)
 
-				if !hasFD && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
+				if !hasFD && shouldAutoClaimVacantFrontDesk(payload.CommonPayload, vaultDir) && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
 					// In-session bootstrap fallback: fresh Vault with no tracked tasks, front_desk is vacant,
 					// and no explicit release-desk marker exists. Claim Front Desk instead of registering [Task:general]!
 					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)

@@ -14,6 +14,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -273,8 +274,9 @@ func Run(vaultDir string) []CheckResult {
 		})
 	}
 
-	// 9. Check Local CI & Git Hook Guards (.git/hooks/pre-commit & pre-push)
-	if rootDir, err := vault.ResolveRoot(); err == nil {
+	// 9. Check Local CI & Git Hook Guards (.git/hooks/pre-commit & pre-push) when inside agy-hq repo
+	rootDir, rootErr := vault.ResolveRoot()
+	if rootErr == nil && vault.IsAgyHQRepo(rootDir) {
 		if _, sErr := os.Stat(filepath.Join(rootDir, ".git")); sErr == nil {
 			if hooksOK, hooksDetail := ci.CheckGitHooksInstalled(rootDir); hooksOK {
 				results = append(results, CheckResult{
@@ -298,7 +300,7 @@ func Run(vaultDir string) []CheckResult {
 		results = append(results, CheckResult{
 			Name:   "Token Budget & Context Health",
 			Status: "WARN",
-			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), Front Desk context %s / 256k (%s); run './bin/hq obs anomalies' or '/compact'",
+			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), Front Desk context %s / 256k (%s); run 'hq obs anomalies' or '/compact'",
 				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
 				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
 				obsSum.DailyBudgetPct,
@@ -332,6 +334,52 @@ func Run(vaultDir string) []CheckResult {
 				obsSum.FrontDeskContextStatus,
 			),
 		})
+	}
+
+	// 11. Check Global Plugin & Binary Sync (RFC-0015)
+	if pSt, pErr := plugin.Status(vaultDir, rootDir); pErr == nil && pSt != nil {
+		switch {
+		case pSt.DaemonSkewed:
+			results = append(results, CheckResult{
+				Name:   "Global Plugin & Binary Sync",
+				Status: "WARN",
+				Detail: fmt.Sprintf("Live daemon version (%s / %s) is skewed vs hq binary (v%s / %s); run 'hq plugin install' or 'hq upgrade'",
+					pSt.DaemonVersion, pSt.DaemonCommit, pSt.EngineVersion, pSt.EngineCommit),
+			})
+		case pSt.GlobalPluginInstalled && pSt.WorkspacePluginFound && (!pSt.BundleInSync || !pSt.VersionInSync):
+			results = append(results, CheckResult{
+				Name:   "Global Plugin & Binary Sync",
+				Status: "WARN",
+				Detail: fmt.Sprintf("Global plugin (%s, v%s) has drifted from workspace source (v%s); run 'hq plugin install'",
+					pSt.GlobalPluginDir, pSt.GlobalPluginVersion, pSt.EngineVersion),
+			})
+		case pSt.GlobalPluginInstalled && !pSt.GlobalBinaryInstalled:
+			results = append(results, CheckResult{
+				Name:   "Global Plugin & Binary Sync",
+				Status: "WARN",
+				Detail: fmt.Sprintf("Global plugin installed at %s, but %s is missing; run 'hq plugin install'",
+					pSt.GlobalPluginDir, pSt.GlobalBinaryPath),
+			})
+		case pSt.GlobalPluginInstalled && !pSt.BinDirOnPath:
+			results = append(results, CheckResult{
+				Name:   "Global Plugin & Binary Sync",
+				Status: "WARN",
+				Detail: fmt.Sprintf("Global plugin v%s installed, but %s is not in PATH (hooks auto-add ~/.local/bin, add it to shell rc for interactive CLI)",
+					pSt.GlobalPluginVersion, filepath.Dir(pSt.GlobalBinaryPath)),
+			})
+		case pSt.GlobalPluginInstalled:
+			results = append(results, CheckResult{
+				Name:   "Global Plugin & Binary Sync",
+				Status: "PASS",
+				Detail: fmt.Sprintf("Installed globally at %s (v%s · vaultSource=%s)", pSt.GlobalPluginDir, pSt.GlobalPluginVersion, pSt.VaultResolutionSource),
+			})
+		default:
+			results = append(results, CheckResult{
+				Name:   "Global Plugin & Binary Sync",
+				Status: "PASS",
+				Detail: fmt.Sprintf("Workspace mode (v%s · vaultSource=%s; run 'hq plugin install' to enable globally)", pSt.EngineVersion, pSt.VaultResolutionSource),
+			})
+		}
 	}
 
 	return results

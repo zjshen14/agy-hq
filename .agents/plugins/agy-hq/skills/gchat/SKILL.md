@@ -1,16 +1,16 @@
 ---
 name: gchat
 description: >-
-  Read, search, draft, and send Google Chat messages and manage Spaces/DMs using ./bin/hq gchat.
+  Read, search, draft, and send Google Chat messages and manage Spaces/DMs using hq gchat.
   Use whenever the user mentions Google Chat, GChat, a Chat space or group (e.g. "Project Launch Space",
   "Engineering Core"), asks to send a message on Google Chat, check unread Chat messages, or list Chat spaces.
 ---
 
-# Google Chat Integration (`./bin/hq gchat`)
+# Google Chat Integration (`hq gchat`)
 
-Use `./bin/hq gchat` for all Google Chat operations across personal (`@gmail.com`) and Google Workspace accounts.
+Use `hq gchat` for all Google Chat operations across personal (`@gmail.com`) and Google Workspace accounts.
 
-> **Never** use `chrome-devtools` MCP tools directly on `chat.google.com` (blocked by `PreToolUse`). Always use `./bin/hq gchat`, which manages an isolated, network-jailed `--headless=new` Chrome profile (`local/private/gchat/chrome-profile`) and enforces cryptographic 1-tap approval.
+> **Never** use `chrome-devtools` MCP tools directly on `chat.google.com` (blocked by `PreToolUse`). Always use `hq gchat`, which manages an isolated, network-jailed `--headless=new` Chrome profile (`local/private/gchat/chrome-profile`) and enforces cryptographic 1-tap approval.
 
 ## 1. Sending a Google Chat Message (Inline 1-Step Workflow)
 
@@ -18,13 +18,13 @@ When the user asks to send a message to a Google Chat space or DM (even from `[H
 
 1. **Stage Draft + Proposal in 1 Command (Supports Natural Space Names or IDs):**
    ```sh
-   ./bin/hq gchat propose --to="Project Launch Space" --body="Your message text here"
+   hq gchat propose --to="Project Launch Space" --body="Your message text here"
    ```
    - `--to` accepts:
      - A human-friendly Space/DM name (e.g., `"Project Launch Space"`, `"Engineering Core"`, `"Alice Chen"`),
      - Any **email address or username handle** (`"alice@gmail.com"`, `"alex_dev"`)—even if they have no existing DM in the top 20 sidebar spaces (`hq gchat propose` automatically runs Google Chat's `"New chat"` PeopleKit search in Go in ~2 seconds and caches the resulting DM `spaceId`), or
      - A raw Space ID (`AAAA_LAUNCH_01` or `spaces/AAAA_LAUNCH_01`).
-   - **Never spawn a subagent** to manually search for or start a new DM in Chrome—`./bin/hq gchat propose --to="<name, email, or handle>" --body="..."` handles both existing spaces and brand-new DMs natively in 1 CLI call.
+   - **Never spawn a subagent** to manually search for or start a new DM in Chrome—`hq gchat propose --to="<name, email, or handle>" --body="..."` handles both existing spaces and brand-new DMs natively in 1 CLI call.
    - `hq gchat propose` automatically:
      1. Ensures the invisible `--headless=new` Chrome CDP session is running using saved cookies in `local/private/gchat/chrome-profile` (zero desktop popup windows),
      2. Fuzzy-resolves `--to` against cached/live spaces (`local/memory/gchat/spaces_cache.json`),
@@ -36,7 +36,7 @@ When the user asks to send a message to a Google Chat space or DM (even from `[H
 3. **Execute on Approval:**
    - Once the user selects Approve, run:
      ```sh
-     ./bin/hq approve <proposal-id> --sha256=<12-char-prefix>
+     hq approve <proposal-id> --sha256=<12-char-prefix>
      ```
 
 ## 2. Listing Spaces & Searching Messages (Safe Metadata — Non-Tainting)
@@ -45,35 +45,35 @@ These read-only metadata commands are safe to run inline (including at `[HQ] Fro
 
 - **List Spaces & DMs (and refresh local name cache):**
   ```sh
-  ./bin/hq gchat spaces [--query="Launch"]
+  hq gchat spaces [--query="Launch"]
   ```
 - **Search Message Snippets:**
   ```sh
-  ./bin/hq gchat search [--space="Project Launch Space"] [--query="is:unread"]
+  hq gchat search [--space="Project Launch Space"] [--query="is:unread"]
   ```
 
 ## 3. Reading Full Chat Transcripts (`read-quarantined` — Subagent Only)
 
-- **CRITICAL QUARANTINE RULE:** Running `./bin/hq gchat read-quarantined --space="<Space Name or ID>"` permanently marks the calling conversation ID as a **Quarantined Reader** in `local/memory/tainted_sessions.json` (disabling `search_web` and restricting `run_command` to read/draft/propose subcommands).
+- **CRITICAL QUARANTINE RULE:** Running `hq gchat read-quarantined --space="<Space Name or ID>"` permanently marks the calling conversation ID as a **Quarantined Reader** in `local/memory/tainted_sessions.json` (disabling `search_web` and restricting `run_command` to read/draft/propose subcommands).
 - **Never** run `read-quarantined` directly in `[HQ] Front Desk` or a general coding conversation.
 - Instead, dispatch a lightweight **`[quick] gchat: Quarantined Reader`** subagent (`invoke_subagent(Model="flash_lite")`) to run:
   ```sh
-  ./bin/hq gchat read-quarantined --space="Project Launch Space"
+  hq gchat read-quarantined --space="Project Launch Space"
   ```
-  and return the sanitized summary (or stage a reply via `./bin/hq gchat propose`).
+  and return the sanitized summary (or stage a reply via `hq gchat propose`).
 
-## 4. First-Time, Expired, or Remote Sign-In (`./bin/hq gchat login`)
+## 4. First-Time, Expired, or Remote Sign-In (`hq gchat login`)
 
-- In steady state, `./bin/hq gchat` reuses the isolated cookies in `local/private/gchat/chrome-profile` and launches Chrome invisibly with `--headless=new` (no window pops up).
+- In steady state, `hq gchat` reuses the isolated cookies in `local/private/gchat/chrome-profile` and launches Chrome invisibly with `--headless=new` (no window pops up).
 - **Desktop Guided Login (or Testing Fresh Login):**
   ```sh
-  ./bin/hq gchat login               # Opens visible sign-in window if logged out
-  ./bin/hq gchat login --reset       # Backs up Cookies -> Cookies.bak and forces a fresh login test
-  ./bin/hq gchat restore-session     # Restores Cookies.bak in 1 second if you cancel a login test
+  hq gchat login               # Opens visible sign-in window if logged out
+  hq gchat login --reset       # Backs up Cookies -> Cookies.bak and forces a fresh login test
+  hq gchat restore-session     # Restores Cookies.bak in 1 second if you cancel a login test
   ```
   `hq gchat login` automatically fills your email address, waits for you to complete Google Sign-In/Passkey, caches your spaces list, closes the visible window, and restarts the browser in invisible `--headless=new` mode.
 - **Remote Login from iPhone (`--remote`):**
   ```sh
-  ./bin/hq gchat login --remote [--reset]
+  hq gchat login --remote [--reset]
   ```
   Runs in headless mode, auto-fills the Google email, auto-submits `local/private/gchat/.pass` (`0600`) if present, prints any **Google Prompt 2-digit number** (`📱 GOOGLE PROMPT ON PHONE: Tap "Yes" and select number [XX]`), and saves a live PNG screenshot to `local/memory/gchat/login-status.png` so the user can approve the prompt directly on their iPhone.

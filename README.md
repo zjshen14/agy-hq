@@ -59,17 +59,25 @@ git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter &
 git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh
 ```
 
+### Option C: Install Globally Across Every Antigravity Workspace (`~/.gemini/config/plugins/agy-hq/`)
+
+```sh
+git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh --global
+```
+
+Installs `~/.local/bin/hq` on `PATH` and syncs the validated `agy-hq` v0.1.0 plugin bundle into `~/.gemini/config/plugins/agy-hq/` (`hq plugin status` / `hq plugin validate`) so your personal Agent OS, 9 skills, Console sidecar, and private Vault work seamlessly from any folder or repository.
+
 **What `bootstrap.sh` sets up automatically:**
-1. Compiles `./bin/hq` locally in `< 2s` from pure Go standard library source (`0` external `go.mod` dependencies).
-2. Runs `./bin/hq init` to scaffold your git-ignored private Vault (`./local/USER.md`, `./local/MEMORY.md`, `./local/CONSOLE.md`, `./local/.git`, and `0700`-permissioned private directories).
+1. Compiles `./bin/hq` locally in `< 2s` from pure Go standard library source (`0` external `go.mod` dependencies, embedded starter `templates/`).
+2. Runs `./bin/hq init` to scaffold your git-ignored private Vault (`./local/USER.md`, `./local/MEMORY.md`, `./local/CONSOLE.md`, `./local/.git`, and `0700`-permissioned private directories; or `~/.gemini/antigravity/hq/vault` via `hq init --global-vault`).
 3. Installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` mathematical PII & harness guards (`Invariants P1–P6`, `Gates H1–H4B`).
 4. Installs the background `hq daemon` user service and runs `./bin/hq doctor` to verify environment health.
 
-> **Zero-Touch GUI Option:** Even if you only `git clone` and open `headquarter` directly in Antigravity without running `./scripts/bootstrap.sh`, the `SessionStart` hook in [`.agents/hooks.json`](.agents/hooks.json) automatically compiles `./bin/hq`, initializes `./local/`, claims your `[HQ] Front Desk` conversation, and pins the live `hq_console.md` artifact on Turn 1.
+> **Zero-Touch GUI Option:** Even if you only `git clone` and open `headquarter` directly in Antigravity without running `./scripts/bootstrap.sh`, the `SessionStart` hook in [`.agents/plugins/agy-hq/hooks.json`](.agents/plugins/agy-hq/hooks.json) automatically compiles `./bin/hq`, initializes `./local/`, claims your `[HQ] Front Desk` conversation, and pins the live `hq_console.md` artifact on Turn 1.
 >
 > **Tip — Pin Your Front Desk:** Pin your `[HQ] Front Desk` conversation to the top of the Antigravity sidebar (via the conversation header menu) so your coordinator stays anchored above ephemeral task threads.
 >
-> **Live Aux Console:** Open the embedded Antigravity Sidecar pane via [`sidecar://agy-hq-console/`](.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) or run `./bin/hq webui` for the standalone dashboard at `http://127.0.0.1:4242`.
+> **Live Aux Console:** Open the embedded Antigravity Sidecar pane via [`sidecar://agy-hq/agy-hq-console/`](.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) or run `hq webui` for the standalone dashboard at `http://127.0.0.1:4242`.
 
 ---
 
@@ -77,17 +85,16 @@ git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter &
 
 ```text
 agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked Root Git Repo)
-├── AGENTS.md                          # Front Desk routing, Vault boundaries & approval invariants
+├── AGENTS.md                          # Contributor, RFC & CI engineering rules for agy-hq
 ├── cmd/hq/                            # Single static Go CLI entrypoint (zero external dependencies)
-├── internal/                          # Go microkernel (hooks, kernel, outbox, approvals, obs, rsi, ci, webui, gmail, gchat)
-├── templates/                         # Clean starter blueprints copied into ./local/ by `hq init`
-├── docs/                              # PRDs, technical RFCs (0001–0014), ADRs & research archive
+├── internal/                          # Go microkernel (hooks, kernel, plugin, version, outbox, approvals, obs, rsi, ci, webui, gmail, gchat)
+├── templates/                         # Embedded (//go:embed) starter blueprints copied into Vault by `hq init`
+├── docs/                              # PRDs, technical RFCs (0001–0015), ADRs & research archive
 ├── assets/branding/                   # Official Asymmetric Wing Cradle icon pack & social preview
 ├── .agents/
-│   ├── hooks.json                     # SessionStart (memory), PreToolUse (guardrails), Stop (0-token log)
-│   └── plugins/agy-hq/                # Official plugin bundle (Aux Sidecar + 9 progressive-disclosure skills)
+│   └── plugins/agy-hq/                # Standalone global & workspace plugin (plugin.json, hooks.json, rules/AGENTS.md, Sidecar + 9 skills)
 │
-└── local/                             # LAYER 2: Your Private Vault (Git-Ignored; Own Private local/.git)
+└── local/                             # LAYER 2: Your Private Vault (Git-Ignored; or ~/.gemini/antigravity/hq/vault globally)
     ├── USER.md                        # Your profile, communication preferences & goals
     ├── MEMORY.md                      # Bounded Roadmap Index (< 2,500 tokens) auto-injected at SessionStart
     ├── CONSOLE.md                     # Zero-token live Task Board, Console Spaces & Ideas snapshot
