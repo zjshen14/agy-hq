@@ -538,28 +538,74 @@ func main() {
 
 	case "worktree":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: hq worktree <add|list> ...")
+			fmt.Fprintln(os.Stderr, "usage: hq worktree <add|list|attach|remove|prune> ...")
 			os.Exit(1)
 		}
 		switch os.Args[2] {
 		case "add":
 			if len(os.Args) < 5 {
-				fmt.Fprintln(os.Stderr, "usage: hq worktree add <repo-path-or-github-slug> <task-name> [--branch=<branch>]")
+				fmt.Fprintln(os.Stderr, "usage: hq worktree add <repo-path-or-github-slug> <task-name> [--branch=<branch>] [--task=<owner-slug-or-conv-id>] [--no-attach]")
 				os.Exit(1)
 			}
 			repoSpec := os.Args[3]
 			taskName := os.Args[4]
 			fs := flag.NewFlagSet("worktree add", flag.ExitOnError)
 			branch := fs.String("branch", "", "Branch name (defaults to hq/<task-name>)")
+			ownerTask := fs.String("task", "", "Optional owning task slug or conversation ID (defaults to $ANTIGRAVITY_CONVERSATION_ID)")
+			noAttach := fs.Bool("no-attach", false, "Do not bind this worktree to an active Task Board entry")
 			_ = fs.Parse(os.Args[5:])
 			dir, err := worktree.Add(vaultDir, repoSpec, taskName, *branch)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq worktree add failed: %v\n", err)
 				os.Exit(1)
 			}
+			attachedSlug := ""
+			if !*noAttach {
+				if slug, ok := kernel.AttachWorktreeToTask(vaultDir, *ownerTask, dir, ""); ok {
+					attachedSlug = slug
+				}
+			}
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Created isolated worktree at %s\n", dir)
+			if attachedSlug != "" {
+				fmt.Printf("Attached worktree to task %q\n", attachedSlug)
+			}
 		case "list":
+			fs := flag.NewFlagSet("worktree list", flag.ExitOnError)
+			showStatus := fs.Bool("status", false, "Show owning task, branch, cleanliness, and merge status")
+			asJSON := fs.Bool("json", false, "Output JSON status")
+			_ = fs.Parse(os.Args[3:])
+			if *showStatus || *asJSON {
+				statuses, err := kernel.InspectWorktrees(vaultDir, time.Now())
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hq worktree list failed: %v\n", err)
+					os.Exit(1)
+				}
+				if *asJSON {
+					enc := json.NewEncoder(os.Stdout)
+					enc.SetIndent("", "  ")
+					_ = enc.Encode(statuses)
+					return
+				}
+				for _, st := range statuses {
+					owner := "(orphan)"
+					if st.OwnerTaskSlug != "" {
+						owner = fmt.Sprintf("%s (%s)", st.OwnerTaskSlug, st.OwnerStatus)
+					}
+					cleanTag := "clean"
+					if !st.Clean {
+						cleanTag = "dirty"
+					}
+					mergeTag := "unmerged"
+					if st.MergedIntoMain {
+						mergeTag = "merged"
+					} else if st.PushedToOrigin {
+						mergeTag = "unmerged,pushed"
+					}
+					fmt.Printf("%-42s  owner=%-32s  branch=%-30s  [%s, %s]\n", st.Name, owner, st.Branch, cleanTag, mergeTag)
+				}
+				return
+			}
 			list, err := worktree.List(vaultDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq worktree list failed: %v\n", err)
@@ -568,6 +614,28 @@ func main() {
 			for _, d := range list {
 				fmt.Println(d)
 			}
+		case "attach":
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "usage: hq worktree attach <worktree-name-or-path> [--task=<owner-slug-or-conv-id>] [--keep-status]")
+				os.Exit(1)
+			}
+			targetWT := os.Args[3]
+			if !filepath.IsAbs(targetWT) {
+				targetWT = filepath.Join(vaultDir, "worktrees", filepath.Base(targetWT))
+			}
+			fs := flag.NewFlagSet("worktree attach", flag.ExitOnError)
+			ownerTask := fs.String("task", "", "Owning task slug or conversation ID (defaults to $ANTIGRAVITY_CONVERSATION_ID)")
+			keepStatus := fs.Bool("keep-status", false, "Do not reactivate a completed task when attaching")
+			_ = fs.Parse(os.Args[4:])
+			slug, ok := kernel.AttachWorktreeToTaskWithOptions(vaultDir, *ownerTask, targetWT, "", kernel.AttachWorktreeOptions{
+				ReactivateCompleted: !*keepStatus,
+			})
+			if !ok {
+				fmt.Fprintf(os.Stderr, "hq worktree attach failed: could not attach %s to task %q\n", targetWT, *ownerTask)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Attached worktree %s to task %q\n", filepath.Base(targetWT), slug)
 		case "remove", "rm":
 			if len(os.Args) < 4 {
 				fmt.Fprintln(os.Stderr, "usage: hq worktree remove <worktree-name-or-path>")
@@ -579,6 +647,47 @@ func main() {
 			}
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Removed worktree %s\n", os.Args[3])
+		case "prune":
+			fs := flag.NewFlagSet("worktree prune", flag.ExitOnError)
+			dryRun := fs.Bool("dry-run", false, "Preview orphan worktrees eligible for pruning without deleting")
+			force := fs.Bool("force", false, "Force removal of unlinked orphan worktrees even if unmerged or dirty (never touches linked hot tasks)")
+			asJSON := fs.Bool("json", false, "Output JSON report")
+			_ = fs.Parse(os.Args[3:])
+			rep, err := kernel.PruneOrphanWorktrees(vaultDir, kernel.PruneWorktreesOptions{
+				Now:    time.Now(),
+				MinAge: 0,
+				DryRun: *dryRun,
+				Force:  *force,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq worktree prune failed: %v\n", err)
+				os.Exit(1)
+			}
+			if !*dryRun && len(rep.Pruned) > 0 {
+				_ = webui.SyncMarkdownConsole(vaultDir)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(rep)
+				return
+			}
+			if *dryRun {
+				fmt.Printf("[DRY-RUN] Scanned %d worktree(s): would prune %d, keep %d\n", rep.Scanned, len(rep.WouldPrune), len(rep.Kept))
+				for _, name := range rep.WouldPrune {
+					fmt.Printf("  - would prune: %s\n", name)
+				}
+			} else {
+				fmt.Printf("Scanned %d worktree(s): pruned %d, kept %d\n", rep.Scanned, len(rep.Pruned), len(rep.Kept))
+				for _, name := range rep.Pruned {
+					fmt.Printf("  - pruned: %s\n", name)
+				}
+			}
+			for _, k := range rep.Kept {
+				if k.OwnerTaskSlug == "" {
+					fmt.Printf("  - kept orphan: %s (%s)\n", k.Name, k.PruneAction)
+				}
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "unknown worktree subcommand: %s\n", os.Args[2])
 			os.Exit(1)
@@ -1922,6 +2031,7 @@ func runTasksCLI(vaultDir string, args []string) {
 			dryRun := fs.Bool("dry-run", false, "Preview compaction without writing files")
 			taskTTLStr := fs.String("task-ttl", "", "Override completed task auto-archive grace period (e.g. 24h)")
 			noSidebar := fs.Bool("no-sidebar", false, "Skip Antigravity sidebar archive synchronization")
+			noWorktreePrune := fs.Bool("no-worktree-prune", false, "Skip orphan git worktree pruning")
 			asJSON := fs.Bool("json", false, "Output JSON")
 			_ = fs.Parse(args[1:])
 			var taskTTL time.Duration
@@ -1938,6 +2048,7 @@ func runTasksCLI(vaultDir string, args []string) {
 				TaskAutoArchiveAfter: taskTTL,
 				DryRun:               *dryRun,
 				NoSidebar:            *noSidebar,
+				NoWorktreePrune:      *noWorktreePrune,
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq tasks compact error: %v\n", err)
@@ -1958,6 +2069,9 @@ func runTasksCLI(vaultDir string, args []string) {
 			}
 			fmt.Printf("%s tasks.json: %d -> %d hot tasks (auto-archived: %d, rotated to cold archive: %d, total cold archive: %d)\n",
 				prefix, res.HotBefore, res.HotAfter, len(res.AutoArchivedSlugs), len(res.RotatedColdSlugs), res.TotalColdAfter)
+			if len(res.PrunedWorktrees) > 0 {
+				fmt.Printf("  worktree prune: %d orphan worktree(s) (%s)\n", len(res.PrunedWorktrees), strings.Join(res.PrunedWorktrees, ", "))
+			}
 			if res.SidebarSyncedCount > 0 || res.SidebarQueuedCount > 0 || res.SidebarSkippedCount > 0 {
 				fmt.Printf("  sidebar sync: synced=%d, queued=%d, skipped=%d\n",
 					res.SidebarSyncedCount, res.SidebarQueuedCount, res.SidebarSkippedCount)
@@ -3201,7 +3315,7 @@ Commands:
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
-  worktree add <repo> <task>          Checkout an isolated git worktree in <vault>/worktrees/
+  worktree <add|list|attach|remove|prune>  Manage isolated git worktrees & prune merged orphans in <vault>/worktrees/
   gmail <init|status|list|read|draft|triage>  Layer 1 Gmail primitives & sidecar precheck
   gchat <init|spaces|search|read|draft|triage> Layer 1 Google Chat primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree

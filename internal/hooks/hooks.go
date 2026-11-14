@@ -1418,6 +1418,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							Tier:                 matchedTask.Tier,
 							Model:                matchedTask.Model,
 							WorktreeDir:          matchedTask.WorktreeDir,
+							WorktreeDirs:         matchedTask.WorktreeDirs,
 							RepoRoot:             matchedTask.RepoRoot,
 							ConversationID:       payload.ConversationID,
 							EventIDs:             matchedTask.EventIDs,

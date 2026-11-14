@@ -1788,10 +1788,10 @@ func SyncMarkdownConsole(vaultDir string) error {
 				if age := t.FormatRelativeAge(now); age != "" {
 					metaParts = append(metaParts, age)
 				}
-				if t.WorktreeDir != "" {
-					if info, sErr := os.Stat(t.WorktreeDir); sErr == nil && info.IsDir() {
-						metaParts = append(metaParts, "🌿 wt")
-					}
+				if existingWTs := t.ExistingWorktreeDirs(); len(existingWTs) == 1 {
+					metaParts = append(metaParts, "🌿 wt")
+				} else if len(existingWTs) > 1 {
+					metaParts = append(metaParts, fmt.Sprintf("🌿 %d wts", len(existingWTs)))
 				}
 				if tb, ok := state.Observability.TaskBadges[strings.ToLower(strings.TrimSpace(t.ConversationID))]; ok && tb.GrossTokens > 0 {
 					metaParts = append(metaParts, "🪙 "+obs.FormatTokensCompact(tb.TreeUncachedTokens))

@@ -90,18 +90,70 @@ func Add(vaultDir, repoSpec, taskName, branch string) (string, error) {
 	return targetDir, nil
 }
 
+// IsManagedDir returns true if dir resolves to a direct child directory under <vault>/worktrees/.
+func IsManagedDir(vaultDir, dir string) bool {
+	if strings.TrimSpace(vaultDir) == "" || strings.TrimSpace(dir) == "" {
+		return false
+	}
+	wtRoot, err := filepath.Abs(filepath.Join(vaultDir, "worktrees"))
+	if err != nil {
+		return false
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	wtRoot = filepath.Clean(wtRoot)
+	absDir = filepath.Clean(absDir)
+	return absDir != wtRoot && filepath.Dir(absDir) == wtRoot
+}
+
+func resolveParentRepoForWorktree(wtDir string) string {
+	out, err := vault.SanitizedGitCommand("", "-C", wtDir, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return ""
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Clean(filepath.Join(wtDir, commonDir))
+	}
+	if strings.HasSuffix(commonDir, "/.git") || strings.HasSuffix(commonDir, string(filepath.Separator)+".git") {
+		return filepath.Dir(commonDir)
+	}
+	return commonDir
+}
+
 // Remove deletes an isolated git worktree from local/worktrees/ and prunes its git worktree entry.
 func Remove(vaultDir, nameOrPath string) error {
 	worktreesRoot := filepath.Join(vaultDir, "worktrees")
-	target := nameOrPath
+	target := strings.TrimSpace(nameOrPath)
+	if target == "" {
+		return fmt.Errorf("empty worktree name or path")
+	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(worktreesRoot, filepath.Base(nameOrPath))
+		target = filepath.Join(worktreesRoot, filepath.Base(target))
+	}
+	target = filepath.Clean(target)
+	if !IsManagedDir(vaultDir, target) {
+		return fmt.Errorf("refusing to remove %q: not a managed worktree under %s", target, worktreesRoot)
 	}
 	if _, err := os.Stat(target); err != nil {
 		return err
 	}
-	_ = vault.SanitizedGitCommand("", "-C", target, "worktree", "remove", "--force", target).Run()
-	return os.RemoveAll(target)
+	repoRoot := resolveParentRepoForWorktree(target)
+	if repoRoot != "" {
+		_ = vault.SanitizedGitCommand("", "-C", repoRoot, "worktree", "remove", "--force", target).Run()
+		_ = vault.SanitizedGitCommand("", "-C", repoRoot, "worktree", "prune").Run()
+	} else {
+		_ = vault.SanitizedGitCommand("", "-C", target, "worktree", "remove", "--force", target).Run()
+	}
+	if _, err := os.Stat(target); err == nil {
+		return os.RemoveAll(target)
+	}
+	return nil
 }
 
 // List returns the directories currently checked out under local/worktrees/.

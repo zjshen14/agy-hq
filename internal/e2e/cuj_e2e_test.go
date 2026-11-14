@@ -3870,3 +3870,117 @@ func TestCUJ29_UnattendedAutoGrayZoneGuardSandboxAndOutboxEval(t *testing.T) {
 		t.Fatalf("expected all outbox eval thresholds met (%d/%d), got: %s", evalRep.PassedCases, evalRep.TotalCases, evalOut)
 	}
 }
+
+func TestCUJ_MultiWorktreeLifecycleAndOrphanPrune(t *testing.T) {
+	env := setupHQEnv(t)
+	isolatedRoot := t.TempDir()
+	env.vaultDir = filepath.Join(isolatedRoot, "local")
+
+	repoA := filepath.Join(isolatedRoot, "repoA")
+	repoB := filepath.Join(isolatedRoot, "repoB")
+	for _, rDir := range []string{repoA, repoB} {
+		_ = os.MkdirAll(rDir, 0o755)
+		for _, args := range [][]string{
+			{"init", "-b", "main"},
+			{"config", "user.email", "test@agy-hq.local"},
+			{"config", "user.name", "Test"},
+		} {
+			c := exec.Command("git", args...)
+			c.Dir = rDir
+			if out, err := c.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v (%s)", args, err, string(out))
+			}
+		}
+		_ = os.WriteFile(filepath.Join(rDir, "README.md"), []byte("# Repo\n"), 0o644)
+		for _, args := range [][]string{
+			{"add", "README.md"},
+			{"commit", "-m", "init"},
+		} {
+			c := exec.Command("git", args...)
+			c.Dir = rDir
+			if out, err := c.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v (%s)", args, err, string(out))
+			}
+		}
+	}
+
+	taskConv := "00000000-0000-0000-0000-000000000201"
+	if err := kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "multi-repo-launch",
+		Title:          "[Task:oss] Multi-Repo Launch",
+		Kind:           "task",
+		ConversationID: taskConv,
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("RegisterTask: %v", err)
+	}
+
+	// 1. Run `hq worktree add` twice across two repos inside taskConv -> both attach automatically
+	convEnv := []string{"ANTIGRAVITY_CONVERSATION_ID=" + taskConv}
+	wt1Out, err := env.runWithEnv("", convEnv, "worktree", "add", repoA, "launch-code")
+	if err != nil || !strings.Contains(wt1Out, `Attached worktree to task "multi-repo-launch"`) {
+		t.Fatalf("expected wt1 to attach to multi-repo-launch, err=%v out=%s", err, wt1Out)
+	}
+	wt2Out, err := env.runWithEnv("", convEnv, "worktree", "add", repoB, "launch-blog")
+	if err != nil || !strings.Contains(wt2Out, `Attached worktree to task "multi-repo-launch"`) {
+		t.Fatalf("expected wt2 to attach to multi-repo-launch, err=%v out=%s", err, wt2Out)
+	}
+
+	wt1Path := filepath.Join(env.vaultDir, "worktrees", "repoA-launch-code")
+	wt2Path := filepath.Join(env.vaultDir, "worktrees", "repoB-launch-blog")
+	for _, p := range []string{wt1Path, wt2Path} {
+		if _, sErr := os.Stat(p); sErr != nil {
+			t.Fatalf("expected worktree %s to exist: %v", p, sErr)
+		}
+	}
+
+	// 2. Archive `multi-repo-launch` -> removes BOTH worktrees together
+	if out, err := env.run("", "archive", "multi-repo-launch", "--no-sidebar"); err != nil {
+		t.Fatalf("hq archive multi-repo-launch failed: %v (%s)", err, out)
+	}
+	for _, p := range []string{wt1Path, wt2Path} {
+		if _, sErr := os.Stat(p); !os.IsNotExist(sErr) {
+			t.Fatalf("expected worktree %s to be deleted on archive, stat err=%v", p, sErr)
+		}
+	}
+
+	// 3. Create one merged orphan worktree and one unmerged RFC orphan worktree (`--no-attach`)
+	if out, err := env.run("", "worktree", "add", repoB, "merged-blog-orphan", "--no-attach"); err != nil {
+		t.Fatalf("worktree add merged-blog-orphan: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "worktree", "add", repoA, "unmerged-rfc-orphan", "--no-attach"); err != nil {
+		t.Fatalf("worktree add unmerged-rfc-orphan: %v (%s)", err, out)
+	}
+	wtMerged := filepath.Join(env.vaultDir, "worktrees", "repoB-merged-blog-orphan")
+	wtUnmerged := filepath.Join(env.vaultDir, "worktrees", "repoA-unmerged-rfc-orphan")
+
+	_ = os.WriteFile(filepath.Join(wtUnmerged, "RFC.md"), []byte("# RFC\n"), 0o644)
+	for _, args := range [][]string{{"add", "RFC.md"}, {"commit", "-m", "docs: rfc"}} {
+		c := exec.Command("git", args...)
+		c.Dir = wtUnmerged
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("commit unmerged RFC: %v (%s)", err, string(out))
+		}
+	}
+
+	listOut, err := env.run("", "worktree", "list", "--status")
+	if err != nil || !strings.Contains(listOut, "repoB-merged-blog-orphan") || !strings.Contains(listOut, "repoA-unmerged-rfc-orphan") {
+		t.Fatalf("unexpected hq worktree list --status output: err=%v out=%s", err, listOut)
+	}
+
+	dryPrune, err := env.run("", "worktree", "prune", "--dry-run")
+	if err != nil || !strings.Contains(dryPrune, "would prune: repoB-merged-blog-orphan") || !strings.Contains(dryPrune, "repoA-unmerged-rfc-orphan (keep:unmerged)") {
+		t.Fatalf("unexpected dry-run prune output: err=%v out=%s", err, dryPrune)
+	}
+
+	livePrune, err := env.run("", "worktree", "prune")
+	if err != nil || !strings.Contains(livePrune, "pruned: repoB-merged-blog-orphan") {
+		t.Fatalf("unexpected live prune output: err=%v out=%s", err, livePrune)
+	}
+	if _, err := os.Stat(wtMerged); !os.IsNotExist(err) {
+		t.Fatalf("expected wtMerged to be removed by hq worktree prune")
+	}
+	if _, err := os.Stat(wtUnmerged); err != nil {
+		t.Fatalf("expected wtUnmerged to be preserved by hq worktree prune: %v", err)
+	}
+}

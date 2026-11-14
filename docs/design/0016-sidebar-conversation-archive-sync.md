@@ -198,15 +198,27 @@ Can `UpdateConversationAnnotations(archived: true)` fire if `GetAllCascadeTrajec
 
 ### 6.1 Backward-Compatible `ActiveTask` Sync Metadata
 
-We add two optional fields to `ActiveTask` in [kernel.go](../../internal/kernel/kernel.go) (serialized with `omitempty` in both `<vault>/memory/tasks.json` and `<vault>/memory/tasks_archive.jsonl`, requiring **no** breaking Vault schema migration):
+We add optional sidebar-sync and multi-worktree ownership fields to `ActiveTask` in [kernel.go](../../internal/kernel/kernel.go) (serialized with `omitempty` in both `<vault>/memory/tasks.json` and `<vault>/memory/tasks_archive.jsonl`, requiring **no** breaking Vault schema migration):
 
 ```go
 type ActiveTask struct {
 	// ... existing RFC-0009 fields ...
-	SidebarArchived bool   `json:"sidebarArchived,omitempty"`
-	SidebarSyncedAt string `json:"sidebarSyncedAt,omitempty"`
+	WorktreeDirs    []string `json:"worktreeDirs,omitempty"` // Secondary worktrees attached via `hq worktree add` / nested subagents
+	SidebarArchived bool     `json:"sidebarArchived,omitempty"`
+	SidebarSyncedAt string   `json:"sidebarSyncedAt,omitempty"`
 }
 ```
+
+### 6.1.1 Multi-Worktree Ownership & Orphan Worktree Synchronization ([worktree_sync.go](../../internal/kernel/worktree_sync.go))
+
+1. **First-Place Automatic Worktree Binding (`hq worktree add` & `SpawnSubagent`):**
+   - Running `hq worktree add <repo> <task>` inside a task or nested subagent conversation automatically inspects `$ANTIGRAVITY_CONVERSATION_ID` (walking `nested_conversations.json` parent links up to the owning task while skipping `[HQ] Front Desk`) and appends the managed worktree to `ActiveTask.WorktreeDirs` (reactivating a previously `completed` task if a follow-up phase starts in the same thread).
+   - `SpawnSubagent` enforces `IsManagedWorktreeDir(vaultDir, workspaceDir)` so primary repository roots are never recorded as `WorktreeDir`, and attaches nested subagent worktrees directly to the parent task.
+2. **Atomic Multi-Worktree Cleanup (`ArchiveTaskWithOptions` & `CompactTasks`):**
+   - `ArchiveTaskWithOptions` validates `git status --porcelain` across **all** `AllWorktreeDirs()` before removing any checkout, resolving each worktree's own git parent repository independently (supporting cross-repository tasks cleanly).
+   - `CompactTasks` removes all managed worktrees across both auto-archived top-level tasks and rotated `subagent`/`auto` tasks, and protects dormant (`active`/`idle` >48h) tasks from auto-archival whenever any attached worktree still holds unmerged commits.
+3. **Defense-in-Depth Orphan Worktree GC (`hq worktree prune` & `CompactTasks`):**
+   - `PruneOrphanWorktrees` scans `<vault>/worktrees/*` and prunes unlinked orphan worktrees **only** when clean, unreferenced by any live hot task, past `MinAge` (`1h` in background `CompactTasks`, `0` on interactive `hq worktree prune`), and already merged (ancestor or patch-equivalent `git cherry`) into the parent repository's default branch (`main`/`master`). Unmerged feature/RFC worktrees remain untouched (`keep:unmerged`).
 
 ### 6.2 Durable Retry Queue (`<vault>/memory/sidebar_sync_queue.json`)
 

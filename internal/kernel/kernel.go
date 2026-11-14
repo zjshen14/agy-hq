@@ -158,6 +158,7 @@ type ActiveTask struct {
 	Model                string   `json:"model"`
 	ParentConversationID string   `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
 	WorktreeDir          string   `json:"worktreeDir,omitempty"`
+	WorktreeDirs         []string `json:"worktreeDirs,omitempty"`
 	RepoRoot             string   `json:"repoRoot,omitempty"`
 	ConversationID       string   `json:"conversationId,omitempty"`
 	TurnCount            int      `json:"turnCount,omitempty"`
@@ -669,9 +670,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.ParentConversationID == "" {
 				task.ParentConversationID = tasks[i].ParentConversationID
 			}
-			if task.WorktreeDir == "" {
-				task.WorktreeDir = tasks[i].WorktreeDir
-			}
+			task.WorktreeDir, task.WorktreeDirs = mergeTaskWorktrees(tasks[i], task)
 			if task.RepoRoot == "" {
 				task.RepoRoot = tasks[i].RepoRoot
 			}
@@ -882,38 +881,11 @@ func ArchiveTaskWithOptions(vaultDir, target string, opts ArchiveTaskOptions) (S
 			if task.Pinned && !opts.Force {
 				return SidebarSingleSyncResult{}, fmt.Errorf("refusing to archive %q: task is pinned (unpin first or pass --force)", target)
 			}
-			if task.WorktreeDir != "" {
-				if info, err := os.Stat(task.WorktreeDir); err == nil && info.IsDir() {
-					cmdStatus := sanitizedGitCmd("-C", task.WorktreeDir, "status", "--porcelain")
-					outStatus, err := cmdStatus.Output()
-					if err != nil {
-						return SidebarSingleSyncResult{}, fmt.Errorf("git status check failed on %s: %w", task.WorktreeDir, err)
-					}
-					if len(strings.TrimSpace(string(outStatus))) > 0 && !opts.Force {
-						return SidebarSingleSyncResult{}, fmt.Errorf("refusing to archive %q: uncommitted changes in worktree (pass --force to override)", target)
-					}
-
-					repoRoot := task.RepoRoot
-					if repoRoot == "" {
-						repoRoot = resolveRepoRootForWorktree(vaultDir, task.WorktreeDir)
-					}
-					task.RepoRoot = repoRoot
-
-					var removeArgs []string
-					if opts.Force {
-						removeArgs = []string{"-C", repoRoot, "worktree", "remove", "--force", task.WorktreeDir}
-					} else {
-						removeArgs = []string{"-C", repoRoot, "worktree", "remove", task.WorktreeDir}
-					}
-					cmdRemove := sanitizedGitCmd(removeArgs...)
-					if out, err := cmdRemove.CombinedOutput(); err != nil {
-						return SidebarSingleSyncResult{}, fmt.Errorf("git worktree remove failed: %w (%s)", err, string(out))
-					}
-					if _, err := os.Stat(task.WorktreeDir); err == nil {
-						_ = os.RemoveAll(task.WorktreeDir)
-					}
-					_ = sanitizedGitCmd("-C", repoRoot, "worktree", "prune").Run()
-				}
+			if err := validateTaskWorktreesForArchive(vaultDir, target, *task, opts.Force); err != nil {
+				return SidebarSingleSyncResult{}, err
+			}
+			if err := removeTaskWorktrees(vaultDir, task, opts.Force, true); err != nil {
+				return SidebarSingleSyncResult{}, err
 			}
 
 			task.Status = "archived"
@@ -1088,6 +1060,7 @@ type CompactTasksOptions struct {
 	ArchivedColdMaxAge       time.Duration
 	DryRun                   bool
 	NoSidebar                bool
+	NoWorktreePrune          bool
 	SidebarConfig            SidebarSyncConfig
 }
 
@@ -1097,6 +1070,7 @@ type CompactTasksReport struct {
 	HotAfter            int      `json:"hotAfter"`
 	AutoArchivedSlugs   []string `json:"autoArchivedSlugs,omitempty"`
 	RotatedColdSlugs    []string `json:"rotatedColdSlugs,omitempty"`
+	PrunedWorktrees     []string `json:"prunedWorktrees,omitempty"`
 	TotalColdAfter      int      `json:"totalColdAfter"`
 	SidebarSyncedCount  int      `json:"sidebarSyncedCount,omitempty"`
 	SidebarQueuedCount  int      `json:"sidebarQueuedCount,omitempty"`
@@ -1154,6 +1128,19 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 	}
 	if len(tasks) == 0 {
 		rep.TotalColdAfter = CountColdArchivedTasks(vaultDir)
+		if !opts.NoWorktreePrune {
+			if pRep, pErr := PruneOrphanWorktrees(vaultDir, PruneWorktreesOptions{
+				Now:    opts.Now,
+				MinAge: DefaultOrphanWorktreeMinAge,
+				DryRun: opts.DryRun,
+			}); pErr == nil && pRep != nil {
+				if opts.DryRun {
+					rep.PrunedWorktrees = pRep.WouldPrune
+				} else {
+					rep.PrunedWorktrees = pRep.Pruned
+				}
+			}
+		}
 		if !opts.NoSidebar && HasPendingSidebarSyncQueue(vaultDir) {
 			if sRep, _ := SyncSidebar(vaultDir, SyncSidebarOptions{
 				Now:          opts.Now,
@@ -1195,21 +1182,14 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		}
 		st := strings.ToLower(strings.TrimSpace(t.Status))
 		shouldArchive := false
-		if kind == "task" && (st == "completed" || st == "cancelled") && !t.Pinned && age >= opts.TaskAutoArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
+		if kind == "task" && (st == "completed" || st == "cancelled") && !t.Pinned && age >= opts.TaskAutoArchiveAfter && areAllTaskWorktreesCleanOrAbsent(vaultDir, *t) {
 			shouldArchive = true
-		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && isWorktreeCleanOrAbsent(t.WorktreeDir) {
+		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && areAllTaskWorktreesMergedAndClean(vaultDir, *t) {
 			shouldArchive = true
 		}
 		if shouldArchive {
-			if !opts.DryRun && t.WorktreeDir != "" {
-				if info, sErr := os.Stat(t.WorktreeDir); sErr == nil && info.IsDir() {
-					repoRoot := t.RepoRoot
-					if repoRoot == "" {
-						repoRoot = resolveRepoRootForWorktree(vaultDir, t.WorktreeDir)
-					}
-					_ = sanitizedGitCmd("-C", repoRoot, "worktree", "remove", t.WorktreeDir).Run()
-					_ = sanitizedGitCmd("-C", repoRoot, "worktree", "prune").Run()
-				}
+			if !opts.DryRun {
+				_ = removeTaskWorktrees(vaultDir, t, false, false)
 			}
 			t.Status = "archived"
 			if t.ArchivedAt == "" {
@@ -1258,7 +1238,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 
 		rotate := false
 		if !t.Pinned && (kind == "subagent" || kind == "auto") && (st == "completed" || st == "cancelled") {
-			if age >= opts.SubagentHotMaxAge || subOverCap[i] {
+			if (age >= opts.SubagentHotMaxAge || subOverCap[i]) && areAllTaskWorktreesCleanOrAbsent(vaultDir, t) {
 				rotate = true
 			}
 		} else if !t.Pinned && st == "archived" && age >= opts.ArchivedColdMaxAge {
@@ -1266,6 +1246,9 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		}
 
 		if rotate {
+			if !opts.DryRun && areAllTaskWorktreesCleanOrAbsent(vaultDir, t) {
+				_ = removeTaskWorktrees(vaultDir, &t, false, false)
+			}
 			rotatedCold = append(rotatedCold, t)
 			rep.RotatedColdSlugs = append(rep.RotatedColdSlugs, t.TaskSlug)
 			if !t.SidebarArchived {
@@ -1299,6 +1282,20 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 	rep.TotalColdAfter = CountColdArchivedTasks(vaultDir)
 	if opts.DryRun {
 		rep.TotalColdAfter += len(rotatedCold)
+	}
+
+	if !opts.NoWorktreePrune {
+		if pRep, pErr := PruneOrphanWorktrees(vaultDir, PruneWorktreesOptions{
+			Now:    opts.Now,
+			MinAge: DefaultOrphanWorktreeMinAge,
+			DryRun: opts.DryRun,
+		}); pErr == nil && pRep != nil {
+			if opts.DryRun {
+				rep.PrunedWorktrees = pRep.WouldPrune
+			} else {
+				rep.PrunedWorktrees = pRep.Pruned
+			}
+		}
 	}
 
 	if !opts.NoSidebar && (len(explicitSidebarIDs) > 0 || HasPendingSidebarSyncQueue(vaultDir)) {
@@ -3181,6 +3178,10 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		fullPrompt = fmt.Sprintf("%s\n\nWhen you finish, send your final report back to parent conversation %s using the send_message tool (Recipient=%q).", prompt, parentConvID, parentConvID)
 	}
 
+	managedWt := ""
+	if IsManagedWorktreeDir(vaultDir, workspaceDir) {
+		managedWt = filepath.Clean(workspaceDir)
+	}
 	if isFrontDesk {
 		// Layer-1 subagent: Register in local/memory/tasks.json before sending the initial message so SessionStart sees it immediately.
 		_ = RegisterTask(vaultDir, ActiveTask{
@@ -3191,7 +3192,7 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 			Tier:                 tier,
 			Model:                modelID,
 			ParentConversationID: parentConvID,
-			WorktreeDir:          workspaceDir,
+			WorktreeDir:          managedWt,
 			ConversationID:       cascadeID,
 			CreatedAt:            time.Now().Format(time.RFC3339),
 			LastUpdatedAt:        time.Now().Format(time.RFC3339),
@@ -3201,6 +3202,9 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 	} else {
 		// Nested descendant subagent: record in nested conversations so hooks ignore it for task tracking
 		_ = RecordNestedConversation(vaultDir, cascadeID, parentConvID)
+		if managedWt != "" {
+			_, _ = AttachWorktreeToTaskWithOptions(vaultDir, parentConvID, managedWt, "", AttachWorktreeOptions{ReactivateCompleted: false})
+		}
 	}
 
 	// Deliver initial prompt via SendUserCascadeMessage to kick off Turn 1 immediately
