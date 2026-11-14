@@ -21,9 +21,42 @@ function isExecutable(p) {
   }
 }
 
+function resolveDefaultCwd() {
+  try {
+    const cfgPath = join(homeDir, '.gemini', 'antigravity', 'hq', 'config.json');
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+      if (cfg?.sourceRepoDir && existsSync(cfg.sourceRepoDir)) {
+        return cfg.sourceRepoDir;
+      }
+      if (cfg?.vaultDir) {
+        const cleanV = resolve(cfg.vaultDir);
+        const parentDir = dirname(cleanV);
+        if (cleanV.endsWith('/local') && existsSync(parentDir)) {
+          return parentDir;
+        }
+      }
+    }
+  } catch {}
+  return homeDir;
+}
+
+function sanitizedDaemonEnv() {
+  const env = { ...process.env };
+  delete env.ANTIGRAVITY_PROJECT_ID;
+  delete env.ANTIGRAVITY_CONVERSATION_ID;
+  delete env.ANTIGRAVITY_TRAJECTORY_ID;
+  delete env.ANTIGRAVITY_SOURCE_METADATA;
+  delete env.ANTIGRAVITY_SIDECAR_WEB_PORT;
+  delete env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+  delete env.PORT;
+  return env;
+}
+
 function resolveHQBin() {
+  const fallbackCwd = resolveDefaultCwd();
   if (process.env.HQ_BIN_PATH && isExecutable(process.env.HQ_BIN_PATH)) {
-    return { bin: process.env.HQ_BIN_PATH, cwd: homeDir };
+    return { bin: process.env.HQ_BIN_PATH, cwd: fallbackCwd };
   }
   const pluginRoot = process.env.PLUGIN_ROOT || resolve(__dirname, '../..');
   const devRoot = resolve(pluginRoot, '../../..');
@@ -35,11 +68,11 @@ function resolveHQBin() {
   }
   const bundledBin = join(pluginRoot, 'bin', 'hq');
   if (isExecutable(bundledBin)) {
-    return { bin: bundledBin, cwd: homeDir };
+    return { bin: bundledBin, cwd: fallbackCwd };
   }
   const localBin = join(homeDir, '.local', 'bin', 'hq');
   if (isExecutable(localBin)) {
-    return { bin: localBin, cwd: homeDir };
+    return { bin: localBin, cwd: fallbackCwd };
   }
   const pathDirs = [
     ...(process.env.PATH ? process.env.PATH.split(delimiter) : []),
@@ -50,10 +83,10 @@ function resolveHQBin() {
     if (!d) continue;
     const cand = join(d, 'hq');
     if (isExecutable(cand)) {
-      return { bin: cand, cwd: homeDir };
+      return { bin: cand, cwd: fallbackCwd };
     }
   }
-  return { bin: localBin, cwd: homeDir };
+  return { bin: localBin, cwd: fallbackCwd };
 }
 
 // Preload JS location or fallback
@@ -110,6 +143,7 @@ function ensureDaemon() {
       try {
         const p = spawn(bin, ['daemon', `--addr=${TARGET_HOST}:${TARGET_PORT}`], {
           cwd,
+          env: sanitizedDaemonEnv(),
           detached: true,
           stdio: 'ignore',
         });

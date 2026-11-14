@@ -89,6 +89,7 @@ func main() {
 		demo := fs.Bool("demo", false, "Seed synthetic [Sample] ACME 10-Q inbox filing, thesis, tasks, approval, and facts")
 		withSample := fs.Bool("with-sample-data", false, "Alias for --demo: seed synthetic [Sample] dataset")
 		globalVault := fs.Bool("global-vault", false, "Initialize and register the canonical global Vault (~/.gemini/antigravity/hq/vault)")
+		attachPlugin := fs.Bool("attach-plugin", false, "Write .agents/plugins.json in the current directory to enable project-scoped agy-hq")
 		_ = fs.Parse(os.Args[2:])
 		if *globalVault {
 			if gv, gErr := vault.DefaultGlobalVaultDir(); gErr == nil && gv != "" {
@@ -103,9 +104,17 @@ func main() {
 		}
 		if *globalVault {
 			_ = vault.SaveGlobalConfig(vault.GlobalConfig{
-				VaultDir:  vaultDir,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				VaultDir:    vaultDir,
+				PluginScope: plugin.ScopeProject,
+				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 			})
+		}
+		if *attachPlugin {
+			if wd, wErr := os.Getwd(); wErr == nil && wd != "" {
+				if mPath, aErr := plugin.AttachProjectPlugin(wd, ""); aErr == nil && mPath != "" {
+					created = append(created, mPath+" (project-scoped plugin)")
+				}
+			}
 		}
 		if *demo || *withSample {
 			demoSeeded, dErr := vault.SeedDemoData(vaultDir)
@@ -243,8 +252,12 @@ func main() {
 			}
 		}
 		if !vault.IsTempPath(targetBin) {
-			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && (st.GlobalPluginInstalled || st.GlobalBinaryInstalled) {
-				syncCmd := exec.Command(targetBin, "plugin", "install", "--vault-dir="+vaultDir)
+			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && (st.GlobalPluginInstalled || st.SharedPluginInstalled || st.GlobalBinaryInstalled) {
+				syncArgs := []string{"plugin", "install", "--vault-dir=" + vaultDir}
+				if cfg, cErr := vault.LoadGlobalConfig(); cErr == nil && cfg != nil && cfg.PluginScope == plugin.ScopeGlobal && st.GlobalPluginInstalled {
+					syncArgs = append(syncArgs, "--global")
+				}
+				syncCmd := exec.Command(targetBin, syncArgs...)
 				syncCmd.Dir = rootDir
 				syncCmd.Env = append(os.Environ(), "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
 				if out, syncErr := syncCmd.CombinedOutput(); syncErr == nil {
@@ -2746,6 +2759,8 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 	case "install":
 		fs := flag.NewFlagSet("plugin install", flag.ExitOnError)
 		_ = fs.Bool("force", false, "Force reinstall even if already at the same version")
+		globalScope := fs.Bool("global", false, "Install into ~/.gemini/config/plugins/agy-hq/ across all projects (default: project-scoped)")
+		projectFlag := fs.String("project", "", "Optional target project directory to attach .agents/plugins.json in project-scoped mode")
 		globalVault := fs.Bool("global-vault", false, "Use canonical global Vault (~/.gemini/antigravity/hq/vault)")
 		vaultFlag := fs.String("vault-dir", "", "Explicit default Vault directory to register in ~/.gemini/antigravity/hq/config.json")
 		pluginSrcFlag := fs.String("plugin-dir", "", "Optional explicit source plugin directory")
@@ -2753,15 +2768,17 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
 		targetVault := strings.TrimSpace(*vaultFlag)
-		if targetVault == "" && !*globalVault {
+		if targetVault == "" && !*globalVault && strings.TrimSpace(*projectFlag) == "" {
 			targetVault = vaultDir
 		}
 		res, err := plugin.Install(plugin.InstallOptions{
 			SourceRepoDir: rootDir,
 			PluginSrcDir:  *pluginSrcFlag,
+			ProjectDir:    *projectFlag,
 			BinDir:        *binDirFlag,
 			VaultDir:      targetVault,
 			GlobalVault:   *globalVault,
+			GlobalScope:   *globalScope,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq plugin install failed: %v\n", err)
@@ -2781,13 +2798,25 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		if len(digShort) > 12 {
 			digShort = digShort[:12]
 		}
-		fmt.Printf("Installed agy-hq global plugin v%s (commit %s)\n", res.Version, res.Commit)
+		fmt.Printf("Installed agy-hq plugin v%s (scope: %s · commit %s)\n", res.Version, res.Scope, res.Commit)
 		fmt.Printf("  Binary:       %s (sha256:%s)\n", res.BinaryPath, shaShort)
 		fmt.Printf("  Plugin Dir:   %s (%d files, bundle:%s)\n", res.PluginDir, res.FileCount, digShort)
+		if res.ProjectDir != "" {
+			fmt.Printf("  Project Root: %s\n", res.ProjectDir)
+		}
+		if res.ProjectPluginsManifest != "" {
+			fmt.Printf("  Project Cfg:  %s\n", res.ProjectPluginsManifest)
+		}
+		if res.RemovedGlobalPluginDir != "" {
+			fmt.Printf("  Tidied Up:    removed global plugin at %s (scoped strictly to project)\n", res.RemovedGlobalPluginDir)
+		}
+		if res.RemovedLegacySidecar != "" {
+			fmt.Printf("  Tidied Up:    removed legacy standalone sidecar at %s\n", res.RemovedLegacySidecar)
+		}
 		fmt.Printf("  Vault Dir:    %s\n", res.VaultDir)
 		fmt.Printf("  Global Cfg:   %s\n", res.GlobalConfigPath)
 		if res.DaemonRestarted {
-			fmt.Printf("  Daemon Sync:  restarted skewed background daemon\n")
+			fmt.Printf("  Daemon Sync:  restarted background daemon with clean environment\n")
 		}
 		if !res.BinDirOnPath {
 			fmt.Printf("  Tip:          Add %s to your shell PATH so bare `hq` resolves in interactive shells.\n", filepath.Dir(res.BinaryPath))
@@ -2796,9 +2825,10 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 	case "uninstall":
 		fs := flag.NewFlagSet("plugin uninstall", flag.ExitOnError)
 		purgeBin := fs.Bool("purge-bin", false, "Also remove ~/.local/bin/hq binary")
+		detachProject := fs.String("detach-project", "", "Optional project directory from which to remove .agents/plugins.json entry")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
-		rep, err := plugin.Uninstall(*purgeBin)
+		rep, err := plugin.Uninstall(*purgeBin, *detachProject)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq plugin uninstall failed: %v\n", err)
 			os.Exit(1)
@@ -2809,8 +2839,8 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 			_ = enc.Encode(rep)
 			return
 		}
-		fmt.Printf("Uninstalled agy-hq global plugin (removedPlugin=%q, removedBinary=%q, preservedVault=%s)\n",
-			rep.RemovedPluginDir, rep.RemovedBinaryPath, rep.PreservedVaultDir)
+		fmt.Printf("Uninstalled agy-hq plugin (removedGlobal=%q, removedShared=%q, removedLegacySidecar=%q, removedBinary=%q, preservedVault=%s)\n",
+			rep.RemovedPluginDir, rep.RemovedSharedPluginDir, rep.RemovedLegacySidecar, rep.RemovedBinaryPath, rep.PreservedVaultDir)
 
 	case "status":
 		fs := flag.NewFlagSet("plugin status", flag.ExitOnError)
@@ -2827,15 +2857,23 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 			_ = enc.Encode(st)
 			return
 		}
-		fmt.Printf("HQ Global Plugin & Binary Status (v%s · commit %s · schema v%d)\n", st.EngineVersion, st.EngineCommit, st.VaultSchemaVersion)
+		fmt.Printf("HQ Plugin & Binary Status (v%s · scope: %s · commit %s · schema v%d)\n", st.EngineVersion, st.Scope, st.EngineCommit, st.VaultSchemaVersion)
 		fmt.Printf("  Active Vault:      %s (source: %s)\n", st.VaultDir, st.VaultResolutionSource)
 		fmt.Printf("  Global Binary:     %s (installed=%v, synced=%v, inPATH=%v)\n",
 			st.GlobalBinaryPath, st.GlobalBinaryInstalled, st.BinaryInSync, st.BinDirOnPath)
-		fmt.Printf("  Global Plugin Dir: %s (installed=%v, version=%s, bundleSynced=%v)\n",
-			st.GlobalPluginDir, st.GlobalPluginInstalled, st.GlobalPluginVersion, st.BundleInSync)
+		fmt.Printf("  Shared Bundle Dir: %s (installed=%v, version=%s, bundleSynced=%v)\n",
+			st.SharedPluginDir, st.SharedPluginInstalled, st.SharedPluginVersion, st.BundleInSync)
+		fmt.Printf("  Global Plugin Dir: %s (installed=%v, version=%s)\n",
+			st.GlobalPluginDir, st.GlobalPluginInstalled, st.GlobalPluginVersion)
 		if st.WorkspacePluginFound {
 			fmt.Printf("  Workspace Plugin:  %s (version=%s, activePrecedence=%s)\n",
 				st.WorkspacePluginDir, st.WorkspacePluginVer, "workspace-first")
+		}
+		if st.ProjectPluginsManifest != "" {
+			fmt.Printf("  Project Manifest:  %s\n", st.ProjectPluginsManifest)
+		}
+		if st.LegacySidecarFound {
+			fmt.Printf("  Legacy Sidecar:    %s (superseded — run 'hq plugin install' to tidy)\n", st.LegacySidecarDir)
 		}
 		if st.DaemonRunning {
 			fmt.Printf("  Live Daemon:       running (version=%s, commit=%s, skewed=%v)\n",
@@ -2850,8 +2888,12 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		_ = fs.Parse(args)
 		targetDir := filepath.Join(rootDir, ".agents", "plugins", "agy-hq")
 		if !vault.IsAgyHQRepo(rootDir) {
-			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && st.GlobalPluginInstalled {
-				targetDir = st.GlobalPluginDir
+			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil {
+				if st.GlobalPluginInstalled {
+					targetDir = st.GlobalPluginDir
+				} else if st.SharedPluginInstalled {
+					targetDir = st.SharedPluginDir
+				}
 			}
 		}
 		if len(fs.Args()) > 0 {
@@ -2884,9 +2926,9 @@ func printUsage() {
 Commands:
   version [--json]                    Show hq binary SemVer, git commit, and Vault schema version
   vault-path [--json]                 Print the resolved private Vault path and resolution source
-  plugin <install|uninstall|status|validate>  Manage global ~/.gemini/config/plugins/agy-hq/ installation
-  init [--demo] [--global-vault]      Initialize private Vault (optionally seed [Sample] dataset)
-  upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, sync global plugin & migrate Vault
+  plugin <install|uninstall|status|validate>  Manage project-scoped (default) or --global plugin & hq binary
+  init [--demo] [--global-vault] [--attach-plugin]  Initialize private Vault (optionally seed [Sample] dataset)
+  upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, sync plugin & migrate Vault
   migrate [--quiet]                   Run non-destructive Vault schema & template migrations
   doctor [--json]                     Check Antigravity sandbox, CLI, plugin sync, and Vault health
   status [--quiet]                    Show pending approvals and active worktrees

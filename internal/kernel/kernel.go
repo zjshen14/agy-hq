@@ -57,6 +57,8 @@ type ArmedTrigger struct {
 type FrontDeskLease struct {
 	ConversationID string                  `json:"conversationId"`
 	ArtifactDir    string                  `json:"artifactDir,omitempty"`
+	ProjectID      string                  `json:"projectId,omitempty"`
+	WorkspaceDir   string                  `json:"workspaceDir,omitempty"`
 	ConsolePinned  bool                    `json:"consolePinned,omitempty"`
 	ArmedTriggers  map[string]ArmedTrigger `json:"armedTriggers,omitempty"`
 	UpdatedAt      string                  `json:"updatedAt"`
@@ -1497,6 +1499,19 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if hasPrev && prev.ConversationID == convID {
 		lease.ConsolePinned = prev.ConsolePinned
 		lease.ArmedTriggers = prev.ArmedTriggers
+		lease.ProjectID = prev.ProjectID
+		lease.WorkspaceDir = prev.WorkspaceDir
+	}
+	if os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") == "" {
+		if projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")); projID != "" {
+			lease.ProjectID = projID
+		}
+	}
+	if lease.WorkspaceDir == "" && vaultDir != "" {
+		cleanV := filepath.Clean(vaultDir)
+		if filepath.Base(cleanV) == "local" {
+			lease.WorkspaceDir = filepath.Dir(cleanV)
+		}
 	}
 	if artifactDir != "" {
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(artifactDir), 0o644)
@@ -1507,6 +1522,27 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	}
 	ReconcileFrontDeskFromTranscript(vaultDir, "")
 	return nil
+}
+
+// SetFrontDeskWorkspace records the primary workspace root associated with the active Front Desk conversation.
+func SetFrontDeskWorkspace(vaultDir, convID, workspaceDir string) error {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" || convID == "" {
+		return nil
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok || fd.ConversationID != convID {
+		return nil
+	}
+	if abs, err := filepath.Abs(workspaceDir); err == nil {
+		workspaceDir = abs
+	}
+	if fd.WorkspaceDir == workspaceDir {
+		return nil
+	}
+	fd.WorkspaceDir = workspaceDir
+	fd.UpdatedAt = time.Now().Format(time.RFC3339)
+	return saveFrontDeskLease(vaultDir, fd)
 }
 
 // MarkConsolePinned records that the active Front Desk has pinned hq_console.md via write_file.
@@ -1998,6 +2034,59 @@ func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
 	return SaveQuota(vaultDir, state)
 }
 
+func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
+	fd, hasFD := GetFrontDesk(vaultDir)
+	isManual := strings.HasPrefix(trigger, "manual-spawn:")
+	if !isManual {
+		workDir := ""
+		if hasFD && fd.WorkspaceDir != "" {
+			if st, err := os.Stat(fd.WorkspaceDir); err == nil && st.IsDir() {
+				workDir = fd.WorkspaceDir
+			}
+		}
+		if workDir == "" && vaultDir != "" {
+			cleanV := filepath.Clean(vaultDir)
+			if filepath.Base(cleanV) == "local" {
+				parent := filepath.Dir(cleanV)
+				if st, err := os.Stat(parent); err == nil && st.IsDir() {
+					workDir = parent
+				}
+			}
+			if workDir == "" {
+				if st, err := os.Stat(cleanV); err == nil && st.IsDir() {
+					workDir = cleanV
+				}
+			}
+		}
+		if workDir != "" {
+			cmd.Dir = workDir
+		}
+	}
+
+	rawEnv := os.Environ()
+	cleanEnv := make([]string, 0, len(rawEnv)+1)
+	inSidecar := os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != ""
+	overrideProj := !isManual || inSidecar
+
+	for _, kv := range rawEnv {
+		if strings.HasPrefix(kv, "ANTIGRAVITY_CONVERSATION_ID=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_TRAJECTORY_ID=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_SOURCE_METADATA=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_SIDECAR_WEB_PORT=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_SIDECAR_UI_TOKEN=") {
+			continue
+		}
+		if overrideProj && strings.HasPrefix(kv, "ANTIGRAVITY_PROJECT_ID=") {
+			continue
+		}
+		cleanEnv = append(cleanEnv, kv)
+	}
+	if overrideProj && hasFD && strings.TrimSpace(fd.ProjectID) != "" {
+		cleanEnv = append(cleanEnv, "ANTIGRAVITY_PROJECT_ID="+strings.TrimSpace(fd.ProjectID))
+	}
+	cmd.Env = cleanEnv
+}
+
 // SpawnTask invokes `agentapi new-conversation --model=<modelID>` (or simulates it if dryRun is true),
 // enforcing the daily spawn budget, auto-downgrading to gemini-4-hydrogen-medium if a higher-tier model
 // hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
@@ -2022,6 +2111,7 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
 	} else {
 		cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
+		configureSpawnCommand(cmd, vaultDir, trigger)
 		outBytes, err := cmd.CombinedOutput()
 		output = strings.TrimSpace(string(outBytes))
 		if err != nil {
@@ -2029,6 +2119,7 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 			if (strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429")) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
 				fallbackModel := "gemini-4-hydrogen-medium"
 				fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
+				configureSpawnCommand(fbCmd, vaultDir, trigger)
 				if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
 					modelID = fallbackModel + " (fallback)"
 					output = strings.TrimSpace(string(fbBytes))

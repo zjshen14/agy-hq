@@ -2890,19 +2890,56 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 		return out.String(), err
 	}
 
-	// 1. Run `hq plugin install --global-vault --json` from repoRoot into isolated fakeHome
-	instOut, err := runStandalone(env.rootDir, "", []string{"HQ_ROOT_DIR=" + env.rootDir}, "plugin", "install", "--global-vault", "--json")
+	// 1a. Seed a legacy standalone sidecar (~/.gemini/config/sidecars/agy-hq-console) to simulate migration,
+	//     and verify a fresh jump-start in project-scoped mode (`hq plugin install --project=<freshHQ>`)
+	//     stages ~/.gemini/antigravity/hq/plugins/agy-hq, writes <freshHQ>/.agents/plugins.json, removes
+	//     the legacy standalone sidecar, and does NOT create ~/.gemini/config/plugins/agy-hq globally!
+	legacySidecar := filepath.Join(fakeHome, ".gemini", "config", "sidecars", "agy-hq-console")
+	_ = os.MkdirAll(legacySidecar, 0o755)
+	_ = os.WriteFile(filepath.Join(legacySidecar, "sidecar.json"), []byte(`{"command":"node"}`), 0o644)
+
+	freshHQ := filepath.Join(t.TempDir(), "fresh-standalone-hq")
+	_ = os.MkdirAll(freshHQ, 0o755)
+
+	projInstOut, err := runStandalone(env.rootDir, "", []string{"HQ_ROOT_DIR=" + env.rootDir}, "plugin", "install", "--global-vault", "--project="+freshHQ, "--json")
 	if err != nil {
-		t.Fatalf("hq plugin install --global-vault failed: %v (%s)", err, instOut)
+		t.Fatalf("project-scoped hq plugin install failed: %v (%s)", err, projInstOut)
+	}
+	var projRes map[string]interface{}
+	if err := json.Unmarshal([]byte(projInstOut), &projRes); err != nil {
+		t.Fatalf("unmarshal project-scoped install JSON: %v (%s)", err, projInstOut)
+	}
+	globalVault := filepath.Join(fakeHome, ".gemini", "antigravity", "hq", "vault")
+	sharedPlugin := filepath.Join(fakeHome, ".gemini", "antigravity", "hq", "plugins", "agy-hq")
+	globalPlugin := filepath.Join(fakeHome, ".gemini", "config", "plugins", "agy-hq")
+
+	if projRes["scope"] != "project" || projRes["version"] != "0.1.0" || projRes["vaultDir"] != globalVault {
+		t.Fatalf("unexpected project-scoped install result: %+v", projRes)
+	}
+	if _, err := os.Stat(globalPlugin); !os.IsNotExist(err) {
+		t.Fatalf("expected default project-scoped install NOT to pollute global ~/.gemini/config/plugins/agy-hq!")
+	}
+	if _, err := os.Stat(legacySidecar); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy standalone sidecar %s to be tidied up during install!", legacySidecar)
+	}
+	if _, err := os.Stat(filepath.Join(sharedPlugin, "rules", "AGENTS.md")); err != nil {
+		t.Fatalf("expected staged shared plugin rules/AGENTS.md: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(freshHQ, ".agents", "plugins.json")); err != nil {
+		t.Fatalf("expected fresh standalone HQ project to receive .agents/plugins.json: %v", err)
+	}
+
+	// 1b. Explicit `--global` opt-in (`hq plugin install --global --global-vault --json`) installs into ~/.gemini/config/plugins/agy-hq
+	instOut, err := runStandalone(env.rootDir, "", []string{"HQ_ROOT_DIR=" + env.rootDir}, "plugin", "install", "--global", "--global-vault", "--json")
+	if err != nil {
+		t.Fatalf("hq plugin install --global --global-vault failed: %v (%s)", err, instOut)
 	}
 	var instRes map[string]interface{}
 	if err := json.Unmarshal([]byte(instOut), &instRes); err != nil {
 		t.Fatalf("unmarshal plugin install JSON: %v (%s)", err, instOut)
 	}
-	globalVault := filepath.Join(fakeHome, ".gemini", "antigravity", "hq", "vault")
-	globalPlugin := filepath.Join(fakeHome, ".gemini", "config", "plugins", "agy-hq")
-	if instRes["version"] != "0.1.0" || instRes["vaultDir"] != globalVault {
-		t.Fatalf("unexpected install result: %+v", instRes)
+	if instRes["scope"] != "global" || instRes["version"] != "0.1.0" || instRes["vaultDir"] != globalVault {
+		t.Fatalf("unexpected global install result: %+v", instRes)
 	}
 	if _, err := os.Stat(filepath.Join(globalPlugin, "rules", "AGENTS.md")); err != nil {
 		t.Fatalf("expected installed global plugin rules/AGENTS.md: %v", err)
@@ -2995,7 +3032,21 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 		t.Fatalf("expected SessionStart version-skew warning banner, got err=%v out=%s", err, skewSSOut)
 	}
 
-	// 6. Worktree ancestor resolution (`hq vault-path --json`) & `hq memory commit` + `hq plugin uninstall --purge-bin`
+	// 6. Switching from `--global` back to default project-scoped (`hq plugin install --global-vault`)
+	//    must automatically remove ~/.gemini/config/plugins/agy-hq while preserving ~/.local/bin/hq,
+	//    ~/.gemini/antigravity/hq/plugins/agy-hq, and the private Vault!
+	migrateBackOut, err := runStandalone(env.rootDir, "", []string{"HQ_ROOT_DIR=" + env.rootDir}, "plugin", "install", "--global-vault", "--json")
+	if err != nil {
+		t.Fatalf("migration back to project-scoped failed: %v (%s)", err, migrateBackOut)
+	}
+	if _, err := os.Stat(globalPlugin); !os.IsNotExist(err) {
+		t.Fatalf("expected globalPlugin (%s) to be removed when switching back to project scope!", globalPlugin)
+	}
+	if _, err := os.Stat(filepath.Join(sharedPlugin, "plugin.json")); err != nil {
+		t.Fatalf("expected sharedPlugin (%s) to remain staged in project scope: %v", sharedPlugin, err)
+	}
+
+	// 7. Worktree ancestor resolution (`hq vault-path --json`) & `hq memory commit` + `hq plugin uninstall --purge-bin`
 	wtChild := filepath.Join(globalVault, "worktrees", "webapp-fix")
 	_ = os.MkdirAll(wtChild, 0o755)
 	vpOut, err := runStandalone(wtChild, "", nil, "vault-path", "--json")
@@ -3009,12 +3060,15 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 		t.Fatalf("expected hq memory commit to commit standalone Vault note, got err=%v out=%s", err, mcOut)
 	}
 
-	uninstOut, err := runStandalone(extRepo, "", nil, "plugin", "uninstall", "--purge-bin")
+	uninstOut, err := runStandalone(extRepo, "", nil, "plugin", "uninstall", "--purge-bin", "--detach-project="+freshHQ)
 	if err != nil {
 		t.Fatalf("hq plugin uninstall --purge-bin failed: %v (%s)", err, uninstOut)
 	}
-	if _, err := os.Stat(globalPlugin); !os.IsNotExist(err) {
-		t.Fatalf("expected globalPlugin directory to be removed after uninstall")
+	if _, err := os.Stat(sharedPlugin); !os.IsNotExist(err) {
+		t.Fatalf("expected sharedPlugin directory to be removed after uninstall")
+	}
+	if _, err := os.Stat(filepath.Join(freshHQ, ".agents", "plugins.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected detached freshHQ .agents/plugins.json to be removed after uninstall")
 	}
 	if _, err := os.Stat(filepath.Join(localBin, "hq")); !os.IsNotExist(err) {
 		t.Fatalf("expected ~/.local/bin/hq to be removed with --purge-bin")

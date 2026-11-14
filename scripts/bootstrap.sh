@@ -7,14 +7,14 @@ cd "$ROOT_DIR"
 export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
 
 INIT_FLAGS=()
-INSTALL_GLOBAL=0
+PLUGIN_FLAGS=()
 for arg in "$@"; do
   case "$arg" in
     --demo|--with-sample-data)
       INIT_FLAGS+=("--demo")
       ;;
     --global)
-      INSTALL_GLOBAL=1
+      PLUGIN_FLAGS+=("--global")
       ;;
   esac
 done
@@ -35,14 +35,10 @@ mkdir -p bin
 GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo dev)"
 go build -ldflags "-X github.com/zjshen14/agy-hq/internal/version.GitCommit=${GIT_SHA}" -o ./bin/hq ./cmd/hq
 
-echo "==> [3/5] Initializing private Vault (./local/) & CI git hooks (pre-commit + pre-push)..."
+echo "==> [3/5] Initializing private Vault (./local/), CI git hooks, & project-scoped hq binary (~/.local/bin/hq)..."
 ./bin/hq init "${INIT_FLAGS[@]}"
 ./bin/hq ci install-hooks 2>/dev/null || true
-
-if [ "$INSTALL_GLOBAL" -eq 1 ]; then
-  echo "==> [3b/5] Installing global plugin (~/.gemini/config/plugins/agy-hq/) & ~/.local/bin/hq..."
-  ./bin/hq plugin install
-fi
+./bin/hq plugin install "${PLUGIN_FLAGS[@]}"
 
 echo "==> [4/5] Auto-arming background daemon & scheduled triggers..."
 ./bin/hq daemon install 2>/dev/null || true

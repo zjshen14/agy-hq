@@ -21,6 +21,7 @@ const AgyHQModulePath = "module github.com/zjshen14/agy-hq"
 type GlobalConfig struct {
 	VaultDir      string `json:"vaultDir"`
 	SourceRepoDir string `json:"sourceRepoDir,omitempty"`
+	PluginScope   string `json:"pluginScope,omitempty"`
 	UpdatedAt     string `json:"updatedAt,omitempty"`
 }
 

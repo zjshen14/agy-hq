@@ -336,48 +336,71 @@ func Run(vaultDir string) []CheckResult {
 		})
 	}
 
-	// 11. Check Global Plugin & Binary Sync (RFC-0015)
+	// 11. Check Plugin & Binary Sync (RFC-0015 — project-scoped by default, --global opt-in)
 	if pSt, pErr := plugin.Status(vaultDir, rootDir); pErr == nil && pSt != nil {
 		switch {
 		case pSt.DaemonSkewed:
 			results = append(results, CheckResult{
-				Name:   "Global Plugin & Binary Sync",
+				Name:   "Plugin & Binary Sync",
 				Status: "WARN",
 				Detail: fmt.Sprintf("Live daemon version (%s / %s) is skewed vs hq binary (v%s / %s); run 'hq plugin install' or 'hq upgrade'",
 					pSt.DaemonVersion, pSt.DaemonCommit, pSt.EngineVersion, pSt.EngineCommit),
 			})
+		case pSt.LegacySidecarFound:
+			results = append(results, CheckResult{
+				Name:   "Plugin & Binary Sync",
+				Status: "WARN",
+				Detail: fmt.Sprintf("Legacy standalone sidecar copy detected at %s; run 'hq plugin install' to tidy up",
+					pSt.LegacySidecarDir),
+			})
 		case pSt.GlobalPluginInstalled && pSt.WorkspacePluginFound && (!pSt.BundleInSync || !pSt.VersionInSync):
 			results = append(results, CheckResult{
-				Name:   "Global Plugin & Binary Sync",
+				Name:   "Plugin & Binary Sync",
 				Status: "WARN",
-				Detail: fmt.Sprintf("Global plugin (%s, v%s) has drifted from workspace source (v%s); run 'hq plugin install'",
+				Detail: fmt.Sprintf("Global plugin (%s, v%s) has drifted from workspace source (v%s); run 'hq plugin install --global' or 'hq plugin install' to scope to project",
 					pSt.GlobalPluginDir, pSt.GlobalPluginVersion, pSt.EngineVersion),
 			})
-		case pSt.GlobalPluginInstalled && !pSt.GlobalBinaryInstalled:
+		case pSt.SharedPluginInstalled && pSt.WorkspacePluginFound && (!pSt.BundleInSync || !pSt.VersionInSync):
 			results = append(results, CheckResult{
-				Name:   "Global Plugin & Binary Sync",
+				Name:   "Plugin & Binary Sync",
 				Status: "WARN",
-				Detail: fmt.Sprintf("Global plugin installed at %s, but %s is missing; run 'hq plugin install'",
-					pSt.GlobalPluginDir, pSt.GlobalBinaryPath),
+				Detail: fmt.Sprintf("Shared plugin bundle (%s, v%s) has drifted from workspace source (v%s); run 'hq plugin install'",
+					pSt.SharedPluginDir, pSt.SharedPluginVersion, pSt.EngineVersion),
 			})
-		case pSt.GlobalPluginInstalled && !pSt.BinDirOnPath:
+		case (pSt.GlobalPluginInstalled || pSt.SharedPluginInstalled) && !pSt.GlobalBinaryInstalled:
 			results = append(results, CheckResult{
-				Name:   "Global Plugin & Binary Sync",
+				Name:   "Plugin & Binary Sync",
 				Status: "WARN",
-				Detail: fmt.Sprintf("Global plugin v%s installed, but %s is not in PATH (hooks auto-add ~/.local/bin, add it to shell rc for interactive CLI)",
-					pSt.GlobalPluginVersion, filepath.Dir(pSt.GlobalBinaryPath)),
+				Detail: fmt.Sprintf("Plugin bundle staged, but %s is missing; run 'hq plugin install'",
+					pSt.GlobalBinaryPath),
+			})
+		case (pSt.GlobalPluginInstalled || pSt.SharedPluginInstalled) && !pSt.BinDirOnPath:
+			results = append(results, CheckResult{
+				Name:   "Plugin & Binary Sync",
+				Status: "WARN",
+				Detail: fmt.Sprintf("hq v%s installed (%s), but %s is not in PATH (hooks auto-add ~/.local/bin, add it to shell rc for interactive CLI)",
+					pSt.EngineVersion, pSt.Scope, filepath.Dir(pSt.GlobalBinaryPath)),
 			})
 		case pSt.GlobalPluginInstalled:
 			results = append(results, CheckResult{
-				Name:   "Global Plugin & Binary Sync",
+				Name:   "Plugin & Binary Sync",
 				Status: "PASS",
-				Detail: fmt.Sprintf("Installed globally at %s (v%s · vaultSource=%s)", pSt.GlobalPluginDir, pSt.GlobalPluginVersion, pSt.VaultResolutionSource),
+				Detail: fmt.Sprintf("Global scope active at %s (v%s · vaultSource=%s; run 'hq plugin install' without --global to scope strictly to project)",
+					pSt.GlobalPluginDir, pSt.GlobalPluginVersion, pSt.VaultResolutionSource),
+			})
+		case pSt.SharedPluginInstalled:
+			results = append(results, CheckResult{
+				Name:   "Plugin & Binary Sync",
+				Status: "PASS",
+				Detail: fmt.Sprintf("Project-scoped mode active (v%s · binary=%s · vaultSource=%s; zero global leakage to unrelated projects)",
+					pSt.SharedPluginVersion, pSt.GlobalBinaryPath, pSt.VaultResolutionSource),
 			})
 		default:
 			results = append(results, CheckResult{
-				Name:   "Global Plugin & Binary Sync",
+				Name:   "Plugin & Binary Sync",
 				Status: "PASS",
-				Detail: fmt.Sprintf("Workspace mode (v%s · vaultSource=%s; run 'hq plugin install' to enable globally)", pSt.EngineVersion, pSt.VaultResolutionSource),
+				Detail: fmt.Sprintf("Workspace mode (v%s · vaultSource=%s; run 'hq plugin install' to install ~/.local/bin/hq in project scope)",
+					pSt.EngineVersion, pSt.VaultResolutionSource),
 			})
 		}
 	}

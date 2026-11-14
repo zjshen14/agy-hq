@@ -270,6 +270,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 
 			_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
+			if len(payload.WorkspacePaths) > 0 && strings.TrimSpace(payload.WorkspacePaths[0]) != "" {
+				_ = kernel.SetFrontDeskWorkspace(vaultDir, payload.ConversationID, payload.WorkspacePaths[0])
+			}
 			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 			fd, _ := kernel.GetFrontDesk(vaultDir)
 			_, unarmedTriggers := kernel.GetUnarmedTriggers(vaultDir)

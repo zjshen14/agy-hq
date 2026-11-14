@@ -53,13 +53,15 @@ Explore the live Task Board, Inbox Triage, Thesis Check (`ACME` Form 10-Q), and 
 git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh --demo
 ```
 
-### Option B: Clean Personal Vault Bootstrap
+### Option B: Clean Personal Vault Bootstrap *(Project-Scoped by Default)*
+
+Installs `~/.local/bin/hq` on `PATH`, initializes `./local/`, and scopes the `agy-hq` plugin **strictly to this project** (so unrelated projects on your machine stay 100% untouched; to attach `agy-hq` to another specific project later, run `hq plugin install --project=/path/to/project`):
 
 ```sh
 git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh
 ```
 
-### Option C: Install Globally Across Every Antigravity Workspace (`~/.gemini/config/plugins/agy-hq/`)
+### Option C: Optional Global Install Across Every Antigravity Workspace (`~/.gemini/config/plugins/agy-hq/`)
 
 ```sh
 git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh --global

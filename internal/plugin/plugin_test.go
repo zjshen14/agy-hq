@@ -196,3 +196,59 @@ func TestValidateBundleMutationsAndSkewProbe(t *testing.T) {
 		t.Fatalf("unexpected ProbeDaemonHealth result: ok=%v ver=%q commit=%q", ok, ver, commit)
 	}
 }
+
+func TestAttachDetachProjectPluginAndSanitizedDaemonEnv(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HQ_HOME_DIR", fakeHome)
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "sidecar-project-uuid")
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-sidecar-1")
+	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "54321")
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "localhost:43701")
+
+	env := SanitizedDaemonEnv()
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "ANTIGRAVITY_PROJECT_ID=") ||
+		strings.Contains(joined, "ANTIGRAVITY_CONVERSATION_ID=") ||
+		strings.Contains(joined, "ANTIGRAVITY_SIDECAR_WEB_PORT=") {
+		t.Fatalf("expected sidecar/session env vars to be stripped, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "ANTIGRAVITY_LS_ADDRESS=localhost:43701") {
+		t.Fatalf("expected ANTIGRAVITY_LS_ADDRESS to be preserved in SanitizedDaemonEnv")
+	}
+
+	// 1. Fresh standalone project gets .agents/plugins.json preserving any existing entries
+	projDir := filepath.Join(t.TempDir(), "my-fresh-hq")
+	_ = os.MkdirAll(filepath.Join(projDir, ".agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".agents", "plugins.json"), []byte(`{"entries":[{"path":"tools/plugins"}]}`), 0o644)
+
+	mPath, err := AttachProjectPlugin(projDir, "")
+	if err != nil || mPath == "" {
+		t.Fatalf("AttachProjectPlugin failed: path=%q err=%v", mPath, err)
+	}
+	raw, _ := os.ReadFile(mPath)
+	if !strings.Contains(string(raw), `"tools/plugins"`) || !strings.Contains(string(raw), `"agy-hq"`) {
+		t.Fatalf("expected both existing entry and agy-hq in plugins.json, got:\n%s", string(raw))
+	}
+
+	// 2. Detaching preserves other entries; detaching from a single-entry file removes plugins.json cleanly
+	removed, err := DetachProjectPlugin(projDir)
+	if err != nil || !removed {
+		t.Fatalf("DetachProjectPlugin failed: removed=%v err=%v", removed, err)
+	}
+	rawAfter, _ := os.ReadFile(mPath)
+	if strings.Contains(string(rawAfter), `"agy-hq"`) || !strings.Contains(string(rawAfter), `"tools/plugins"`) {
+		t.Fatalf("expected agy-hq removed while keeping tools/plugins, got:\n%s", string(rawAfter))
+	}
+
+	soloProj := filepath.Join(t.TempDir(), "solo-hq")
+	soloManifest, err := AttachProjectPlugin(soloProj, "")
+	if err != nil || soloManifest == "" {
+		t.Fatalf("AttachProjectPlugin on soloProj failed: %v", err)
+	}
+	if ok, err := DetachProjectPlugin(soloProj); err != nil || !ok {
+		t.Fatalf("DetachProjectPlugin on soloProj failed: ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(soloManifest); !os.IsNotExist(err) {
+		t.Fatalf("expected empty solo plugins.json to be deleted on detach")
+	}
+}
