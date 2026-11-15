@@ -1694,6 +1694,26 @@ func SetFrontDeskWorkspace(vaultDir, convID, workspaceDir string) error {
 	return saveFrontDeskLease(vaultDir, fd)
 }
 
+// BackfillFrontDeskProjectID persists ANTIGRAVITY_PROJECT_ID into front_desk.json when the
+// current process belongs to the active Front Desk conversation and fd.ProjectID is empty.
+func BackfillFrontDeskProjectID(vaultDir string) {
+	if vaultDir == "" || os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != "" {
+		return
+	}
+	convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	if convID == "" || projID == "" {
+		return
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok || fd.ConversationID != convID || strings.TrimSpace(fd.ProjectID) != "" {
+		return
+	}
+	fd.ProjectID = projID
+	fd.UpdatedAt = time.Now().Format(time.RFC3339)
+	_ = saveFrontDeskLease(vaultDir, fd)
+}
+
 // MarkConsolePinned records that the active Front Desk has pinned hq_console.md via write_file.
 func MarkConsolePinned(vaultDir, convID string) error {
 	fd, ok := GetFrontDesk(vaultDir)
@@ -2136,11 +2156,10 @@ func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
 	return SaveQuota(vaultDir, state)
 }
 
-func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
+func resolveSpawnTarget(vaultDir, trigger string) (workDir, projectID string) {
 	fd, hasFD := GetFrontDesk(vaultDir)
 	isManual := strings.HasPrefix(trigger, "manual-spawn:")
 	if !isManual {
-		workDir := ""
 		if hasFD && fd.WorkspaceDir != "" {
 			if st, err := os.Stat(fd.WorkspaceDir); err == nil && st.IsDir() {
 				workDir = fd.WorkspaceDir
@@ -2160,9 +2179,30 @@ func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
 				}
 			}
 		}
-		if workDir != "" {
-			cmd.Dir = workDir
+	} else if wd, err := os.Getwd(); err == nil && wd != "" {
+		workDir = wd
+	}
+
+	inSidecar := os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != ""
+	overrideProj := !isManual || inSidecar
+	if overrideProj {
+		if hasFD {
+			projectID = strings.TrimSpace(fd.ProjectID)
 		}
+	} else {
+		projectID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+		if projectID == "" && hasFD {
+			projectID = strings.TrimSpace(fd.ProjectID)
+		}
+	}
+	return workDir, projectID
+}
+
+func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
+	workDir, projectID := resolveSpawnTarget(vaultDir, trigger)
+	isManual := strings.HasPrefix(trigger, "manual-spawn:")
+	if !isManual && workDir != "" {
+		cmd.Dir = workDir
 	}
 
 	rawEnv := os.Environ()
@@ -2183,15 +2223,74 @@ func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
 		}
 		cleanEnv = append(cleanEnv, kv)
 	}
-	if overrideProj && hasFD && strings.TrimSpace(fd.ProjectID) != "" {
-		cleanEnv = append(cleanEnv, "ANTIGRAVITY_PROJECT_ID="+strings.TrimSpace(fd.ProjectID))
+	if overrideProj && projectID != "" {
+		cleanEnv = append(cleanEnv, "ANTIGRAVITY_PROJECT_ID="+projectID)
 	}
 	cmd.Env = cleanEnv
 }
 
-// SpawnTask invokes `agentapi new-conversation --model=<modelID>` (or simulates it if dryRun is true),
-// enforcing the daily spawn budget, auto-downgrading to gemini-4-hydrogen-medium if a higher-tier model
-// hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
+func isQuotaExhaustedError(msg string) bool {
+	return strings.Contains(msg, "RESOURCE_EXHAUSTED") || strings.Contains(msg, "429")
+}
+
+func resolveRoutineFallbackModel(vaultDir string) string {
+	rFallback := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"})
+	fallbackModel := strings.TrimSpace(rFallback.FallbackModel)
+	if fallbackModel == "" {
+		fallbackModel = rFallback.ModelID
+	}
+	return fallbackModel
+}
+
+func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string) (cascadeID string, usedModel string, fallbackToAgentAPI bool, err error) {
+	creds, ok := discoverLSCredentials(vaultDir)
+	if !ok {
+		return "", "", true, nil
+	}
+	modelEnum, enumErr := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, modelID)
+	if enumErr != nil {
+		return "", "", true, nil
+	}
+
+	usedModel = modelID
+	reqBody := buildCascadeRequestBody(modelEnum, "", "", workDir, projectID, true)
+	cascadeID, err = startCascade(creds.BaseURL, creds.CSRFToken, reqBody)
+	if err != nil {
+		if isQuotaExhaustedError(err.Error()) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
+			fallbackModel := resolveRoutineFallbackModel(vaultDir)
+			if fbEnum, fbEnumErr := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, fallbackModel); fbEnumErr == nil {
+				fbReqBody := buildCascadeRequestBody(fbEnum, "", "", workDir, projectID, true)
+				if fbCascadeID, fbErr := startCascade(creds.BaseURL, creds.CSRFToken, fbReqBody); fbErr == nil {
+					cascadeID = fbCascadeID
+					usedModel = fallbackModel + " (fallback)"
+					err = nil
+				}
+			}
+		}
+		if err != nil {
+			if isQuotaExhaustedError(err.Error()) {
+				return "", usedModel, false, err
+			}
+			if _, lpErr := exec.LookPath("agentapi"); lpErr == nil {
+				return "", "", true, nil
+			}
+			return "", usedModel, false, err
+		}
+	}
+
+	if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, cascadeID, prompt, 10*time.Second); sendErr != nil {
+		msgCmd := exec.Command("agentapi", "send-message", "--title="+title, cascadeID, prompt)
+		if msgErr := msgCmd.Run(); msgErr != nil {
+			return cascadeID, usedModel, false, fmt.Errorf("StartCascade succeeded (%s) but SendUserCascadeMessage failed: %w", cascadeID, sendErr)
+		}
+	}
+	return cascadeID, usedModel, false, nil
+}
+
+// SpawnTask creates and starts a top-level Antigravity conversation (via LanguageServerService/StartCascade
+// + SendUserCascadeMessage when LS credentials are available, falling back to `agentapi new-conversation`),
+// enforcing the daily spawn budget, auto-downgrading to routine tier if a higher-tier model hits 429,
+// and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
 func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
 	if modelID == "" {
 		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, "", "", "")
@@ -2212,41 +2311,61 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	if dryRun {
 		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
 	} else {
-		cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
-		configureSpawnCommand(cmd, vaultDir, trigger)
-		outBytes, err := cmd.CombinedOutput()
-		output = strings.TrimSpace(string(outBytes))
-		if err != nil {
-			// Quota-aware fallback: if a non-Hydrogen/non-Flash model hit 429, retry once on fallback_on_429 (or routine tier)
-			if (strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429")) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
-				rFallback := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"})
-				fallbackModel := strings.TrimSpace(rFallback.FallbackModel)
-				if fallbackModel == "" {
-					fallbackModel = rFallback.ModelID
+		workDir, projectID := resolveSpawnTarget(vaultDir, trigger)
+		lsOut, lsModel, useAgentAPI, lsErr := spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID)
+		if !useAgentAPI {
+			if lsModel != "" {
+				modelID = lsModel
+			}
+			if lsErr != nil {
+				if isQuotaExhaustedError(lsErr.Error()) {
+					state.CircuitOpen = true
+					state.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from LanguageServerService"
 				}
-				fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
-				configureSpawnCommand(fbCmd, vaultDir, trigger)
-				if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
-					modelID = fallbackModel + " (fallback)"
-					output = strings.TrimSpace(string(fbBytes))
-					err = nil
+				state.Events = append(state.Events, SpawnEvent{
+					Timestamp: time.Now().Format(time.RFC3339),
+					Trigger:   trigger,
+					Skill:     skill,
+					Model:     modelID,
+					Outcome:   "error: " + lsErr.Error(),
+				})
+				_ = SaveQuota(vaultDir, state)
+				return lsOut, lsErr
+			}
+			output = lsOut
+		} else {
+			cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
+			configureSpawnCommand(cmd, vaultDir, trigger)
+			outBytes, err := cmd.CombinedOutput()
+			output = strings.TrimSpace(string(outBytes))
+			if err != nil {
+				// Quota-aware fallback: if a non-Hydrogen/non-Flash model hit 429, retry once on fallback_on_429 (or routine tier)
+				if isQuotaExhaustedError(output) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
+					fallbackModel := resolveRoutineFallbackModel(vaultDir)
+					fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
+					configureSpawnCommand(fbCmd, vaultDir, trigger)
+					if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
+						modelID = fallbackModel + " (fallback)"
+						output = strings.TrimSpace(string(fbBytes))
+						err = nil
+					}
 				}
 			}
-		}
-		if err != nil {
-			if strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429") {
-				state.CircuitOpen = true
-				state.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from agentapi"
+			if err != nil {
+				if isQuotaExhaustedError(output) {
+					state.CircuitOpen = true
+					state.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from agentapi"
+				}
+				state.Events = append(state.Events, SpawnEvent{
+					Timestamp: time.Now().Format(time.RFC3339),
+					Trigger:   trigger,
+					Skill:     skill,
+					Model:     modelID,
+					Outcome:   "error: " + err.Error(),
+				})
+				_ = SaveQuota(vaultDir, state)
+				return output, fmt.Errorf("agentapi error: %w (%s)", err, output)
 			}
-			state.Events = append(state.Events, SpawnEvent{
-				Timestamp: time.Now().Format(time.RFC3339),
-				Trigger:   trigger,
-				Skill:     skill,
-				Model:     modelID,
-				Outcome:   "error: " + err.Error(),
-			})
-			_ = SaveQuota(vaultDir, state)
-			return output, fmt.Errorf("agentapi error: %w (%s)", err, output)
 		}
 	}
 
@@ -2882,6 +3001,191 @@ var staticModelEnumMap = map[string]string{
 	"gpt-oss-120b-medium":      "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
 }
 
+type lsCredentials struct {
+	BaseURL   string
+	CSRFToken string
+}
+
+func normalizeLSBaseURL(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr != "" && !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		addr = "http://" + addr
+	}
+	return strings.TrimRight(addr, "/")
+}
+
+func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
+	if addr, csrf := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN")); addr != "" && csrf != "" {
+		return lsCredentials{
+			BaseURL:   normalizeLSBaseURL(addr),
+			CSRFToken: csrf,
+		}, true
+	}
+
+	roots := hostpaths.Resolve(vaultDir)
+	if roots.AppDataDir == "" {
+		return lsCredentials{}, false
+	}
+	// In hermetic temp-vault tests without an explicit temp AppDataDir, never probe the live host's ~/.gemini/antigravity/daemon.
+	if hostpaths.IsTempPath(vaultDir) && !hostpaths.IsTempPath(roots.AppDataDir) && os.Getenv("HQ_ALLOW_LIVE_LS_DISCOVERY") != "1" {
+		return lsCredentials{}, false
+	}
+
+	matches, err := filepath.Glob(filepath.Join(roots.AppDataDir, "daemon", "hub_*.json"))
+	if err != nil || len(matches) == 0 {
+		return lsCredentials{}, false
+	}
+	type hubCandidate struct {
+		path    string
+		modTime time.Time
+	}
+	candidates := make([]hubCandidate, 0, len(matches))
+	for _, m := range matches {
+		if st, sErr := os.Stat(m); sErr == nil && !st.IsDir() {
+			candidates = append(candidates, hubCandidate{path: m, modTime: st.ModTime()})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+
+	for _, c := range candidates {
+		data, rErr := os.ReadFile(c.path)
+		if rErr != nil {
+			continue
+		}
+		var hub struct {
+			PID       int    `json:"pid"`
+			HTTPPort  int    `json:"httpPort"`
+			CSRFToken string `json:"csrfToken"`
+		}
+		if json.Unmarshal(data, &hub) != nil || hub.HTTPPort <= 0 || strings.TrimSpace(hub.CSRFToken) == "" {
+			continue
+		}
+		if hub.PID > 0 && !isProcessAlive(hub.PID) {
+			continue
+		}
+		return lsCredentials{
+			BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", hub.HTTPPort),
+			CSRFToken: strings.TrimSpace(hub.CSRFToken),
+		}, true
+	}
+	return lsCredentials{}, false
+}
+
+func buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, projectID string, includeBothProjectAndWorkspace bool) map[string]interface{} {
+	reqBody := map[string]interface{}{
+		"baseTrajectoryIdentifier": map[string]interface{}{
+			"lastActiveDoc": true,
+		},
+		"source":         "CORTEX_TRAJECTORY_SOURCE_AGENT_API",
+		"trajectoryType": "CORTEX_TRAJECTORY_TYPE_CASCADE",
+		"requestedModel": modelEnum,
+		"customAgentSpec": map[string]interface{}{
+			"codingAgent":                 map[string]interface{}{},
+			"commandExecutionPolicy":      "eager",
+			"enforcedWorkspaceValidation": false,
+			"cascadeConfig": map[string]interface{}{
+				"plannerConfig": map[string]interface{}{
+					"planModel": modelEnum,
+					"requestedModel": map[string]interface{}{
+						"model": modelEnum,
+					},
+				},
+			},
+		},
+	}
+	if parentConvID != "" {
+		reqBody["parentConversationId"] = parentConvID
+		reqBody["subagentDescriptor"] = map[string]interface{}{
+			"typeName": "self",
+			"role":     role,
+		}
+		reqBody["agentScriptItem"] = map[string]interface{}{
+			"name": "self",
+		}
+	}
+	if projectID != "" {
+		reqBody["projectEnvConfig"] = map[string]interface{}{
+			"projectId":                 projectID,
+			"defaultProjectEnvironment": map[string]interface{}{},
+		}
+	}
+	if workspaceDir != "" && (includeBothProjectAndWorkspace || projectID == "") {
+		if absDir, absErr := filepath.Abs(workspaceDir); absErr == nil {
+			workspaceDir = absDir
+		}
+		reqBody["workspaceUris"] = []string{"file://" + filepath.ToSlash(workspaceDir)}
+	}
+	return reqBody
+}
+
+func startCascade(lsBaseURL, csrfToken string, reqBody map[string]interface{}) (string, error) {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+	startURL := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/StartCascade", normalizeLSBaseURL(lsBaseURL))
+	req, err := http.NewRequest(http.MethodPost, startURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-codeium-csrf-token", csrfToken)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("StartCascade RPC failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("StartCascade HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+	}
+
+	var startResp struct {
+		CascadeID string `json:"cascadeId"`
+	}
+	if err := json.Unmarshal(respBytes, &startResp); err != nil || startResp.CascadeID == "" {
+		return "", fmt.Errorf("invalid StartCascade response: %s", strings.TrimSpace(string(respBytes)))
+	}
+	return startResp.CascadeID, nil
+}
+
+func sendUserCascadeMessage(lsBaseURL, csrfToken, cascadeID, text string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	sendURL := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage", normalizeLSBaseURL(lsBaseURL))
+	sendPayload, err := json.Marshal(map[string]interface{}{
+		"cascadeId": cascadeID,
+		"items": []map[string]interface{}{
+			{"text": text},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	sendReq, err := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(sendPayload))
+	if err != nil {
+		return err
+	}
+	sendReq.Header.Set("Content-Type", "application/json")
+	sendReq.Header.Set("x-codeium-csrf-token", csrfToken)
+	client := &http.Client{Timeout: timeout}
+	sendResp, err := client.Do(sendReq)
+	if err != nil {
+		return fmt.Errorf("SendUserCascadeMessage failed: %w", err)
+	}
+	defer sendResp.Body.Close()
+	respBody, _ := io.ReadAll(sendResp.Body)
+	if sendResp.StatusCode < 200 || sendResp.StatusCode >= 300 {
+		return fmt.Errorf("SendUserCascadeMessage HTTP %d: %s", sendResp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
 // ResolveModelEnum maps a human-readable Antigravity model ID (e.g. "claude-opus-5-5-high")
 // to its LanguageServerService Model enum string (e.g. "MODEL_PLACEHOLDER_M402") by querying
 // GetCascadeModelConfigData on the local language server with a static fallback table.
@@ -2893,7 +3197,7 @@ func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
 	normalized := strings.ToLower(trimmed)
 
 	if lsAddr != "" && csrfToken != "" {
-		url := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData", lsAddr)
+		url := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData", normalizeLSBaseURL(lsAddr))
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -2978,90 +3282,21 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		return output, nil
 	}
 
-	lsAddr := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
-	csrfToken := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
-	if lsAddr == "" || csrfToken == "" {
+	creds, ok := discoverLSCredentials(vaultDir)
+	if !ok {
 		return "", fmt.Errorf("ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN are required to spawn a live subagent")
 	}
 
-	modelEnum, err := ResolveModelEnum(lsAddr, csrfToken, modelID)
+	modelEnum, err := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, modelID)
 	if err != nil {
 		return "", err
 	}
 
-	reqBody := map[string]interface{}{
-		"baseTrajectoryIdentifier": map[string]interface{}{
-			"lastActiveDoc": true,
-		},
-		"source":               "CORTEX_TRAJECTORY_SOURCE_AGENT_API",
-		"trajectoryType":       "CORTEX_TRAJECTORY_TYPE_CASCADE",
-		"requestedModel":       modelEnum,
-		"parentConversationId": parentConvID,
-		"subagentDescriptor": map[string]interface{}{
-			"typeName": "self",
-			"role":     role,
-		},
-		"agentScriptItem": map[string]interface{}{
-			"name": "self",
-		},
-		"customAgentSpec": map[string]interface{}{
-			"codingAgent":                 map[string]interface{}{},
-			"commandExecutionPolicy":      "eager",
-			"enforcedWorkspaceValidation": false,
-			"cascadeConfig": map[string]interface{}{
-				"plannerConfig": map[string]interface{}{
-					"planModel": modelEnum,
-					"requestedModel": map[string]interface{}{
-						"model": modelEnum,
-					},
-				},
-			},
-		},
-	}
-
-	if projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")); projID != "" {
-		reqBody["projectEnvConfig"] = map[string]interface{}{
-			"projectId":                 projID,
-			"defaultProjectEnvironment": map[string]interface{}{},
-		}
-	} else if workspaceDir != "" {
-		if absDir, absErr := filepath.Abs(workspaceDir); absErr == nil {
-			workspaceDir = absDir
-		}
-		reqBody["workspaceUris"] = []string{"file://" + filepath.ToSlash(workspaceDir)}
-	}
-
-	bodyBytes, err := json.Marshal(reqBody)
+	reqBody := buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")), false)
+	cascadeID, err := startCascade(creds.BaseURL, creds.CSRFToken, reqBody)
 	if err != nil {
 		return "", err
 	}
-
-	startURL := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/StartCascade", lsAddr)
-	req, err := http.NewRequest(http.MethodPost, startURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-codeium-csrf-token", csrfToken)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("StartCascade RPC failed: %w", err)
-	}
-	defer resp.Body.Close()
-	respBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("StartCascade HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
-	}
-
-	var startResp struct {
-		CascadeID string `json:"cascadeId"`
-	}
-	if err := json.Unmarshal(respBytes, &startResp); err != nil || startResp.CascadeID == "" {
-		return "", fmt.Errorf("invalid StartCascade response: %s", strings.TrimSpace(string(respBytes)))
-	}
-	cascadeID := startResp.CascadeID
 
 	fullPrompt := prompt
 	if parentConvID != "" && !strings.Contains(fullPrompt, parentConvID) {
@@ -3099,25 +3334,7 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 
 	// Deliver initial prompt via SendUserCascadeMessage to kick off Turn 1 immediately
 	// (Note: agentapi send-message only queues an inbox message and will not wake a 0-step StartCascade trajectory).
-	sent := false
-	sendURL := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage", lsAddr)
-	sendPayload, _ := json.Marshal(map[string]interface{}{
-		"cascadeId": cascadeID,
-		"items": []map[string]interface{}{
-			{"text": fullPrompt},
-		},
-	})
-	if sendReq, reqErr := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(sendPayload)); reqErr == nil {
-		sendReq.Header.Set("Content-Type", "application/json")
-		sendReq.Header.Set("x-codeium-csrf-token", csrfToken)
-		if sendResp, doErr := client.Do(sendReq); doErr == nil {
-			_, _ = io.Copy(io.Discard, sendResp.Body)
-			_ = sendResp.Body.Close()
-			if sendResp.StatusCode >= 200 && sendResp.StatusCode < 300 {
-				sent = true
-			}
-		}
-	}
+	sent := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, cascadeID, fullPrompt, 10*time.Second) == nil
 	if !sent && parentConvID != "" {
 		msgCmd := exec.Command("agentapi", "send-message", "--title=Message from "+parentConvID, cascadeID, fullPrompt)
 		_ = msgCmd.Run()

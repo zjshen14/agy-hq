@@ -49,6 +49,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "hq: resolve vault: %v\n", err)
 		os.Exit(1)
 	}
+	kernel.BackfillFrontDeskProjectID(vaultDir)
 
 	switch os.Args[1] {
 	case "version", "--version", "-v":

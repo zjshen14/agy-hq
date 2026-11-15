@@ -1,14 +1,11 @@
 package kernel
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,37 +35,11 @@ func DeliverMessageToSession(vaultDir, sessionID, title, text string, dryRun boo
 		return fmt.Sprintf("[dry-run] send-message --title=%q %s", title, sessionID), nil
 	}
 
-	lsAddr := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
-	csrfToken := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
-	if lsAddr != "" && csrfToken != "" {
-		lsBase := lsAddr
-		if !strings.HasPrefix(lsBase, "http://") && !strings.HasPrefix(lsBase, "https://") {
-			lsBase = "http://" + lsBase
-		}
-		lsBase = strings.TrimRight(lsBase, "/")
-		sendURL := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage", lsBase)
-		sendPayload, _ := json.Marshal(map[string]interface{}{
-			"cascadeId": sessionID,
-			"items": []map[string]interface{}{
-				{"text": text},
-			},
-		})
-		if req, reqErr := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(sendPayload)); reqErr == nil {
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("x-codeium-csrf-token", csrfToken)
-			client := &http.Client{Timeout: 3 * time.Second}
-			if resp, doErr := client.Do(req); doErr == nil {
-				respBody, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					return fmt.Sprintf("delivered via LanguageServerService (%s)", sessionID), nil
-				}
-				if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
-					return "", fmt.Errorf("SendUserCascadeMessage HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-				}
-			} else if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
-				return "", fmt.Errorf("SendUserCascadeMessage failed: %w", doErr)
-			}
+	if creds, ok := discoverLSCredentials(vaultDir); ok {
+		if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, sessionID, text, 3*time.Second); sendErr == nil {
+			return fmt.Sprintf("delivered via LanguageServerService (%s)", sessionID), nil
+		} else if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
+			return "", sendErr
 		}
 	}
 

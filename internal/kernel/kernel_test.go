@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -559,5 +561,174 @@ func TestIsSubagentConversationAndSetFrontDeskGuard(t *testing.T) {
 	// 6. Normal conversation CAN claim Front Desk lease
 	if err := SetFrontDesk(vaultDir, "conv-desk-1", ""); err != nil {
 		t.Fatalf("expected SetFrontDesk for conv-desk-1 to succeed, got %v", err)
+	}
+}
+
+func TestSpawnTaskLSAttachmentAndHubDiscovery(t *testing.T) {
+	var gotStartReqs []map[string]interface{}
+	var gotSendReqs []map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != "hub-csrf-token" {
+			http.Error(w, "missing csrf", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"clientModelConfigs": []map[string]interface{}{
+					{
+						"modelId": "gemini-4-carbon-medium",
+						"modelOrAlias": map[string]interface{}{
+							"model": "MODEL_PLACEHOLDER_M421",
+						},
+					},
+				},
+			})
+		case "/exa.language_server_pb.LanguageServerService/StartCascade":
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotStartReqs = append(gotStartReqs, req)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"cascadeId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			})
+		case "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage":
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotSendReqs = append(gotSendReqs, req)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	parsedURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse srv URL: %v", err)
+	}
+	port, err := strconv.Atoi(parsedURL.Port())
+	if err != nil {
+		t.Fatalf("parse srv port: %v", err)
+	}
+
+	// Simulate systemd daemon environment: no ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN in env,
+	// only <AppDataDir>/daemon/hub_<port>.json on disk.
+	rootDir := t.TempDir()
+	vaultDir := filepath.Join(rootDir, "local")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appDataDir := t.TempDir()
+	daemonDir := filepath.Join(appDataDir, "daemon")
+	if err := os.MkdirAll(daemonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hubData, _ := json.Marshal(map[string]interface{}{
+		"pid":       os.Getpid(),
+		"httpPort":  port,
+		"csrfToken": "hub-csrf-token",
+	})
+	if err := os.WriteFile(filepath.Join(daemonDir, fmt.Sprintf("hub_%d.json", port)), hubData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
+	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "")
+	t.Setenv("ANTIGRAVITY_APP_DATA_DIR", appDataDir)
+
+	// 1. Without fd.ProjectID (typical daemon case): workspaceUris must still attach to rootDir.
+	if err := SetFrontDesk(vaultDir, "conv-fd-daemon", ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+	out, err := SpawnTask(vaultDir, "sleep-consolidate", "sleep-consolidate", "[Auto] sleep-consolidate", "Run nightly sleep", "gemini-4-carbon-medium", false)
+	if err != nil {
+		t.Fatalf("SpawnTask without ProjectID failed: %v", err)
+	}
+	if out != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Fatalf("expected cascadeId output, got %q", out)
+	}
+	if len(gotStartReqs) != 1 || len(gotSendReqs) != 1 {
+		t.Fatalf("expected 1 StartCascade and 1 SendUserCascadeMessage, got %d and %d", len(gotStartReqs), len(gotSendReqs))
+	}
+	req1 := gotStartReqs[0]
+	if _, hasParent := req1["parentConversationId"]; hasParent {
+		t.Fatalf("top-level SpawnTask must not set parentConversationId: %+v", req1)
+	}
+	if _, hasSub := req1["subagentDescriptor"]; hasSub {
+		t.Fatalf("top-level SpawnTask must not set subagentDescriptor: %+v", req1)
+	}
+	expectedURI := "file://" + filepath.ToSlash(rootDir)
+	uris, _ := req1["workspaceUris"].([]interface{})
+	if len(uris) != 1 || uris[0] != expectedURI {
+		t.Fatalf("expected workspaceUris=[%q], got %+v", expectedURI, req1["workspaceUris"])
+	}
+	if _, hasProj := req1["projectEnvConfig"]; hasProj {
+		t.Fatalf("expected no projectEnvConfig when fd.ProjectID is empty, got %+v", req1["projectEnvConfig"])
+	}
+
+	// 2. With fd.ProjectID populated: both projectEnvConfig.projectId and workspaceUris must be sent.
+	fd, _ := GetFrontDesk(vaultDir)
+	fd.ProjectID = "proj-headquarter-uuid"
+	if err := saveFrontDeskLease(vaultDir, fd); err != nil {
+		t.Fatalf("saveFrontDeskLease: %v", err)
+	}
+	if _, err := SpawnTask(vaultDir, "morning-brief", "morning-brief", "[Auto] morning-brief", "Run morning brief", "gemini-4-carbon-medium", false); err != nil {
+		t.Fatalf("SpawnTask with ProjectID failed: %v", err)
+	}
+	if len(gotStartReqs) != 2 {
+		t.Fatalf("expected 2 StartCascade calls, got %d", len(gotStartReqs))
+	}
+	req2 := gotStartReqs[1]
+	projCfg, _ := req2["projectEnvConfig"].(map[string]interface{})
+	if projCfg["projectId"] != "proj-headquarter-uuid" {
+		t.Fatalf("expected projectEnvConfig.projectId=proj-headquarter-uuid, got %+v", req2["projectEnvConfig"])
+	}
+	uris2, _ := req2["workspaceUris"].([]interface{})
+	if len(uris2) != 1 || uris2[0] != expectedURI {
+		t.Fatalf("expected workspaceUris=[%q] even when projectId is set, got %+v", expectedURI, req2["workspaceUris"])
+	}
+}
+
+func TestBackfillFrontDeskProjectID(t *testing.T) {
+	vaultDir := t.TempDir()
+	fdConv := "conv-front-desk-backfill"
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
+	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "")
+	if err := SetFrontDesk(vaultDir, fdConv, ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	// 1. Different conversation must NOT backfill fd.ProjectID
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-other")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-wrong")
+	BackfillFrontDeskProjectID(vaultDir)
+	if fd, _ := GetFrontDesk(vaultDir); fd.ProjectID != "" {
+		t.Fatalf("expected empty ProjectID for non-FrontDesk conversation, got %q", fd.ProjectID)
+	}
+
+	// 2. Sidecar environment must NOT backfill fd.ProjectID
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", fdConv)
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-sidecar")
+	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "49152")
+	BackfillFrontDeskProjectID(vaultDir)
+	if fd, _ := GetFrontDesk(vaultDir); fd.ProjectID != "" {
+		t.Fatalf("expected empty ProjectID in sidecar env, got %q", fd.ProjectID)
+	}
+
+	// 3. Matching Front Desk conversation without sidecar DOES backfill fd.ProjectID
+	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-real-hq")
+	BackfillFrontDeskProjectID(vaultDir)
+	if fd, ok := GetFrontDesk(vaultDir); !ok || fd.ProjectID != "proj-real-hq" {
+		t.Fatalf("expected ProjectID=proj-real-hq, got %q (ok=%v)", fd.ProjectID, ok)
+	}
+
+	// 4. Subsequent run with different ANTIGRAVITY_PROJECT_ID must NOT overwrite existing fd.ProjectID
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-other")
+	BackfillFrontDeskProjectID(vaultDir)
+	if fd, _ := GetFrontDesk(vaultDir); fd.ProjectID != "proj-real-hq" {
+		t.Fatalf("expected existing ProjectID to be preserved, got %q", fd.ProjectID)
 	}
 }
