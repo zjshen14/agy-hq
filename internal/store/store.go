@@ -216,6 +216,33 @@ func WriteAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// OpenCreateExclNoFollow creates a brand-new file with O_CREATE|O_EXCL|O_WRONLY|O_NOFOLLOW
+// and ensures parent directories exist (0700 when perm restricts group/other).
+func OpenCreateExclNoFollow(path string, perm os.FileMode) (*os.File, error) {
+	clean := filepath.Clean(path)
+	if st, err := os.Lstat(clean); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("store: refusing symlink at %s", clean)
+	}
+	dir := filepath.Dir(clean)
+	dirPerm := os.FileMode(0o700)
+	if perm&0o077 != 0 {
+		dirPerm = 0o755
+	}
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(clean, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollowFlag, perm)
+	if err != nil {
+		return nil, err
+	}
+	if cErr := f.Chmod(perm); cErr != nil {
+		_ = f.Close()
+		_ = os.Remove(clean)
+		return nil, cErr
+	}
+	return f, nil
+}
+
 // AppendLineNoFollow appends a single line (ensuring trailing '\n') to path using O_APPEND|O_NOFOLLOW and fsync.
 func AppendLineNoFollow(path string, line []byte, perm os.FileMode) error {
 	clean := filepath.Clean(path)

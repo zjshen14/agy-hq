@@ -340,9 +340,15 @@ func ValidateBundle(pluginDir string, checkEngineVersionParity bool) error {
 		}
 	}
 	rawHooks := string(hooksBytes)
-	for _, m := range RequiredPreToolMatchers {
-		if !strings.Contains(rawHooks, m) {
-			return fmt.Errorf("%s PreToolUse matcher missing required tool %q", hooksPath, m)
+	if strings.Contains(rawHooks, `"matcher": ".*"`) || strings.Contains(rawHooks, `"matcher":".*"`) {
+		if !strings.Contains(rawHooks, `"decision":"deny"`) && !strings.Contains(rawHooks, `\"decision\":\"deny\"`) {
+			return fmt.Errorf("%s PreToolUse universal matcher must fail closed when hq binary is unavailable", hooksPath)
+		}
+	} else {
+		for _, m := range RequiredPreToolMatchers {
+			if !strings.Contains(rawHooks, m) {
+				return fmt.Errorf("%s PreToolUse matcher missing required tool %q", hooksPath, m)
+			}
 		}
 	}
 	if strings.Contains(rawHooks, `"./bin/hq"`) || strings.Contains(rawHooks, `(\"./bin/hq\"`) || strings.Contains(rawHooks, `"../../../bin/hq"`) {

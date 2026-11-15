@@ -292,7 +292,7 @@ func NewHandler(vaultDir string) http.Handler {
 			return
 		}
 
-		out, err := approvals.ApproveProposal(vaultDir, id, sha)
+		out, err := approvals.ApproveFromTrustedDaemon(vaultDir, id, sha)
 		_ = SyncMarkdownConsole(vaultDir)
 
 		msg := fmt.Sprintf("Approved %s", id)

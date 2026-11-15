@@ -340,6 +340,7 @@ func main() {
 		}
 
 	case "propose":
+		denyIfCallerTainted(vaultDir, "propose")
 		var proposeFlagArgs []string
 		var cmdArgv []string
 		for i, a := range os.Args[2:] {
@@ -502,15 +503,17 @@ func main() {
 		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 	case "approve":
+		denyIfCallerTainted(vaultDir, "approve")
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: hq approve <proposal-id> [--sha256=<prefix>]")
+			fmt.Fprintln(os.Stderr, "usage: hq approve <proposal-id> [--sha256=<prefix>] [--cap=<token>]")
 			os.Exit(1)
 		}
 		id := os.Args[2]
 		fs := flag.NewFlagSet("approve", flag.ExitOnError)
 		shaPrefix := fs.String("sha256", "", "SHA-256 prefix verification")
+		capTok := fs.String("cap", "", "One-shot human-presence capability token")
 		_ = fs.Parse(os.Args[3:])
-		out, err := approvals.Approve(vaultDir, id, *shaPrefix)
+		out, err := approvals.ApproveFromCLI(vaultDir, id, *shaPrefix, *capTok)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if out != "" {
 			fmt.Print(out)
@@ -522,6 +525,7 @@ func main() {
 		fmt.Printf("Approved and executed proposal %s\n", id)
 
 	case "reject":
+		denyIfCallerTainted(vaultDir, "reject")
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: hq reject <proposal-id> [--reason=\"...\"]")
 			os.Exit(1)
@@ -929,6 +933,7 @@ func main() {
 		}
 
 	case "spawn":
+		denyIfCallerTainted(vaultDir, "spawn")
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
 		taskName := fs.String("task", "", "Short task slug for worktree and conversation title")
@@ -1047,6 +1052,7 @@ func main() {
 		fmt.Println(out)
 
 	case "subagent":
+		denyIfCallerTainted(vaultDir, "subagent")
 		fs := flag.NewFlagSet("subagent", flag.ExitOnError)
 		role := fs.String("role", "", "Subagent role title, e.g. \"[deep] rfc-0005: Opus 5.5 Reviewer\"")
 		parentConv := fs.String("parent", "", "Parent conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
@@ -1163,6 +1169,7 @@ func main() {
 			fmt.Print(formatted)
 
 		case "draft":
+			denyIfCallerTainted(vaultDir, "gmail draft")
 			fs := flag.NewFlagSet("gmail draft", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			draftID := fs.String("draft", "", "Optional existing draft ID to update")
@@ -1189,6 +1196,7 @@ func main() {
 			fmt.Println(string(b))
 
 		case "send-draft", "send":
+			denyIfCallerTainted(vaultDir, "gmail send-draft")
 			fs := flag.NewFlagSet("gmail send-draft", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email")
 			draftID := fs.String("draft", "", "Draft ID to verify and send")
@@ -1393,6 +1401,7 @@ func main() {
 			fmt.Print(formatted)
 
 		case "draft":
+			denyIfCallerTainted(vaultDir, "gchat draft")
 			fs := flag.NewFlagSet("gchat draft", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			draftID := fs.String("draft", "", "Optional existing draft ID to update")
@@ -1423,6 +1432,7 @@ func main() {
 			fmt.Println(string(b))
 
 		case "propose", "stage-send":
+			denyIfCallerTainted(vaultDir, "gchat propose")
 			fs := flag.NewFlagSet("gchat propose", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			draftID := fs.String("draft", "", "Optional existing draft ID to update or propose")
@@ -1507,6 +1517,7 @@ func main() {
 			fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 		case "send-draft", "send":
+			denyIfCallerTainted(vaultDir, "gchat send-draft")
 			fs := flag.NewFlagSet("gchat send-draft", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email")
 			draftID := fs.String("draft", "", "Draft ID to verify and send")
@@ -1746,6 +1757,7 @@ func main() {
 			}
 
 		case "add-fact":
+			denyIfCallerTainted(vaultDir, "memory add-fact")
 			fs := flag.NewFlagSet("memory add-fact", flag.ExitOnError)
 			id := fs.String("id", "", "Optional explicit fact ID")
 			topic := fs.String("topic", "", "Fact topic category (e.g., architecture, workflow, investing)")
@@ -1761,6 +1773,7 @@ func main() {
 			fmt.Printf("Added fact %s [%s]: %s\n", fact.ID, fact.Topic, fact.Statement)
 
 		case "prune-fact":
+			denyIfCallerTainted(vaultDir, "memory prune-fact")
 			if len(os.Args) < 4 {
 				fmt.Fprintln(os.Stderr, "usage: hq memory prune-fact <fact-id> [--superseded-by=<new-id>]")
 				os.Exit(1)
@@ -1808,6 +1821,7 @@ func main() {
 			_ = enc.Encode(digest)
 
 		case "forget":
+			denyIfCallerTainted(vaultDir, "memory forget")
 			var posQ string
 			var flagArgs []string
 			for _, a := range os.Args[3:] {
@@ -1869,6 +1883,7 @@ func main() {
 			}
 
 		case "add-entity":
+			denyIfCallerTainted(vaultDir, "memory add-entity")
 			fs := flag.NewFlagSet("memory add-entity", flag.ExitOnError)
 			slug := fs.String("slug", "", "Entity slug (defaults to kebab-case of --name)")
 			name := fs.String("name", "", "Display name")
@@ -1933,6 +1948,13 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq memory lookup failed: %v\n", err)
 				os.Exit(1)
 			}
+			if _, isTainted := checkCallerTaintedEnv(vaultDir); isTainted {
+				for i := range hits {
+					hits[i].Notes = nil
+					hits[i].Spaces = nil
+					hits[i].Path = ""
+				}
+			}
 			if *asJSON {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
@@ -1952,6 +1974,7 @@ func main() {
 			}
 
 		case "commit":
+			denyIfCallerTainted(vaultDir, "memory commit")
 			fs := flag.NewFlagSet("memory commit", flag.ExitOnError)
 			msg := fs.String("message", "", "Optional commit message for the private Vault git repository")
 			msgShort := fs.String("m", "", "Alias for --message")

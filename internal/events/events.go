@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -32,43 +33,49 @@ const (
 	DefaultMaxAttempts = 5
 	DefaultLeaseTTL    = 15 * time.Minute
 	DedupArchiveWindow = 7 * 24 * time.Hour
+	MaxBatchEvents     = 25
 )
 
 // Event models a single trigger or continuation row in local/memory/events.json.
 type Event struct {
-	ID             string            `json:"id"`
-	CreatedAt      string            `json:"createdAt"`
-	UpdatedAt      string            `json:"updatedAt,omitempty"`
-	AvailableAt    string            `json:"availableAt"`
-	Source         string            `json:"source"`
-	DedupKey       string            `json:"dedupKey,omitempty"`
-	ScopeKey       string            `json:"scopeKey"`
-	SessionID      string            `json:"sessionId,omitempty"`
-	Skill          string            `json:"skill,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	Title          string            `json:"title"`
-	Prompt         string            `json:"prompt"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	Status         EventStatus       `json:"status"`
-	LeaseID        string            `json:"leaseId,omitempty"`
-	LeaseConvID    string            `json:"leaseConvId,omitempty"`
-	LeaseExpiresAt string            `json:"leaseExpiresAt,omitempty"`
-	AttemptCount   int               `json:"attemptCount"`
-	MaxAttempts    int               `json:"maxAttempts"`
-	LastError      string            `json:"lastError,omitempty"`
+	ID                   string            `json:"id"`
+	CreatedAt            string            `json:"createdAt"`
+	UpdatedAt            string            `json:"updatedAt,omitempty"`
+	AvailableAt          string            `json:"availableAt"`
+	Source               string            `json:"source"`
+	DedupKey             string            `json:"dedupKey,omitempty"`
+	DedupIncludesDropped bool              `json:"dedupIncludesDropped,omitempty"`
+	ScopeKey             string            `json:"scopeKey"`
+	SessionID            string            `json:"sessionId,omitempty"`
+	Skill                string            `json:"skill,omitempty"`
+	Model                string            `json:"model,omitempty"`
+	Title                string            `json:"title"`
+	Prompt               string            `json:"prompt"`
+	Metadata             map[string]string `json:"metadata,omitempty"`
+	TaintOnSpawn         bool              `json:"taintOnSpawn,omitempty"`
+	SpawnTokenHash       string            `json:"spawnTokenHash,omitempty"`
+	Status               EventStatus       `json:"status"`
+	LeaseID              string            `json:"leaseId,omitempty"`
+	LeaseConvID          string            `json:"leaseConvId,omitempty"`
+	LeaseExpiresAt       string            `json:"leaseExpiresAt,omitempty"`
+	AttemptCount         int               `json:"attemptCount"`
+	MaxAttempts          int               `json:"maxAttempts"`
+	LastError            string            `json:"lastError,omitempty"`
 }
 
 // LeasedBatch groups one or more pending events sharing a ScopeKey and SessionID
 // into a single serialized agent run.
 type LeasedBatch struct {
-	LeaseID   string  `json:"leaseId"`
-	ScopeKey  string  `json:"scopeKey"`
-	SessionID string  `json:"sessionId,omitempty"`
-	Skill     string  `json:"skill,omitempty"`
-	Model     string  `json:"model,omitempty"`
-	Title     string  `json:"title"`
-	Prompt    string  `json:"prompt"`
-	Events    []Event `json:"events"`
+	LeaseID      string  `json:"leaseId"`
+	ScopeKey     string  `json:"scopeKey"`
+	SessionID    string  `json:"sessionId,omitempty"`
+	Skill        string  `json:"skill,omitempty"`
+	Model        string  `json:"model,omitempty"`
+	Title        string  `json:"title"`
+	Prompt       string  `json:"prompt"`
+	TaintOnSpawn bool    `json:"taintOnSpawn,omitempty"`
+	SpawnToken   string  `json:"-"` // Ephemeral raw token injected into worker prompt; only SpawnTokenHash is persisted
+	Events       []Event `json:"events"`
 }
 
 // EventIDs returns the slice of Event IDs included in the batch.
@@ -190,11 +197,12 @@ func appendArchiveUnlocked(vaultDir string, items []Event) error {
 	return nil
 }
 
-func loadRecentArchivedDedupUnlocked(vaultDir string, now time.Time, window time.Duration) map[string]bool {
-	seen := make(map[string]bool)
+func loadRecentArchivedDedupWithDroppedUnlocked(vaultDir string, now time.Time, window time.Duration) (done map[string]bool, dropped map[string]bool) {
+	done = make(map[string]bool)
+	dropped = make(map[string]bool)
 	f, err := os.Open(archiveEventsPath(vaultDir))
 	if err != nil {
-		return seen
+		return done, dropped
 	}
 	defer f.Close()
 
@@ -208,10 +216,10 @@ func loadRecentArchivedDedupUnlocked(vaultDir string, now time.Time, window time
 			continue
 		}
 		var ev Event
-		if json.Unmarshal([]byte(line), &ev) != nil {
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.DedupKey == "" {
 			continue
 		}
-		if ev.DedupKey == "" || ev.Status != StatusDone {
+		if ev.Status != StatusDone && ev.Status != StatusDropped {
 			continue
 		}
 		ts, err := parseEventTime(ev.UpdatedAt)
@@ -221,9 +229,18 @@ func loadRecentArchivedDedupUnlocked(vaultDir string, now time.Time, window time
 		if err == nil && ts.Before(cutoff) {
 			continue
 		}
-		seen[ev.DedupKey] = true
+		if ev.Status == StatusDone {
+			done[ev.DedupKey] = true
+		} else if ev.Status == StatusDropped {
+			dropped[ev.DedupKey] = true
+		}
 	}
-	return seen
+	return done, dropped
+}
+
+func loadRecentArchivedDedupUnlocked(vaultDir string, now time.Time, window time.Duration) map[string]bool {
+	done, _ := loadRecentArchivedDedupWithDroppedUnlocked(vaultDir, now, window)
+	return done
 }
 
 func parseEventTime(raw string) (time.Time, error) {
@@ -312,8 +329,8 @@ func Enqueue(vaultDir string, ev Event, now time.Time) (Event, bool, error) {
 					return nil
 				}
 			}
-			recentDone := loadRecentArchivedDedupUnlocked(vaultDir, now, DedupArchiveWindow)
-			if recentDone[ev.DedupKey] {
+			recentDone, recentDropped := loadRecentArchivedDedupWithDroppedUnlocked(vaultDir, now, DedupArchiveWindow)
+			if recentDone[ev.DedupKey] || (ev.DedupIncludesDropped && recentDropped[ev.DedupKey]) {
 				ev.Status = StatusDone
 				stored = ev
 				deduped = true
@@ -342,6 +359,92 @@ func Enqueue(vaultDir string, ev Event, now time.Time) (Event, bool, error) {
 		signalWake()
 	}
 	return stored, deduped, err
+}
+
+// EnqueueBatch atomically validates, deduplicates, and persists multiple Events in a single RankEvents lock + atomic write.
+func EnqueueBatch(vaultDir string, evs []Event, now time.Time) (stored []Event, dedupCount int, err error) {
+	if len(evs) == 0 {
+		return nil, 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	err = withEventsLock(vaultDir, func() error {
+		active, lErr := loadActiveUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		recentDone, recentDropped := loadRecentArchivedDedupWithDroppedUnlocked(vaultDir, now, DedupArchiveWindow)
+		activeDedup := make(map[string]Event, len(active))
+		for _, ex := range active {
+			if ex.DedupKey != "" && (ex.Status == StatusPending || ex.Status == StatusLeased) {
+				activeDedup[ex.DedupKey] = ex
+			}
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		addedAny := false
+		for _, ev := range evs {
+			ev.Source = strings.TrimSpace(ev.Source)
+			if ev.Source == "" {
+				ev.Source = "manual"
+			}
+			ev.Prompt = strings.TrimSpace(ev.Prompt)
+			ev.Title = strings.TrimSpace(ev.Title)
+			if ev.Prompt == "" && ev.Title == "" {
+				continue
+			}
+			if ev.Title == "" {
+				ev.Title = ev.Prompt
+				if r := []rune(ev.Title); len(r) > 72 {
+					ev.Title = string(r[:69]) + "..."
+				}
+			}
+			if ev.Prompt == "" {
+				ev.Prompt = ev.Title
+			}
+			ev.ScopeKey = defaultScopeKey(ev)
+			ev.DedupKey = strings.TrimSpace(ev.DedupKey)
+			if ev.MaxAttempts <= 0 {
+				ev.MaxAttempts = DefaultMaxAttempts
+			}
+			if ev.DedupKey != "" {
+				if ex, ok := activeDedup[ev.DedupKey]; ok {
+					stored = append(stored, ex)
+					dedupCount++
+					continue
+				}
+				if recentDone[ev.DedupKey] || (ev.DedupIncludesDropped && recentDropped[ev.DedupKey]) {
+					ev.Status = StatusDone
+					stored = append(stored, ev)
+					dedupCount++
+					continue
+				}
+			}
+			if strings.TrimSpace(ev.ID) == "" {
+				ev.ID = generateEventID(now)
+			}
+			ev.CreatedAt = nowStr
+			ev.UpdatedAt = nowStr
+			if strings.TrimSpace(ev.AvailableAt) == "" {
+				ev.AvailableAt = nowStr
+			}
+			ev.Status = StatusPending
+			active = append(active, ev)
+			if ev.DedupKey != "" {
+				activeDedup[ev.DedupKey] = ev
+			}
+			stored = append(stored, ev)
+			addedAny = true
+		}
+		if !addedAny {
+			return nil
+		}
+		return saveActiveUnlocked(vaultDir, active)
+	})
+	if err == nil && len(stored) > dedupCount {
+		signalWake()
+	}
+	return stored, dedupCount, err
 }
 
 // HasActiveOrCompletedDedup returns true if dedupKey is currently pending, leased, or completed within DedupArchiveWindow.
@@ -555,7 +658,7 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 				}
 				groups[ev.ScopeKey] = g
 				groupOrder = append(groupOrder, ev.ScopeKey)
-			} else if g.sessionID == ev.SessionID {
+			} else if g.sessionID == ev.SessionID && len(g.indices) < MaxBatchEvents {
 				g.indices = append(g.indices, i)
 			}
 		}
@@ -568,27 +671,43 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 		for _, sk := range groupOrder {
 			g := groups[sk]
 			leaseID := fmt.Sprintf("lease-%s-%s", now.UTC().Format("150405"), generateHex(3))
+			spawnToken := ""
+			spawnTokenHash := ""
+			if g.sessionID == "" {
+				spawnToken = generateHex(16)
+				sum := sha256.Sum256([]byte(spawnToken))
+				spawnTokenHash = hex.EncodeToString(sum[:])
+			}
+			taintBatch := false
 			batchEvents := make([]Event, 0, len(g.indices))
 			for _, idx := range g.indices {
 				active[idx].Status = StatusLeased
 				active[idx].LeaseID = leaseID
 				active[idx].LeaseExpiresAt = expStr
 				active[idx].UpdatedAt = nowStr
+				if spawnTokenHash != "" {
+					active[idx].SpawnTokenHash = spawnTokenHash
+				}
 				if g.sessionID != "" {
 					active[idx].LeaseConvID = g.sessionID
+				}
+				if active[idx].TaintOnSpawn {
+					taintBatch = true
 				}
 				batchEvents = append(batchEvents, active[idx])
 			}
 			head := batchEvents[0]
 			batches = append(batches, LeasedBatch{
-				LeaseID:   leaseID,
-				ScopeKey:  g.scopeKey,
-				SessionID: g.sessionID,
-				Skill:     head.Skill,
-				Model:     head.Model,
-				Title:     formatBatchTitle(batchEvents),
-				Prompt:    formatBatchPrompt(batchEvents),
-				Events:    batchEvents,
+				LeaseID:      leaseID,
+				ScopeKey:     g.scopeKey,
+				SessionID:    g.sessionID,
+				Skill:        head.Skill,
+				Model:        head.Model,
+				Title:        formatBatchTitle(batchEvents),
+				Prompt:       formatBatchPrompt(batchEvents),
+				TaintOnSpawn: taintBatch,
+				SpawnToken:   spawnToken,
+				Events:       batchEvents,
 			})
 			dirty = true
 		}
@@ -667,6 +786,136 @@ func BindBatchConversation(vaultDir string, eventIDs []string, convID string, no
 		}
 		return saveActiveUnlocked(vaultDir, active)
 	})
+}
+
+// BindBatchByToken atomically CAS-binds a leased event batch matching sha256(rawToken) to convID,
+// refusing to overwrite an already-bound foreign LeaseConvID.
+func BindBatchByToken(vaultDir, rawToken, convID string, now time.Time, leaseTTL time.Duration) ([]Event, bool, error) {
+	rawToken = strings.TrimSpace(rawToken)
+	convID = strings.TrimSpace(convID)
+	if rawToken == "" || convID == "" {
+		return nil, false, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultLeaseTTL
+	}
+	sum := sha256.Sum256([]byte(rawToken))
+	wantHash := hex.EncodeToString(sum[:])
+
+	var bound []Event
+	matched := false
+	err := withEventsLock(vaultDir, func() error {
+		active, lErr := loadActiveUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		changed := false
+		nowStr := now.UTC().Format(time.RFC3339)
+		expStr := now.Add(leaseTTL).UTC().Format(time.RFC3339)
+		for i := range active {
+			if active[i].Status != StatusLeased || len(active[i].SpawnTokenHash) != len(wantHash) {
+				continue
+			}
+			if subtle.ConstantTimeCompare([]byte(active[i].SpawnTokenHash), []byte(wantHash)) != 1 {
+				continue
+			}
+			// CAS: reject hijacking if already bound to a different conversation
+			if active[i].LeaseConvID != "" && active[i].LeaseConvID != convID {
+				return fmt.Errorf("events: spawn token already bound to another conversation")
+			}
+			matched = true
+			if active[i].LeaseConvID != convID {
+				active[i].LeaseConvID = convID
+				active[i].LeaseExpiresAt = expStr
+				active[i].UpdatedAt = nowStr
+				changed = true
+			}
+			bound = append(bound, active[i])
+		}
+		if !changed {
+			return nil
+		}
+		return saveActiveUnlocked(vaultDir, active)
+	})
+	return bound, matched, err
+}
+
+// ListLeasedByConversation returns all currently leased events bound to convID.
+func ListLeasedByConversation(vaultDir, convID string) ([]Event, error) {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return nil, nil
+	}
+	var out []Event
+	err := withEventsLock(vaultDir, func() error {
+		active, lErr := loadActiveUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		for _, ev := range active {
+			if ev.Status == StatusLeased && ev.LeaseConvID == convID {
+				out = append(out, ev)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// AckWatcherEvents marks Metadata["acked"]="1" on leased watcher events bound to convID matching itemKeys (or all if itemKeys is empty).
+func AckWatcherEvents(vaultDir, convID string, itemKeys []string, now time.Time) (int, error) {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return 0, fmt.Errorf("convID is required")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	keySet := make(map[string]bool, len(itemKeys))
+	for _, k := range itemKeys {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			keySet[k] = true
+		}
+	}
+	acked := 0
+	err := withEventsLock(vaultDir, func() error {
+		active, lErr := loadActiveUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		changed := false
+		for i := range active {
+			if active[i].Status != StatusLeased || active[i].LeaseConvID != convID {
+				continue
+			}
+			if len(keySet) > 0 {
+				ik := ""
+				if active[i].Metadata != nil {
+					ik = active[i].Metadata["item_key"]
+				}
+				if !keySet[ik] && !keySet[active[i].ID] {
+					continue
+				}
+			}
+			if active[i].Metadata == nil {
+				active[i].Metadata = make(map[string]string)
+			}
+			active[i].Metadata["acked"] = "1"
+			active[i].UpdatedAt = nowStr
+			acked++
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		return saveActiveUnlocked(vaultDir, active)
+	})
+	return acked, err
 }
 
 // TryRenewLeaseByConversation performs a non-blocking lease renewal (LOCK_NB) suitable for hot PreToolUse hooks
@@ -840,25 +1089,61 @@ func CompleteIDs(vaultDir string, eventIDs []string, now time.Time) ([]Event, er
 	return completed, err
 }
 
-// CompleteByConversation transitions all leased events bound to convID to StatusDone and archives them.
+// CompleteByConversation transitions leased events bound to convID to StatusDone (or requeues/drops
+// unacknowledged events when Metadata["requires_ack"]=="1" and Metadata["acked"]!="1").
 func CompleteByConversation(vaultDir, convID string, now time.Time) ([]Event, error) {
+	completed, _, _, err := FinalizeByConversation(vaultDir, convID, now)
+	return completed, err
+}
+
+// FinalizeByConversation atomically finalizes leased events bound to convID under a single RankEvents lock:
+// events with Metadata["requires_ack"]=="1" and Metadata["acked"]!="1" are requeued with AttemptCount++
+// (or transitioned to StatusDropped once AttemptCount >= MaxAttempts); all other leased events move to StatusDone.
+func FinalizeByConversation(vaultDir, convID string, now time.Time) (completed []Event, requeued []Event, dropped []Event, err error) {
 	convID = strings.TrimSpace(convID)
 	if convID == "" {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	if now.IsZero() {
 		now = time.Now()
 	}
-	var completed []Event
-	err := withEventsLock(vaultDir, func() error {
-		active, err := loadActiveUnlocked(vaultDir)
-		if err != nil || len(active) == 0 {
-			return err
+	err = withEventsLock(vaultDir, func() error {
+		active, lErr := loadActiveUnlocked(vaultDir)
+		if lErr != nil || len(active) == 0 {
+			return lErr
 		}
 		nowStr := now.UTC().Format(time.RFC3339)
 		var kept []Event
+		changed := false
 		for _, ev := range active {
 			if ev.Status == StatusLeased && ev.LeaseConvID == convID {
+				changed = true
+				requiresAck := ev.Metadata != nil && ev.Metadata["requires_ack"] == "1"
+				acked := ev.Metadata != nil && ev.Metadata["acked"] == "1"
+				if requiresAck && !acked {
+					ev.AttemptCount++
+					ev.UpdatedAt = nowStr
+					ev.LeaseID = ""
+					ev.LeaseConvID = ""
+					ev.LeaseExpiresAt = ""
+					ev.SpawnTokenHash = ""
+					maxAtt := ev.MaxAttempts
+					if maxAtt <= 0 {
+						maxAtt = DefaultMaxAttempts
+					}
+					if ev.AttemptCount >= maxAtt {
+						ev.Status = StatusDropped
+						ev.LastError = "worker exited without acknowledging item (`hq watch ack`)"
+						dropped = append(dropped, ev)
+					} else {
+						ev.Status = StatusPending
+						ev.AvailableAt = now.Add(retryBackoff(ev.AttemptCount)).UTC().Format(time.RFC3339)
+						ev.LastError = "unacknowledged on Stop; requeued for retry"
+						kept = append(kept, ev)
+						requeued = append(requeued, ev)
+					}
+					continue
+				}
 				ev.Status = StatusDone
 				ev.UpdatedAt = nowStr
 				ev.LeaseExpiresAt = ""
@@ -867,15 +1152,20 @@ func CompleteByConversation(vaultDir, convID string, now time.Time) ([]Event, er
 				kept = append(kept, ev)
 			}
 		}
-		if len(completed) == 0 {
+		if !changed {
 			return nil
 		}
-		if err := appendArchiveUnlocked(vaultDir, completed); err != nil {
-			return err
+		if len(completed)+len(dropped) > 0 {
+			toArchive := make([]Event, 0, len(completed)+len(dropped))
+			toArchive = append(toArchive, completed...)
+			toArchive = append(toArchive, dropped...)
+			if aErr := appendArchiveUnlocked(vaultDir, toArchive); aErr != nil {
+				return aErr
+			}
 		}
 		return saveActiveUnlocked(vaultDir, kept)
 	})
-	return completed, err
+	return completed, requeued, dropped, err
 }
 
 // Retry resets an active leased or archived dropped event back to StatusPending for immediate execution.

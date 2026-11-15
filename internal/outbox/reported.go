@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 const (
@@ -35,17 +37,15 @@ func reportedFilePath(vaultDir string) string {
 
 // RecordReportedFromItem appends a compact anti-repetition record for a delivered OutboxItem.
 func RecordReportedFromItem(vaultDir string, it OutboxItem, now time.Time) error {
-	sum := strings.Join(strings.Fields(strings.TrimSpace(it.Summary)), " ")
-	if runes := []rune(sum); len(runes) > 120 {
-		sum = string(runes[:117]) + "..."
-	}
+	sum := SanitizeAntiCue(strings.Join(strings.Fields(strings.TrimSpace(it.Summary)), " "), 120)
+	title := SanitizeAntiCue(strings.TrimSpace(it.Title), 140)
 	return RecordReported(vaultDir, ReportedEntry{
 		Timestamp:   now.UTC().Format(time.RFC3339),
 		ItemID:      it.ID,
 		Tier:        it.Tier,
-		SourceSkill: it.SourceSkill,
-		Scope:       it.Scope,
-		Title:       strings.TrimSpace(it.Title),
+		SourceSkill: SanitizeAntiCue(it.SourceSkill, 60),
+		Scope:       SanitizeAntiCue(it.Scope, 60),
+		Title:       title,
 		Summary:     sum,
 	}, now)
 }
@@ -58,33 +58,32 @@ func RecordReported(vaultDir string, entry ReportedEntry, now time.Time) error {
 	if strings.TrimSpace(entry.Timestamp) == "" {
 		entry.Timestamp = now.UTC().Format(time.RFC3339)
 	}
-	existing, _ := LoadRecentReported(vaultDir, now, MaxReportedRetention, MaxReportedStored)
-	if entry.ItemID != "" {
-		for _, prev := range existing {
-			if prev.ItemID == entry.ItemID {
-				return nil
+	return WithOutboxLock(vaultDir, func() error {
+		existing, _ := LoadRecentReported(vaultDir, now, MaxReportedRetention, MaxReportedStored)
+		if entry.ItemID != "" {
+			for _, prev := range existing {
+				if prev.ItemID == entry.ItemID {
+					return nil
+				}
 			}
 		}
-	}
-	existing = append(existing, entry)
-	if len(existing) > MaxReportedStored {
-		existing = existing[len(existing)-MaxReportedStored:]
-	}
-
-	p := reportedFilePath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	var sb strings.Builder
-	for _, r := range existing {
-		b, err := json.Marshal(r)
-		if err != nil {
-			continue
+		existing = append(existing, entry)
+		if len(existing) > MaxReportedStored {
+			existing = existing[len(existing)-MaxReportedStored:]
 		}
-		sb.Write(b)
-		sb.WriteByte('\n')
-	}
-	return os.WriteFile(p, []byte(sb.String()), 0o600)
+
+		p := reportedFilePath(vaultDir)
+		var sb strings.Builder
+		for _, r := range existing {
+			b, err := json.Marshal(r)
+			if err != nil {
+				continue
+			}
+			sb.Write(b)
+			sb.WriteByte('\n')
+		}
+		return store.WriteAtomic(p, []byte(sb.String()), 0o600)
+	})
 }
 
 // LoadRecentReported returns recent reported entries within window, ordered oldest to newest (capped at limit).
@@ -146,10 +145,12 @@ func FormatReportedDigest(vaultDir string, now time.Time, limit int) string {
 		if e.Scope != "" {
 			scopeTag += ":" + e.Scope
 		}
-		if e.Summary != "" {
-			lines = append(lines, fmt.Sprintf("- [%s · `%s`] **%s** — %s", e.Timestamp, scopeTag, e.Title, e.Summary))
+		title := SanitizeAntiCue(e.Title, 140)
+		summary := SanitizeAntiCue(e.Summary, 120)
+		if summary != "" {
+			lines = append(lines, fmt.Sprintf("- [%s · `%s`] **%s** — %s", e.Timestamp, scopeTag, title, summary))
 		} else {
-			lines = append(lines, fmt.Sprintf("- [%s · `%s`] **%s**", e.Timestamp, scopeTag, e.Title))
+			lines = append(lines, fmt.Sprintf("- [%s · `%s`] **%s**", e.Timestamp, scopeTag, title))
 		}
 	}
 	return strings.Join(lines, "\n")

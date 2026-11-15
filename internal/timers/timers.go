@@ -48,6 +48,7 @@ type Timer struct {
 	Model           string        `json:"model,omitempty"`
 	Title           string        `json:"title"`
 	Prompt          string        `json:"prompt"`
+	Tainted         bool          `json:"tainted,omitempty"`
 	CreatedByConvID string        `json:"createdByConvId,omitempty"`
 	CreatedAt       string        `json:"createdAt"`
 	FiredAt         string        `json:"firedAt,omitempty"`
@@ -63,6 +64,7 @@ type FollowUpRequest struct {
 	Model           string
 	Title           string
 	Prompt          string
+	Tainted         bool
 	CreatedByConvID string
 }
 
@@ -200,6 +202,7 @@ func SetFollowUp(vaultDir string, req FollowUpRequest, now time.Time) (Timer, er
 			Model:           model,
 			Title:           title,
 			Prompt:          prompt,
+			Tainted:         req.Tainted,
 			CreatedByConvID: strings.TrimSpace(req.CreatedByConvID),
 			CreatedAt:       nowStr,
 		}
@@ -376,14 +379,15 @@ func EvaluateDue(vaultDir string, now time.Time) ([]events.Event, error) {
 				evPrompt = fmt.Sprintf("[Scheduled Follow-Up Timer Fired (%s · due %s)]\n\n%s", t.ID, t.DueAt, t.Prompt)
 			}
 			ev, deduped, enqErr := events.Enqueue(vaultDir, events.Event{
-				Source:    "timer",
-				DedupKey:  dedupKey,
-				ScopeKey:  t.ScopeKey,
-				SessionID: t.SessionID,
-				Skill:     t.Skill,
-				Model:     t.Model,
-				Title:     t.Title,
-				Prompt:    evPrompt,
+				Source:       "timer",
+				DedupKey:     dedupKey,
+				ScopeKey:     t.ScopeKey,
+				SessionID:    t.SessionID,
+				Skill:        t.Skill,
+				Model:        t.Model,
+				Title:        t.Title,
+				Prompt:       evPrompt,
+				TaintOnSpawn: t.Tainted,
 				Metadata: map[string]string{
 					"timer_id":       t.ID,
 					"timer_category": string(t.Category),

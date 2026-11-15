@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 // DefaultPrimaryQuery filters for unread human messages in the Primary tab.
@@ -379,47 +380,17 @@ func randomNonceHex() string {
 	return hex.EncodeToString(b)
 }
 
-func taintedSessionsPath(vaultDir string) string {
-	return filepath.Join(vaultDir, "memory", "tainted_sessions.json")
-}
-
-// MarkSessionTainted records that convID has ingested untrusted external content (e.g. via read-quarantined)
+// MarkSessionTainted records that convID has ingested untrusted external content
+// in <vault>/private/taint/<sha256(convID)>.json and <vault>/private/taint/ledger.jsonl
 // so PreToolUse enforces the Quarantined Reader security profile.
 func MarkSessionTainted(vaultDir, convID, source string) error {
-	convID = strings.TrimSpace(convID)
-	if convID == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
-	}
-	tainted := loadTaintedMap(vaultDir)
-	tainted[convID] = fmt.Sprintf("%s (%s)", source, time.Now().Format(time.RFC3339))
-	data, err := json.MarshalIndent(tainted, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(taintedSessionsPath(vaultDir), data, 0o644)
+	return taint.MarkSession(vaultDir, convID, source)
 }
 
-// IsSessionTainted returns true if convID has been marked as a Quarantined Reader session.
+// IsSessionTainted returns true if convID has been marked as a Quarantined Reader session,
+// failing closed if the taint marker or legacy tainted_sessions.json is corrupt.
 func IsSessionTainted(vaultDir, convID string) (string, bool) {
-	convID = strings.TrimSpace(convID)
-	if convID == "" {
-		return "", false
-	}
-	tainted := loadTaintedMap(vaultDir)
-	reason, ok := tainted[convID]
-	return reason, ok
-}
-
-func loadTaintedMap(vaultDir string) map[string]string {
-	out := make(map[string]string)
-	data, err := os.ReadFile(taintedSessionsPath(vaultDir))
-	if err == nil {
-		_ = json.Unmarshal(data, &out)
-	}
-	return out
+	return taint.IsTainted(vaultDir, convID)
 }
 
 // FormatQuarantinedThread renders a single ThreadDetail into a sanitized, nonce-delimited envelope
@@ -510,10 +481,13 @@ func ReadQuarantinedThread(vaultDir, accountAlias, threadID, convID string) (Thr
 	if threadID == "" {
 		return ThreadDetail{}, "", fmt.Errorf("--thread=<threadId> is required")
 	}
-	if convID == "" {
-		convID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	resolvedConv, err := taint.ResolveCallerConvID(vaultDir, convID)
+	if err != nil {
+		return ThreadDetail{}, "", err
 	}
-	_ = MarkSessionTainted(vaultDir, convID, "gmail:thread:"+threadID)
+	if err := MarkSessionTainted(vaultDir, resolvedConv, "gmail:thread:"+threadID); err != nil {
+		return ThreadDetail{}, "", fmt.Errorf("persist provenance taint before read: %w", err)
+	}
 
 	var td ThreadDetail
 	if mDir := mockDir(vaultDir); mDir != "" {

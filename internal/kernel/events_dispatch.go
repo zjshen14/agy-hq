@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
+	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 // DeliverMessageToSession injects a user/system message into an existing Antigravity conversation
@@ -154,6 +156,25 @@ func batchTriggerName(batch events.LeasedBatch) string {
 	return fmt.Sprintf("event:%s:%s", head.Source, head.ID)
 }
 
+func batchItemKeys(evs []events.Event) []string {
+	var keys []string
+	for _, ev := range evs {
+		if ev.Metadata != nil {
+			if ik := strings.TrimSpace(ev.Metadata["item_key"]); ik != "" {
+				keys = append(keys, ik)
+			}
+		}
+	}
+	return keys
+}
+
+func headMetaVal(ev events.Event, key string) string {
+	if ev.Metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(ev.Metadata[key])
+}
+
 func emitDroppedEventAlerts(vaultDir string, dropped []events.Event, now time.Time) {
 	for _, d := range dropped {
 		skillName := d.Skill
@@ -225,7 +246,12 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 			})
 		}
 
-		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, batch.Prompt, batch.Model, dryRun)
+		spawnPrompt := batch.Prompt
+		if batch.SpawnToken != "" {
+			spawnPrompt = spawnPrompt + "\n\n[hq-spawn:" + batch.SpawnToken + "]"
+		}
+
+		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, batch.Model, dryRun)
 		if spawnErr != nil {
 			if !dryRun {
 				removeTaskBySlug(vaultDir, autoSlug)
@@ -245,14 +271,25 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 				LastUpdatedAt:  time.Now().UTC().Format(time.RFC3339),
 			})
 			_ = events.BindBatchConversation(vaultDir, ids, uuid, now, events.DefaultLeaseTTL)
+			if batch.TaintOnSpawn {
+				_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{
+					ConvID:    uuid,
+					Source:    "spawn_batch:" + head.Source,
+					Connector: headMetaVal(head, "connector"),
+					Account:   headMetaVal(head, "account"),
+					BatchID:   batch.LeaseID,
+					EventIDs:  ids,
+					ItemKeys:  batchItemKeys(batch.Events),
+				})
+			}
 		}
 		actions = append(actions, fmt.Sprintf("%s (%s)", label, out))
 	}
 	return actions, nil
 }
 
-// CompleteConversationEvents marks all leased events bound to convID as completed in local/memory/events_archive.jsonl,
-// and moves any completed `inbox_drop` files from `local/inbox/queued/` to `local/inbox/processed/`.
+// CompleteConversationEvents marks all leased events bound to convID as completed in local/memory/events_archive.jsonl
+// (requeuing unacknowledged watcher events), and moves any completed `inbox_drop` files from `local/inbox/queued/` to `local/inbox/processed/`.
 func CompleteConversationEvents(vaultDir, convID string, now time.Time) (int, error) {
 	convID = strings.TrimSpace(convID)
 	if convID == "" {
@@ -261,10 +298,11 @@ func CompleteConversationEvents(vaultDir, convID string, now time.Time) (int, er
 	if now.IsZero() {
 		now = time.Now()
 	}
-	completed, err := events.CompleteByConversation(vaultDir, convID, now)
+	completed, _, dropped, err := events.FinalizeByConversation(vaultDir, convID, now)
 	if err != nil {
 		return 0, err
 	}
+	emitDroppedEventAlerts(vaultDir, dropped, now)
 	finalizeCompletedInboxFiles(vaultDir, completed, now)
 	return len(completed), nil
 }

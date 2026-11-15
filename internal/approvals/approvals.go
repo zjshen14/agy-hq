@@ -6,16 +6,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // DefaultProposalTTL is the standard expiration window for pending outbound approval proposals.
@@ -41,6 +44,10 @@ func ValidateProposalID(id string) error {
 	return nil
 }
 
+// RegisteredApplyPrecondition is an optional hook registered by higher-level packages (e.g., offer/connector)
+// to verify remote thread preconditions (such as ExpectedRemoteVersion) right before an approved proposal executes.
+var RegisteredApplyPrecondition func(vaultDir string, prop Proposal) error
+
 // Proposal represents an approval-bound action staged in local/memory/pending/<id>.json.
 type Proposal struct {
 	ID               string            `json:"id"`
@@ -52,7 +59,14 @@ type Proposal struct {
 	Command          string            `json:"command"`
 	CommandArgv      []string          `json:"commandArgv,omitempty"`
 	WorkDir          string            `json:"workDir,omitempty"`
+	HashVersion      int               `json:"hashVersion,omitempty"`
 	SHA256           string            `json:"sha256"`
+	IdempotencyKey   string            `json:"idempotencyKey,omitempty"`
+	TargetConnector  string            `json:"targetConnector,omitempty"`
+	TargetAccount    string            `json:"targetAccount,omitempty"`
+	TargetThreadKey  string            `json:"targetThreadKey,omitempty"`
+	PayloadSHA256    string            `json:"payloadSha256,omitempty"`
+	SupersededBy     string            `json:"supersededBy,omitempty"`
 	Status           string            `json:"status"`
 	RiskTier         string            `json:"riskTier,omitempty"`
 	RiskFlags        []string          `json:"riskFlags,omitempty"`
@@ -62,7 +76,7 @@ type Proposal struct {
 	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
-// CreateOptions configures structured argv, deferred session resumption, and skill attribution.
+// CreateOptions configures structured argv, deferred session resumption, idempotency, and skill attribution.
 type CreateOptions struct {
 	ActionType       string
 	Summary          string
@@ -70,6 +84,12 @@ type CreateOptions struct {
 	CommandArgv      []string
 	WorkDir          string
 	ConversationID   string
+	IdempotencyKey   string
+	TargetConnector  string
+	TargetAccount    string
+	TargetThreadKey  string
+	PayloadSHA256    string
+	SupersedePrior   bool
 	ResumeOnDecide   bool
 	ContinuationNote string
 	OriginSkill      string
@@ -125,6 +145,86 @@ func ComputeProposalHash(actionType, command string, argv []string) string {
 	canonicalArgv, _ := json.Marshal(argv)
 	sum := sha256.Sum256([]byte(actionType + "\nargv:" + string(canonicalArgv)))
 	return hex.EncodeToString(sum[:])
+}
+
+func writeLenPrefixed(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
+	b.WriteByte('\n')
+}
+
+// ComputeProposalHashV2 computes an unambiguous length-prefixed SHA-256 digest over the full execution envelope.
+func ComputeProposalHashV2(p Proposal) string {
+	var b strings.Builder
+	writeLenPrefixed(&b, "hq-proposal-hash-v2")
+	writeLenPrefixed(&b, p.ActionType)
+	writeLenPrefixed(&b, p.Command)
+	b.WriteString("argv_count:")
+	b.WriteString(strconv.Itoa(len(p.CommandArgv)))
+	b.WriteByte('\n')
+	for _, arg := range p.CommandArgv {
+		writeLenPrefixed(&b, arg)
+	}
+	writeLenPrefixed(&b, p.WorkDir)
+	writeLenPrefixed(&b, p.TargetConnector)
+	writeLenPrefixed(&b, p.TargetAccount)
+	writeLenPrefixed(&b, p.TargetThreadKey)
+	writeLenPrefixed(&b, p.PayloadSHA256)
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyProposalHash checks p.SHA256 against ComputeProposalHashV2 (for HashVersion >= 2) or legacy ComputeProposalHash (HashVersion == 0).
+func VerifyProposalHash(p Proposal) error {
+	var expected string
+	if p.HashVersion >= 2 {
+		expected = ComputeProposalHashV2(p)
+	} else {
+		expected = ComputeProposalHash(p.ActionType, p.Command, p.CommandArgv)
+	}
+	if strings.ToLower(strings.TrimSpace(p.SHA256)) != expected {
+		return fmt.Errorf("tampered proposal: stored sha256 %s != computed %s", p.SHA256, expected)
+	}
+	return nil
+}
+
+func idemMarkerPath(vaultDir, idemKey string) string {
+	k := strings.TrimSpace(idemKey)
+	if k == "" {
+		return ""
+	}
+	return filepath.Join(vaultDir, "memory", "pending", ".idem", sha256HexString(k))
+}
+
+func removeIdemMarker(vaultDir, idemKey string) {
+	if p := idemMarkerPath(vaultDir, idemKey); p != "" {
+		_ = os.Remove(p)
+	}
+}
+
+func lookupExistingIdemProposal(vaultDir, idemPath string, now time.Time) (Proposal, bool) {
+	rawID, err := os.ReadFile(idemPath)
+	if err != nil {
+		return Proposal{}, false
+	}
+	propID := strings.TrimSpace(string(rawID))
+	if ValidateProposalID(propID) != nil {
+		_ = os.Remove(idemPath)
+		return Proposal{}, false
+	}
+	pendingPath := filepath.Join(vaultDir, "memory", "pending", propID+".json")
+	rawProp, err := os.ReadFile(pendingPath)
+	if err != nil {
+		_ = os.Remove(idemPath)
+		return Proposal{}, false
+	}
+	var existing Proposal
+	if json.Unmarshal(rawProp, &existing) != nil || existing.ID != propID || existing.IsExpired(now) {
+		_ = os.Remove(idemPath)
+		return Proposal{}, false
+	}
+	return existing, true
 }
 
 // ScanOutboundContextualPII deterministically checks outbound draft/command payloads against
@@ -199,7 +299,29 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		return Proposal{}, err
 	}
 	now := time.Now()
+	idemKey := strings.TrimSpace(opts.IdempotencyKey)
+	idemPath := idemMarkerPath(vaultDir, idemKey)
 	id := generateID()
+	reservedIdem := false
+	if idemPath != "" {
+		if existing, ok := lookupExistingIdemProposal(vaultDir, idemPath, now); ok {
+			return existing, nil
+		}
+		f, oErr := store.OpenCreateExclNoFollow(idemPath, 0o600)
+		if oErr != nil {
+			if errors.Is(oErr, os.ErrExist) {
+				if existing, ok := lookupExistingIdemProposal(vaultDir, idemPath, now); ok {
+					return existing, nil
+				}
+			}
+			return Proposal{}, oErr
+		}
+		_, _ = f.WriteString(id + "\n")
+		_ = f.Sync()
+		_ = f.Close()
+		reservedIdem = true
+	}
+
 	expiresAt := now.Add(DefaultProposalTTL).UTC().Format(time.RFC3339)
 	if opts.Metadata != nil && strings.TrimSpace(opts.Metadata["expiresAt"]) != "" {
 		expiresAt = strings.TrimSpace(opts.Metadata["expiresAt"])
@@ -245,7 +367,12 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		Command:          cmdDisplay,
 		CommandArgv:      opts.CommandArgv,
 		WorkDir:          strings.TrimSpace(opts.WorkDir),
-		SHA256:           ComputeProposalHash(strings.TrimSpace(opts.ActionType), cmdDisplay, opts.CommandArgv),
+		HashVersion:      2,
+		IdempotencyKey:   idemKey,
+		TargetConnector:  strings.TrimSpace(opts.TargetConnector),
+		TargetAccount:    strings.TrimSpace(opts.TargetAccount),
+		TargetThreadKey:  strings.TrimSpace(opts.TargetThreadKey),
+		PayloadSHA256:    strings.ToLower(strings.TrimSpace(opts.PayloadSHA256)),
 		Status:           "pending",
 		RiskTier:         riskTier,
 		RiskFlags:        riskFlags,
@@ -254,15 +381,83 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		OriginSkill:      originSkill,
 		Metadata:         opts.Metadata,
 	}
+	prop.SHA256 = ComputeProposalHashV2(prop)
+
 	data, err := json.MarshalIndent(prop, "", "  ")
 	if err != nil {
+		if reservedIdem {
+			_ = os.Remove(idemPath)
+		}
 		return Proposal{}, err
 	}
 	dst := filepath.Join(pendingDir, id+".json")
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
+	if err := store.WriteAtomic(dst, append(data, '\n'), 0o600); err != nil {
+		if reservedIdem {
+			_ = os.Remove(idemPath)
+		}
 		return Proposal{}, err
 	}
+	if opts.SupersedePrior && prop.TargetThreadKey != "" {
+		_, _ = SupersedeByThread(vaultDir, prop.TargetConnector, prop.TargetAccount, prop.TargetThreadKey, prop.ID, now)
+	}
 	return prop, nil
+}
+
+// SupersedeByThread atomically removes older pending proposals targeting the same (connector, account, threadKey)
+// and records `"superseded"` entries in interventions.jsonl so stale replies can never be double-approved.
+func SupersedeByThread(vaultDir, connector, account, threadKey, newPropID string, now time.Time) ([]Proposal, error) {
+	threadKey = strings.TrimSpace(threadKey)
+	if threadKey == "" {
+		return nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	pendingDir := filepath.Join(vaultDir, "memory", "pending")
+	entries, err := os.ReadDir(pendingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var superseded []Proposal
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fileID := strings.TrimSuffix(e.Name(), ".json")
+		if fileID == newPropID || ValidateProposalID(fileID) != nil {
+			continue
+		}
+		fullPath := filepath.Join(pendingDir, e.Name())
+		data, rErr := os.ReadFile(fullPath)
+		if rErr != nil {
+			continue
+		}
+		var p Proposal
+		if json.Unmarshal(data, &p) != nil || p.ID != fileID {
+			continue
+		}
+		if p.TargetConnector == strings.TrimSpace(connector) &&
+			p.TargetAccount == strings.TrimSpace(account) &&
+			p.TargetThreadKey == threadKey {
+			if os.Remove(fullPath) == nil {
+				removeIdemMarker(vaultDir, p.IdempotencyKey)
+				CleanupApprovalArtifacts(vaultDir, p.ID)
+				p.Status = "superseded"
+				p.SupersededBy = newPropID
+				appendIntervention(vaultDir, InterventionRecord{
+					Timestamp: now.Format(time.RFC3339),
+					Decision:  "superseded",
+					Proposal:  p,
+					Output:    fmt.Sprintf("Superseded by newer proposal %s on thread %s", newPropID, threadKey),
+				})
+				superseded = append(superseded, p)
+			}
+		}
+	}
+	return superseded, nil
 }
 
 // ExpireStaleProposals sweeps local/memory/pending/*.json for proposals past ExpiresAt,
@@ -299,6 +494,8 @@ func ExpireStaleProposals(vaultDir string, now time.Time) ([]Proposal, error) {
 		}
 		if p.IsExpired(now) {
 			if os.Remove(fullPath) == nil {
+				removeIdemMarker(vaultDir, p.IdempotencyKey)
+				CleanupApprovalArtifacts(vaultDir, p.ID)
 				p.Status = "expired"
 				appendIntervention(vaultDir, InterventionRecord{
 					Timestamp: now.Format(time.RFC3339),
@@ -439,6 +636,8 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	now := time.Now()
 	if prop.IsExpired(now) {
 		_ = os.Remove(pendingPath)
+		removeIdemMarker(vaultDir, prop.IdempotencyKey)
+		CleanupApprovalArtifacts(vaultDir, prop.ID)
 		prop.Status = "expired"
 		appendIntervention(vaultDir, InterventionRecord{
 			Timestamp: now.Format(time.RFC3339),
@@ -448,9 +647,8 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 		})
 		return "", fmt.Errorf("proposal %s expired at %s; re-stage with ./bin/hq propose", id, prop.ExpiresAt)
 	}
-	expected := ComputeProposalHash(prop.ActionType, prop.Command, prop.CommandArgv)
-	if prop.SHA256 != expected {
-		return "", fmt.Errorf("tampered proposal: stored sha256 %s != computed %s", prop.SHA256, expected)
+	if err := VerifyProposalHash(prop); err != nil {
+		return "", err
 	}
 	if !strings.HasPrefix(strings.ToLower(prop.SHA256), normPrefix) {
 		return "", fmt.Errorf("sha256 prefix mismatch: got %s, expected prefix of %s", normPrefix, prop.SHA256)
@@ -462,6 +660,21 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 		return "", fmt.Errorf("claim proposal %s (already approved or removed): %w", id, err)
 	}
 	defer func() { _ = os.Remove(claimPath) }()
+	removeIdemMarker(vaultDir, prop.IdempotencyKey)
+	CleanupApprovalArtifacts(vaultDir, prop.ID)
+
+	if RegisteredApplyPrecondition != nil {
+		if preErr := RegisteredApplyPrecondition(vaultDir, prop); preErr != nil {
+			prop.Status = "stale_conflict"
+			appendIntervention(vaultDir, InterventionRecord{
+				Timestamp: now.Format(time.RFC3339),
+				Decision:  "stale_conflict",
+				Proposal:  prop,
+				Error:     preErr.Error(),
+			})
+			return "", fmt.Errorf("proposal %s blocked by apply precondition: %w", id, preErr)
+		}
+	}
 
 	var cmd *exec.Cmd
 	if len(prop.CommandArgv) > 0 && strings.TrimSpace(prop.CommandArgv[0]) != "" {
@@ -519,6 +732,8 @@ func RejectProposal(vaultDir, id, reason string) error {
 	now := time.Now()
 	prop.Status = "rejected"
 	_ = os.Remove(pendingPath)
+	removeIdemMarker(vaultDir, prop.IdempotencyKey)
+	CleanupApprovalArtifacts(vaultDir, prop.ID)
 
 	rec := InterventionRecord{
 		Timestamp: now.Format(time.RFC3339),
@@ -593,17 +808,11 @@ func enqueueApprovalDecisionEvent(vaultDir string, prop Proposal, decision, deta
 
 func appendIntervention(vaultDir string, rec InterventionRecord) {
 	logPath := filepath.Join(vaultDir, "memory", "interventions.jsonl")
-	_ = os.MkdirAll(filepath.Dir(logPath), 0o700)
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = f.Write(append(line, '\n'))
+	_ = store.AppendLineNoFollow(logPath, append(line, '\n'), 0o600)
 }
 
 // LoadInterventions reads intervention audit records from local/memory/interventions.jsonl.

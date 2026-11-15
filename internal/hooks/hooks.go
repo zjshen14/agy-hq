@@ -20,6 +20,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/worktree"
@@ -197,6 +198,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
 	_ = hostpaths.PersistFromLiveEnv(vaultDir)
+	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.TranscriptPath)
+	_, isTaintedStart := taint.Check(vaultDir, payload.ConversationID)
 
 	// Zero-touch auto-bootstrap: if USER.md does not exist yet in the target Vault,
 	// automatically initialize the private Vault from disk templates/ or embedded templates.FS.
@@ -274,8 +277,11 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 
 		isAutoWorker := hasMatchedTask && matchedTask.EffectiveKind() == "auto"
-		leanAuto = isSubagent || isAutoWorker
+		leanAuto = isSubagent || isAutoWorker || isTaintedStart
 		isFrontDesk := !leanAuto && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
+		if isTaintedStart {
+			zone2Sections = append(zone2Sections, "## 🛡️ Active Role: Quarantined Triage Worker (TAINTED)\n- Untrusted external channel content is in scope. Private Vault memory (`MEMORY.md`, wiki topics, facts) is withheld, and outbound commands are restricted to `hq offer stage` and `hq outbox add`.")
+		}
 
 		if isFrontDesk {
 			turnFile := filepath.Join(vaultDir, "memory", "front_desk_turn.json")
@@ -400,31 +406,33 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			zone1Sections = append(zone1Sections, "## HQ Vault: USER.md\n"+s)
 		}
 	}
-	if memBytes, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
-		if s := strings.TrimSpace(string(memBytes)); s != "" {
-			lines := strings.Split(s, "\n")
-			if len(lines) > vault.MaxMemoryIndexLines {
-				s = strings.Join(lines[:vault.MaxMemoryIndexLines], "\n") +
-					fmt.Sprintf("\n\n> ⚠️ **[Roadmap Index Budget Warning]:** `local/MEMORY.md` exceeds %d lines (%d lines). Run `/sleep-consolidate` or `./bin/hq memory status` to distill detailed notes into `local/memory/topics/<slug>.md`.", vault.MaxMemoryIndexLines, len(lines))
-			}
-			zone1Sections = append(zone1Sections, "## HQ Vault: MEMORY.md\n"+s)
-		}
-	}
-	if topics, err := vault.LoadTopicIndex(vaultDir); err == nil && len(topics) > 0 {
-		var topicLines []string
-		topicLines = append(topicLines, "> **Retrieval Directive:** When your task touches any topic listed below, call `read_file` on its topic page first to load verified architectural context.")
-		for _, tp := range topics {
-			if tp.Summary != "" {
-				topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`): %s", tp.Title, tp.Path, tp.Slug, tp.Summary))
-			} else {
-				topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`)", tp.Title, tp.Path, tp.Slug))
+	if !isTaintedStart {
+		if memBytes, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
+			if s := strings.TrimSpace(string(memBytes)); s != "" {
+				lines := strings.Split(s, "\n")
+				if len(lines) > vault.MaxMemoryIndexLines {
+					s = strings.Join(lines[:vault.MaxMemoryIndexLines], "\n") +
+						fmt.Sprintf("\n\n> ⚠️ **[Roadmap Index Budget Warning]:** `local/MEMORY.md` exceeds %d lines (%d lines). Run `/sleep-consolidate` or `./bin/hq memory status` to distill detailed notes into `local/memory/topics/<slug>.md`.", vault.MaxMemoryIndexLines, len(lines))
+				}
+				zone1Sections = append(zone1Sections, "## HQ Vault: MEMORY.md\n"+s)
 			}
 		}
-		zone1Sections = append(zone1Sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
+		if topics, err := vault.LoadTopicIndex(vaultDir); err == nil && len(topics) > 0 {
+			var topicLines []string
+			topicLines = append(topicLines, "> **Retrieval Directive:** When your task touches any topic listed below, call `read_file` on its topic page first to load verified architectural context.")
+			for _, tp := range topics {
+				if tp.Summary != "" {
+					topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`): %s", tp.Title, tp.Path, tp.Slug, tp.Summary))
+				} else {
+					topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`)", tp.Title, tp.Path, tp.Slug))
+				}
+			}
+			zone1Sections = append(zone1Sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
+		}
 	}
 
 	// Zone 2: Role-Scoped Dynamic Tail
-	if hasMatchedTask && matchedTask.TaskSlug != "" {
+	if !isTaintedStart && hasMatchedTask && matchedTask.TaskSlug != "" {
 		if _, rawProg, foundProg, pErr := vault.LoadProgress(vaultDir, matchedTask.TaskSlug); pErr == nil && foundProg && strings.TrimSpace(rawProg) != "" {
 			zone2Sections = append(zone2Sections, "## Active Task Progress Checkpoint\n"+strings.TrimSpace(rawProg))
 		}
@@ -434,20 +442,22 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	if leanAuto {
 		factLimit = 8
 	}
-	if facts, err := vault.LoadActiveFacts(vaultDir, factLimit); err == nil && len(facts) > 0 {
-		var lines []string
-		for _, f := range facts {
-			meta := ""
-			if f.ID != "" {
-				if f.Verified {
-					meta = fmt.Sprintf(" (%s · verified)", f.ID)
-				} else {
-					meta = fmt.Sprintf(" (%s)", f.ID)
+	if !isTaintedStart {
+		if facts, err := vault.LoadActiveFacts(vaultDir, factLimit); err == nil && len(facts) > 0 {
+			var lines []string
+			for _, f := range facts {
+				meta := ""
+				if f.ID != "" {
+					if f.Verified {
+						meta = fmt.Sprintf(" (%s · verified)", f.ID)
+					} else {
+						meta = fmt.Sprintf(" (%s)", f.ID)
+					}
 				}
+				lines = append(lines, fmt.Sprintf("- [%s]%s %s", f.Topic, meta, f.Statement))
 			}
-			lines = append(lines, fmt.Sprintf("- [%s]%s %s", f.Topic, meta, f.Statement))
+			zone2Sections = append(zone2Sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
 		}
-		zone2Sections = append(zone2Sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
 	}
 
 	if reportedDigest := outbox.FormatReportedDigest(vaultDir, time.Now(), 8); reportedDigest != "" {
@@ -549,7 +559,7 @@ var (
 	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|taint|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -766,10 +776,20 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	}
 
 	if payload.ConversationID != "" {
+		bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.TranscriptPath)
 		convID := payload.ConversationID
 		defer func() {
 			_, _ = events.TryRenewLeaseByConversation(vaultDir, convID, time.Now(), events.DefaultLeaseTTL)
 		}()
+	}
+
+	protectedPrivateSubs := []string{
+		"gmail", "gchat", "credentials", "connectors", "taint",
+		"trust.json", "approval_asks", "approval_caps", "pii-denylist.txt", "daemon_token",
+	}
+	rootsFileCanon := ""
+	if rts := hostpaths.Resolve(vaultDir); rts.AppDataDir != "" {
+		rootsFileCanon = canonicalizeHookPath(vaultDir, filepath.Join(rts.AppDataDir, "hq", "roots.json"))
 	}
 
 	if payload.ToolCall.Name == "run_command" {
@@ -780,10 +800,13 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				"reason":   "Blocked by Front Desk Lease Subagent Invariant: subagents and autonomous background workers are ephemeral processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).",
 			})
 		}
-		// Universal Credential Vault Guard: block direct shell reads/mutations of raw OAuth tokens, Chrome cookies, credentials, daemon_token, or pii-denylist.txt across ALL sessions
+		// Universal Credential & Trust Vault Guard: block direct shell reads/mutations of raw OAuth tokens, connectors, taint, trust, approval_asks/caps, daemon_token, pii-denylist.txt, or roots.json across ALL sessions
 		cleanVault := filepath.Clean(vaultDir)
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 		credShellHit := reLocalCredentialShell.MatchString(cmdLine)
+		if !credShellHit && rootsFileCanon != "" && strings.Contains(cmdLine, rootsFileCanon) {
+			credShellHit = true
+		}
 		if !credShellHit {
 			vaultBases := []string{cleanVault}
 			if canonVault != "" && canonVault != cleanVault {
@@ -793,7 +816,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				if vBase == "" || vBase == "." {
 					continue
 				}
-				for _, sub := range []string{"gmail", "gchat", "credentials", "pii-denylist.txt", "daemon_token"} {
+				for _, sub := range protectedPrivateSubs {
 					if strings.Contains(cmdLine, filepath.Join(vBase, "private", sub)) {
 						credShellHit = true
 						break
@@ -805,12 +828,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 		}
 		if !credShellHit && canonVault != "" {
-			credTargets := []string{
-				filepath.Join(canonVault, "private", "gmail"),
-				filepath.Join(canonVault, "private", "gchat"),
-				filepath.Join(canonVault, "private", "credentials"),
-				filepath.Join(canonVault, "private", "pii-denylist.txt"),
-				filepath.Join(canonVault, "private", "daemon_token"),
+			var credTargets []string
+			for _, sub := range protectedPrivateSubs {
+				credTargets = append(credTargets, filepath.Join(canonVault, "private", sub))
+			}
+			if rootsFileCanon != "" {
+				credTargets = append(credTargets, rootsFileCanon)
 			}
 			for _, tok := range strings.FieldsFunc(cmdLine, func(r rune) bool {
 				switch r {
@@ -837,7 +860,41 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		if credShellHit {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,pii-denylist.txt,daemon_token} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget` instead.",
+				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,taint,trust.json,approval_asks,approval_caps,pii-denylist.txt,daemon_token} or roots.json is strictly prohibited across all sessions.",
+			})
+		}
+
+		// Canonical Human-Presence Gate on `hq approve` (N1 / S1 / S2)
+		if reHQApproveAny.MatchString(cmdLine) {
+			if _, isTaintedCaller := taint.Check(vaultDir, payload.ConversationID); isTaintedCaller || isAutoConversation(vaultDir, payload.ConversationID) || kernel.IsSubagentConversation(vaultDir, payload.ConversationID) {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   "Blocked by agy-hq Human-Presence Approval policy: subagents, autonomous [Auto] runs, and quarantined sessions may never execute `hq approve`.",
+				})
+			}
+			binTok, propID, shaPrefix, parseErr := parseCanonicalHQApprove(cmdLine)
+			if parseErr != nil {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   fmt.Sprintf("Blocked by agy-hq Human-Presence Approval policy: %v", parseErr),
+				})
+			}
+			capTok, fullSHA, vErr := approvals.VerifyAskAndMintCap(vaultDir, propID, shaPrefix, payload.ConversationID, payload.TranscriptPath, time.Now())
+			if vErr != nil {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   fmt.Sprintf("Blocked by agy-hq Human-Presence Approval policy: %v", vErr),
+				})
+			}
+			rewritten := fmt.Sprintf("%s approve %s --sha256=%s --cap=%s",
+				shellQuoteSingle(resolveTrustedHQExecutable(binTok)),
+				shellQuoteSingle(propID),
+				shellQuoteSingle(fullSHA),
+				shellQuoteSingle(capTok),
+			)
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision":  "allow",
+				"overwrite": map[string]interface{}{"CommandLine": rewritten},
 			})
 		}
 		if hasUnsafeDoubleQuotedDollar(cmdLine) {
@@ -881,16 +938,16 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, Chrome cookies, credentials, daemon_token, and pii-denylist.txt across ALL sessions (tainted or untainted)
+	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, connectors, taint, trust, approval_asks/caps, daemon_token, pii-denylist.txt, and roots.json across ALL sessions (tainted or untainted)
 	switch payload.ToolCall.Name {
 	case "read_file", "write_file", "edit_file", "grep_search", "find_by_name":
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
-		credPaths := []string{
-			filepath.Join(canonVault, "private", "gmail"),
-			filepath.Join(canonVault, "private", "gchat"),
-			filepath.Join(canonVault, "private", "credentials"),
-			filepath.Join(canonVault, "private", "pii-denylist.txt"),
-			filepath.Join(canonVault, "private", "daemon_token"),
+		var credPaths []string
+		for _, sub := range protectedPrivateSubs {
+			credPaths = append(credPaths, filepath.Join(canonVault, "private", sub))
+		}
+		if rootsFileCanon != "" {
+			credPaths = append(credPaths, rootsFileCanon)
 		}
 		for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
 			if rawArg, ok := payload.ToolCall.Args[key].(string); ok && strings.TrimSpace(rawArg) != "" {
@@ -899,7 +956,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					if canonP == cp || strings.HasPrefix(canonP, cp+string(filepath.Separator)) {
 						return json.NewEncoder(w).Encode(map[string]interface{}{
 							"decision": "deny",
-							"reason":   "Blocked by agy-hq Credential Vault policy: direct LLM access to local/private/{gmail,gchat,credentials,pii-denylist.txt,daemon_token} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget`.",
+							"reason":   "Blocked by agy-hq Credential Vault policy: direct LLM access to protected Vault secrets/trust/taint/approvals or roots.json is strictly prohibited across all sessions.",
 						})
 					}
 				}
@@ -907,7 +964,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Protect deterministic proposal, RSI verification, transcript logs (.system_generated), and durable event/timer stores from direct LLM file tampering across all sessions
+	// Protect deterministic proposal, RSI verification, transcript logs (.system_generated), extensions.json, and durable event/timer/outbox/watcher stores from direct LLM file tampering across all sessions
 	if payload.ToolCall.Name == "write_file" || payload.ToolCall.Name == "edit_file" {
 		if pathArg, ok := payload.ToolCall.Args["Path"].(string); ok && strings.TrimSpace(pathArg) != "" {
 			canonPath := canonicalizeHookPath(vaultDir, pathArg)
@@ -921,6 +978,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 			for _, protectedSub := range []string{
+				filepath.Join(canonVault, "extensions.json"),
 				filepath.Join(canonVault, "memory", "pending"),
 				filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
 				filepath.Join(canonVault, "memory", "rsi", "archive.jsonl"),
@@ -928,11 +986,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				filepath.Join(canonVault, "memory", "events.json"),
 				filepath.Join(canonVault, "memory", "events_archive.jsonl"),
 				filepath.Join(canonVault, "memory", "timers.json"),
+				filepath.Join(canonVault, "memory", "outbox"),
+				filepath.Join(canonVault, "memory", "watchers"),
+				filepath.Join(canonVault, "memory", "trigger_cursors.json"),
 			} {
 				if canonPath == protectedSub || strings.HasPrefix(canonPath, protectedSub+string(filepath.Separator)) {
 					return json.NewEncoder(w).Encode(map[string]interface{}{
 						"decision": "deny",
-						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, RSI hypotheses, durable event/timer stores, or intervention audit logs are prohibited. Use `./bin/hq propose`, `./bin/hq events`, `./bin/hq timers`, or `./bin/hq rsi`.",
+						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, extension state, RSI hypotheses, durable event/timer/outbox/watcher stores, or intervention audit logs are prohibited.",
 					})
 				}
 			}
@@ -948,61 +1009,65 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		if reGChatBrowserURL.Match(rawArgs) {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Google Chat safety policy: direct chrome-devtools interaction with chat.google.com is forbidden. Use `./bin/hq gchat <spaces|search|read-quarantined|draft>` and `./bin/hq propose --type=gchat_send --draft=<draftId>` instead.",
+				"reason":   "Blocked by agy-hq Google Chat safety policy: direct chrome-devtools interaction with chat.google.com is forbidden. Use `./bin/hq gchat <spaces|search|read-quarantined|propose>` instead.",
 			})
 		}
 	}
 
-	// Enforce Quarantined Reader profile on sessions that have ingested untrusted external email/chat
-	if taintReason, tainted := gmail.IsSessionTainted(vaultDir, payload.ConversationID); tainted {
+	// Enforce Strict Deny-by-Default Quarantined Worker Profile on sessions that have ingested untrusted external channel content (RFC-0017b §3)
+	if taintReason, tainted := taint.IsTainted(vaultDir, payload.ConversationID); tainted {
 		switch payload.ToolCall.Name {
-		case "search_web", "write_file", "edit_file", "invoke_subagent", "define_subagent", "send_message", "schedule", "call_mcp_tool":
-			return json.NewEncoder(w).Encode(map[string]interface{}{
-				"decision": "deny",
-				"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): tool %q is disabled after reading untrusted external messages.", taintReason, payload.ToolCall.Name),
-			})
-		case "read_file", "grep_search", "find_by_name":
-			canonVault := canonicalizeHookPath(vaultDir, vaultDir)
-			cleanPrivate := filepath.Join(canonVault, "private")
-			cleanMem := filepath.Join(canonVault, "MEMORY.md")
-			for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
-				if p, ok := payload.ToolCall.Args[key].(string); ok && p != "" {
-					cleanP := canonicalizeHookPath(vaultDir, p)
-					if cleanP == cleanPrivate || strings.HasPrefix(cleanP, cleanPrivate+string(filepath.Separator)) || cleanP == cleanMem {
-						return json.NewEncoder(w).Encode(map[string]interface{}{
-							"decision": "deny",
-							"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): access to local/private/ and local/MEMORY.md is forbidden in quarantined sessions.", taintReason),
-						})
-					}
-				}
+		case "read_file":
+			pathArg, _ := payload.ToolCall.Args["Path"].(string)
+			if !isAllowedTaintedReadPath(vaultDir, payload, pathArg) {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): read_file in tainted sessions is restricted to SKILL.md instructions and this conversation's own artifact directory.", taintReason),
+				})
 			}
+			_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+			return err
 		case "run_command":
 			cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
-			if !reAllowedQuarantineHQCmd.MatchString(cmdLine) || strings.ContainsAny(cmdLine, "\n\r;|&`$") {
+			argv, aErr := strictArgv(cmdLine)
+			if aErr != nil {
 				return json.NewEncoder(w).Encode(map[string]interface{}{
 					"decision": "deny",
-					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): only single-line `./bin/hq gmail <search|read-quarantined|draft|triage-result|attachment-quarantine>`, `./bin/hq gchat <spaces|search|read-quarantined|draft|triage-result>`, and `./bin/hq propose` are permitted in quarantined sessions.", taintReason),
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): %v", taintReason, aErr),
 				})
 			}
+			if vErr := validateTaintedHQArgv(argv); vErr != nil {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): %v", taintReason, vErr),
+				})
+			}
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision":  "allow",
+				"overwrite": map[string]interface{}{"CommandLine": wrapScrubbedArgvCommand(argv)},
+			})
 		default:
-			if strings.HasPrefix(payload.ToolCall.Name, "mcp_") {
-				return json.NewEncoder(w).Encode(map[string]interface{}{
-					"decision": "deny",
-					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): MCP tools (%s) are disabled in quarantined sessions.", taintReason, payload.ToolCall.Name),
-				})
-			}
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): tool %q is disabled in tainted sessions (deny-by-default).", taintReason, payload.ToolCall.Name),
+			})
 		}
 	}
 
-	// Canonical Gmail / Google Chat / RSI Patch Preview overwrite on ask_question for pending proposals
+	// Canonical Proposal Preview + Human-Presence Challenge Nonce overwrite on ask_question for ALL pending proposals
 	if payload.ToolCall.Name == "ask_question" {
+		if isAutoConversation(vaultDir, payload.ConversationID) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Unattended [Auto] policy: background [Auto] sessions cannot prompt via ask_question; route findings via `hq outbox add` or `hq offer stage`.",
+			})
+		}
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
 			rawArgs, _ := json.Marshal(payload.ToolCall.Args)
 			rawStr := string(rawArgs)
 			for _, prop := range pending {
-				isStructuredPreview := (prop.ActionType == "gmail_send" || prop.ActionType == "gchat_send" || prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch") && prop.Metadata != nil
-				hasPIIWarning := len(prop.RiskFlags) > 0
-				if (isStructuredPreview || hasPIIWarning) && strings.Contains(rawStr, prop.ID) {
+				if strings.Contains(rawStr, prop.ID) {
+					hasPIIWarning := len(prop.RiskFlags) > 0
 					meta := prop.Metadata
 					if meta == nil {
 						meta = map[string]string{}
@@ -1105,13 +1170,17 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 					if hasPIIWarning {
 						canonicalQ = fmt.Sprintf("⚠️ [PII WARNING: %s]\n%s", strings.Join(prop.RiskFlags, ", "), canonicalQ)
 					}
+					approveOpt := fmt.Sprintf("(Recommended) Approve (%s · sha256:%s)", prop.ID, shaShort)
+					if askRec, aErr := approvals.RecordAsk(vaultDir, prop.ID, payload.ConversationID, payload.TranscriptPath, time.Now()); aErr == nil && askRec.NonceCode != "" {
+						approveOpt = fmt.Sprintf("(Recommended) Approve (%s · sha256:%s · code:%s)", prop.ID, shaShort, askRec.NonceCode)
+					}
 					overwriteArgs := map[string]interface{}{
 						"questions": []map[string]interface{}{
 							{
 								"question":        canonicalQ,
 								"is_multi_select": false,
 								"options": []string{
-									fmt.Sprintf("(Recommended) Approve (%s · sha256:%s)", prop.ID, shaShort),
+									approveOpt,
 									fmt.Sprintf("Reject (%s)", prop.ID),
 									"Keep pending",
 								},
@@ -1180,6 +1249,13 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
 
 	if !isFrontDesk {
+		if payload.ToolCall.Name == "run_command" && isAutoConversation(vaultDir, payload.ConversationID) {
+			cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision":  "allow",
+				"overwrite": map[string]interface{}{"CommandLine": wrapScrubbedAutoShellCommand(cmdLine)},
+			})
+		}
 		return writeAllowWithOptionalCompactionNudge(w, vaultDir, payload)
 	}
 

@@ -3665,8 +3665,22 @@ func TestCUJ28_DeferredApprovalResumptionArgvScrubAndProgressCheckpoints(t *test
 		t.Fatalf("expected 1 pending proposal, got %+v", allProps)
 	}
 
-	// 2. Approve proposal -> helper runs without shell expansion & with ANTIGRAVITY_CSRF_TOKEN scrubbed, and queues continuation
-	appOut, err := env.runWithEnv("", lsEnv, "approve", p1.ID, "--sha256="+p1.SHA256[:12])
+	// 2. Approve proposal with verified human-presence capability -> helper runs without shell expansion & with ANTIGRAVITY_CSRF_TOKEN scrubbed, and queues continuation
+	tPath28 := filepath.Join(t.TempDir(), "transcript.jsonl")
+	_ = os.WriteFile(tPath28, []byte(`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"deploy"}`+"\n"), 0o600)
+	ask28, err := approvals.RecordAsk(env.vaultDir, p1.ID, convID, tPath28, time.Now())
+	if err != nil {
+		t.Fatalf("RecordAsk: %v", err)
+	}
+	_ = os.WriteFile(tPath28, []byte(
+		`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"deploy"}`+"\n"+
+			fmt.Sprintf(`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":"Selected: Approve %s · code:%s"}`+"\n", p1.ID, ask28.NonceCode),
+	), 0o600)
+	cap28, _, err := approvals.VerifyAskAndMintCap(env.vaultDir, p1.ID, p1.SHA256[:12], convID, tPath28, time.Now())
+	if err != nil {
+		t.Fatalf("VerifyAskAndMintCap: %v", err)
+	}
+	appOut, err := env.runWithEnv("", lsEnv, "approve", p1.ID, "--sha256="+p1.SHA256[:12], "--cap="+cap28)
 	if err != nil {
 		t.Fatalf("hq approve failed: %v (%s)", err, appOut)
 	}

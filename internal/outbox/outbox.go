@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // Supported attention delivery tiers.
@@ -28,39 +30,51 @@ const (
 
 // Supported outbox lifecycle states.
 const (
-	StatusPending   = "pending"
-	StatusDelivered = "delivered"
-	StatusPromoted  = "promoted"
-	StatusSnoozed   = "snoozed"
-	StatusDismissed = "dismissed"
+	StatusPending     = "pending"
+	StatusDispatching = "dispatching"
+	StatusDelivered   = "delivered"
+	StatusPromoted    = "promoted"
+	StatusSnoozed     = "snoozed"
+	StatusDismissed   = "dismissed"
 )
 
-const SemanticDedupWindow = 12 * time.Hour
+const (
+	SemanticDedupWindow = 12 * time.Hour
+	DispatchingClaimTTL = 2 * time.Minute
+)
 
 // OutboxItem represents a proactive insight, rollup item, or actionable idea persisted
 // in local/memory/outbox/items.jsonl.
 type OutboxItem struct {
-	ID                string   `json:"id"`
-	CreatedAt         string   `json:"createdAt"`
-	SourceSkill       string   `json:"sourceSkill"`
-	SourceConvID      string   `json:"sourceConvId,omitempty"`
-	Scope             string   `json:"scope,omitempty"`
-	Tier              string   `json:"tier"` // interrupt | brief_rollup | ideas_feed | silent_ledger
-	Title             string   `json:"title"`
-	Summary           string   `json:"summary"`
-	ProposalIDs       []string `json:"proposalIds,omitempty"`
-	SuggestedSlug     string   `json:"suggestedSlug,omitempty"`
-	Critical          bool     `json:"critical,omitempty"`
-	Force             bool     `json:"force,omitempty"`
-	Status            string   `json:"status"` // pending | delivered | promoted | snoozed | dismissed
-	DismissReason     string   `json:"dismissReason,omitempty"`
-	SnoozeUntil       string   `json:"snoozeUntil,omitempty"`
-	DowngradedBy      string   `json:"downgradedBy,omitempty"`
-	CoalescedCount    int      `json:"coalescedCount,omitempty"`
-	DeliveryAttempts  int      `json:"deliveryAttempts,omitempty"`
-	NextAttemptAt     string   `json:"nextAttemptAt,omitempty"`
-	LastDeliveryError string   `json:"lastDeliveryError,omitempty"`
-	UpdatedAt         string   `json:"updatedAt"`
+	ID                  string   `json:"id"`
+	CreatedAt           string   `json:"createdAt"`
+	SourceSkill         string   `json:"sourceSkill"`
+	SourceConvID        string   `json:"sourceConvId,omitempty"`
+	Scope               string   `json:"scope,omitempty"`
+	Tier                string   `json:"tier"` // interrupt | brief_rollup | ideas_feed | silent_ledger
+	Title               string   `json:"title"`
+	Summary             string   `json:"summary"`
+	ProposalIDs         []string `json:"proposalIds,omitempty"`
+	SuggestedSlug       string   `json:"suggestedSlug,omitempty"`
+	Critical            bool     `json:"critical,omitempty"`
+	Force               bool     `json:"force,omitempty"`
+	Tainted             bool     `json:"tainted,omitempty"`
+	Connector           string   `json:"connector,omitempty"`
+	Account             string   `json:"account,omitempty"`
+	ThreadKey           string   `json:"threadKey,omitempty"`
+	BriefLeaseID        string   `json:"briefLeaseId,omitempty"`
+	BriefLeaseExpiresAt string   `json:"briefLeaseExpiresAt,omitempty"`
+	BriefLeaseConvID    string   `json:"briefLeaseConvId,omitempty"`
+	DispatchClaimUntil  string   `json:"dispatchClaimUntil,omitempty"`
+	Status              string   `json:"status"` // pending | dispatching | delivered | promoted | snoozed | dismissed
+	DismissReason       string   `json:"dismissReason,omitempty"`
+	SnoozeUntil         string   `json:"snoozeUntil,omitempty"`
+	DowngradedBy        string   `json:"downgradedBy,omitempty"`
+	CoalescedCount      int      `json:"coalescedCount,omitempty"`
+	DeliveryAttempts    int      `json:"deliveryAttempts,omitempty"`
+	NextAttemptAt       string   `json:"nextAttemptAt,omitempty"`
+	LastDeliveryError   string   `json:"lastDeliveryError,omitempty"`
+	UpdatedAt           string   `json:"updatedAt"`
 }
 
 // QuietHoursConfig configures DND quiet hours for proactive interrupts.
@@ -159,6 +173,8 @@ func ParseAttentionConfig(content string) AttentionConfig {
 				}
 			case "quiet_hours":
 				inQuietHours = true
+				// Presence of an explicit `quiet_hours:` block enables quiet hours by default unless `enabled: false` is set.
+				cfg.QuietHours.Enabled = true
 			case "cooldown_per_topic":
 				if d, err := time.ParseDuration(val); err == nil && d >= 0 {
 					cfg.CooldownPerTopic = d
@@ -190,7 +206,7 @@ func ParseAttentionConfig(content string) AttentionConfig {
 				if val != "" {
 					cfg.QuietHours.End = val
 				}
-			case "timezone":
+			case "timezone", "tz":
 				if val != "" {
 					cfg.QuietHours.Timezone = val
 				}
@@ -256,6 +272,17 @@ func itemsFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "outbox", "items.jsonl")
 }
 
+func outboxLockPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "outbox", ".outbox.lock")
+}
+
+// WithOutboxLock executes fn while holding RankOutbox on <vault>/memory/outbox/.outbox.lock.
+func WithOutboxLock(vaultDir string, fn func() error) error {
+	return store.With(context.Background(), store.RankOutbox, outboxLockPath(vaultDir), func(_ context.Context) error {
+		return fn()
+	})
+}
+
 func generateID(now time.Time) string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
@@ -277,8 +304,19 @@ func normalizeTier(tier string) string {
 	}
 }
 
-// LoadAll reads and deduplicates all OutboxItems from local/memory/outbox/items.jsonl.
+// LoadAll reads and deduplicates all OutboxItems from local/memory/outbox/items.jsonl under RankOutbox.
 func LoadAll(vaultDir string) ([]OutboxItem, error) {
+	var out []OutboxItem
+	err := WithOutboxLock(vaultDir, func() error {
+		var lErr error
+		out, lErr = LoadAllUnlocked(vaultDir)
+		return lErr
+	})
+	return out, err
+}
+
+// LoadAllUnlocked reads items.jsonl when RankOutbox is already held by the caller.
+func LoadAllUnlocked(vaultDir string) ([]OutboxItem, error) {
 	f, err := os.Open(itemsFilePath(vaultDir))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -317,11 +355,9 @@ func LoadAll(vaultDir string) ([]OutboxItem, error) {
 	return out, nil
 }
 
-func saveCanonical(vaultDir string, items []OutboxItem) error {
+// SaveCanonicalUnlocked atomically writes items.jsonl via store.WriteAtomic when RankOutbox is held.
+func SaveCanonicalUnlocked(vaultDir string, items []OutboxItem) error {
 	p := itemsFilePath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
 	var sb strings.Builder
 	for _, it := range items {
 		b, err := json.Marshal(it)
@@ -331,7 +367,7 @@ func saveCanonical(vaultDir string, items []OutboxItem) error {
 		sb.Write(b)
 		sb.WriteByte('\n')
 	}
-	return os.WriteFile(p, []byte(sb.String()), 0o600)
+	return store.WriteAtomic(p, []byte(sb.String()), 0o600)
 }
 
 func topicDedupKey(it OutboxItem) string {
@@ -429,12 +465,17 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 	if item.Status == "" {
 		item.Status = StatusPending
 	}
+	if item.Tainted {
+		// Tainted workers can never force cooldown bypasses or critical quiet-hour breaches.
+		item.Force = false
+		item.Critical = false
+	}
 	if item.Tier == TierSilentLedger {
 		item.Status = StatusDelivered
 		return item, false
 	}
 
-	// 1. Exact per-topic dedup cooldown + 12h entity-preserving semantic Jaccard dedup (unless --force)
+	// 1. Exact per-topic dedup cooldown, tainted (connector, account, threadKey) dedup, + 12h entity-preserving semantic Jaccard dedup (unless --force)
 	if !item.Force && (item.Tier == TierInterrupt || item.Tier == TierBriefRollup || item.Tier == TierIdeasFeed) {
 		key := topicDedupKey(item)
 		semWindow := SemanticDedupWindow
@@ -443,12 +484,22 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 		}
 		for i := len(existing) - 1; i >= 0; i-- {
 			prev := existing[i]
-			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" {
+			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" || prev.DowngradedBy == "thread_cooldown" {
 				continue
 			}
 			ts, err := time.Parse(time.RFC3339, prev.CreatedAt)
 			if err != nil || now.Sub(ts) < 0 {
 				continue
+			}
+			if item.Tainted && strings.TrimSpace(item.ThreadKey) != "" && cfg.CooldownPerTopic > 0 && now.Sub(ts) < cfg.CooldownPerTopic {
+				if strings.EqualFold(strings.TrimSpace(prev.Connector), strings.TrimSpace(item.Connector)) &&
+					strings.EqualFold(strings.TrimSpace(prev.Account), strings.TrimSpace(item.Account)) &&
+					strings.TrimSpace(prev.ThreadKey) == strings.TrimSpace(item.ThreadKey) {
+					item.DowngradedBy = "thread_cooldown"
+					item.Tier = TierSilentLedger
+					item.Status = StatusDelivered
+					return item, true
+				}
 			}
 			if cfg.CooldownPerTopic > 0 && topicDedupKey(prev) == key && now.Sub(ts) < cfg.CooldownPerTopic {
 				item.DowngradedBy = "topic_cooldown"
@@ -502,12 +553,7 @@ func Add(vaultDir string, item OutboxItem, now time.Time) (OutboxItem, bool, err
 		item.SourceSkill = "general"
 	}
 
-	existing, err := LoadAll(vaultDir)
-	if err != nil {
-		return OutboxItem{}, false, err
-	}
 	cfg := LoadAttentionConfig(vaultDir)
-
 	nowStr := now.UTC().Format(time.RFC3339)
 	if strings.TrimSpace(item.ID) == "" {
 		item.ID = generateID(now)
@@ -515,18 +561,27 @@ func Add(vaultDir string, item OutboxItem, now time.Time) (OutboxItem, bool, err
 	item.CreatedAt = nowStr
 	item.UpdatedAt = nowStr
 
-	evaluated, cooled := EvaluateDelivery(existing, cfg, now, item)
-	if cooled && evaluated.DowngradedBy == "semantic_dedup" {
-		for i := len(existing) - 1; i >= 0; i-- {
-			if isNearDuplicateTitle(existing[i], item) {
-				existing[i].CoalescedCount++
-				existing[i].UpdatedAt = nowStr
-				break
+	var evaluated OutboxItem
+	var cooled bool
+	err := WithOutboxLock(vaultDir, func() error {
+		existing, lErr := LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		evaluated, cooled = EvaluateDelivery(existing, cfg, now, item)
+		if cooled && evaluated.DowngradedBy == "semantic_dedup" {
+			for i := len(existing) - 1; i >= 0; i-- {
+				if isNearDuplicateTitle(existing[i], item) {
+					existing[i].CoalescedCount++
+					existing[i].UpdatedAt = nowStr
+					break
+				}
 			}
 		}
-	}
-	existing = append(existing, evaluated)
-	if err := saveCanonical(vaultDir, existing); err != nil {
+		existing = append(existing, evaluated)
+		return SaveCanonicalUnlocked(vaultDir, existing)
+	})
+	if err != nil {
 		return OutboxItem{}, false, err
 	}
 	return evaluated, cooled, nil
@@ -537,24 +592,32 @@ func List(vaultDir, tierFilter, statusFilter string, now time.Time) ([]OutboxIte
 	if now.IsZero() {
 		now = time.Now()
 	}
-	items, err := LoadAll(vaultDir)
-	if err != nil {
-		return nil, err
-	}
-	dirty := false
-	nowStr := now.UTC().Format(time.RFC3339)
-	for i := range items {
-		if items[i].Status == StatusSnoozed && items[i].SnoozeUntil != "" {
-			if wakeAt, pErr := time.Parse(time.RFC3339, items[i].SnoozeUntil); pErr == nil && !now.Before(wakeAt) {
-				items[i].Status = StatusPending
-				items[i].SnoozeUntil = ""
-				items[i].UpdatedAt = nowStr
-				dirty = true
+	var items []OutboxItem
+	err := WithOutboxLock(vaultDir, func() error {
+		var lErr error
+		items, lErr = LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		dirty := false
+		nowStr := now.UTC().Format(time.RFC3339)
+		for i := range items {
+			if items[i].Status == StatusSnoozed && items[i].SnoozeUntil != "" {
+				if wakeAt, pErr := time.Parse(time.RFC3339, items[i].SnoozeUntil); pErr == nil && !now.Before(wakeAt) {
+					items[i].Status = StatusPending
+					items[i].SnoozeUntil = ""
+					items[i].UpdatedAt = nowStr
+					dirty = true
+				}
 			}
 		}
-	}
-	if dirty {
-		_ = saveCanonical(vaultDir, items)
+		if dirty {
+			return SaveCanonicalUnlocked(vaultDir, items)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	var out []OutboxItem
@@ -579,26 +642,30 @@ func DrainBriefRollup(vaultDir string, now time.Time) ([]OutboxItem, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	items, err := LoadAll(vaultDir)
+	var drained []OutboxItem
+	err := WithOutboxLock(vaultDir, func() error {
+		items, lErr := LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		for i := range items {
+			if items[i].Tier == TierBriefRollup && items[i].Status == StatusPending && !hasActiveBriefLease(items[i], now) {
+				items[i].Status = StatusDelivered
+				items[i].UpdatedAt = nowStr
+				drained = append(drained, items[i])
+			}
+		}
+		if len(drained) > 0 {
+			return SaveCanonicalUnlocked(vaultDir, items)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	nowStr := now.UTC().Format(time.RFC3339)
-	var drained []OutboxItem
-	for i := range items {
-		if items[i].Tier == TierBriefRollup && items[i].Status == StatusPending {
-			items[i].Status = StatusDelivered
-			items[i].UpdatedAt = nowStr
-			drained = append(drained, items[i])
-		}
-	}
-	if len(drained) > 0 {
-		if err := saveCanonical(vaultDir, items); err != nil {
-			return nil, err
-		}
-		for _, it := range drained {
-			_ = RecordReportedFromItem(vaultDir, it, now)
-		}
+	for _, it := range drained {
+		_ = RecordReportedFromItem(vaultDir, it, now)
 	}
 	return drained, nil
 }
@@ -644,21 +711,26 @@ func mutateItem(vaultDir, id string, now time.Time, fn func(it *OutboxItem, nowS
 	if now.IsZero() {
 		now = time.Now()
 	}
-	items, err := LoadAll(vaultDir)
-	if err != nil {
-		return OutboxItem{}, err
-	}
-	nowStr := now.UTC().Format(time.RFC3339)
-	for i := range items {
-		if items[i].ID == id {
-			fn(&items[i], nowStr)
-			if err := saveCanonical(vaultDir, items); err != nil {
-				return OutboxItem{}, err
-			}
-			return items[i], nil
+	var updated OutboxItem
+	err := WithOutboxLock(vaultDir, func() error {
+		items, lErr := LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
 		}
-	}
-	return OutboxItem{}, fmt.Errorf("outbox item %q not found", id)
+		nowStr := now.UTC().Format(time.RFC3339)
+		for i := range items {
+			if items[i].ID == id {
+				fn(&items[i], nowStr)
+				if sErr := SaveCanonicalUnlocked(vaultDir, items); sErr != nil {
+					return sErr
+				}
+				updated = items[i]
+				return nil
+			}
+		}
+		return fmt.Errorf("outbox item %q not found", id)
+	})
+	return updated, err
 }
 
 // ComputeSkillDismissalStats aggregates promoted/approved vs. dismissed/rejected resolution rates per skill

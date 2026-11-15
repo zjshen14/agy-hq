@@ -17,10 +17,27 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
+	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
+	"unicode/utf8"
 )
+
+func checkCallerTaintedEnv(vaultDir string) (taint.Record, bool) {
+	convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	if convID == "" {
+		return taint.Record{}, false
+	}
+	return taint.Check(vaultDir, convID)
+}
+
+func denyIfCallerTainted(vaultDir, verb string) {
+	if rec, ok := checkCallerTaintedEnv(vaultDir); ok {
+		fmt.Fprintf(os.Stderr, "hq %s blocked: conversation %s is quarantined (%s)\n", verb, rec.ConvID, rec.Source)
+		os.Exit(1)
+	}
+}
 
 func runOutboxCLI(vaultDir string, args []string) {
 	sub := "list"
@@ -40,6 +57,9 @@ func runOutboxCLI(vaultDir string, args []string) {
 		title := fs.String("title", "", "Concise item title")
 		summary := fs.String("summary", "", "Detailed summary or rationale")
 		slug := fs.String("slug", "", "Optional suggested task/topic slug")
+		connectorFlag := fs.String("connector", "", "Optional originating connector ID")
+		accountFlag := fs.String("account", "", "Optional originating account alias")
+		threadFlag := fs.String("thread", "", "Optional originating thread/item key for per-thread interrupt cooldown")
 		critical := fs.Bool("critical", false, "Critical breach override (bypasses quiet-hours hold)")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
@@ -47,15 +67,35 @@ func runOutboxCLI(vaultDir string, args []string) {
 			fmt.Fprintln(os.Stderr, "usage: hq outbox add --title=\"...\" [--tier=brief_rollup|ideas_feed|interrupt|silent_ledger] [--scope=...] [--skill=...] [--summary=\"...\"] [--critical]")
 			os.Exit(1)
 		}
-		item, cooledDown, err := outbox.Add(vaultDir, outbox.OutboxItem{
+		taintRec, isTainted := checkCallerTaintedEnv(vaultDir)
+		obItem := outbox.OutboxItem{
 			SourceSkill:   *skill,
 			Scope:         *scope,
 			Tier:          *tier,
 			Title:         *title,
 			Summary:       *summary,
 			SuggestedSlug: *slug,
+			Connector:     strings.TrimSpace(*connectorFlag),
+			Account:       strings.TrimSpace(*accountFlag),
+			ThreadKey:     strings.TrimSpace(*threadFlag),
+			Tainted:       isTainted,
 			Critical:      *critical,
-		}, now)
+		}
+		if isTainted {
+			obItem.Critical = false
+			obItem.Force = false
+			obItem.SourceConvID = taintRec.ConvID
+			if obItem.Connector == "" {
+				obItem.Connector = taintRec.Connector
+			}
+			if obItem.Account == "" {
+				obItem.Account = taintRec.Account
+			}
+			if obItem.ThreadKey == "" && len(taintRec.ItemKeys) > 0 {
+				obItem.ThreadKey = taintRec.ItemKeys[0]
+			}
+		}
+		item, cooledDown, err := outbox.Add(vaultDir, obItem, now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq outbox add failed: %v\n", err)
 			os.Exit(1)
@@ -688,6 +728,7 @@ func runEventsCLI(vaultDir string, args []string) {
 
 	switch sub {
 	case "enqueue", "add":
+		denyIfCallerTainted(vaultDir, "events "+sub)
 		fs := flag.NewFlagSet("events enqueue", flag.ExitOnError)
 		source := fs.String("source", "cli", "Event source (cli, webhook, timer, inbox_drop, gatekeeper)")
 		dedup := fs.String("dedup", "", "Optional idempotency dedup key")
@@ -785,6 +826,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		_ = asJSON
 
 	case "retry":
+		denyIfCallerTainted(vaultDir, "events retry")
 		var id string
 		var flagArgs []string
 		for _, a := range rest {
@@ -816,6 +858,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		fmt.Printf("Reset event %s to pending\n", ev.ID)
 
 	case "drop":
+		denyIfCallerTainted(vaultDir, "events drop")
 		var id string
 		var flagArgs []string
 		for _, a := range rest {
@@ -848,6 +891,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		fmt.Printf("Dropped event %s\n", ev.ID)
 
 	case "dispatch":
+		denyIfCallerTainted(vaultDir, "events dispatch")
 		fs := flag.NewFlagSet("events dispatch", flag.ExitOnError)
 		dryRun := fs.Bool("dry-run", false, "Simulate spawns/continuations without executing")
 		nowStr := fs.String("now", "", "Optional reference timestamp (RFC3339)")
@@ -879,6 +923,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		}
 
 	case "token":
+		denyIfCallerTainted(vaultDir, "events token")
 		fs := flag.NewFlagSet("events token", flag.ExitOnError)
 		rotate := fs.Bool("rotate", false, "Regenerate local/private/daemon_token")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -928,14 +973,64 @@ func runTimersCLI(vaultDir string, args []string) {
 		model := fs.String("model", "", "Optional model override")
 		title := fs.String("title", "", "Optional timer title")
 		prompt := fs.String("prompt", "", "Follow-up or schedule instructions")
+		reasonFlag := fs.String("reason", "", "Concise single-line follow-up reason (<= 200 runes; required for quarantined callers)")
+		itemFlag := fs.String("item", "", "Optional watched item key for quarantined follow-ups")
 		nowStr := fs.String("now", "", "Optional reference timestamp (RFC3339)")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
 		now := parseOptionalNowFlag(*nowStr)
+		taintRec, isTainted := checkCallerTaintedEnv(vaultDir)
 
 		var tm timers.Timer
 		var err error
-		if strings.ToLower(strings.TrimSpace(*kind)) == string(timers.TimerSchedule) {
+		if isTainted {
+			var forbiddenFlag string
+			fs.Visit(func(f *flag.Flag) {
+				switch f.Name {
+				case "kind", "in", "reason", "item", "now", "json":
+				default:
+					if forbiddenFlag == "" {
+						forbiddenFlag = f.Name
+					}
+				}
+			})
+			if forbiddenFlag != "" {
+				fmt.Fprintf(os.Stderr, "hq timers set blocked: quarantined session cannot pass --%s (allowed: --kind=follow_up --in=<dur> --reason=\"...\" [--item=<key>])\n", forbiddenFlag)
+				os.Exit(1)
+			}
+			if strings.ToLower(strings.TrimSpace(*kind)) != string(timers.TimerFollowUp) {
+				fmt.Fprintln(os.Stderr, "hq timers set blocked: quarantined session can only arm --kind=follow_up timers")
+				os.Exit(1)
+			}
+			dur, pErr := time.ParseDuration(strings.TrimSpace(*inDur))
+			if pErr != nil || dur <= 0 {
+				fmt.Fprintf(os.Stderr, "hq timers set blocked: quarantined follow_up requires valid --in=<dur>\n")
+				os.Exit(1)
+			}
+			reason := strings.TrimSpace(*reasonFlag)
+			if reason == "" || utf8.RuneCountInString(reason) > 200 || strings.ContainsAny(reason, "\r\n") {
+				fmt.Fprintln(os.Stderr, "hq timers set blocked: quarantined follow_up requires single-line --reason (<= 200 runes)")
+				os.Exit(1)
+			}
+			itemKey := strings.TrimSpace(*itemFlag)
+			if itemKey == "" && len(taintRec.ItemKeys) > 0 {
+				itemKey = taintRec.ItemKeys[0]
+			}
+			scopeKey := "watch-followup"
+			if taintRec.Connector != "" {
+				scopeKey = fmt.Sprintf("watch-followup:%s:%s", taintRec.Connector, taintRec.Account)
+			}
+			tm, err = timers.SetFollowUp(vaultDir, timers.FollowUpRequest{
+				InDuration:      dur,
+				ScopeKey:        scopeKey,
+				SessionID:       "",
+				Skill:           "inbox-triage",
+				Title:           "Quarantined follow-up: " + reason,
+				Prompt:          fmt.Sprintf("Follow up on watched item %q (%s). Operate strictly inside Quarantined Reader invariants.", itemKey, reason),
+				Tainted:         true,
+				CreatedByConvID: taintRec.ConvID,
+			}, now)
+		} else if strings.ToLower(strings.TrimSpace(*kind)) == string(timers.TimerSchedule) {
 			tm, err = timers.UpsertSchedule(vaultDir, *id, *cronExpr, *scope, *skill, *model, *title, *prompt, now)
 		} else {
 			var dur time.Duration
@@ -958,6 +1053,14 @@ func runTimersCLI(vaultDir string, args []string) {
 			if sessID == "" && !*noSession {
 				sessID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
 			}
+			effPrompt := *prompt
+			if strings.TrimSpace(effPrompt) == "" && strings.TrimSpace(*reasonFlag) != "" {
+				effPrompt = strings.TrimSpace(*reasonFlag)
+			}
+			effTitle := *title
+			if strings.TrimSpace(effTitle) == "" && strings.TrimSpace(*reasonFlag) != "" {
+				effTitle = strings.TrimSpace(*reasonFlag)
+			}
 			tm, err = timers.SetFollowUp(vaultDir, timers.FollowUpRequest{
 				DueAt:           dueAt,
 				InDuration:      dur,
@@ -965,8 +1068,8 @@ func runTimersCLI(vaultDir string, args []string) {
 				SessionID:       sessID,
 				Skill:           *skill,
 				Model:           *model,
-				Title:           *title,
-				Prompt:          *prompt,
+				Title:           effTitle,
+				Prompt:          effPrompt,
 				CreatedByConvID: strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")),
 			}, now)
 		}
@@ -1009,6 +1112,7 @@ func runTimersCLI(vaultDir string, args []string) {
 		}
 
 	case "cancel", "rm", "remove":
+		denyIfCallerTainted(vaultDir, "timers cancel")
 		var id string
 		var flagArgs []string
 		for _, a := range rest {
@@ -1251,6 +1355,7 @@ func runExecSandboxedCLI(vaultDir string, args []string) {
 		fmt.Fprintln(os.Stderr, "usage: hq exec-sandboxed [--workdir=...] [--net-isolated] -- <command> [args...]")
 		os.Exit(1)
 	}
+	denyIfCallerTainted(vaultDir, "exec-sandboxed")
 	cmd, _, err := sandbox.BuildCommand(context.Background(), vaultDir, *workDir, *netIsolated, cmdArgv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hq exec-sandboxed error: %v\n", err)

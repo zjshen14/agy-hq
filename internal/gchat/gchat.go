@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 // DefaultCDPEndpoint is the local loopback Chrome DevTools Protocol HTTP endpoint for the isolated GChat profile.
@@ -795,15 +796,19 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 	if maxMessages <= 0 {
 		maxMessages = 20
 	}
-	if convID == "" {
-		convID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	resolvedConv, err := taint.ResolveCallerConvID(vaultDir, convID)
+	if err != nil {
+		return ThreadDetail{}, "", err
 	}
+	convID = resolvedConv
 	if _, alreadyTainted := gmail.IsSessionTainted(vaultDir, convID); !alreadyTainted {
 		if resolvedID, _, rErr := ResolveSpaceTarget(vaultDir, cfg.Alias, spaceID); rErr == nil && resolvedID != "" {
 			spaceID = resolvedID
 		}
 	}
-	_ = gmail.MarkSessionTainted(vaultDir, convID, "gchat:space:"+spaceID)
+	if err := gmail.MarkSessionTainted(vaultDir, convID, "gchat:space:"+spaceID); err != nil {
+		return ThreadDetail{}, "", fmt.Errorf("persist provenance taint before read: %w", err)
+	}
 
 	var td ThreadDetail
 	if mDir := mockDir(vaultDir); mDir != "" {

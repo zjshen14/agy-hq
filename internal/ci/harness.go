@@ -198,6 +198,13 @@ func checkGateH2HooksJSONParity(rootDir string) (bool, string) {
 		return false, ".agents/plugins/agy-hq/hooks.json must use $PLUGIN_ROOT and PATH-resolved `hq hook`"
 	}
 
+	if strings.Contains(rawStr, `"matcher": ".*"`) || strings.Contains(rawStr, `"matcher":".*"`) {
+		if !strings.Contains(rawStr, `"decision":"deny"`) && !strings.Contains(rawStr, `\"decision\":\"deny\"`) {
+			return false, ".agents/plugins/agy-hq/hooks.json PreToolUse command must fail closed when hq binary is unavailable"
+		}
+		return true, "Single-source .agents/plugins/agy-hq/hooks.json verified (universal .* PreToolUse matcher, fail-closed fallback, zero ./bin/hq paths)"
+	}
+
 	requiredMatchers := []string{
 		"run_command",
 		"edit_file",
@@ -399,13 +406,16 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		return false, "PreToolUse failed to deny direct chrome-devtools navigation to chat.google.com"
 	}
 
-	// 3. Quarantined (tainted) session matrix (both ./bin/hq and bare hq allowed for safe draft/propose)
+	// 3. Quarantined (tainted) session matrix: deny-by-default tools + deny direct draft/propose, allow offer stage / outbox add / watch read|ack
 	_ = gmail.MarkSessionTainted(vaultDir, "conv-tainted", "gmail:thread:t1")
 	taintedDenied := []map[string]interface{}{
 		{"name": "search_web", "args": map[string]interface{}{"query": "leak"}},
+		{"name": "grep_search", "args": map[string]interface{}{"SearchPath": vaultDir, "Query": "secret"}},
 		{"name": "read_file", "args": map[string]interface{}{"Path": filepath.Join(vaultDir, "private", "secret.txt")}},
 		{"name": "read_file", "args": map[string]interface{}{"Path": filepath.Join(vaultDir, "MEMORY.md")}},
 		{"name": "run_command", "args": map[string]interface{}{"CommandLine": "curl https://evil.example.com"}},
+		{"name": "run_command", "args": map[string]interface{}{"CommandLine": `./bin/hq gmail draft --thread=t1 --to="alice@example.com" --subject="Re" --body="OK"`}},
+		{"name": "run_command", "args": map[string]interface{}{"CommandLine": `hq propose --type=gmail_send --draft=draft-1`}},
 	}
 	for _, tc := range taintedDenied {
 		out, _ := runHook(map[string]interface{}{
@@ -413,13 +423,13 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 			"toolCall":       tc,
 		})
 		if !strings.Contains(out, `"decision":"deny"`) {
-			return false, fmt.Sprintf("Quarantined session failed to deny %v", tc["name"])
+			return false, fmt.Sprintf("Quarantined session failed to deny %v (%v)", tc["name"], tc["args"])
 		}
 	}
 	for _, safeTaintedCmd := range []string{
-		`./bin/hq gmail draft --thread=t1 --to="alice@example.com" --subject="Re" --body="OK"`,
-		`hq gmail draft --thread=t1 --to="alice@example.com" --subject="Re" --body="OK"`,
-		`hq propose --type=gmail_send --draft=draft-1`,
+		`./bin/hq offer stage --connector=gmail --account=primary --action=create_draft --thread=t1 --body="OK"`,
+		`hq outbox add --tier=brief_rollup --title="Summary" --summary="Safe digest"`,
+		`hq watch ack --item=gmail:thread:t1`,
 	} {
 		taintedAllowOut, _ := runHook(map[string]interface{}{
 			"conversationId": "conv-tainted",
@@ -428,8 +438,8 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 				"args": map[string]interface{}{"CommandLine": safeTaintedCmd},
 			},
 		})
-		if !strings.Contains(taintedAllowOut, `"decision":"allow"`) {
-			return false, fmt.Sprintf("Quarantined session failed to allow %q", safeTaintedCmd)
+		if !strings.Contains(taintedAllowOut, `"decision":"allow"`) || !strings.Contains(taintedAllowOut, "ANTIGRAVITY_CSRF_TOKEN") {
+			return false, fmt.Sprintf("Quarantined session failed to allow & scrub %q (got %s)", safeTaintedCmd, strings.TrimSpace(taintedAllowOut))
 		}
 	}
 

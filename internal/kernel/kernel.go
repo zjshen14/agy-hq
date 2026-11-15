@@ -625,6 +625,11 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 	}
 	for i := len(tasks) - 1; i >= 0; i-- {
 		if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
+			// Never allow an interactive session to bind to an event-leased batch;
+			// background batches bind solely via [hq-spawn:<token>] or SpawnTask UUID return.
+			if len(tasks[i].EventIDs) > 0 {
+				continue
+			}
 			tasks[i].ConversationID = convID
 			if model != "" && tasks[i].Model == "" {
 				tasks[i].Model = model
@@ -632,9 +637,6 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
 			if data, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
 				_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
-			}
-			if len(tasks[i].EventIDs) > 0 {
-				_ = events.BindBatchConversation(vaultDir, tasks[i].EventIDs, convID, time.Now(), events.DefaultLeaseTTL)
 			}
 			return tasks[i], true
 		}
