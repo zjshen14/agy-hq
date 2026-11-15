@@ -863,3 +863,125 @@ func TestAutoScrubBypassDefenseAndWorktreeRegexPrecision(t *testing.T) {
 		t.Fatalf("expected AGY_ACCOUNT=... gmail mutate send-message to be denied, got: %s", sendOut.String())
 	}
 }
+
+func TestMacOSTempAncestorSymlinkAndSymlinkEscapeGuards(t *testing.T) {
+	base := t.TempDir()
+	// Simulate macOS /var -> /private/var (or enterprise symlinked $HOME) ancestor directory symlink
+	realVar := filepath.Join(base, "private", "var")
+	symlinkVar := filepath.Join(base, "var")
+	if err := os.MkdirAll(filepath.Join(realVar, "folders", "xx", "ws"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realVar, symlinkVar); err != nil {
+		t.Fatal(err)
+	}
+
+	wsRoot := filepath.Join(symlinkVar, "folders", "xx", "ws")
+	vaultDir := filepath.Join(wsRoot, "local")
+	artDeskAlias := filepath.Join(wsRoot, "brain-desk")
+	artDeskCanon := filepath.Join(realVar, "folders", "xx", "ws", "brain-desk")
+	repoDir := filepath.Join(wsRoot, "repo")
+	skillFile := filepath.Join(wsRoot, ".agents", "plugins", "agy-hq", "skills", "inbox-triage", "SKILL.md")
+
+	for _, d := range []string{
+		filepath.Join(vaultDir, "memory"),
+		filepath.Join(vaultDir, "worktrees", "wt"),
+		artDeskAlias,
+		repoDir,
+		filepath.Dir(skillFile),
+	} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package main\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(vaultDir, "worktrees", "wt", "main.go"), []byte("package main\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(artDeskAlias, "summary.md"), []byte("# ok\n"), 0o644)
+	_ = os.WriteFile(skillFile, []byte("# skill\n"), 0o644)
+
+	deskConv := "conv-desk-macos"
+	// Store canonicalized ArtifactDir in Front Desk state while caller passes symlink-aliased path
+	if err := kernel.SetFrontDesk(vaultDir, deskConv, artDeskCanon); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	runPreTool := func(conv, artDir, toolName, path string) string {
+		t.Helper()
+		var out bytes.Buffer
+		payload := map[string]interface{}{
+			"conversationId": conv,
+			"toolCall": map[string]interface{}{
+				"name": toolName,
+				"args": map[string]interface{}{"Path": path},
+			},
+		}
+		if artDir != "" {
+			payload["artifactDirectoryPath"] = artDir
+		}
+		raw, _ := json.Marshal(payload)
+		if err := HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse(%s %s): %v", toolName, path, err)
+		}
+		return out.String()
+	}
+
+	// 1. Front Desk writes to artifact dir and local/USER.md under ancestor symlink -> ALLOW
+	if got := runPreTool(deskConv, artDeskAlias, "write_file", filepath.Join(artDeskAlias, "hq_console.md")); !strings.Contains(got, `"decision":"allow"`) {
+		t.Fatalf("expected allow writing hq_console.md under ancestor symlink, got: %s", got)
+	}
+	if got := runPreTool(deskConv, "", "write_file", filepath.Join(artDeskAlias, "notes.md")); !strings.Contains(got, `"decision":"allow"`) {
+		t.Fatalf("expected allow writing via canonical fd.ArtifactDir with aliased target path, got: %s", got)
+	}
+	if got := runPreTool(deskConv, "", "write_file", filepath.Join(vaultDir, "USER.md")); !strings.Contains(got, `"decision":"allow"`) {
+		t.Fatalf("expected allow writing local/USER.md under ancestor symlink, got: %s", got)
+	}
+
+	// 2. Escape probes on Front Desk -> DENY
+	danglingLink := filepath.Join(artDeskAlias, "dangling.md")
+	_ = os.Symlink(filepath.Join(repoDir, "new_backdoor.go"), danglingLink)
+	liveLink := filepath.Join(artDeskAlias, "live.md")
+	_ = os.Symlink(filepath.Join(repoDir, "main.go"), liveLink)
+	intraLink := filepath.Join(artDeskAlias, "intra.md")
+	_ = os.Symlink(filepath.Join(artDeskAlias, "summary.md"), intraLink)
+	inboundFileLink := filepath.Join(repoDir, "inbound.go")
+	_ = os.Symlink(filepath.Join(artDeskAlias, "summary.md"), inboundFileLink)
+	evilParentLink := filepath.Join(repoDir, "evil_parent")
+	_ = os.Symlink(filepath.Join(realVar, "folders", "xx", "ws"), evilParentLink)
+	vaultWorktreeLink := filepath.Join(vaultDir, "SNEAKY_USER.md")
+	_ = os.Symlink(filepath.Join(vaultDir, "worktrees", "wt", "main.go"), vaultWorktreeLink)
+
+	for _, badPath := range []string{
+		danglingLink,
+		liveLink,
+		intraLink,
+		inboundFileLink,
+		filepath.Join(evilParentLink, "brain-desk", "hq_console.md"),
+		vaultWorktreeLink,
+	} {
+		if got := runPreTool(deskConv, artDeskAlias, "write_file", badPath); !strings.Contains(got, `"decision":"deny"`) {
+			t.Fatalf("expected deny for symlink escape %q, got: %s", badPath, got)
+		}
+	}
+
+	// 3. Quarantined session reading artifact dir & repo SKILL.md under ancestor symlink -> ALLOW, escapes -> DENY
+	qConv := "conv-tainted-macos"
+	if err := gmail.MarkSessionTainted(vaultDir, qConv, "gmail:thread:macos"); err != nil {
+		t.Fatal(err)
+	}
+	if got := runPreTool(qConv, artDeskAlias, "read_file", filepath.Join(artDeskAlias, "summary.md")); !strings.Contains(got, `"decision":"allow"`) {
+		t.Fatalf("expected quarantined read of own artifact under ancestor symlink to allow, got: %s", got)
+	}
+	if got := runPreTool(qConv, artDeskAlias, "read_file", skillFile); !strings.Contains(got, `"decision":"allow"`) {
+		t.Fatalf("expected quarantined read of SKILL.md under ancestor symlink to allow, got: %s", got)
+	}
+	for _, badRead := range []string{
+		liveLink,
+		intraLink,
+		filepath.Join(artDeskAlias, ".system_generated", "logs", "transcript.jsonl"),
+		filepath.Join(evilParentLink, ".agents", "plugins", "agy-hq", "skills", "inbox-triage", "SKILL.md"),
+	} {
+		if got := runPreTool(qConv, artDeskAlias, "read_file", badRead); !strings.Contains(got, `"decision":"deny"`) {
+			t.Fatalf("expected quarantined read escape %q to deny, got: %s", badRead, got)
+		}
+	}
+}

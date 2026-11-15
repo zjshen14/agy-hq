@@ -336,25 +336,30 @@ func validateTaintedHQArgv(argv []string) error {
 }
 
 func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath string) bool {
-	if strings.TrimSpace(rawPath) == "" || pathHasSymlink(rawPath) {
+	if strings.TrimSpace(rawPath) == "" {
 		return false
 	}
+	absRaw := resolveHookLexicalAbs(vaultDir, rawPath)
 	canonPath := canonicalizeHookPath(vaultDir, rawPath)
+	if absRaw == "" || canonPath == "" || pathHasSymlink(canonPath) {
+		return false
+	}
 	canonSlash := filepath.ToSlash(canonPath)
-	if isSystemGeneratedTranscriptPath(canonSlash) || isSystemGeneratedTranscriptPath(filepath.ToSlash(filepath.Clean(rawPath))) {
+	rawSlash := filepath.ToSlash(absRaw)
+	if isSystemGeneratedTranscriptPath(canonSlash) || isSystemGeneratedTranscriptPath(rawSlash) {
 		return false
 	}
 
 	// 1. Own conversation artifact directory (excluding .system_generated)
 	var allowedArtDirs []string
 	if strings.TrimSpace(payload.ArtifactDirectoryPath) != "" {
-		allowedArtDirs = append(allowedArtDirs, canonicalizeHookPath(vaultDir, payload.ArtifactDirectoryPath))
+		allowedArtDirs = append(allowedArtDirs, payload.ArtifactDirectoryPath)
 	}
 	if roots := hostpaths.Resolve(vaultDir); roots.BrainDir != "" && strings.TrimSpace(payload.ConversationID) != "" {
-		allowedArtDirs = append(allowedArtDirs, canonicalizeHookPath(vaultDir, filepath.Join(roots.BrainDir, strings.TrimSpace(payload.ConversationID))))
+		allowedArtDirs = append(allowedArtDirs, filepath.Join(roots.BrainDir, strings.TrimSpace(payload.ConversationID)))
 	}
 	for _, ad := range allowedArtDirs {
-		if ad != "" && ad != "." && (canonPath == ad || strings.HasPrefix(canonPath, ad+string(filepath.Separator))) {
+		if _, ok := isSafePathUnderBase(vaultDir, ad, rawPath); ok {
 			return true
 		}
 	}
@@ -367,25 +372,30 @@ func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath 
 		}
 	}
 
-	// 2. Installed or repo plugin skills/ directories (read-only SKILL.md instructions)
+	// 2. Installed, shared HQ, or workspace-root plugin skills/ directories (read-only SKILL.md instructions)
 	if plugRoot := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); plugRoot != "" {
-		skillsDir := canonicalizeHookPath(vaultDir, filepath.Join(plugRoot, "skills"))
-		if skillsDir != "" && (canonPath == skillsDir || strings.HasPrefix(canonPath, skillsDir+string(filepath.Separator))) {
+		if _, ok := isSafePathUnderBase(vaultDir, filepath.Join(plugRoot, "skills"), rawPath); ok {
 			return true
 		}
 	}
 	roots := hostpaths.Resolve(vaultDir)
+	var trustedPluginBases []string
 	if roots.PluginsDir != "" {
-		plugBase := canonicalizeHookPath(vaultDir, roots.PluginsDir)
-		if rel, err := filepath.Rel(plugBase, canonPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
-			parts := strings.Split(filepath.ToSlash(rel), "/")
+		trustedPluginBases = append(trustedPluginBases, roots.PluginsDir)
+	}
+	if roots.AppDataDir != "" {
+		trustedPluginBases = append(trustedPluginBases, filepath.Join(roots.AppDataDir, "hq", "plugins"))
+	}
+	if strings.TrimSpace(vaultDir) != "" {
+		trustedPluginBases = append(trustedPluginBases, filepath.Join(filepath.Dir(filepath.Clean(vaultDir)), ".agents", "plugins"))
+	}
+	for _, plugBase := range trustedPluginBases {
+		if relSlash, ok := isSafePathUnderBase(vaultDir, plugBase, rawPath); ok && relSlash != "." {
+			parts := strings.Split(relSlash, "/")
 			if len(parts) >= 2 && parts[1] == "skills" {
 				return true
 			}
 		}
-	}
-	if strings.Contains(canonSlash, "/.agents/plugins/") && strings.Contains(canonSlash, "/skills/") {
-		return true
 	}
 	return false
 }

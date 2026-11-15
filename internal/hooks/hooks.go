@@ -792,6 +792,19 @@ func isSystemGeneratedTranscriptPath(cleanSlash string) bool {
 	return strings.Contains(cleanSlash, "/.system_generated/") || strings.HasSuffix(cleanSlash, "/.system_generated")
 }
 
+func resolveHookLexicalAbs(vaultDir, rawPath string) string {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		return ""
+	}
+	p := trimmed
+	if !filepath.IsAbs(p) {
+		rootDir := filepath.Dir(filepath.Clean(vaultDir))
+		p = filepath.Join(rootDir, p)
+	}
+	return filepath.Clean(p)
+}
+
 func pathHasSymlink(rawPath string) bool {
 	cur := filepath.Clean(rawPath)
 	for {
@@ -804,6 +817,91 @@ func pathHasSymlink(rawPath string) bool {
 		}
 		cur = parent
 	}
+}
+
+// isSafePathUnderBase verifies that rawTargetPath resolves canonically inside rawBaseDir,
+// matches rawBaseDir lexically (accommodating OS/temp/home/vault root symlinks above rawBaseDir,
+// such as macOS /var -> /private/var or enterprise symlinked $HOME), and traverses zero
+// symlinks (live or dangling) at or below rawBaseDir.
+func isSafePathUnderBase(vaultDir, rawBaseDir, rawTargetPath string) (string, bool) {
+	absBase := resolveHookLexicalAbs(vaultDir, rawBaseDir)
+	absTarget := resolveHookLexicalAbs(vaultDir, rawTargetPath)
+	if absBase == "" || absTarget == "" {
+		return "", false
+	}
+	canonBase := canonicalizeHookPath(vaultDir, absBase)
+	canonTarget := canonicalizeHookPath(vaultDir, absTarget)
+	if canonBase == "" || canonBase == "." || canonTarget == "" || canonTarget == "." {
+		return "", false
+	}
+	if pathHasSymlink(canonBase) || pathHasSymlink(canonTarget) {
+		return "", false
+	}
+	sep := string(filepath.Separator)
+	if canonTarget != canonBase && !strings.HasPrefix(canonTarget, canonBase+sep) {
+		return "", false
+	}
+
+	candidates := []string{absBase, canonBase}
+	trustedRoots := []string{
+		filepath.Clean(os.TempDir()),
+		"/var",
+		"/tmp",
+	}
+	if strings.TrimSpace(vaultDir) != "" {
+		cleanV := filepath.Clean(vaultDir)
+		trustedRoots = append(trustedRoots, cleanV, filepath.Dir(cleanV))
+	}
+	if home, err := hostpaths.ResolveHomeDir(); err == nil && home != "" {
+		trustedRoots = append(trustedRoots, filepath.Clean(home))
+	}
+	for _, tr := range trustedRoots {
+		if tr == "" || tr == "." || tr == sep {
+			continue
+		}
+		canonTR := canonicalizeHookPath(vaultDir, tr)
+		if canonTR != "" && canonTR != tr {
+			if canonBase == canonTR {
+				candidates = append(candidates, tr)
+			} else if strings.HasPrefix(canonBase, canonTR+sep) {
+				candidates = append(candidates, tr+strings.TrimPrefix(canonBase, canonTR))
+			}
+		}
+	}
+
+	matchedRel := ""
+	matched := false
+	for _, cand := range candidates {
+		if cand == "" || cand == "." {
+			continue
+		}
+		rel, err := filepath.Rel(cand, absTarget)
+		if err != nil {
+			continue
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+sep)) {
+			matchedRel = rel
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return "", false
+	}
+
+	if matchedRel != "." {
+		cur := canonBase
+		for _, seg := range strings.Split(filepath.ToSlash(matchedRel), "/") {
+			if seg == "" || seg == "." {
+				continue
+			}
+			cur = filepath.Join(cur, seg)
+			if st, err := os.Lstat(cur); err == nil && st.Mode()&os.ModeSymlink != 0 {
+				return "", false
+			}
+		}
+	}
+	return filepath.ToSlash(matchedRel), true
 }
 
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
@@ -1338,36 +1436,34 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	// Rule A: Block Direct Source/Worktree File Edits on the Front Desk (edit_file / write_file)
 	if payload.ToolCall.Name == "edit_file" || payload.ToolCall.Name == "write_file" {
 		pathArg, _ := payload.ToolCall.Args["Path"].(string)
+		absRaw := resolveHookLexicalAbs(vaultDir, pathArg)
 		cleanPath := canonicalizeHookPath(vaultDir, pathArg)
-		hasLink := pathHasSymlink(pathArg)
 
-		cleanArtDir := ""
+		var rawArtDirs []string
 		if strings.TrimSpace(payload.ArtifactDirectoryPath) != "" {
-			cleanArtDir = canonicalizeHookPath(vaultDir, payload.ArtifactDirectoryPath)
+			rawArtDirs = append(rawArtDirs, payload.ArtifactDirectoryPath)
 		}
-		fdArtDir := ""
 		if strings.TrimSpace(fd.ArtifactDir) != "" {
-			fdArtDir = canonicalizeHookPath(vaultDir, fd.ArtifactDir)
+			rawArtDirs = append(rawArtDirs, fd.ArtifactDir)
 		}
-		ownBrainConvDir := ""
 		if roots := hostpaths.Resolve(vaultDir); roots.BrainDir != "" && strings.TrimSpace(payload.ConversationID) != "" {
-			ownBrainConvDir = canonicalizeHookPath(vaultDir, filepath.Join(roots.BrainDir, strings.TrimSpace(payload.ConversationID)))
+			rawArtDirs = append(rawArtDirs, filepath.Join(roots.BrainDir, strings.TrimSpace(payload.ConversationID)))
 		}
 
 		isArtifact := false
-		if !hasLink && !isSystemGeneratedTranscriptPath(filepath.ToSlash(cleanPath)) {
-			for _, allowedArt := range []string{cleanArtDir, fdArtDir, ownBrainConvDir} {
-				if allowedArt != "" && allowedArt != "." && (cleanPath == allowedArt || strings.HasPrefix(cleanPath, allowedArt+string(filepath.Separator))) {
+		if absRaw != "" && cleanPath != "" &&
+			!isSystemGeneratedTranscriptPath(filepath.ToSlash(cleanPath)) &&
+			!isSystemGeneratedTranscriptPath(filepath.ToSlash(absRaw)) {
+			for _, allowedArt := range rawArtDirs {
+				if _, ok := isSafePathUnderBase(vaultDir, allowedArt, pathArg); ok {
 					isArtifact = true
 					break
 				}
 			}
 		}
 
-		cleanVaultDir := filepath.Clean(vaultDir)
 		isLocalNonWorktree := false
-		if rel, err := filepath.Rel(cleanVaultDir, cleanPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
-			relSlash := filepath.ToSlash(rel)
+		if relSlash, ok := isSafePathUnderBase(vaultDir, vaultDir, pathArg); ok && relSlash != "." {
 			if !strings.HasPrefix(relSlash, "worktrees/") && relSlash != "worktrees" &&
 				!strings.HasPrefix(relSlash, "repos/") && relSlash != "repos" {
 				isLocalNonWorktree = true
