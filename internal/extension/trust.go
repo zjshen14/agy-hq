@@ -310,6 +310,65 @@ func VerifyTrustedBinaryReadOnly(vaultDir, sourceID, rawBin string) (string, err
 	return verifyTrustedBinaryInternal(vaultDir, sourceID, rawBin, false)
 }
 
+func stageVerifiedExecCache(vaultDir, resolvedPath, expectedSHA string) (string, error) {
+	f, err := store.OpenReadNoFollow(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+	const maxBinaryBytes = 256 * 1024 * 1024 // 256 MiB safety ceiling
+	rawBytes, rErr := io.ReadAll(io.LimitReader(f, maxBinaryBytes+1))
+	_ = f.Close()
+	if rErr != nil {
+		return "", rErr
+	}
+	if len(rawBytes) > maxBinaryBytes {
+		return "", fmt.Errorf("binary %s exceeds 256 MiB ceiling", resolvedPath)
+	}
+	sum := sha256.Sum256(rawBytes)
+	gotSHA := hex.EncodeToString(sum[:])
+	if len(gotSHA) != len(expectedSHA) || subtle.ConstantTimeCompare([]byte(gotSHA), []byte(expectedSHA)) != 1 {
+		return gotSHA, fmt.Errorf("external binary %s SHA-256 changed since trust ceremony (%s != %s)", resolvedPath, gotSHA[:12], expectedSHA[:12])
+	}
+	if strings.TrimSpace(vaultDir) == "" {
+		return resolvedPath, nil
+	}
+
+	baseName := filepath.Base(filepath.Clean(resolvedPath))
+	if baseName == "" || baseName == "." || baseName == ".." {
+		baseName = "bin"
+	}
+	cacheRoot := filepath.Join(vaultDir, "private", "exec-cache")
+	if st, lErr := os.Lstat(cacheRoot); lErr == nil && st.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing symlinked exec-cache root %s", cacheRoot)
+	}
+	cacheDir := filepath.Join(cacheRoot, expectedSHA)
+	if st, lErr := os.Lstat(cacheDir); lErr == nil && st.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing symlinked exec-cache entry %s", cacheDir)
+	}
+	if mkErr := os.MkdirAll(cacheDir, 0o700); mkErr != nil {
+		return "", mkErr
+	}
+	cachedPath := filepath.Join(cacheDir, baseName)
+	if cf, oErr := store.OpenReadNoFollow(cachedPath); oErr == nil {
+		h := sha256.New()
+		_, cpErr := io.Copy(h, cf)
+		_ = cf.Close()
+		if cpErr == nil {
+			cachedSHA := hex.EncodeToString(h.Sum(nil))
+			if subtle.ConstantTimeCompare([]byte(cachedSHA), []byte(expectedSHA)) == 1 {
+				return cachedPath, nil
+			}
+		}
+		_ = os.Chmod(cachedPath, 0o600)
+		_ = os.Remove(cachedPath)
+	}
+
+	if wErr := store.WriteAtomic(cachedPath, rawBytes, 0o500); wErr != nil {
+		return "", wErr
+	}
+	return cachedPath, nil
+}
+
 func verifyTrustedBinaryInternal(vaultDir, sourceID, rawBin string, notifyOutbox bool) (string, error) {
 	if IsSelfHQBinary(rawBin) {
 		return ResolveSelfHQExecutable(), nil
@@ -341,17 +400,14 @@ func verifyTrustedBinaryInternal(vaultDir, sourceID, rawBin string, notifyOutbox
 	if pin.SelfHQ {
 		return ResolveSelfHQExecutable(), nil
 	}
-	gotSHA, err := ComputeStatCachedSHA256(pin.ResolvedPath)
+	execPath, err := stageVerifiedExecCache(vaultDir, pin.ResolvedPath, pin.SHA256)
 	if err != nil {
-		return "", fmt.Errorf("read pinned binary %s: %w", pin.ResolvedPath, err)
-	}
-	if len(gotSHA) != len(pin.SHA256) || subtle.ConstantTimeCompare([]byte(gotSHA), []byte(pin.SHA256)) != 1 {
-		if notifyOutbox {
-			emitTrustMismatchNoticeOnce(vaultDir, sourceID, rawBin, gotSHA[:12])
+		if notifyOutbox && len(execPath) >= 12 {
+			emitTrustMismatchNoticeOnce(vaultDir, sourceID, rawBin, execPath[:12])
 		}
-		return "", fmt.Errorf("external binary %s SHA-256 changed since trust ceremony (%s != %s)", pin.ResolvedPath, gotSHA[:12], pin.SHA256[:12])
+		return "", fmt.Errorf("verify pinned binary %s: %w", pin.ResolvedPath, err)
 	}
-	return pin.ResolvedPath, nil
+	return execPath, nil
 }
 
 // IsSecurityLoosened returns true only when <vault>/extensions.json declares a security_loosening rule

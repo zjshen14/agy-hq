@@ -1,6 +1,6 @@
 # RFC-0017a: Modular Connector Protocol, CLI Transport Profiles & 0-Token Watcher Engine
 
-- **Status:** Proposed (Phase 1 Review)
+- **Status:** Implemented
 - **Date:** 2026-11-14
 - **Suite:** Part 1 of 4 — see also [RFC-0017b (Provenance Taint & Offer Gateway)](0017b-provenance-taint-and-offer-gateway.md), [RFC-0017c (Lease-Based Morning Brief & Extensions)](0017c-lease-based-morning-brief-and-extensions.md), and [RFC-0017d (Companion Extension Packs, Unified Trust & Host Portability)](0017d-enterprise-extensibility-and-portability.md)
 - **Depends On:** [RFC-0003](0003-approval-bound-execution.md), [RFC-0005](0005-gmail-integration.md), [RFC-0008](0008-gchat-integration.md), [RFC-0014](0014-proactive-engine-and-living-context.md), [RFC-0015](0015-global-plugin-packaging.md), [RFC-0017d](0017d-enterprise-extensibility-and-portability.md), [RFC-0018](0018-always-on-agent-runtime-hardening.md)

@@ -155,7 +155,7 @@ func writeLenPrefixed(b *strings.Builder, s string) {
 	b.WriteByte('\n')
 }
 
-// ComputeProposalHashV2 computes an unambiguous length-prefixed SHA-256 digest over the full execution envelope.
+// ComputeProposalHashV2 computes an unambiguous length-prefixed SHA-256 digest over the full execution and lifecycle envelope.
 func ComputeProposalHashV2(p Proposal) string {
 	var b strings.Builder
 	writeLenPrefixed(&b, "hq-proposal-hash-v2")
@@ -172,6 +172,10 @@ func ComputeProposalHashV2(p Proposal) string {
 	writeLenPrefixed(&b, p.TargetAccount)
 	writeLenPrefixed(&b, p.TargetThreadKey)
 	writeLenPrefixed(&b, p.PayloadSHA256)
+	writeLenPrefixed(&b, p.ExpiresAt)
+	writeLenPrefixed(&b, p.ConversationID)
+	writeLenPrefixed(&b, strconv.FormatBool(p.ResumeOnDecide))
+	writeLenPrefixed(&b, p.ContinuationNote)
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
 }
@@ -589,7 +593,15 @@ func List(vaultDir string) ([]Proposal, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAt < out[j].CreatedAt
+		ti, ei := time.Parse(time.RFC3339Nano, out[i].CreatedAt)
+		tj, ej := time.Parse(time.RFC3339Nano, out[j].CreatedAt)
+		if ei == nil && ej == nil && !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].ID < out[j].ID
 	})
 	return out, nil
 }
@@ -634,17 +646,19 @@ func SanitizedApprovalEnv(vaultDir string) []string {
 	}
 
 	pathVal := os.Getenv("PATH")
-	var extraDirs []string
+	var pathParts []string
 	if exe, eErr := os.Executable(); eErr == nil && exe != "" {
-		extraDirs = append(extraDirs, filepath.Dir(exe))
+		pathParts = append(pathParts, filepath.Dir(exe))
+	}
+	if pathVal != "" {
+		pathParts = append(pathParts, pathVal)
 	}
 	if home, hErr := os.UserHomeDir(); hErr == nil && home != "" {
-		extraDirs = append(extraDirs, filepath.Join(home, ".local", "bin"))
+		// Append ~/.local/bin AFTER system PATH so user-writable wrappers cannot shadow /usr/bin/git or /usr/bin/gh.
+		pathParts = append(pathParts, filepath.Join(home, ".local", "bin"))
 	}
-	if len(extraDirs) > 0 {
-		env = append(env, "PATH="+strings.Join(extraDirs, string(os.PathListSeparator))+string(os.PathListSeparator)+pathVal)
-	} else if pathVal != "" {
-		env = append(env, "PATH="+pathVal)
+	if len(pathParts) > 0 {
+		env = append(env, "PATH="+strings.Join(pathParts, string(os.PathListSeparator)))
 	}
 
 	if v := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); v != "" {

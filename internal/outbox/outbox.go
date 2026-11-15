@@ -801,9 +801,7 @@ func CommitBriefLease(vaultDir, rawLeaseToken, callerConvID string, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	for _, it := range committed {
-		_ = RecordReportedFromItem(vaultDir, it, now)
-	}
+	_ = RecordReportedBatch(vaultDir, committed, now)
 	return committed, nil
 }
 

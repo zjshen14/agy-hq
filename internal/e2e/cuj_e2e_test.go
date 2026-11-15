@@ -584,7 +584,7 @@ func TestCUJ5_ApprovalBoundOutboundExecution(t *testing.T) {
 		"gh release create v1.0.0",
 		"vercel --prod",
 	} {
-		payload := fmt.Sprintf(`{"toolCall":{"name":"run_command","args":{"CommandLine":%q}}}`, forbidden)
+		payload := fmt.Sprintf(`{"conversationId":"conv-cuj5","toolCall":{"name":"run_command","args":{"CommandLine":%q}}}`, forbidden)
 		out, err := env.run(payload, "hook", "pre-tool")
 		if err != nil {
 			t.Fatalf("pre-tool error for %q: %v", forbidden, err)
@@ -595,7 +595,7 @@ func TestCUJ5_ApprovalBoundOutboundExecution(t *testing.T) {
 	}
 
 	// 1b. PreToolUse MUST allow `hq propose --cmd="gh pr merge ..."` when staging an outbound command
-	proposeHookPayload := `{"toolCall":{"name":"run_command","args":{"CommandLine":"./bin/hq propose --type=pr_merge --summary=\"Merge PR 279\" --cmd=\"gh pr merge 279 --squash\""}}}`
+	proposeHookPayload := `{"conversationId":"conv-cuj5","toolCall":{"name":"run_command","args":{"CommandLine":"./bin/hq propose --type=pr_merge --summary=\"Merge PR 279\" --cmd=\"gh pr merge 279 --squash\""}}}`
 	allowOut, err := env.run(proposeHookPayload, "hook", "pre-tool")
 	if err != nil || !strings.Contains(allowOut, `"decision":"allow"`) {
 		t.Fatalf("expected PreToolUse to allow hq propose with outbound --cmd, got err=%v out=%s", err, allowOut)
@@ -4650,6 +4650,7 @@ func TestCUJ33_LeaseBasedMorningBriefAndStructuredExtensions(t *testing.T) {
 	var pMod approvals.Proposal
 	_ = json.Unmarshal(rawProp, &pMod)
 	pMod.ExpiresAt = time.Now().Add(90 * time.Minute).UTC().Format(time.RFC3339)
+	pMod.SHA256 = approvals.ComputeProposalHashV2(pMod)
 	modBytes, _ := json.MarshalIndent(pMod, "", "  ")
 	_ = os.WriteFile(propPath, modBytes, 0o600)
 

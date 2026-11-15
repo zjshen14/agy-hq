@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -39,7 +42,53 @@ type heldRank struct {
 	Path string
 }
 
-var pathMuMap sync.Map // map[string]*sync.Mutex
+var (
+	pathMuMap      sync.Map // map[string]*sync.Mutex
+	goroutineRanks sync.Map // map[uint64][]heldRank (active in tests / HQ_STRICT_LOCK_RANK=1)
+)
+
+func currentGoroutineID() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	line := bytes.TrimPrefix(buf[:n], []byte("goroutine "))
+	idx := bytes.IndexByte(line, ' ')
+	if idx <= 0 {
+		return 0
+	}
+	gid, _ := strconv.ParseUint(string(line[:idx]), 10, 64)
+	return gid
+}
+
+func pushGoroutineRank(rank Rank, lockKey string) (func(), error) {
+	if !testing.Testing() && os.Getenv("HQ_STRICT_LOCK_RANK") != "1" {
+		return func() {}, nil
+	}
+	gid := currentGoroutineID()
+	if gid == 0 {
+		return func() {}, nil
+	}
+	var existing []heldRank
+	if raw, ok := goroutineRanks.Load(gid); ok {
+		existing = raw.([]heldRank)
+	}
+	for _, h := range existing {
+		if rank <= h.Rank {
+			err := fmt.Errorf("%w: attempted rank %d (%s) while holding rank %d (%s) on goroutine %d", ErrLockOrderViolation, rank, lockKey, h.Rank, h.Path, gid)
+			panic(err)
+		}
+	}
+	next := make([]heldRank, len(existing)+1)
+	copy(next, existing)
+	next[len(existing)] = heldRank{Rank: rank, Path: lockKey}
+	goroutineRanks.Store(gid, next)
+	return func() {
+		if len(existing) == 0 {
+			goroutineRanks.Delete(gid)
+		} else {
+			goroutineRanks.Store(gid, existing)
+		}
+	}, nil
+}
 
 func mutexForPath(cleanLockPath string) *sync.Mutex {
 	if v, ok := pathMuMap.Load(cleanLockPath); ok {
@@ -95,6 +144,11 @@ func With(ctx context.Context, rank Rank, lockPath string, fn func(context.Conte
 	if err != nil {
 		return err
 	}
+	popGID, gErr := pushGoroutineRank(rank, lockKey)
+	if gErr != nil {
+		return gErr
+	}
+	defer popGID()
 
 	mu := mutexForPath(lockKey)
 	mu.Lock()
@@ -133,6 +187,12 @@ func TryWith(ctx context.Context, rank Rank, lockPath string, fn func(context.Co
 		return false, nil
 	}
 	defer mu.Unlock()
+
+	popGID, gErr := pushGoroutineRank(rank, lockKey)
+	if gErr != nil {
+		return false, gErr
+	}
+	defer popGID()
 
 	if err := os.MkdirAll(filepath.Dir(lockKey), 0o700); err != nil {
 		return false, err

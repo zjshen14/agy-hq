@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/connector"
@@ -90,7 +89,7 @@ func MaybeLaunchDesktopPiggyback(vaultDir string, now time.Time) bool {
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	store.SetDetachedSession(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return false

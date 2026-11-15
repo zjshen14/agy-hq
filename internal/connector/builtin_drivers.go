@@ -67,10 +67,29 @@ func ParseRFC5322Emails(raw string) ([]string, error) {
 	return out, nil
 }
 
-// IsDKIMOrSPFAligned verifies whether Authentication-Results proves DKIM or SPF alignment for fromEmail.
+func extractDomainCandidate(raw string) string {
+	val := strings.TrimSpace(raw)
+	val = strings.Trim(val, `"';,<>()`)
+	if idx := strings.LastIndexByte(val, '@'); idx >= 0 {
+		val = val[idx+1:]
+	}
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(val)), ".")
+}
+
+func isDomainAligned(candDomain, fromDomain string) bool {
+	if candDomain == "" || fromDomain == "" {
+		return false
+	}
+	return candDomain == fromDomain || strings.HasSuffix(candDomain, "."+fromDomain)
+}
+
+// IsDKIMOrSPFAligned verifies whether Authentication-Results proves DKIM or SPF domain alignment for fromEmail.
+// Each RFC 8601 semicolon-delimited clause is evaluated independently so an unaligned pass in one clause
+// cannot piggyback on an unauthenticated domain mention in another clause.
 func IsDKIMOrSPFAligned(fromEmail, authResults string, isMock bool) bool {
 	fromEmail = strings.ToLower(strings.TrimSpace(fromEmail))
 	_, fromDomain, hasAt := strings.Cut(fromEmail, "@")
+	fromDomain = strings.TrimSuffix(strings.TrimSpace(fromDomain), ".")
 	if !hasAt || fromDomain == "" {
 		return false
 	}
@@ -78,16 +97,53 @@ func IsDKIMOrSPFAligned(fromEmail, authResults string, isMock bool) bool {
 	if ar == "" {
 		return isMock
 	}
-	dkimPass := strings.Contains(ar, "dkim=pass")
-	spfPass := strings.Contains(ar, "spf=pass")
-	if !dkimPass && !spfPass {
-		return false
+	for _, clause := range strings.Split(ar, ";") {
+		tokens := strings.Fields(clause)
+		clauseDKIMPass := false
+		clauseSPFPass := false
+		var dkimDomains []string
+		var spfDomains []string
+		for _, tok := range tokens {
+			cleanTok := strings.Trim(tok, ",()")
+			switch {
+			case cleanTok == "dkim=pass":
+				clauseDKIMPass = true
+			case cleanTok == "spf=pass":
+				clauseSPFPass = true
+			case strings.HasPrefix(cleanTok, "header.d="):
+				if d := extractDomainCandidate(strings.TrimPrefix(cleanTok, "header.d=")); d != "" {
+					dkimDomains = append(dkimDomains, d)
+				}
+			case strings.HasPrefix(cleanTok, "header.i="):
+				if d := extractDomainCandidate(strings.TrimPrefix(cleanTok, "header.i=")); d != "" {
+					dkimDomains = append(dkimDomains, d)
+				}
+			case strings.HasPrefix(cleanTok, "smtp.mailfrom="):
+				if d := extractDomainCandidate(strings.TrimPrefix(cleanTok, "smtp.mailfrom=")); d != "" {
+					spfDomains = append(spfDomains, d)
+				}
+			case strings.HasPrefix(cleanTok, "smtp.helo="):
+				if d := extractDomainCandidate(strings.TrimPrefix(cleanTok, "smtp.helo=")); d != "" {
+					spfDomains = append(spfDomains, d)
+				}
+			}
+		}
+		if clauseDKIMPass {
+			for _, d := range dkimDomains {
+				if isDomainAligned(d, fromDomain) {
+					return true
+				}
+			}
+		}
+		if clauseSPFPass {
+			for _, d := range spfDomains {
+				if isDomainAligned(d, fromDomain) {
+					return true
+				}
+			}
+		}
 	}
-	// If header.i=@domain or header.d=domain is present, check domain alignment
-	if strings.Contains(ar, "header.d=") || strings.Contains(ar, "header.i=") || strings.Contains(ar, "smtp.mailfrom=") {
-		return strings.Contains(ar, fromDomain)
-	}
-	return true
+	return false
 }
 
 func classifyErrCode(err error) string {

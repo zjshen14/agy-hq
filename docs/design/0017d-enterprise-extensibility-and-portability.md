@@ -1,6 +1,6 @@
 # RFC-0017d: Companion Extension Packs, Unified Trust Registry & Host Portability
 
-- **Status:** Proposed (Phase 1 Review)
+- **Status:** Implemented
 - **Date:** 2026-11-14
 - **Suite:** Part 4 of 4 — see also [RFC-0017a (Connector Protocol & Watcher Engine)](0017a-connector-protocol-and-watcher-engine.md), [RFC-0017b (Provenance Taint & Offer Gateway)](0017b-provenance-taint-and-offer-gateway.md), and [RFC-0017c (Lease-Based Morning Brief & Extensions)](0017c-lease-based-morning-brief-and-extensions.md)
 - **Depends On:** [RFC-0003](0003-approval-bound-execution.md), [RFC-0014](0014-proactive-engine-and-living-context.md), [RFC-0015](0015-global-plugin-packaging.md), [RFC-0017a](0017a-connector-protocol-and-watcher-engine.md), [RFC-0017b](0017b-provenance-taint-and-offer-gateway.md), [RFC-0017c](0017c-lease-based-morning-brief-and-extensions.md), [RFC-0018](0018-always-on-agent-runtime-hardening.md)

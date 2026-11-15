@@ -1,6 +1,6 @@
 # RFC-0017b: Provenance-Based Taint Propagation, Nonce-Rewritten Approval Proof & Offer Gateway
 
-- **Status:** Proposed (Phase 1 Review — Opus 5.5 Security & Systems Hardened)
+- **Status:** Implemented
 - **Date:** 2026-11-14
 - **Suite:** Part 2 of 4 — see also [RFC-0017a (Connector Protocol & Watcher Engine)](0017a-connector-protocol-and-watcher-engine.md), [RFC-0017c (Lease-Based Morning Brief & Extensions)](0017c-lease-based-morning-brief-and-extensions.md), and [RFC-0017d (Companion Extension Packs, Unified Trust & Host Portability)](0017d-enterprise-extensibility-and-portability.md)
 - **Depends On:** [RFC-0003 (Approval-Bound Execution)](0003-approval-bound-execution.md), [RFC-0017a](0017a-connector-protocol-and-watcher-engine.md), [RFC-0017d](0017d-enterprise-extensibility-and-portability.md), [RFC-0018 (Always-On Agent Runtime Hardening)](0018-always-on-agent-runtime-hardening.md)

@@ -245,3 +245,49 @@ func TestConsoleSidecarHandlerAuthAndProxy(t *testing.T) {
 		t.Fatalf("expected 200 with session cookie, got %d", resp3.StatusCode)
 	}
 }
+
+func TestVerifyTrustedBinaryExecCacheDefense(t *testing.T) {
+	vaultDir := t.TempDir()
+	extBinDir := t.TempDir()
+	extBin := filepath.Join(extBinDir, "corp-mail")
+	if err := os.WriteFile(extBin, []byte("#!/bin/sh\necho safe-v1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Join(vaultDir, "brief.d"), 0o700)
+	_ = os.WriteFile(filepath.Join(vaultDir, "brief.d", "mail.json"), []byte(
+		`{"schema_version":1,"id":"mail-ext","section":"Inbox","mode":"argv","argv":["`+extBin+`"]}`,
+	), 0o600)
+
+	bundle, err := BuildTrustBundle(vaultDir, "vault", "")
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	raw, _ := json.Marshal(bundle)
+	if err := ApplyTrustBundle(vaultDir, raw); err != nil {
+		t.Fatalf("ApplyTrustBundle: %v", err)
+	}
+
+	cachedPath, err := VerifyTrustedBinary(vaultDir, "vault", extBin)
+	if err != nil {
+		t.Fatalf("VerifyTrustedBinary: %v", err)
+	}
+	if !strings.Contains(filepath.ToSlash(cachedPath), "/private/exec-cache/") || filepath.Base(cachedPath) != "corp-mail" {
+		t.Fatalf("expected immutable exec-cache path preserving basename, got %s", cachedPath)
+	}
+	st, err := os.Stat(cachedPath)
+	if err != nil || st.Mode().Perm() != 0o500 {
+		t.Fatalf("expected 0500 permissions on cached binary, got st=%v err=%v", st, err)
+	}
+
+	// Mutating extBin on disk must fail subsequent VerifyTrustedBinary while leaving previously staged cachedPath intact
+	if err := os.WriteFile(extBin, []byte("#!/bin/sh\necho tampered\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyTrustedBinary(vaultDir, "vault", extBin); err == nil {
+		t.Fatalf("expected VerifyTrustedBinary to reject mutated source binary")
+	}
+	cachedContent, _ := os.ReadFile(cachedPath)
+	if !strings.Contains(string(cachedContent), "safe-v1") {
+		t.Fatalf("expected cached copy to remain immutable, got %q", string(cachedContent))
+	}
+}

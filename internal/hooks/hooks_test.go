@@ -40,15 +40,21 @@ func TestHandleSessionStartAndPreToolUseAndStop(t *testing.T) {
 		t.Fatalf("unexpected SessionStart output: %s", out.String())
 	}
 
-	// 2. PreToolUse (allow safe command, deny outbound command)
+	// 2. PreToolUse (deny missing conversationId, allow safe command, deny outbound command)
 	out.Reset()
 	_ = HandlePreToolUse(strings.NewReader(`{"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`), &out, vaultDir)
+	if !strings.Contains(out.String(), `"decision":"deny"`) {
+		t.Fatalf("expected fail-closed deny on missing conversationId, got: %s", out.String())
+	}
+
+	out.Reset()
+	_ = HandlePreToolUse(strings.NewReader(`{"conversationId":"c-worker","toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`), &out, vaultDir)
 	if !strings.Contains(out.String(), `"decision":"allow"`) {
 		t.Fatalf("expected allow, got: %s", out.String())
 	}
 
 	out.Reset()
-	_ = HandlePreToolUse(strings.NewReader(`{"toolCall":{"name":"run_command","args":{"CommandLine":"gh pr merge 10"}}}`), &out, vaultDir)
+	_ = HandlePreToolUse(strings.NewReader(`{"conversationId":"c1","toolCall":{"name":"run_command","args":{"CommandLine":"gh pr merge 10"}}}`), &out, vaultDir)
 	var denyResp map[string]interface{}
 	_ = json.Unmarshal(out.Bytes(), &denyResp)
 	if denyResp["decision"] != "deny" {
@@ -798,5 +804,62 @@ func TestPreToolUseOutboundDoubleQuotedDollarGuard(t *testing.T) {
 		if resp["decision"] != "allow" {
 			t.Fatalf("expected allow for %q, got: %v", cmd, resp)
 		}
+	}
+}
+
+func TestAutoScrubBypassDefenseAndWorktreeRegexPrecision(t *testing.T) {
+	// 1. SEC-P0-1: prefixing with `env -u ANTIGRAVITY_CSRF_TOKEN ` must NOT bypass LS/AGENTAPI scrubbing or sh -c quoting
+	wrapped := wrapScrubbedAutoShellCommand(`env -u ANTIGRAVITY_CSRF_TOKEN python3 -c "print(1)"`)
+	for _, want := range []string{
+		"-u ANTIGRAVITY_CSRF_TOKEN",
+		"-u ANTIGRAVITY_LS_ADDRESS",
+		"-u ANTIGRAVITY_AGENTAPI_EXE",
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel",
+		"-- sh -c '",
+	} {
+		if !strings.Contains(wrapped, want) {
+			t.Fatalf("wrapScrubbedAutoShellCommand missing %q in %s", want, wrapped)
+		}
+	}
+
+	// 2. SEC-P2-1: `hq exec-sandboxed` is NOT treated as an inline non-blocking single HQ command
+	if isSingleHQCommand("hq exec-sandboxed -- go test ./...") || isSingleHQCommand("./bin/hq exec-sandboxed -- pytest") {
+		t.Fatalf("expected hq exec-sandboxed to return false from isSingleHQCommand")
+	}
+	if !isSingleHQCommand("hq status") || !isSingleHQCommand("./bin/hq goals list") {
+		t.Fatalf("expected normal hq status/goals commands to return true from isSingleHQCommand")
+	}
+
+	// 3. SEC-P2-7: benign grep over a worktree path containing `gmail` + `send-message` must be allowed,
+	// while actual `gmail` CLI `send-message` / `send-draft` invocations remain denied.
+	vaultDir := t.TempDir()
+	var grepOut bytes.Buffer
+	grepPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-dev",
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{
+				"CommandLine": `grep -rn "send-message" /tmp/worktrees/acme-proactive-gmail-watcher/internal/`,
+			},
+		},
+	})
+	_ = HandlePreToolUse(bytes.NewReader(grepPayload), &grepOut, vaultDir)
+	if !strings.Contains(grepOut.String(), `"decision":"allow"`) {
+		t.Fatalf("expected benign grep over gmail-watcher path to be allowed, got: %s", grepOut.String())
+	}
+
+	var sendOut bytes.Buffer
+	sendPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-dev",
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{
+				"CommandLine": `AGY_ACCOUNT=work /opt/bin/gmail mutate send-message --to=alice@example.com`,
+			},
+		},
+	})
+	_ = HandlePreToolUse(bytes.NewReader(sendPayload), &sendOut, vaultDir)
+	if !strings.Contains(sendOut.String(), `"decision":"deny"`) {
+		t.Fatalf("expected AGY_ACCOUNT=... gmail mutate send-message to be denied, got: %s", sendOut.String())
 	}
 }

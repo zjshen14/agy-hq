@@ -15,10 +15,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 const defaultDaemonTargetAddr = "127.0.0.1:4242"
@@ -110,7 +110,7 @@ func ensureDaemonAlive(targetAddr string) {
 	exe := ResolveSelfHQExecutable()
 	cmd := exec.Command(exe, "daemon", "--addr="+targetAddr)
 	cmd.Env = SanitizedDaemonEnv(os.Environ())
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	store.SetDetachedSession(cmd)
 	devNull, oErr := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if oErr == nil {
 		cmd.Stdin = devNull

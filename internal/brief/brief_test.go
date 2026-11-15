@@ -94,6 +94,7 @@ func TestCollectPeekLeaseCommitAndQuarantineInvariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	pMod.ExpiresAt = now.Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	pMod.SHA256 = approvals.ComputeProposalHashV2(pMod)
 	bMod, _ := json.MarshalIndent(pMod, "", "  ")
 	if err := os.WriteFile(propPath, bMod, 0o600); err != nil {
 		t.Fatal(err)

@@ -37,17 +37,63 @@ func reportedFilePath(vaultDir string) string {
 
 // RecordReportedFromItem appends a compact anti-repetition record for a delivered OutboxItem.
 func RecordReportedFromItem(vaultDir string, it OutboxItem, now time.Time) error {
-	sum := SanitizeAntiCue(strings.Join(strings.Fields(strings.TrimSpace(it.Summary)), " "), 120)
-	title := SanitizeAntiCue(strings.TrimSpace(it.Title), 140)
-	return RecordReported(vaultDir, ReportedEntry{
-		Timestamp:   now.UTC().Format(time.RFC3339),
-		ItemID:      it.ID,
-		Tier:        it.Tier,
-		SourceSkill: SanitizeAntiCue(it.SourceSkill, 60),
-		Scope:       SanitizeAntiCue(it.Scope, 60),
-		Title:       title,
-		Summary:     sum,
-	}, now)
+	return RecordReportedBatch(vaultDir, []OutboxItem{it}, now)
+}
+
+// RecordReportedBatch appends anti-repetition records for multiple delivered OutboxItems in a single atomic lock/write.
+func RecordReportedBatch(vaultDir string, items []OutboxItem, now time.Time) error {
+	if len(items) == 0 {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	return WithOutboxLock(vaultDir, func() error {
+		existing, _ := LoadRecentReported(vaultDir, now, MaxReportedRetention, MaxReportedStored)
+		seenIDs := make(map[string]bool, len(existing)+len(items))
+		for _, prev := range existing {
+			if prev.ItemID != "" {
+				seenIDs[prev.ItemID] = true
+			}
+		}
+		changed := false
+		for _, it := range items {
+			if it.ID != "" && seenIDs[it.ID] {
+				continue
+			}
+			if it.ID != "" {
+				seenIDs[it.ID] = true
+			}
+			existing = append(existing, ReportedEntry{
+				Timestamp:   nowStr,
+				ItemID:      it.ID,
+				Tier:        it.Tier,
+				SourceSkill: SanitizeAntiCue(it.SourceSkill, 60),
+				Scope:       SanitizeAntiCue(it.Scope, 60),
+				Title:       SanitizeAntiCue(strings.TrimSpace(it.Title), 140),
+				Summary:     SanitizeAntiCue(strings.Join(strings.Fields(strings.TrimSpace(it.Summary)), " "), 120),
+			})
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		if len(existing) > MaxReportedStored {
+			existing = existing[len(existing)-MaxReportedStored:]
+		}
+		p := reportedFilePath(vaultDir)
+		var sb strings.Builder
+		for _, r := range existing {
+			b, err := json.Marshal(r)
+			if err != nil {
+				continue
+			}
+			sb.Write(b)
+			sb.WriteByte('\n')
+		}
+		return store.WriteAtomic(p, []byte(sb.String()), 0o600)
+	})
 }
 
 // RecordReported appends an entry to local/memory/reported.jsonl and compacts entries older than 72h.

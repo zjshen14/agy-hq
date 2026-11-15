@@ -108,7 +108,7 @@ func loadPersistedRoots(vaultDir, home string) *Roots {
 	if err != nil || p == "" {
 		return nil
 	}
-	if st, lErr := os.Lstat(p); lErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+	if st, lErr := os.Lstat(p); lErr != nil || !store.VerifyOwnedPrivateFile(st) {
 		return nil
 	}
 	data, err := os.ReadFile(p)

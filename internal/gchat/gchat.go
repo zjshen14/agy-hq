@@ -18,11 +18,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
@@ -1455,7 +1455,7 @@ func launchChromeWithURL(cfg AccountConfig, headless bool, targetURL string) (in
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	store.SetDetachedSession(cmd)
 	if err := cmd.Start(); err != nil {
 		return 0, "", fmt.Errorf("launch chrome failed: %w", err)
 	}
@@ -1478,7 +1478,7 @@ func launchDetachedInteractiveLogin(accountAlias string) {
 	cmd := exec.Command(exe, "gchat", "login", "--account="+accountAlias, "--timeout=180")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	store.SetDetachedSession(cmd)
 	_ = cmd.Start()
 }
 

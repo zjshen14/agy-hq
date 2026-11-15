@@ -1,6 +1,7 @@
 package taint
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -148,6 +149,7 @@ func Mark(ctx context.Context, vaultDir string, rec Record) (Record, error) {
 		}
 		data = append(data, '\n')
 
+		shouldAppendLedger := false
 		f, openErr := store.OpenCreateExclNoFollow(mp, 0o600)
 		if openErr == nil {
 			if _, wErr := f.Write(data); wErr != nil {
@@ -168,6 +170,7 @@ func Mark(ctx context.Context, vaultDir string, rec Record) (Record, error) {
 				_ = df.Close()
 			}
 			persisted = rec
+			shouldAppendLedger = true
 		} else if errors.Is(openErr, os.ErrExist) {
 			// Marker already exists — taint is monotonic and can never be cleared.
 			// Only expand allowed scope metadata (EventIDs, ItemKeys, Connector/Account if empty).
@@ -207,10 +210,15 @@ func Mark(ctx context.Context, vaultDir string, rec Record) (Record, error) {
 				if wErr := store.WriteAtomic(mp, append(updBytes, '\n'), 0o600); wErr != nil {
 					return wErr
 				}
+				shouldAppendLedger = true
 			}
 			persisted = existing
 		} else {
 			return openErr
+		}
+
+		if !shouldAppendLedger {
+			return nil
 		}
 
 		ledgerEntry := map[string]interface{}{
@@ -276,6 +284,83 @@ func Check(vaultDir, convID string) (Record, bool) {
 		return rec, true
 	} else if !os.IsNotExist(lErr) {
 		return Record{ConvID: convID, Source: "fail_closed:lstat_error"}, true
+	}
+
+	// Append-only ledger failover (<vault>/private/taint/ledger.jsonl): if <sha256>.json was removed,
+	// consult the durable ledger and fail closed on symlinked/unreadable/corrupt ledger files.
+	lp := ledgerPath(vaultDir)
+	if st, lErr := os.Lstat(lp); lErr == nil {
+		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+			return Record{ConvID: convID, Source: "fail_closed:non_regular_taint_ledger"}, true
+		}
+		lf, oErr := store.OpenReadNoFollow(lp)
+		if oErr != nil {
+			return Record{ConvID: convID, Source: "fail_closed:unreadable_taint_ledger"}, true
+		}
+		scanner := bufio.NewScanner(lf)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		var matched Record
+		foundInLedger := false
+		corruptLedger := false
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var entry struct {
+				Timestamp string   `json:"timestamp"`
+				ConvID    string   `json:"conv_id"`
+				Source    string   `json:"source"`
+				Connector string   `json:"connector"`
+				Account   string   `json:"account"`
+				BatchID   string   `json:"batch_id"`
+				EventIDs  []string `json:"event_ids"`
+				ItemKeys  []string `json:"item_keys"`
+			}
+			if json.Unmarshal([]byte(line), &entry) != nil {
+				corruptLedger = true
+				break
+			}
+			if strings.TrimSpace(entry.ConvID) != convID {
+				continue
+			}
+			if !foundInLedger {
+				foundInLedger = true
+				matched = Record{
+					SchemaVersion: SchemaVersion,
+					ConvID:        convID,
+					TaintedAt:     entry.Timestamp,
+					Source:        entry.Source,
+					Connector:     entry.Connector,
+					Account:       entry.Account,
+					BatchID:       entry.BatchID,
+				}
+				if matched.Source == "" {
+					matched.Source = "taint_ledger_failover"
+				}
+			}
+			matched.EventIDs, _ = mergeSortedUnique(matched.EventIDs, entry.EventIDs)
+			matched.ItemKeys, _ = mergeSortedUnique(matched.ItemKeys, entry.ItemKeys)
+			if matched.Connector == "" && entry.Connector != "" {
+				matched.Connector = entry.Connector
+			}
+			if matched.Account == "" && entry.Account != "" {
+				matched.Account = entry.Account
+			}
+			if matched.BatchID == "" && entry.BatchID != "" {
+				matched.BatchID = entry.BatchID
+			}
+		}
+		sErr := scanner.Err()
+		_ = lf.Close()
+		if corruptLedger || sErr != nil {
+			return Record{ConvID: convID, Source: "fail_closed:corrupt_taint_ledger"}, true
+		}
+		if foundInLedger {
+			return matched, true
+		}
+	} else if !os.IsNotExist(lErr) {
+		return Record{ConvID: convID, Source: "fail_closed:ledger_lstat_error"}, true
 	}
 
 	// 1-release read-only fallback to legacy <vault>/memory/tainted_sessions.json

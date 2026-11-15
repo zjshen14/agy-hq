@@ -59,6 +59,29 @@ func TestMarkMonotonicLedgerAndFailClosed(t *testing.T) {
 		t.Fatalf("expected 8 ledger entries, got %d", len(lines))
 	}
 
+	// Idempotent re-mark with unchanged ItemKeys must NOT append duplicate lines to ledger.jsonl
+	if _, err := Mark(context.Background(), vaultDir, Record{
+		ConvID:    convID,
+		Source:    "watch:gmail:primary",
+		Connector: "gmail",
+		Account:   "primary",
+		ItemKeys:  []string{"thr-a"},
+	}); err != nil {
+		t.Fatalf("idempotent Mark: %v", err)
+	}
+	ledgerBytesAfterNoop, _ := os.ReadFile(ledgerPath(vaultDir))
+	if lines := strings.Split(strings.TrimSpace(string(ledgerBytesAfterNoop)), "\n"); len(lines) != 8 {
+		t.Fatalf("expected idempotent Mark to skip duplicate ledger append, got %d lines", len(lines))
+	}
+
+	// Removing <sha256>.json marker must STILL report tainted via append-only ledger.jsonl failover
+	if err := os.Remove(mp); err != nil {
+		t.Fatal(err)
+	}
+	if ledRec, ledOK := Check(vaultDir, convID); !ledOK || len(ledRec.ItemKeys) != 8 {
+		t.Fatalf("expected ledger.jsonl failover to reconstruct tainted record, got ok=%v rec=%+v", ledOK, ledRec)
+	}
+
 	// Corrupting marker JSON must fail CLOSED (still report tainted = true!)
 	if err := os.WriteFile(mp, []byte("{corrupt"), 0o600); err != nil {
 		t.Fatal(err)

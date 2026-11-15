@@ -775,10 +775,15 @@ func BindBatchConversation(vaultDir string, eventIDs []string, convID string, no
 		expStr := now.Add(leaseTTL).UTC().Format(time.RFC3339)
 		for i := range active {
 			if idSet[active[i].ID] && active[i].Status == StatusLeased {
-				active[i].LeaseConvID = convID
-				active[i].LeaseExpiresAt = expStr
-				active[i].UpdatedAt = nowStr
-				changed = true
+				if active[i].LeaseConvID != "" && active[i].LeaseConvID != convID {
+					return fmt.Errorf("events: batch event %s already bound to conversation %s", active[i].ID, active[i].LeaseConvID)
+				}
+				if active[i].LeaseConvID != convID {
+					active[i].LeaseConvID = convID
+					active[i].LeaseExpiresAt = expStr
+					active[i].UpdatedAt = nowStr
+					changed = true
+				}
 			}
 		}
 		if !changed {

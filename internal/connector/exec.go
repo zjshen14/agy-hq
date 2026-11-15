@@ -10,8 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 const (
@@ -202,11 +203,11 @@ func RunSubprocess(parentCtx context.Context, spec SubprocessSpec) ([]byte, stri
 		cmd.Dir = spec.WorkDir
 	}
 	cmd.Env = SanitizedSubprocessEnv(os.Environ(), spec.EnvAllow, spec.ExtraEnv, spec.AllowDesktopScope)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	store.SetProcessGroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Cancel = func() error {
 		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			store.KillProcessGroup(cmd.Process.Pid)
 			return cmd.Process.Kill()
 		}
 		return nil

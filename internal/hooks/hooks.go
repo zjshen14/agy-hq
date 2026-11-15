@@ -187,11 +187,17 @@ func isSingleHQCommand(cmdLine string) bool {
 		return false
 	}
 	first := filepath.ToSlash(fields[0])
-	return first == "hq" ||
+	isHQ := first == "hq" ||
 		first == "./bin/hq" ||
 		first == "bin/hq" ||
-		strings.HasSuffix(first, "/hq") ||
-		first == "./scripts/bootstrap.sh" ||
+		strings.HasSuffix(first, "/hq")
+	if isHQ {
+		if len(fields) >= 2 && fields[1] == "exec-sandboxed" {
+			return false
+		}
+		return true
+	}
+	return first == "./scripts/bootstrap.sh" ||
 		first == "scripts/bootstrap.sh"
 }
 
@@ -201,7 +207,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
 	_ = hostpaths.PersistFromLiveEnv(vaultDir)
-	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.TranscriptPath)
+	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
 	_, isTaintedStart := taint.Check(vaultDir, payload.ConversationID)
 
 	// Zero-touch auto-bootstrap: if USER.md does not exist yet in the target Vault,
@@ -577,7 +583,7 @@ var (
 
 	outboundCommandPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post|patch|update|delete)\b`),
-		regexp.MustCompile(`(?i)(?:^|[;&|]\s*|\bAGY_ACCOUNT=\S+\s+)(?:\S+/)?gmail(?:-[0-9]+)?\b[^;&|\n]*\b(send-message|send-draft)\b`),
+		regexp.MustCompile(`(?i)(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:\S+/)?gmail(?:-[0-9]+)?\s+[^;&|\n]*\b(send-message|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gmail\s+send-draft\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gchat\s+(send|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bchat\.googleapis\.com/v1/spaces/[^\s]*messages\b`),
@@ -595,7 +601,7 @@ var (
 	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|watch\s+(?:read|query|ack)|offer\s+stage|brief\s+format-quarantined|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|taint|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|taint|exec-cache|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -811,16 +817,24 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		})
 	}
 
-	if payload.ConversationID != "" {
-		bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.TranscriptPath)
-		convID := payload.ConversationID
-		defer func() {
-			_, _ = events.TryRenewLeaseByConversation(vaultDir, convID, time.Now(), events.DefaultLeaseTTL)
-		}()
+	if strings.TrimSpace(payload.ConversationID) == "" {
+		payload.ConversationID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	}
+	if strings.TrimSpace(payload.ConversationID) == "" {
+		return json.NewEncoder(w).Encode(map[string]interface{}{
+			"decision": "deny",
+			"reason":   "Blocked by agy-hq PreToolUse safety policy: missing conversationId in hook payload (fail-closed).",
+		})
 	}
 
+	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
+	convID := payload.ConversationID
+	defer func() {
+		_, _ = events.TryRenewLeaseByConversation(vaultDir, convID, time.Now(), events.DefaultLeaseTTL)
+	}()
+
 	protectedPrivateSubs := []string{
-		"gmail", "gchat", "credentials", "connectors", "taint",
+		"gmail", "gchat", "credentials", "connectors", "taint", "exec-cache",
 		"trust.json", "approval_asks", "approval_caps", "pii-denylist.txt", "daemon_token",
 	}
 	var extraCredTargets []string
@@ -1049,6 +1063,8 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				filepath.Join(canonVault, "memory", "watcher"),
 				filepath.Join(canonVault, "memory", "watchers"),
 				filepath.Join(canonVault, "memory", "trigger_cursors.json"),
+				filepath.Join(canonVault, "memory", "front_desk.json"),
+				filepath.Join(canonVault, "memory", "tasks.json"),
 			} {
 				if canonPath == protectedSub || strings.HasPrefix(canonPath, protectedSub+string(filepath.Separator)) {
 					return json.NewEncoder(w).Encode(map[string]interface{}{

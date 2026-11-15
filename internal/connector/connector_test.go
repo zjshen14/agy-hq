@@ -168,3 +168,69 @@ func TestLegacyMigrationAndDriftCheck(t *testing.T) {
 		t.Fatalf("expected WARN drift after accounts.json diverged, got %+v", drift1)
 	}
 }
+
+func TestDKIMAndSPFDomainAlignmentStrictness(t *testing.T) {
+	cases := []struct {
+		name     string
+		from     string
+		authRes  string
+		isMock   bool
+		expected bool
+	}{
+		{
+			name:     "exact header.d match",
+			from:     "user@acme.com",
+			authRes:  "mx.google.com; dkim=pass header.d=acme.com; spf=fail",
+			expected: true,
+		},
+		{
+			name:     "subdomain header.i match",
+			from:     "user@acme.com",
+			authRes:  "mx.google.com; dkim=pass header.i=@mail.acme.com",
+			expected: true,
+		},
+		{
+			name:     "aligned spf smtp.mailfrom and subdomain smtp.helo",
+			from:     "alerts@acme.com",
+			authRes:  "mx.google.com; dkim=fail; spf=pass smtp.helo=notify.acme.com",
+			expected: true,
+		},
+		{
+			name:     "reject lookalike suffix attacker-acme.com",
+			from:     "user@acme.com",
+			authRes:  "mx.google.com; dkim=pass header.d=attacker-acme.com",
+			expected: false,
+		},
+		{
+			name:     "reject cross-clause unaligned pass",
+			from:     "user@acme.com",
+			authRes:  "mx.acme.com; dkim=fail header.d=acme.com; spf=pass smtp.mailfrom=user@evil.com",
+			expected: false,
+		},
+		{
+			name:     "reject bare dkim=pass with no domain tag",
+			from:     "user@acme.com",
+			authRes:  "mx.google.com; dkim=pass",
+			expected: false,
+		},
+		{
+			name:     "empty authResults allowed only in mock mode",
+			from:     "user@acme.com",
+			authRes:  "",
+			isMock:   true,
+			expected: true,
+		},
+		{
+			name:     "empty authResults rejected in live mode",
+			from:     "user@acme.com",
+			authRes:  "",
+			isMock:   false,
+			expected: false,
+		},
+	}
+	for _, tc := range cases {
+		if got := IsDKIMOrSPFAligned(tc.from, tc.authRes, tc.isMock); got != tc.expected {
+			t.Fatalf("%s: IsDKIMOrSPFAligned(%q, %q, %v) = %v, want %v", tc.name, tc.from, tc.authRes, tc.isMock, got, tc.expected)
+		}
+	}
+}

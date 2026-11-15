@@ -3,6 +3,8 @@ package hooks
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
@@ -21,36 +24,64 @@ var (
 	reHQApproveAny  = regexp.MustCompile(`(?i)(?:^|[\s;&|("'` + "`" + `])(?:\S+/)?hq\s+approve\b`)
 )
 
-// bindSpawnTokenFromTranscript inspects the first 64 KiB of transcriptPath for `[hq-spawn:<token>]`,
-// atomically CAS-binds the leased event batch to convID, and marks convID tainted BEFORE any tool executes
-// if any bound event carries TaintOnSpawn=true.
-func bindSpawnTokenFromTranscript(vaultDir, convID, transcriptPath string) {
-	convID = strings.TrimSpace(convID)
-	transcriptPath = strings.TrimSpace(transcriptPath)
-	if convID == "" || transcriptPath == "" {
-		return
-	}
-	st, err := os.Lstat(transcriptPath)
-	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
-		return
-	}
-	f, err := os.Open(transcriptPath)
-	if err != nil {
-		return
-	}
-	defer f.Close()
+func spawnCheckMarkerPath(vaultDir, convID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(convID)))
+	return filepath.Join(vaultDir, "private", "taint", ".checked-"+hex.EncodeToString(sum[:16]))
+}
 
-	head, err := io.ReadAll(io.LimitReader(f, 64*1024))
-	if err != nil || len(head) == 0 {
+// bindSpawnTokenFromTranscript inspects lastUserInput and the first 64 KiB of transcriptPath for `[hq-spawn:<token>]`,
+// atomically CAS-binds the leased event batch to convID, and marks convID tainted BEFORE any tool executes
+// if any bound event carries TaintOnSpawn=true. Once scanned, a per-conversation marker skips redundant I/O on tool calls 2+.
+func bindSpawnTokenFromTranscript(vaultDir, convID, lastUserInput, transcriptPath string) {
+	convID = strings.TrimSpace(convID)
+	lastUserInput = strings.TrimSpace(lastUserInput)
+	transcriptPath = strings.TrimSpace(transcriptPath)
+	if convID == "" || strings.TrimSpace(vaultDir) == "" {
 		return
 	}
-	matches := reSpawnTokenTag.FindAllSubmatch(head, 4)
-	for _, m := range matches {
-		rawTok := string(bytes.TrimSpace(m[1]))
+
+	checkMarker := spawnCheckMarkerPath(vaultDir, convID)
+	if st, err := os.Lstat(checkMarker); err == nil && st.Mode().IsRegular() {
+		return
+	}
+
+	seenTokens := make(map[string]bool)
+	var candidateTokens []string
+	addMatches := func(raw []byte) {
+		for _, m := range reSpawnTokenTag.FindAllSubmatch(raw, 4) {
+			tok := string(bytes.TrimSpace(m[1]))
+			if tok != "" && !seenTokens[tok] {
+				seenTokens[tok] = true
+				candidateTokens = append(candidateTokens, tok)
+			}
+		}
+	}
+
+	if lastUserInput != "" {
+		addMatches([]byte(lastUserInput))
+	}
+
+	scannedTranscript := false
+	if transcriptPath != "" {
+		if st, err := os.Lstat(transcriptPath); err == nil && st.Mode()&os.ModeSymlink == 0 && st.Mode().IsRegular() {
+			if f, oErr := os.Open(transcriptPath); oErr == nil {
+				head, rErr := io.ReadAll(io.LimitReader(f, 64*1024))
+				_ = f.Close()
+				if rErr == nil && len(head) > 0 {
+					scannedTranscript = true
+					addMatches(head)
+				}
+			}
+		}
+	}
+
+	boundAny := false
+	for _, rawTok := range candidateTokens {
 		bound, ok, bErr := events.BindBatchByToken(vaultDir, rawTok, convID, time.Now(), events.DefaultLeaseTTL)
 		if bErr != nil || !ok || len(bound) == 0 {
 			continue
 		}
+		boundAny = true
 		needsTaint := false
 		var evIDs []string
 		var itemKeys []string
@@ -95,6 +126,10 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, transcriptPath string) {
 				ItemKeys:  itemKeys,
 			})
 		}
+	}
+
+	if boundAny || scannedTranscript {
+		_ = store.WriteAtomic(checkMarker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 	}
 }
 
@@ -227,10 +262,8 @@ func wrapScrubbedArgvCommand(argv []string) string {
 }
 
 func wrapScrubbedAutoShellCommand(cmdLine string) string {
-	if strings.HasPrefix(strings.TrimSpace(cmdLine), "env -u ANTIGRAVITY_CSRF_TOKEN ") {
-		return cmdLine
-	}
-	return "env -u ANTIGRAVITY_CSRF_TOKEN -u ANTIGRAVITY_LS_ADDRESS -u ANTIGRAVITY_AGENTAPI_EXE -- sh -c " + shellQuoteSingle(cmdLine)
+	return "env -u ANTIGRAVITY_CSRF_TOKEN -u ANTIGRAVITY_LS_ADDRESS -u ANTIGRAVITY_AGENTAPI_EXE " +
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel -- sh -c " + shellQuoteSingle(cmdLine)
 }
 
 // validateTaintedHQArgv enforces the strict Quarantined Worker CLI allowlist (RFC-0017b §3.2):
@@ -326,6 +359,14 @@ func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath 
 		}
 	}
 
+	// Never allow reading any file inside <vault>/ even if a directory inside <vault>/ mimics /.agents/plugins/.../skills/
+	if strings.TrimSpace(vaultDir) != "" {
+		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
+		if canonVault != "" && (canonPath == canonVault || strings.HasPrefix(canonPath, canonVault+string(filepath.Separator))) {
+			return false
+		}
+	}
+
 	// 2. Installed or repo plugin skills/ directories (read-only SKILL.md instructions)
 	if plugRoot := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); plugRoot != "" {
 		skillsDir := canonicalizeHookPath(vaultDir, filepath.Join(plugRoot, "skills"))
@@ -336,8 +377,11 @@ func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath 
 	roots := hostpaths.Resolve(vaultDir)
 	if roots.PluginsDir != "" {
 		plugBase := canonicalizeHookPath(vaultDir, roots.PluginsDir)
-		if strings.HasPrefix(canonPath, plugBase+string(filepath.Separator)) && strings.Contains(canonSlash, "/skills/") {
-			return true
+		if rel, err := filepath.Rel(plugBase, canonPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+			parts := strings.Split(filepath.ToSlash(rel), "/")
+			if len(parts) >= 2 && parts[1] == "skills" {
+				return true
+			}
 		}
 	}
 	if strings.Contains(canonSlash, "/.agents/plugins/") && strings.Contains(canonSlash, "/skills/") {

@@ -1142,6 +1142,7 @@ func main() {
 			fmt.Println(string(b))
 
 		case "search", "list":
+			denyIfCallerTainted(vaultDir, "gmail search")
 			fs := flag.NewFlagSet("gmail search", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			query := fs.String("query", "", "Gmail search query (defaults to account's Primary unread query)")
@@ -1371,6 +1372,7 @@ func main() {
 			fmt.Println(string(b))
 
 		case "search", "list":
+			denyIfCallerTainted(vaultDir, "gchat search")
 			fs := flag.NewFlagSet("gchat search", flag.ExitOnError)
 			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
 			spaceID := fs.String("space", "", "Optional space name or ID filter (e.g. \"Project Launch Space\" or spaces/AAAA123)")
