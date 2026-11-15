@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
@@ -149,17 +150,17 @@ func DefaultBinDir() (string, error) {
 	return filepath.Join(home, ".local", "bin"), nil
 }
 
-// DefaultSharedPluginsParentDir returns ~/.gemini/antigravity/hq/plugins (outside global ~/.gemini/config/plugins
-// so unrelated projects are never auto-injected unless they opt in via .agents/plugins.json).
+// DefaultSharedPluginsParentDir returns <AppDataDir>/hq/plugins (default ~/.gemini/antigravity/hq/plugins,
+// outside global <PluginsDir> so unrelated projects are never auto-injected unless they opt in via .agents/plugins.json).
 func DefaultSharedPluginsParentDir() (string, error) {
-	home, err := resolveHomeDir()
-	if err != nil {
-		return "", err
+	roots := hostpaths.Resolve("")
+	if roots.AppDataDir == "" {
+		return "", fmt.Errorf("resolve Antigravity appDataDir: empty host root")
 	}
-	return filepath.Join(home, ".gemini", "antigravity", "hq", "plugins"), nil
+	return filepath.Join(roots.AppDataDir, "hq", "plugins"), nil
 }
 
-// DefaultSharedPluginDir returns ~/.gemini/antigravity/hq/plugins/agy-hq.
+// DefaultSharedPluginDir returns <AppDataDir>/hq/plugins/agy-hq.
 func DefaultSharedPluginDir() (string, error) {
 	parent, err := DefaultSharedPluginsParentDir()
 	if err != nil {
@@ -168,22 +169,22 @@ func DefaultSharedPluginDir() (string, error) {
 	return filepath.Join(parent, PluginSlug), nil
 }
 
-// DefaultGlobalPluginDir returns ~/.gemini/config/plugins/agy-hq (used only when --global is explicitly set).
+// DefaultGlobalPluginDir returns <PluginsDir>/agy-hq (used only when --global is explicitly set).
 func DefaultGlobalPluginDir() (string, error) {
-	home, err := resolveHomeDir()
-	if err != nil {
-		return "", err
+	roots := hostpaths.Resolve("")
+	if roots.PluginsDir == "" {
+		return "", fmt.Errorf("resolve Antigravity pluginsDir: empty host root")
 	}
-	return filepath.Join(home, ".gemini", "config", "plugins", PluginSlug), nil
+	return filepath.Join(roots.PluginsDir, PluginSlug), nil
 }
 
-// DefaultLegacySidecarDir returns the pre-plugin standalone sidecar path ~/.gemini/config/sidecars/agy-hq-console.
+// DefaultLegacySidecarDir returns the pre-plugin standalone sidecar path <ConfigDir>/sidecars/agy-hq-console.
 func DefaultLegacySidecarDir() (string, error) {
-	home, err := resolveHomeDir()
-	if err != nil {
-		return "", err
+	roots := hostpaths.Resolve("")
+	if roots.ConfigDir == "" {
+		return "", fmt.Errorf("resolve Antigravity configDir: empty host root")
 	}
-	return filepath.Join(home, ".gemini", "config", "sidecars", "agy-hq-console"), nil
+	return filepath.Join(roots.ConfigDir, "sidecars", "agy-hq-console"), nil
 }
 
 // IsDirOnPATH reports whether targetDir appears in the current PATH environment variable.
@@ -443,9 +444,11 @@ func AttachProjectPlugin(projectDir, sharedPluginsParent string) (string, error)
 		_ = json.Unmarshal(raw, &cfg)
 	}
 	found := false
+	cleanSharedSlash := filepath.ToSlash(filepath.Clean(sharedPluginsParent))
 	for i := range cfg.Entries {
 		e := &cfg.Entries[i]
-		if e.Path == entryPath || strings.HasSuffix(filepath.ToSlash(e.Path), "/.gemini/antigravity/hq/plugins") {
+		eSlash := filepath.ToSlash(filepath.Clean(e.Path))
+		if e.Path == entryPath || eSlash == cleanSharedSlash || strings.HasSuffix(filepath.ToSlash(e.Path), "/.gemini/antigravity/hq/plugins") {
 			e.Path = entryPath
 			hasSlug := false
 			for _, inc := range e.IncludeOnly {
@@ -510,8 +513,15 @@ func DetachProjectPlugin(projectDir string) (bool, error) {
 	}
 	var kept []pluginsManifestEntry
 	removed := false
+	sharedParent, _ := DefaultSharedPluginsParentDir()
+	cleanSharedSlash := ""
+	if sharedParent != "" {
+		cleanSharedSlash = filepath.ToSlash(filepath.Clean(sharedParent))
+	}
 	for _, e := range cfg.Entries {
-		isHQPath := strings.HasSuffix(filepath.ToSlash(e.Path), "/.gemini/antigravity/hq/plugins")
+		eSlash := filepath.ToSlash(filepath.Clean(e.Path))
+		isHQPath := strings.HasSuffix(filepath.ToSlash(e.Path), "/.gemini/antigravity/hq/plugins") ||
+			(cleanSharedSlash != "" && eSlash == cleanSharedSlash)
 		if isHQPath {
 			var remInc []string
 			for _, inc := range e.IncludeOnly {

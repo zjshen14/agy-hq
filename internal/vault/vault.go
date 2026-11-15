@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/templates"
 )
 
@@ -102,22 +103,22 @@ func resolveHomeDir() (string, error) {
 	return os.UserHomeDir()
 }
 
-// GlobalConfigPath returns ~/.gemini/antigravity/hq/config.json.
+// GlobalConfigPath returns <AppDataDir>/hq/config.json (default ~/.gemini/antigravity/hq/config.json).
 func GlobalConfigPath() (string, error) {
-	home, err := resolveHomeDir()
-	if err != nil || home == "" {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+	roots := hostpaths.Resolve("")
+	if roots.AppDataDir == "" {
+		return "", fmt.Errorf("resolve Antigravity appDataDir: empty host root")
 	}
-	return filepath.Join(home, ".gemini", "antigravity", "hq", "config.json"), nil
+	return filepath.Join(roots.AppDataDir, "hq", "config.json"), nil
 }
 
-// DefaultGlobalVaultDir returns ~/.gemini/antigravity/hq/vault.
+// DefaultGlobalVaultDir returns <AppDataDir>/hq/vault (default ~/.gemini/antigravity/hq/vault).
 func DefaultGlobalVaultDir() (string, error) {
-	home, err := resolveHomeDir()
-	if err != nil || home == "" {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+	roots := hostpaths.Resolve("")
+	if roots.AppDataDir == "" {
+		return "", fmt.Errorf("resolve Antigravity appDataDir: empty host root")
 	}
-	return filepath.Join(home, ".gemini", "antigravity", "hq", "vault"), nil
+	return filepath.Join(roots.AppDataDir, "hq", "vault"), nil
 }
 
 // LoadGlobalConfig reads ~/.gemini/antigravity/hq/config.json if present.
@@ -375,25 +376,16 @@ func ResolveConversationID() string {
 }
 
 // ResolveArtifactDir determines the artifact directory for a conversation ID.
-// It checks ANTIGRAVITY_APP_DATA_DIR (falling back to ~/.gemini/antigravity),
-// returning <appDataDir>/brain/<convID>.
+// It resolves <BrainDir>/<convID> via hostpaths.Resolve (honoring ANTIGRAVITY_APP_DATA_DIR, HQ_BRAIN_DIR, and hermetic test vaults).
 func ResolveArtifactDir(convID string) string {
 	if convID == "" {
 		return ""
 	}
-	appDataDir := os.Getenv("ANTIGRAVITY_APP_DATA_DIR")
-	if appDataDir == "" {
-		if envVault := os.Getenv("HQ_VAULT_DIR"); envVault != "" && IsTempPath(envVault) {
-			return filepath.Join(filepath.Dir(filepath.Clean(envVault)), ".brain", convID)
-		}
-		if home, err := resolveHomeDir(); err == nil && home != "" {
-			appDataDir = filepath.Join(home, ".gemini", "antigravity")
-		}
-	}
-	if appDataDir == "" {
+	roots := hostpaths.Resolve(os.Getenv("HQ_VAULT_DIR"))
+	if roots.BrainDir == "" {
 		return ""
 	}
-	return filepath.Join(appDataDir, "brain", convID)
+	return filepath.Join(roots.BrainDir, convID)
 }
 
 // Init scaffolds the private Vault directory structure, copies starter templates

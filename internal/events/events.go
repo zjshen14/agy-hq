@@ -2,6 +2,7 @@ package events
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -12,8 +13,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // EventStatus represents the lifecycle state of an Event in the durable Event Inbox.
@@ -79,7 +81,6 @@ func (b LeasedBatch) EventIDs() []string {
 }
 
 var (
-	inProcMu   sync.Mutex
 	wakeMu     sync.Mutex
 	wakeNotify chan struct{}
 )
@@ -131,26 +132,9 @@ func generateEventID(now time.Time) string {
 }
 
 func withEventsLock(vaultDir string, fn func() error) error {
-	inProcMu.Lock()
-	defer inProcMu.Unlock()
-
-	memDir := filepath.Join(vaultDir, "memory")
-	if err := os.MkdirAll(memDir, 0o700); err != nil {
-		return err
-	}
-	lf, err := os.OpenFile(lockFilePath(vaultDir), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lf.Close()
-
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer func() {
-		_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
-	}()
-	return fn()
+	return store.With(context.Background(), store.RankEvents, lockFilePath(vaultDir), func(_ context.Context) error {
+		return fn()
+	})
 }
 
 func loadActiveUnlocked(vaultDir string) ([]Event, error) {
@@ -173,9 +157,6 @@ func loadActiveUnlocked(vaultDir string) ([]Event, error) {
 
 func saveActiveUnlocked(vaultDir string, items []Event) error {
 	p := activeEventsPath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
 	if items == nil {
 		items = []Event{}
 	}
@@ -183,11 +164,7 @@ func saveActiveUnlocked(vaultDir string, items []Event) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp." + generateHex(4)
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return store.WriteAtomic(p, append(data, '\n'), 0o600)
 }
 
 func appendArchiveUnlocked(vaultDir string, items []Event) error {
@@ -692,6 +669,41 @@ func BindBatchConversation(vaultDir string, eventIDs []string, convID string, no
 	})
 }
 
+// TryRenewLeaseByConversation performs a non-blocking lease renewal (LOCK_NB) suitable for hot PreToolUse hooks
+// so active tool calls never stall waiting behind background batch dispatchers.
+func TryRenewLeaseByConversation(vaultDir, convID string, now time.Time, leaseTTL time.Duration) (bool, error) {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return false, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultLeaseTTL
+	}
+	return store.TryWith(context.Background(), store.RankEvents, lockFilePath(vaultDir), func(_ context.Context) error {
+		active, err := loadActiveUnlocked(vaultDir)
+		if err != nil || len(active) == 0 {
+			return err
+		}
+		changed := false
+		expStr := now.Add(leaseTTL).UTC().Format(time.RFC3339)
+		nowStr := now.UTC().Format(time.RFC3339)
+		for i := range active {
+			if active[i].Status == StatusLeased && active[i].LeaseConvID == convID {
+				active[i].LeaseExpiresAt = expStr
+				active[i].UpdatedAt = nowStr
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		return saveActiveUnlocked(vaultDir, active)
+	})
+}
+
 // RenewLeaseByConversation extends LeaseExpiresAt for all leased events bound to convID.
 func RenewLeaseByConversation(vaultDir, convID string, now time.Time, leaseTTL time.Duration) error {
 	convID = strings.TrimSpace(convID)
@@ -912,6 +924,49 @@ func Retry(vaultDir, id string, now time.Time) (Event, error) {
 		signalWake()
 	}
 	return updated, err
+}
+
+// DropPendingBySchedule transitions all pending (unleased) events matching scheduleID (bare or FQID) to StatusDropped.
+func DropPendingBySchedule(vaultDir, scheduleID, reason string, now time.Time) (int, error) {
+	bare := strings.TrimPrefix(strings.TrimSpace(scheduleID), "core/")
+	fqid := scheduleID
+	if !strings.Contains(fqid, "/") && fqid != "" {
+		fqid = "core/" + fqid
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var dropped []Event
+	err := withEventsLock(vaultDir, func() error {
+		active, err := loadActiveUnlocked(vaultDir)
+		if err != nil || len(active) == 0 {
+			return err
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		var kept []Event
+		for _, ev := range active {
+			schedMeta := ""
+			if ev.Metadata != nil {
+				schedMeta = ev.Metadata["schedule_id"]
+			}
+			if ev.Status == StatusPending && (schedMeta == bare || schedMeta == fqid || ev.ScopeKey == "gatekeeper:"+bare || ev.ScopeKey == "gatekeeper:"+fqid) {
+				ev.Status = StatusDropped
+				ev.UpdatedAt = nowStr
+				ev.LastError = strings.TrimSpace(reason)
+				dropped = append(dropped, ev)
+			} else {
+				kept = append(kept, ev)
+			}
+		}
+		if len(dropped) == 0 {
+			return nil
+		}
+		if err := appendArchiveUnlocked(vaultDir, dropped); err != nil {
+			return err
+		}
+		return saveActiveUnlocked(vaultDir, kept)
+	})
+	return len(dropped), err
 }
 
 // Drop transitions an active event to StatusDropped and moves it to events_archive.jsonl.

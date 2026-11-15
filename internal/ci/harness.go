@@ -242,6 +242,9 @@ var (
 		"tasks": true, "outbox": true, "ideas": true, "goals": true,
 		"events": true, "timers": true, "progress": true, "exec-sandboxed": true,
 		"spaces": true, "obs": true, "rsi": true, "ci": true,
+		"watch": true, "offer": true, "brief": true, "dispatch": true,
+		"extension": true, "connector": true, "triggers": true, "sidecar": true,
+		"connector-driver": true,
 		// Prose words that can follow `hq` in descriptive sentences
 		"daemon_gatekeeper": true, "binary": true, "cli": true, "microkernel": true,
 	}

@@ -20,7 +20,9 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/timers"
 )
 
@@ -1625,11 +1627,8 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		artifactDir = prev.ArtifactDir
 	}
 	if artifactDir == "" {
-		if appData := os.Getenv("ANTIGRAVITY_APP_DATA_DIR"); appData != "" {
-			artifactDir = filepath.Join(appData, "brain", convID)
-		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
-			candidate := filepath.Join(home, ".gemini", "antigravity", "brain", convID)
-			artifactDir = candidate
+		if roots := hostpaths.Resolve(vaultDir); roots.BrainDir != "" {
+			artifactDir = filepath.Join(roots.BrainDir, convID)
 		}
 	}
 	if artifactDir != "" {
@@ -1859,17 +1858,23 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 	return changed
 }
 
-// GetUnarmedTriggers compares local/triggers.yaml against the active Front Desk's ArmedTriggers
+// GetUnarmedTriggers compares effective schedules (core + packs + extensions.json overrides) against the active Front Desk's ArmedTriggers
 // (and active background daemon coverage for daemon_gatekeeper / isolated_worker schedules)
-// and returns the armed and unarmed ScheduleTrigger slices.
+// and returns the armed and unarmed ScheduleTrigger slices for enabled schedules.
 func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []ScheduleTrigger) {
-	cfg, err := LoadTriggers(vaultDir)
-	if err != nil || cfg == nil {
+	cfg, err := LoadEffectiveTriggers(vaultDir)
+	if err != nil && (cfg == nil || len(cfg.Schedules) == 0) {
+		return nil, nil
+	}
+	if cfg == nil {
 		return nil, nil
 	}
 	daemonActive := IsDaemonActiveFast(vaultDir)
 	fd, ok := GetFrontDesk(vaultDir)
 	for _, s := range cfg.Schedules {
+		if !s.IsEnabled() {
+			continue
+		}
 		if daemonActive && (s.EffectiveMode() == "daemon_gatekeeper" || s.EffectiveMode() == "isolated_worker") {
 			armed = append(armed, s)
 			continue
@@ -1879,10 +1884,70 @@ func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []Sch
 				armed = append(armed, s)
 				continue
 			}
+			if _, isArmedFQ := fd.ArmedTriggers[s.FQID()]; isArmedFQ {
+				armed = append(armed, s)
+				continue
+			}
 		}
 		unarmed = append(unarmed, s)
 	}
 	return armed, unarmed
+}
+
+// GetDisarmTriggers returns armed Front Desk schedules that have since been paused/disabled via <vault>/extensions.json
+// so SessionStart can instruct the Front Desk coordinator to cancel the live schedule via manage_task(Action="kill").
+func GetDisarmTriggers(vaultDir string) []ArmedTrigger {
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok || len(fd.ArmedTriggers) == 0 {
+		return nil
+	}
+	cfg, _ := LoadEffectiveTriggers(vaultDir)
+	if cfg == nil {
+		return nil
+	}
+	disabled := make(map[string]bool)
+	for _, s := range cfg.Schedules {
+		if !s.IsEnabled() {
+			disabled[s.ID] = true
+			disabled[s.FQID()] = true
+		}
+	}
+	var out []ArmedTrigger
+	for k, at := range fd.ArmedTriggers {
+		if disabled[k] || disabled[at.ID] {
+			out = append(out, at)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// ClearArmedTrigger removes a paused/disarmed trigger record from front_desk.json if present.
+func ClearArmedTrigger(vaultDir, scheduleID string) error {
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok || len(fd.ArmedTriggers) == 0 {
+		return nil
+	}
+	fqid := ScheduleTrigger{ID: scheduleID}.FQID()
+	bare := strings.TrimPrefix(fqid, "core/")
+	changed := false
+	if _, exists := fd.ArmedTriggers[scheduleID]; exists {
+		delete(fd.ArmedTriggers, scheduleID)
+		changed = true
+	}
+	if _, exists := fd.ArmedTriggers[fqid]; exists {
+		delete(fd.ArmedTriggers, fqid)
+		changed = true
+	}
+	if _, exists := fd.ArmedTriggers[bare]; exists {
+		delete(fd.ArmedTriggers, bare)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	fd.UpdatedAt = time.Now().Format(time.RFC3339)
+	return saveFrontDeskLease(vaultDir, fd)
 }
 
 // ReleaseFrontDesk clears local/memory/front_desk.json so the next new conversation
@@ -1943,131 +2008,18 @@ func ExtractUUID(s string) string {
 //   - claude-opus-5-5-{low,medium,high}
 //   - gpt-oss-120b-medium
 func ResolveModel(prompt, explicitModel, explicitDepth, explicitTier string) (modelID, tier, subagentModel string) {
-	depth := strings.ToLower(strings.TrimSpace(explicitDepth))
-	model := strings.ToLower(strings.TrimSpace(explicitModel))
-	tier = strings.ToLower(strings.TrimSpace(explicitTier))
+	return routing.ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier)
+}
 
-	// Check natural-language model hint in prompt if explicitModel was not provided
-	if model == "" {
-		if m := rePromptModelHint.FindStringSubmatch(prompt); len(m) == 2 {
-			model = strings.ToLower(m[1])
-		}
-	}
-
-	// 1. Infer profile/tier from prompt if not explicitly specified
-	if tier == "" {
-		switch {
-		case reDeepMediumTask.MatchString(prompt) && !reDeepHighOnlyTask.MatchString(prompt):
-			tier = "deep-medium"
-		case reHeavySweepTask.MatchString(prompt) && !reDeepHighOnlyTask.MatchString(prompt):
-			tier = "heavy"
-		case reRoutineTask.MatchString(prompt) && !reDeepHighOnlyTask.MatchString(prompt):
-			tier = "routine"
-		case reDeepTask.MatchString(prompt):
-			tier = "deep"
-		case reQuickTask.MatchString(prompt):
-			tier = "quick"
-		default:
-			tier = "standard"
-		}
-	}
-
-	// 2. Normalize tier to canonical quick|standard|deep and assign default depth + model family
-	inferredDepth := ""
-	switch tier {
-	case "quick":
-		inferredDepth = "low"
-		if model == "" {
-			model = "gemini-4-hydrogen"
-		}
-		subagentModel = "flash_lite"
-	case "routine", "synthesis", "medium", "standard-medium":
-		tier = "standard"
-		inferredDepth = "medium"
-		if model == "" {
-			model = "gemini-4-hydrogen"
-		}
-		subagentModel = "flash"
-	case "heavy", "sweep", "xhigh", "standard-xhigh":
-		tier = "standard"
-		inferredDepth = "xhigh"
-		if model == "" {
-			model = "gemini-4-hydrogen"
-		}
-		subagentModel = "flash"
-	case "deep-medium", "deep_medium", "deep-routine", "deep_routine", "consolidation", "research":
-		tier = "deep"
-		inferredDepth = "medium"
-		if model == "" {
-			model = "gemini-4-carbon"
-		}
-		subagentModel = "pro"
-	case "deep":
-		inferredDepth = "high"
-		if model == "" {
-			model = "gemini-4-carbon"
-		}
-		subagentModel = "pro"
-	default: // "standard"
-		tier = "standard"
-		inferredDepth = "high"
-		if model == "" {
-			model = "gemini-4-hydrogen"
-		}
-		subagentModel = "flash"
-	}
-	if depth == "" {
-		depth = inferredDepth
-	}
-
-	// Normalize shorthand model aliases
-	switch model {
-	case "hydrogen":
-		model = "gemini-4-hydrogen"
-		subagentModel = "flash"
-	case "flash":
-		model = "gemini-4-hydrogen"
-		subagentModel = "flash"
-	case "flash_lite", "flash-lite":
-		model = "gemini-4-hydrogen"
-		depth = "low"
-		subagentModel = "flash_lite"
-	case "carbon":
-		model = "gemini-4-carbon"
-		subagentModel = "pro"
-	case "argon", "pro":
-		model = "gemini-4-carbon"
-		subagentModel = "pro"
-	case "sonnet", "claude-sonnet":
-		model = "claude-sonnet-5-5"
-		subagentModel = "pro"
-	case "opus", "claude-opus":
-		model = "claude-opus-5-5"
-		subagentModel = "pro"
-	}
-
-	// If model already ends with -low, -medium, -high, or -xhigh, keep it as-is
-	if strings.HasSuffix(model, "-low") || strings.HasSuffix(model, "-medium") || strings.HasSuffix(model, "-high") || strings.HasSuffix(model, "-xhigh") {
-		if strings.HasPrefix(model, "gemini-4-carbon-") || strings.HasPrefix(model, "gemini-4-argon-") ||
-			strings.HasPrefix(model, "claude-opus-") || strings.HasPrefix(model, "claude-sonnet-") {
-			subagentModel = "pro"
-			if strings.TrimSpace(explicitTier) == "" && (strings.HasPrefix(model, "gemini-4-carbon-") || strings.HasPrefix(model, "gemini-4-argon-")) {
-				tier = "deep"
-			}
-		} else if strings.HasPrefix(model, "gemini-4-hydrogen-low") || strings.HasPrefix(model, "gemini-3.8-flash-low") {
-			subagentModel = "flash_lite"
-			if strings.TrimSpace(explicitTier) == "" {
-				tier = "quick"
-			}
-		} else if strings.HasPrefix(model, "gemini-4-hydrogen-") || strings.HasPrefix(model, "gemini-3.8-flash-") {
-			subagentModel = "flash"
-			if strings.TrimSpace(explicitTier) == "" {
-				tier = "standard"
-			}
-		}
-		return model, tier, subagentModel
-	}
-	return fmt.Sprintf("%s-%s", model, depth), tier, subagentModel
+// ResolveVaultModel resolves the model and tier honoring <vault>/config.yaml routing.tiers and active pack defaults.
+func ResolveVaultModel(vaultDir, prompt, explicitModel, explicitDepth, explicitTier string) (modelID, tier, subagentModel string) {
+	res := routing.Resolve(vaultDir, routing.Request{
+		Prompt:        prompt,
+		ExplicitModel: explicitModel,
+		ExplicitDepth: explicitDepth,
+		ExplicitTier:  explicitTier,
+	})
+	return res.ModelID, res.CanonicalTier, res.SubagentModel
 }
 
 // ClassifyInboxFile routes a filename in local/inbox/ to the matching skill name.
@@ -2242,7 +2194,7 @@ func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
 // hits 429 RESOURCE_EXHAUSTED, and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
 func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
 	if modelID == "" {
-		modelID, _, _ = ResolveModel(prompt, "", "", "")
+		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, "", "", "")
 	}
 	isForced := len(force) > 0 && force[0]
 	state := LoadQuota(vaultDir)
@@ -2265,9 +2217,13 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		outBytes, err := cmd.CombinedOutput()
 		output = strings.TrimSpace(string(outBytes))
 		if err != nil {
-			// Quota-aware fallback: if a non-Hydrogen/non-Flash model hit 429, retry once on gemini-4-hydrogen-medium
+			// Quota-aware fallback: if a non-Hydrogen/non-Flash model hit 429, retry once on fallback_on_429 (or routine tier)
 			if (strings.Contains(output, "RESOURCE_EXHAUSTED") || strings.Contains(output, "429")) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
-				fallbackModel := "gemini-4-hydrogen-medium"
+				rFallback := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"})
+				fallbackModel := strings.TrimSpace(rFallback.FallbackModel)
+				if fallbackModel == "" {
+					fallbackModel = rFallback.ModelID
+				}
 				fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
 				configureSpawnCommand(fbCmd, vaultDir, trigger)
 				if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
@@ -2307,9 +2263,9 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	return output, nil
 }
 
-// SpawnFlashTask is a convenience wrapper for background watcher spawns pinned to Flash.
+// SpawnFlashTask is a convenience wrapper for background watcher spawns resolved via standard tier.
 func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool) (string, error) {
-	modelID, _, _ := ResolveModel(prompt, "flash", "", "")
+	modelID, _, _ := ResolveVaultModel(vaultDir, prompt, "", "", "standard")
 	return SpawnTask(vaultDir, trigger, skill, title, prompt, modelID, dryRun)
 }
 
@@ -2358,7 +2314,7 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 				"and save your structured summary via `hq gmail triage-result --batch=%s`.",
 			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
 		)
-		flashModelID, _, _ := ResolveModel(prompt, "flash", "", "")
+		flashModelID, _, _ := ResolveVaultModel(vaultDir, prompt, "", "", "standard")
 		_, _, _ = events.Enqueue(vaultDir, events.Event{
 			Source:   "gmail_precheck",
 			DedupKey: fmt.Sprintf("gmail:%s:%s", entry.Account, batchLabel),
@@ -2393,7 +2349,7 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 				"and save your structured summary via `hq gchat triage-result --batch=%s`.",
 			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
 		)
-		flashModelID, _, _ := ResolveModel(prompt, "flash", "", "")
+		flashModelID, _, _ := ResolveVaultModel(vaultDir, prompt, "", "", "standard")
 		_, _, _ = events.Enqueue(vaultDir, events.Event{
 			Source:   "gchat_precheck",
 			DedupKey: fmt.Sprintf("gchat:%s:%s", entry.Account, batchLabel),
@@ -3042,9 +2998,9 @@ func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
 // followed by delivering the initial prompt from parentConvID.
 func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir string, dryRun bool, force ...bool) (string, error) {
 	if modelID == "" {
-		modelID, _, _ = ResolveModel(prompt, "", "", "")
+		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, "", "", "")
 	} else if !strings.HasPrefix(strings.TrimSpace(modelID), "MODEL_") {
-		modelID, _, _ = ResolveModel(prompt, modelID, "", "")
+		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, modelID, "", "")
 	}
 	parentConvID = strings.TrimSpace(parentConvID)
 	if parentConvID == "" {

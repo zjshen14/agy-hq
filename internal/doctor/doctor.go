@@ -14,9 +14,11 @@ import (
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
+	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
@@ -47,9 +49,10 @@ func Run(vaultDir string) []CheckResult {
 		})
 	}
 
-	// 1. Check Antigravity permission preset in ~/.gemini/config/config.json
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".gemini", "config", "config.json")
+	// 1. Check Antigravity permission preset in <ConfigDir>/config.json
+	roots := hostpaths.Resolve(vaultDir)
+	home := roots.HomeDir
+	cfgPath := filepath.Join(roots.ConfigDir, "config.json")
 	if data, err := os.ReadFile(cfgPath); err == nil {
 		var rootCfg map[string]interface{}
 		if json.Unmarshal(data, &rootCfg) == nil {
@@ -90,7 +93,7 @@ func Run(vaultDir string) []CheckResult {
 		results = append(results, CheckResult{
 			Name:   "Antigravity Config",
 			Status: "WARN",
-			Detail: "Could not read ~/.gemini/config/config.json",
+			Detail: fmt.Sprintf("Could not read %s", cfgPath),
 		})
 	}
 
@@ -100,7 +103,7 @@ func Run(vaultDir string) []CheckResult {
 		if err != nil {
 			for _, candidate := range []string{
 				filepath.Join(home, ".local", "bin", bin),
-				filepath.Join(home, ".gemini", "antigravity", "bin", bin),
+				filepath.Join(roots.AppDataDir, "bin", bin),
 			} {
 				if st, sErr := os.Stat(candidate); sErr == nil && !st.IsDir() {
 					path = candidate
@@ -486,6 +489,16 @@ func Run(vaultDir string) []CheckResult {
 			Detail: fmt.Sprintf("mode=%s · %s", sbCfg.Mode, sbCap.Detail),
 		})
 	}
+
+	// 15. Check Model Routing Tiers & Host Roots (RFC-0017d)
+	rQuick := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "quick"})
+	rRoutine := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"})
+	rDeep := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "deep"})
+	results = append(results, CheckResult{
+		Name:   "Model Routing & Host Roots",
+		Status: "PASS",
+		Detail: fmt.Sprintf("quick=%s (%s), routine=%s, deep=%s · appData=%s", rQuick.ModelID, rQuick.Source, rRoutine.ModelID, rDeep.ModelID, roots.AppDataDir),
+	})
 
 	return results
 }

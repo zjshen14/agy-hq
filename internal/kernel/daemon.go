@@ -14,18 +14,45 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/extension"
 )
 
-// ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml.
+// ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml (and optional extension packs).
 type ScheduleTrigger struct {
 	ID          string   `json:"id"`
 	Cron        string   `json:"cron"`
 	Mode        string   `json:"mode,omitempty"` // front_desk_cron | isolated_worker | daemon_gatekeeper
+	Tier        string   `json:"tier,omitempty"` // quick | routine | standard | heavy | deep_routine | deep
 	Model       string   `json:"model"`
 	Skill       string   `json:"skill"`
 	PrecheckCmd []string `json:"precheckCmd,omitempty"`
 	DedupMode   string   `json:"dedupMode,omitempty"` // none | exit_zero_nonempty | stdout_sha256
 	Delivery    string   `json:"delivery,omitempty"`  // interrupt | interrupt_on_breach | brief_rollup | ideas_feed | silent_ledger
+	Enabled     *bool    `json:"enabled,omitempty"`
+	CatchUp     string   `json:"catchUp,omitempty"` // none (default) | last
+	Source      string   `json:"source,omitempty"`  // "core" | "pack:<name>"
+}
+
+// FQID returns the canonical fully qualified schedule ID ("core/<id>" or "<pack>/<id>").
+func (s ScheduleTrigger) FQID() string {
+	return extension.NormalizeScheduleFQID(s.ID)
+}
+
+// IsEnabled returns whether the schedule is enabled (default true unless Enabled is explicitly false).
+func (s ScheduleTrigger) IsEnabled() bool {
+	if s.Enabled != nil {
+		return *s.Enabled
+	}
+	return true
+}
+
+// EffectiveCatchUp returns "last" when configured, otherwise "none".
+func (s ScheduleTrigger) EffectiveCatchUp() string {
+	if strings.EqualFold(strings.TrimSpace(s.CatchUp), "last") {
+		return "last"
+	}
+	return "none"
 }
 
 // EffectiveMode returns the normalized execution mode ("front_desk_cron", "isolated_worker", or "daemon_gatekeeper").
@@ -74,21 +101,22 @@ func (s ScheduleTrigger) FiveFieldCron() string {
 	return strings.Join(fields, " ")
 }
 
-// DefaultPrompt returns the canonical prompt string to pass to Antigravity's `schedule` tool for this trigger.
+// DefaultPrompt returns the canonical prompt string (tagged with [hq-trigger:<fqid>]) to pass to Antigravity's `schedule` tool.
 func (s ScheduleTrigger) DefaultPrompt() string {
+	tag := fmt.Sprintf(" [hq-trigger:%s]", s.FQID())
 	switch s.ID {
 	case "morning-brief":
-		return "[Auto] Morning Brief: Activate the morning-brief skill to generate today's Morning Brief across calendar events, inbox triage, pending approvals, active worktrees, and investment watchlist."
+		return "[Auto] Morning Brief: Activate the morning-brief skill to generate today's Morning Brief across calendar events, inbox triage, pending approvals, active worktrees, and investment watchlist." + tag
 	case "edgar-close-watch":
-		return "[Auto] EDGAR Close Watch: Activate the thesis-check skill to monitor new after-close 8-K, 10-Q, or 10-K filings against investment watchlists."
+		return "[Auto] EDGAR Close Watch: Activate the thesis-check skill to monitor new after-close 8-K, 10-Q, or 10-K filings against investment watchlists." + tag
 	case "sleep-consolidate":
-		return "[Auto] Nightly Sleep Consolidation: Activate the sleep-consolidate skill to review today's turn journals in local/memory/journal/, update local/MEMORY.md and local/memory/facts.jsonl, and commit private Vault changes."
+		return "[Auto] Nightly Sleep Consolidation: Activate the sleep-consolidate skill to review today's turn journals in local/memory/journal/, update local/MEMORY.md and local/memory/facts.jsonl, and commit private Vault changes." + tag
 	default:
 		skill := s.Skill
 		if skill == "" {
 			skill = s.ID
 		}
-		return fmt.Sprintf("[Auto] %s: Activate the %s skill and execute the scheduled workflow.", s.ID, skill)
+		return fmt.Sprintf("[Auto] %s: Activate the %s skill and execute the scheduled workflow.%s", s.ID, skill, tag)
 	}
 }
 
@@ -114,16 +142,17 @@ type daemonState struct {
 
 // DaemonInfo holds the running state, PID, uptime, and declared triggers of the background daemon.
 type DaemonInfo struct {
-	Running         bool               `json:"running"`
-	PID             int                `json:"pid,omitempty"`
-	Addr            string             `json:"addr,omitempty"`
-	StartedAt       string             `json:"startedAt,omitempty"`
-	UptimeSeconds   int64              `json:"uptimeSeconds,omitempty"`
-	UptimeStr       string             `json:"uptime,omitempty"`
-	SchedulesCount  int                `json:"schedulesCount"`
-	InboxRulesCount int                `json:"inboxRulesCount"`
-	Schedules       []ScheduleTrigger  `json:"schedules,omitempty"`
-	InboxRules      []InboxRuleTrigger `json:"inboxRules,omitempty"`
+	Running                 bool               `json:"running"`
+	PID                     int                `json:"pid,omitempty"`
+	Addr                    string             `json:"addr,omitempty"`
+	StartedAt               string             `json:"startedAt,omitempty"`
+	UptimeSeconds           int64              `json:"uptimeSeconds,omitempty"`
+	UptimeStr               string             `json:"uptime,omitempty"`
+	SchedulesCount          int                `json:"schedulesCount"`
+	EffectiveSchedulesCount int                `json:"effectiveSchedulesCount"`
+	InboxRulesCount         int                `json:"inboxRulesCount"`
+	Schedules               []ScheduleTrigger  `json:"schedules,omitempty"`
+	InboxRules              []InboxRuleTrigger `json:"inboxRules,omitempty"`
 }
 
 func daemonStatePath(vaultDir string) string {
@@ -170,6 +199,8 @@ func parseScheduleField(s *ScheduleTrigger, line string) {
 		s.Cron = cleanVal(val)
 	case "mode":
 		s.Mode = cleanVal(val)
+	case "tier":
+		s.Tier = cleanVal(val)
 	case "model":
 		s.Model = cleanVal(val)
 	case "skill":
@@ -180,6 +211,14 @@ func parseScheduleField(s *ScheduleTrigger, line string) {
 		s.DedupMode = cleanVal(val)
 	case "delivery":
 		s.Delivery = cleanVal(val)
+	case "catch_up":
+		s.CatchUp = cleanVal(val)
+	case "enabled":
+		v := strings.ToLower(cleanVal(val))
+		if v == "true" || v == "false" {
+			b := v == "true"
+			s.Enabled = &b
+		}
 	}
 }
 
@@ -301,7 +340,73 @@ func LoadTriggers(vaultDir string) (*TriggersConfig, error) {
 			InboxRules: make([]InboxRuleTrigger, 0),
 		}, err
 	}
+	for i := range cfg.Schedules {
+		if cfg.Schedules[i].Source == "" {
+			cfg.Schedules[i].Source = "core"
+		}
+	}
 	return cfg, nil
+}
+
+// PackScheduleLoader is an optional hook populated by internal/extension in Phase 2 to supply
+// verified companion-pack schedules without introducing circular imports.
+var PackScheduleLoader func(vaultDir string) ([]ScheduleTrigger, []InboxRuleTrigger)
+
+// LoadEffectiveTriggers merges declared schedules (core + active companion packs) with
+// runtime overrides in <vault>/extensions.json (`hq triggers pause|resume`).
+func LoadEffectiveTriggers(vaultDir string) (*TriggersConfig, error) {
+	base, err := LoadTriggers(vaultDir)
+	if base == nil {
+		base = &TriggersConfig{
+			Schedules:  make([]ScheduleTrigger, 0),
+			InboxRules: make([]InboxRuleTrigger, 0),
+		}
+	}
+	schedules := make([]ScheduleTrigger, 0, len(base.Schedules))
+	seen := make(map[string]int, len(base.Schedules))
+	for _, s := range base.Schedules {
+		if s.Source == "" {
+			s.Source = "core"
+		}
+		seen[s.FQID()] = len(schedules)
+		schedules = append(schedules, s)
+	}
+	rules := append([]InboxRuleTrigger(nil), base.InboxRules...)
+
+	if PackScheduleLoader != nil {
+		packScheds, packRules := PackScheduleLoader(vaultDir)
+		for _, ps := range packScheds {
+			if _, exists := seen[ps.FQID()]; !exists {
+				seen[ps.FQID()] = len(schedules)
+				schedules = append(schedules, ps)
+			}
+		}
+		rules = append(rules, packRules...)
+	}
+
+	extState, _ := extension.LoadVaultState(vaultDir)
+	for i := range schedules {
+		if ov, ok := extState.LookupScheduleOverride(schedules[i].ID); ok {
+			if ov.Enabled != nil {
+				b := *ov.Enabled
+				schedules[i].Enabled = &b
+			}
+			if strings.TrimSpace(ov.Cron) != "" {
+				schedules[i].Cron = strings.TrimSpace(ov.Cron)
+			}
+			if strings.TrimSpace(ov.Tier) != "" {
+				schedules[i].Tier = strings.TrimSpace(ov.Tier)
+			}
+			if strings.TrimSpace(ov.CatchUp) != "" {
+				schedules[i].CatchUp = strings.TrimSpace(ov.CatchUp)
+			}
+		}
+	}
+
+	return &TriggersConfig{
+		Schedules:  schedules,
+		InboxRules: rules,
+	}, err
 }
 
 func isProcessAlive(pid int) bool {
@@ -467,12 +572,22 @@ func IsDaemonActiveFast(vaultDir string) bool {
 // GetDaemonInfo returns the status, running state, PID, uptime, and declared triggers.
 func GetDaemonInfo(vaultDir string) DaemonInfo {
 	triggers, _ := LoadTriggers(vaultDir)
+	effTriggers, _ := LoadEffectiveTriggers(vaultDir)
+	effCount := 0
+	if effTriggers != nil {
+		for _, s := range effTriggers.Schedules {
+			if s.IsEnabled() {
+				effCount++
+			}
+		}
+	}
 	info := DaemonInfo{
-		Running:         false,
-		SchedulesCount:  len(triggers.Schedules),
-		InboxRulesCount: len(triggers.InboxRules),
-		Schedules:       triggers.Schedules,
-		InboxRules:      triggers.InboxRules,
+		Running:                 false,
+		SchedulesCount:          len(triggers.Schedules),
+		EffectiveSchedulesCount: effCount,
+		InboxRulesCount:         len(triggers.InboxRules),
+		Schedules:               triggers.Schedules,
+		InboxRules:              triggers.InboxRules,
 	}
 
 	p := daemonStatePath(vaultDir)

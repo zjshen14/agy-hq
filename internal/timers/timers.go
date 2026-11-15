@@ -1,6 +1,7 @@
 package timers
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -10,11 +11,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/routing"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // TimerCategory distinguishes agent/user one-shot Follow-Ups from recurring Schedules.
@@ -65,8 +66,6 @@ type FollowUpRequest struct {
 	CreatedByConvID string
 }
 
-var inProcTimerMu sync.Mutex
-
 func timersFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "timers.json")
 }
@@ -82,26 +81,9 @@ func randomHex(n int) string {
 }
 
 func withTimersLock(vaultDir string, fn func() error) error {
-	inProcTimerMu.Lock()
-	defer inProcTimerMu.Unlock()
-
-	memDir := filepath.Join(vaultDir, "memory")
-	if err := os.MkdirAll(memDir, 0o700); err != nil {
-		return err
-	}
-	lf, err := os.OpenFile(timersLockPath(vaultDir), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lf.Close()
-
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer func() {
-		_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
-	}()
-	return fn()
+	return store.With(context.Background(), store.RankTimers, timersLockPath(vaultDir), func(_ context.Context) error {
+		return fn()
+	})
 }
 
 func loadTimersUnlocked(vaultDir string) ([]Timer, error) {
@@ -124,9 +106,6 @@ func loadTimersUnlocked(vaultDir string) ([]Timer, error) {
 
 func saveTimersUnlocked(vaultDir string, list []Timer) error {
 	p := timersFilePath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
 	if list == nil {
 		list = []Timer{}
 	}
@@ -134,11 +113,7 @@ func saveTimersUnlocked(vaultDir string, list []Timer) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp." + randomHex(4)
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return store.WriteAtomic(p, append(data, '\n'), 0o600)
 }
 
 func parseTimerDue(raw string) (time.Time, error) {
@@ -194,7 +169,7 @@ func SetFollowUp(vaultDir string, req FollowUpRequest, now time.Time) (Timer, er
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = "gemini-4-hydrogen-low"
+		model = routing.Resolve(vaultDir, routing.Request{ExplicitTier: "quick"}).ModelID
 	}
 
 	var created Timer

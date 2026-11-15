@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
-	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 // SubagentSpawnEdge records a ground-truth parent -> child subagent invocation extracted
@@ -396,25 +396,9 @@ func obsIndexFilePath(vaultDir string) string {
 
 // ResolveBrainDir returns the Antigravity brain directory to scan for conversation transcripts.
 // When vaultDir is inside os.TempDir() (unit/E2E tests) and HQ_BRAIN_DIR / ANTIGRAVITY_APP_DATA_DIR
-// are unset, it returns a hermetic path inside the temp dir rather than scanning the host's ~/.gemini.
+// are unset, hostpaths.Resolve returns a hermetic path inside the temp dir rather than scanning ~/.gemini.
 func ResolveBrainDir(vaultDir string) string {
-	if envBrain := strings.TrimSpace(os.Getenv("HQ_BRAIN_DIR")); envBrain != "" {
-		return envBrain
-	}
-	appData := strings.TrimSpace(os.Getenv("ANTIGRAVITY_APP_DATA_DIR"))
-	if vault.IsTempPath(vaultDir) {
-		if appData != "" && vault.IsTempPath(appData) {
-			return filepath.Join(appData, "brain")
-		}
-		return filepath.Join(filepath.Dir(filepath.Clean(vaultDir)), ".brain")
-	}
-	if appData != "" {
-		return filepath.Join(appData, "brain")
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".gemini", "antigravity", "brain")
-	}
-	return ""
+	return hostpaths.Resolve(vaultDir).BrainDir
 }
 
 func loadCachedIndex(vaultDir string) *ObsIndex {

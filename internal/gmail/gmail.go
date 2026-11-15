@@ -1,7 +1,6 @@
 package gmail
 
 import (
-	"archive/zip"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 )
 
 // DefaultPrimaryQuery filters for unread human messages in the Primary tab.
@@ -42,9 +42,22 @@ type AccountConfig struct {
 	Email      string `json:"email"`
 	AGYAccount string `json:"agyAccount,omitempty"`
 	TokenFile  string `json:"tokenFile,omitempty"`
+	CLIPath    string `json:"cliPath,omitempty"`
 	Query      string `json:"query"`
 	Enabled    bool   `json:"enabled"`
 	AddedAt    string `json:"addedAt"`
+}
+
+// InitAccountOptions configures optional enterprise CLI / plugin installation flags for Gmail init.
+type InitAccountOptions struct {
+	Alias         string
+	Email         string
+	AGYAccount    string
+	TokenFile     string
+	CLIPath       string
+	Query         string
+	SetDefault    bool
+	InstallPlugin bool
 }
 
 // AccountRegistry holds all configured Gmail accounts (1 primary account now, extensible to N accounts).
@@ -195,20 +208,36 @@ func SaveRegistry(vaultDir string, reg AccountRegistry) error {
 	return os.Rename(tmp, registryPath(vaultDir))
 }
 
-// InitOrAddAccount registers a primary or additional Gmail account in local/private/gmail/accounts.json,
-// and unpacks Antigravity's bundled gmail.zip plugin into ~/.gemini/config/plugins/gmail if available.
+// InitOrAddAccount registers a primary or additional Gmail account in local/private/gmail/accounts.json
+// without performing any implicit network plugin download (auto_install_plugin defaults to false).
 func InitOrAddAccount(vaultDir, alias, email, agyAccount, tokenFile, query string, setDefault bool) (AccountConfig, error) {
-	alias = strings.ToLower(strings.TrimSpace(alias))
+	return InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{
+		Alias:         alias,
+		Email:         email,
+		AGYAccount:    agyAccount,
+		TokenFile:     tokenFile,
+		Query:         query,
+		SetDefault:    setDefault,
+		InstallPlugin: false,
+	})
+}
+
+// InitOrAddAccountWithOptions registers a Gmail account and optionally installs the official marketplace
+// Gmail plugin via `agy plugin install` only when opts.InstallPlugin is explicitly true.
+func InitOrAddAccountWithOptions(vaultDir string, opts InitAccountOptions) (AccountConfig, error) {
+	alias := strings.ToLower(strings.TrimSpace(opts.Alias))
 	if alias == "" {
 		alias = "primary"
 	}
-	email = strings.ToLower(strings.TrimSpace(email))
+	email := strings.ToLower(strings.TrimSpace(opts.Email))
 	if email == "" {
-		return AccountConfig{}, fmt.Errorf("email address is required (e.g. --email=you@gmail.com)")
+		return AccountConfig{}, fmt.Errorf("email address is required (e.g. --email=you@example.com)")
 	}
+	query := opts.Query
 	if strings.TrimSpace(query) == "" {
 		query = DefaultPrimaryQuery
 	}
+	tokenFile := strings.TrimSpace(opts.TokenFile)
 	if tokenFile == "" {
 		tokenFile = filepath.Join(vaultDir, "private", "gmail", "tokens", alias+".json")
 	}
@@ -230,23 +259,41 @@ func InitOrAddAccount(vaultDir, alias, email, agyAccount, tokenFile, query strin
 	cfg := AccountConfig{
 		Alias:      alias,
 		Email:      email,
-		AGYAccount: strings.TrimSpace(agyAccount),
+		AGYAccount: strings.TrimSpace(opts.AGYAccount),
 		TokenFile:  tokenFile,
+		CLIPath:    strings.TrimSpace(opts.CLIPath),
 		Query:      query,
 		Enabled:    true,
 		AddedAt:    time.Now().Format(time.RFC3339),
 	}
 	reg.Accounts[alias] = cfg
-	if setDefault || reg.DefaultAccount == "" || len(reg.Accounts) == 1 {
+	if opts.SetDefault || reg.DefaultAccount == "" || len(reg.Accounts) == 1 {
 		reg.DefaultAccount = alias
 	}
 	if err := SaveRegistry(vaultDir, reg); err != nil {
 		return AccountConfig{}, err
 	}
 
-	// Best-effort unpack of Antigravity's staged official gmail.zip plugin if present on host.
-	_ = ensureAntigravityGmailPlugin()
+	if opts.InstallPlugin && !hostpaths.IsTempPath(vaultDir) {
+		if err := InstallOfficialGmailPlugin(); err != nil {
+			return cfg, fmt.Errorf("account saved, but optional plugin install failed: %w", err)
+		}
+	}
 	return cfg, nil
+}
+
+// InstallOfficialGmailPlugin invokes `agy plugin install antigravity-plugins-official/plugin/gmail`
+// when the user explicitly opts in via `--install-plugin`.
+func InstallOfficialGmailPlugin() error {
+	agyBin, err := exec.LookPath("agy")
+	if err != nil {
+		return fmt.Errorf("agy CLI not found on PATH: %w", err)
+	}
+	out, err := exec.Command(agyBin, "plugin", "install", "antigravity-plugins-official/plugin/gmail").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("agy plugin install failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ResolveAccount looks up an AccountConfig by alias or email, defaulting to DefaultAccount when aliasOrEmail is "".
@@ -271,86 +318,6 @@ func ResolveAccount(vaultDir, aliasOrEmail string) (AccountConfig, error) {
 		}
 	}
 	return AccountConfig{}, fmt.Errorf("gmail account %q not found in local/private/gmail/accounts.json", aliasOrEmail)
-}
-
-func isGmailTempPath(p string) bool {
-	if p == "" {
-		return false
-	}
-	tmp := filepath.Clean(os.TempDir())
-	cleanP := filepath.Clean(p)
-	if strings.HasPrefix(cleanP, tmp) || strings.HasPrefix(cleanP, "/private"+tmp) || strings.HasPrefix(cleanP, "/tmp/") || strings.HasPrefix(cleanP, "/private/tmp/") {
-		return true
-	}
-	if evalTmp, err := filepath.EvalSymlinks(tmp); err == nil && evalTmp != "" && strings.HasPrefix(cleanP, filepath.Clean(evalTmp)) {
-		return true
-	}
-	return false
-}
-
-func ensureAntigravityGmailPlugin() error {
-	if env := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); env != "" && isGmailTempPath(env) {
-		// Skip network plugin download during isolated unit/E2E tests
-		return nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil
-	}
-	destDir := filepath.Join(home, ".gemini", "config", "plugins", "gmail")
-	if _, err := os.Stat(filepath.Join(destDir, "plugin.json")); os.IsNotExist(err) {
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get("https://www.gstatic.com/antigravity/plugins/gmail/gmail.zip")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			tmpZip, err := os.CreateTemp("", "agy-gmail-plugin-*.zip")
-			if err == nil {
-				_, _ = io.Copy(tmpZip, resp.Body)
-				_ = tmpZip.Close()
-				defer os.Remove(tmpZip.Name())
-				if zr, zErr := zip.OpenReader(tmpZip.Name()); zErr == nil {
-					for _, f := range zr.File {
-						rel := filepath.Clean(f.Name)
-						if strings.HasPrefix(rel, "..") {
-							continue
-						}
-						target := filepath.Join(destDir, rel)
-						if f.FileInfo().IsDir() {
-							_ = os.MkdirAll(target, 0o755)
-							continue
-						}
-						_ = os.MkdirAll(filepath.Dir(target), 0o755)
-						rc, openErr := f.Open()
-						if openErr != nil {
-							continue
-						}
-						mode := f.Mode()
-						if strings.Contains(rel, "scripts/") {
-							mode = 0o755
-						}
-						out, createErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-						if createErr == nil {
-							_, _ = io.Copy(out, rc)
-							_ = out.Close()
-						}
-						_ = rc.Close()
-					}
-					_ = zr.Close()
-				}
-			}
-		}
-	}
-
-	launcher := filepath.Join(destDir, "skills", "gmail", "scripts", "gmail")
-	if data, err := os.ReadFile(launcher); err == nil {
-		updated := strings.ReplaceAll(string(data), "CLI_VERSION=986250228", "CLI_VERSION=1015343799")
-		_ = os.WriteFile(launcher, []byte(updated), 0o755)
-		_ = exec.Command(launcher, "--version").Run()
-	}
-	return nil
 }
 
 // --- Quarantined Reader & HTML Sanitizer ---
@@ -1026,14 +993,29 @@ func readMockThread(mDir, alias, threadID string) (ThreadDetail, error) {
 	return td, nil
 }
 
-func resolveGmailBinary() string {
+func resolveGmailBinary(cfg AccountConfig) string {
+	if explicit := strings.TrimSpace(cfg.CLIPath); explicit != "" {
+		if st, err := os.Stat(explicit); err == nil && !st.IsDir() {
+			return explicit
+		}
+		if lp, err := exec.LookPath(explicit); err == nil && lp != "" {
+			return lp
+		}
+	}
 	if p, err := exec.LookPath("gmail"); err == nil {
 		return p
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		matches, _ := filepath.Glob(filepath.Join(home, ".gemini", "antigravity", "plugin_data", "gmail", "bin", "gmail-*"))
+	roots := hostpaths.Resolve("")
+	if roots.AppDataDir != "" {
+		matches, _ := filepath.Glob(filepath.Join(roots.AppDataDir, "plugin_data", "gmail", "bin", "gmail-*"))
 		if len(matches) > 0 {
 			return matches[0]
+		}
+	}
+	if roots.PluginsDir != "" {
+		launcher := filepath.Join(roots.PluginsDir, "gmail", "skills", "gmail", "scripts", "gmail")
+		if st, err := os.Stat(launcher); err == nil && !st.IsDir() {
+			return launcher
 		}
 	}
 	matches, _ := filepath.Glob("/usr/share/antigravity/resources/app/extensions/antigravity/bin/gmail-*")
@@ -1044,7 +1026,7 @@ func resolveGmailBinary() string {
 }
 
 func runGmailCLI(cfg AccountConfig, args ...string) ([]byte, error) {
-	bin := resolveGmailBinary()
+	bin := resolveGmailBinary(cfg)
 	if bin == "" {
 		return nil, fmt.Errorf("gmail plugin binary not found")
 	}

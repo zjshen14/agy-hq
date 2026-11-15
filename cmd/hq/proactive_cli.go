@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
@@ -232,7 +233,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 			}
 			title := fmt.Sprintf("[Task:%s] %s", scope, item.Title)
 			prompt := fmt.Sprintf("%s\n\n%s", item.Title, item.Summary)
-			resolvedModel, resolvedTier, _ := kernel.ResolveModel(prompt, "", "", "")
+			resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, prompt, "", "", "")
 			createdAt := now.UTC().Format(time.RFC3339)
 			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 				TaskSlug:      slug,
@@ -1264,6 +1265,193 @@ func runExecSandboxedCLI(vaultDir string, args []string) {
 			os.Exit(exitErr.ExitCode())
 		}
 		fmt.Fprintf(os.Stderr, "hq exec-sandboxed failed: %v\n", runErr)
+		os.Exit(1)
+	}
+}
+
+func runTriggersCLI(vaultDir string, args []string) {
+	sub := "list"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		rest = args[1:]
+	}
+	now := time.Now()
+
+	switch sub {
+	case "list":
+		fs := flag.NewFlagSet("triggers list", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		cfg, _ := kernel.LoadEffectiveTriggers(vaultDir)
+		if cfg == nil {
+			cfg = &kernel.TriggersConfig{}
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(cfg)
+			return
+		}
+		if len(cfg.Schedules) == 0 {
+			fmt.Println("No declarative schedules configured.")
+			return
+		}
+		for _, s := range cfg.Schedules {
+			state := "enabled"
+			if !s.IsEnabled() {
+				state = "PAUSED"
+			}
+			tier := s.Tier
+			if tier == "" {
+				tier = "-"
+			}
+			src := s.Source
+			if src == "" {
+				src = "core"
+			}
+			fmt.Printf("- [%s] %-24s  mode=%-17s  tier=%-12s  cron=%q  source=%s\n",
+				state, s.FQID(), s.EffectiveMode(), tier, s.Cron, src)
+		}
+
+	case "pause", "resume":
+		var targetID string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && targetID == "" {
+				targetID = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("triggers "+sub, flag.ExitOnError)
+		reason := fs.String("reason", "", "Optional pause reason")
+		catchUp := fs.String("catch-up", "", "Optional catch-up policy on resume (none or last)")
+		dropQueued := fs.Bool("drop-queued", false, "Also drop any pending unleased events for this schedule")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if targetID == "" {
+			fmt.Fprintf(os.Stderr, "usage: hq triggers %s <schedule-id> [--reason=...] [--catch-up=none|last] [--drop-queued] [--json]\n", sub)
+			os.Exit(1)
+		}
+		paused := sub == "pause"
+		fqid, ov, err := extension.SetSchedulePaused(context.Background(), vaultDir, targetID, paused, *reason, *catchUp, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq triggers %s failed: %v\n", sub, err)
+			os.Exit(1)
+		}
+		dropped := 0
+		if paused && *dropQueued {
+			dropReason := *reason
+			if dropReason == "" {
+				dropReason = "paused via hq triggers pause --drop-queued"
+			}
+			dropped, _ = events.DropPendingBySchedule(vaultDir, fqid, dropReason, now)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"fqid":          fqid,
+				"paused":        paused,
+				"override":      ov,
+				"droppedQueued": dropped,
+			})
+			return
+		}
+		if paused {
+			fmt.Printf("Paused schedule %s (droppedQueued=%d)\n", fqid, dropped)
+		} else {
+			fmt.Printf("Resumed schedule %s (catch_up=%s)\n", fqid, ov.CatchUp)
+		}
+
+	case "fire":
+		var targetID string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && targetID == "" {
+				targetID = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("triggers fire", flag.ExitOnError)
+		bypassPrecheck := fs.Bool("bypass-precheck", false, "Bypass 0-token precheck and enqueue immediately")
+		dryRun := fs.Bool("dry-run", false, "Simulate dispatch without spawning a live conversation")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if targetID == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq triggers fire <schedule-id> [--bypass-precheck] [--dry-run] [--json]")
+			os.Exit(1)
+		}
+		actions, err := kernel.FireScheduleOnce(vaultDir, targetID, *bypassPrecheck, *dryRun, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq triggers fire failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"schedule": targetID,
+				"actions":  actions,
+			})
+			return
+		}
+		if len(actions) == 0 {
+			fmt.Printf("Checked schedule %s (0-token precheck yielded no new work)\n", targetID)
+			return
+		}
+		for _, act := range actions {
+			fmt.Println(act)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown triggers subcommand %q (expected list, pause, resume, fire)\n", sub)
+		os.Exit(1)
+	}
+}
+
+func runDispatchCLI(vaultDir string, args []string) {
+	sub := "resolve"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		rest = args[1:]
+	}
+	switch sub {
+	case "resolve":
+		var skillName string
+		var flagArgs []string
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "-") && skillName == "" {
+				skillName = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		fs := flag.NewFlagSet("dispatch resolve", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if skillName == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq dispatch resolve <skill> [--json]")
+			os.Exit(1)
+		}
+		res := extension.ResolveSkillDispatch(vaultDir, skillName)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(res)
+			return
+		}
+		if res.Overridden {
+			fmt.Printf("%s -> %s (override: %s)\n", res.LogicalSkill, res.ActiveTarget, res.SkillPath)
+		} else {
+			fmt.Printf("%s -> %s\n", res.LogicalSkill, res.ActiveTarget)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "unknown dispatch subcommand %q (expected resolve)\n", sub)
 		os.Exit(1)
 	}
 }

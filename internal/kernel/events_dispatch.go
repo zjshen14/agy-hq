@@ -16,6 +16,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/routing"
 )
 
 // DeliverMessageToSession injects a user/system message into an existing Antigravity conversation
@@ -356,7 +357,7 @@ func enqueueQueuedInboxFile(vaultDir, dstPath, name string, now time.Time) {
 	skill := ClassifyInboxFile(name)
 	title := fmt.Sprintf("[Auto] Inbox Drop: %s (/%s)", name, skill)
 	prompt := fmt.Sprintf("A new file was dropped into the inbox and moved to %s. Activate the %s skill and process this file.", dstPath, skill)
-	modelID, _, _ := ResolveModel(prompt, "flash", "", "")
+	modelID := routing.Resolve(vaultDir, routing.Request{Prompt: prompt, ExplicitTier: "standard"}).ModelID
 	dedupKey := fmt.Sprintf("inbox_drop:%s:%s", name, fileContentDigest16(dstPath))
 
 	_, _, _ = events.Enqueue(vaultDir, events.Event{

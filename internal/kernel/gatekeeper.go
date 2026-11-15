@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/routing"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // TriggerCursor tracks deterministic sidecar pre-check execution, SHA-256 deduplication,
@@ -35,6 +38,10 @@ func triggerCursorsPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "trigger_cursors.json")
 }
 
+func triggerCursorsLockPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", ".trigger_cursors.lock")
+}
+
 // LoadTriggerCursors reads local/memory/trigger_cursors.json.
 func LoadTriggerCursors(vaultDir string) map[string]TriggerCursor {
 	out := make(map[string]TriggerCursor)
@@ -46,17 +53,39 @@ func LoadTriggerCursors(vaultDir string) map[string]TriggerCursor {
 	return out
 }
 
-// SaveTriggerCursors writes local/memory/trigger_cursors.json.
+// SaveTriggerCursors writes local/memory/trigger_cursors.json atomically under RankTriggerCur lock.
 func SaveTriggerCursors(vaultDir string, cursors map[string]TriggerCursor) error {
-	p := triggerCursorsPath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
+	return store.With(context.Background(), store.RankTriggerCur, triggerCursorsLockPath(vaultDir), func(_ context.Context) error {
+		return saveTriggerCursorsUnlocked(vaultDir, cursors)
+	})
+}
+
+func saveTriggerCursorsUnlocked(vaultDir string, cursors map[string]TriggerCursor) error {
 	b, err := json.MarshalIndent(cursors, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o600)
+	return store.WriteAtomic(triggerCursorsPath(vaultDir), append(b, '\n'), 0o600)
+}
+
+func resolveScheduleModel(vaultDir string, s ScheduleTrigger) string {
+	prompt := s.DefaultPrompt()
+	tier := strings.TrimSpace(s.Tier)
+	explicitM := strings.TrimSpace(s.Model)
+	if tier != "" {
+		builtinM, _, _ := routing.ResolveBuiltin(prompt, "", "", tier)
+		if explicitM == "" || strings.EqualFold(explicitM, builtinM) {
+			return routing.Resolve(vaultDir, routing.Request{
+				Prompt:       prompt,
+				ExplicitTier: tier,
+			}).ModelID
+		}
+	}
+	return routing.Resolve(vaultDir, routing.Request{
+		Prompt:        prompt,
+		ExplicitModel: explicitM,
+		ExplicitTier:  tier,
+	}).ModelID
 }
 
 func matchCronField(expr string, val, minVal, maxVal int, allowSevenAsZero bool) bool {
@@ -147,19 +176,79 @@ func MatchesCron(cronExpr string, now time.Time) (bool, string) {
 }
 
 // EvaluateDaemonGatekeepers executes 0-token Go sidecar pre-checks for `daemon_gatekeeper`
-// and `isolated_worker` schedules declared in local/triggers.yaml.
+// and `isolated_worker` schedules declared in local/triggers.yaml (plus enabled companion packs).
 // If forceCheck is true, cron minute matching is bypassed so callers/tests can evaluate pre-checks immediately.
 func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, dryRun bool) (actions []string, zeroTokenSaves int, err error) {
+	return evaluateGatekeepersFiltered(vaultDir, "", now, forceCheck, dryRun)
+}
+
+// FireScheduleOnce immediately evaluates or enqueues a single schedule by bare ID or FQID (`hq triggers fire <id>`),
+// honoring its precheck unless bypassPrecheck is true, even if the schedule is currently paused.
+func FireScheduleOnce(vaultDir, targetID string, bypassPrecheck bool, dryRun bool, now time.Time) ([]string, error) {
+	targetFQID := extension.NormalizeScheduleFQID(targetID)
+	if targetFQID == "" {
+		return nil, fmt.Errorf("schedule id is required")
+	}
+	cfg, _ := LoadEffectiveTriggers(vaultDir)
+	if cfg == nil {
+		return nil, fmt.Errorf("no triggers configured")
+	}
+	found := false
+	for _, s := range cfg.Schedules {
+		if s.FQID() == targetFQID || s.ID == targetID {
+			found = true
+			if bypassPrecheck {
+				if now.IsZero() {
+					now = time.Now()
+				}
+				modelID := resolveScheduleModel(vaultDir, s)
+				prompt := s.DefaultPrompt()
+				if deliv := s.EffectiveDelivery(); deliv != "" {
+					prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
+				}
+				title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, s.Skill)
+				slotKey := now.UTC().Format("2006-01-02T15:04:05Z")
+				_, _, enqErr := events.Enqueue(vaultDir, events.Event{
+					Source:   "gatekeeper",
+					DedupKey: fmt.Sprintf("manual-fire:%s:%s", s.FQID(), slotKey),
+					ScopeKey: "gatekeeper:" + s.ID,
+					Skill:    s.Skill,
+					Model:    modelID,
+					Title:    title,
+					Prompt:   prompt,
+					Metadata: map[string]string{
+						"trigger":      "gatekeeper:" + s.ID,
+						"action_label": fmt.Sprintf("fire:%s -> /%s", s.ID, s.Skill),
+						"schedule_id":  s.ID,
+					},
+				}, now)
+				if enqErr != nil {
+					return nil, enqErr
+				}
+				return DispatchPendingEvents(vaultDir, now, dryRun)
+			}
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("schedule %q not found", targetID)
+	}
+	actions, _, evalErr := evaluateGatekeepersFiltered(vaultDir, targetFQID, now, true, dryRun)
+	return actions, evalErr
+}
+
+func evaluateGatekeepersFiltered(vaultDir, onlyFQID string, now time.Time, forceCheck bool, dryRun bool) (actions []string, zeroTokenSaves int, err error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	cfg, err := LoadTriggers(vaultDir)
-	if err != nil || cfg == nil || len(cfg.Schedules) == 0 {
+	cfg, err := LoadEffectiveTriggers(vaultDir)
+	if err != nil && (cfg == nil || len(cfg.Schedules) == 0) {
+		return nil, 0, nil
+	}
+	if cfg == nil || len(cfg.Schedules) == 0 {
 		return nil, 0, nil
 	}
 
-	cursors := LoadTriggerCursors(vaultDir)
-	dirtyCursors := false
 	rootDir := filepath.Dir(filepath.Clean(vaultDir))
 	if envRoot := strings.TrimSpace(os.Getenv("HQ_ROOT_DIR")); envRoot != "" {
 		if abs, aErr := filepath.Abs(envRoot); aErr == nil {
@@ -167,170 +256,184 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 		}
 	}
 
-	for _, s := range cfg.Schedules {
-		if forceCheck {
-			if len(s.PrecheckCmd) == 0 {
+	_ = store.With(context.Background(), store.RankTriggerCur, triggerCursorsLockPath(vaultDir), func(_ context.Context) error {
+		cursors := LoadTriggerCursors(vaultDir)
+		dirtyCursors := false
+
+		for _, s := range cfg.Schedules {
+			if onlyFQID != "" {
+				if s.FQID() != onlyFQID {
+					continue
+				}
+			} else if !s.IsEnabled() {
 				continue
 			}
-		} else {
-			mode := s.EffectiveMode()
-			if mode != "daemon_gatekeeper" && mode != "isolated_worker" {
-				continue
+
+			if forceCheck && onlyFQID == "" {
+				if len(s.PrecheckCmd) == 0 {
+					continue
+				}
+			} else if onlyFQID == "" {
+				mode := s.EffectiveMode()
+				if mode != "daemon_gatekeeper" && mode != "isolated_worker" {
+					continue
+				}
 			}
-		}
 
-		cur := cursors[s.ID]
-		slotKey := now.UTC().Format("2006-01-02T15:04Z")
-		if !forceCheck {
-			matched, sk := MatchesCron(s.Cron, now)
-			if !matched || (sk != "" && cur.LastCronSlot == sk) {
-				continue
+			cur := cursors[s.ID]
+			slotKey := now.UTC().Format("2006-01-02T15:04Z")
+			if !forceCheck {
+				matched, sk := MatchesCron(s.Cron, now)
+				if !matched || (sk != "" && cur.LastCronSlot == sk) {
+					continue
+				}
+				slotKey = sk
 			}
-			slotKey = sk
-		}
 
-		cur.ID = s.ID
-		cur.LastCheckedAt = now.UTC().Format(time.RFC3339)
-		dirtyCursors = true
+			cur.ID = s.ID
+			cur.LastCheckedAt = now.UTC().Format(time.RFC3339)
+			dirtyCursors = true
 
-		shouldSpawn := false
-		precheckDigest := ""
-		nextStdoutSHA := cur.LastStdoutSHA256
-		shaHex := "no-precheck"
+			shouldSpawn := false
+			precheckDigest := ""
+			nextStdoutSHA := cur.LastStdoutSHA256
+			shaHex := "no-precheck"
 
-		if len(s.PrecheckCmd) > 0 {
-			bin0 := s.PrecheckCmd[0]
-			if bin0 == "hq" || bin0 == "./bin/hq" || bin0 == "bin/hq" {
-				cand := filepath.Join(rootDir, bin0)
-				if bin0 != "hq" {
-					if st, sErr := os.Stat(cand); sErr == nil && !st.IsDir() {
-						bin0 = cand
+			if len(s.PrecheckCmd) > 0 {
+				bin0 := s.PrecheckCmd[0]
+				if bin0 == "hq" || bin0 == "./bin/hq" || bin0 == "bin/hq" {
+					cand := filepath.Join(rootDir, bin0)
+					if bin0 != "hq" {
+						if st, sErr := os.Stat(cand); sErr == nil && !st.IsDir() {
+							bin0 = cand
+						} else if exe, eErr := os.Executable(); eErr == nil && exe != "" && strings.HasPrefix(filepath.Base(exe), "hq") {
+							bin0 = exe
+						} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
+							bin0 = lp
+						}
 					} else if exe, eErr := os.Executable(); eErr == nil && exe != "" && strings.HasPrefix(filepath.Base(exe), "hq") {
 						bin0 = exe
 					} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
 						bin0 = lp
+					} else if st, sErr := os.Stat(filepath.Join(rootDir, "bin", "hq")); sErr == nil && !st.IsDir() {
+						bin0 = filepath.Join(rootDir, "bin", "hq")
 					}
-				} else if exe, eErr := os.Executable(); eErr == nil && exe != "" && strings.HasPrefix(filepath.Base(exe), "hq") {
-					bin0 = exe
-				} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
-					bin0 = lp
-				} else if st, sErr := os.Stat(filepath.Join(rootDir, "bin", "hq")); sErr == nil && !st.IsDir() {
-					bin0 = filepath.Join(rootDir, "bin", "hq")
 				}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			cmd := exec.CommandContext(ctx, bin0, s.PrecheckCmd[1:]...)
-			cmd.Dir = rootDir
-			cmd.Env = append(sanitizedGitCmd().Env, "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
-			outBytes, cmdErr := cmd.CombinedOutput()
-			cancel()
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				cmd := exec.CommandContext(ctx, bin0, s.PrecheckCmd[1:]...)
+				cmd.Dir = rootDir
+				cmd.Env = append(sanitizedGitCmd().Env, "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
+				outBytes, cmdErr := cmd.CombinedOutput()
+				cancel()
 
-			trimmedOut := strings.TrimSpace(string(outBytes))
-			if cmdErr != nil {
-				errMsg := cmdErr.Error()
-				if trimmedOut != "" {
-					errMsg = errMsg + ": " + trimmedOut
-				}
-				if runes := []rune(errMsg); len(runes) > 240 {
-					errMsg = string(runes[:240]) + "..."
-				}
-				cur.ConsecutiveErrors++
-				cur.LastError = errMsg
-				cur.LastErrorAt = now.UTC().Format(time.RFC3339)
-				cursors[s.ID] = cur
-				if cur.ConsecutiveErrors == 3 {
-					skillName := s.Skill
-					if skillName == "" {
-						skillName = s.ID
+				trimmedOut := strings.TrimSpace(string(outBytes))
+				if cmdErr != nil {
+					errMsg := cmdErr.Error()
+					if trimmedOut != "" {
+						errMsg = errMsg + ": " + trimmedOut
 					}
-					_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
-						Tier:        outbox.TierBriefRollup,
-						SourceSkill: skillName,
-						Scope:       s.ID,
-						Title:       "Gatekeeper precheck failing: " + s.ID,
-						Summary:     fmt.Sprintf("Schedule %q failed 3 consecutive pre-checks without advancing cursor. Last error: %s", s.ID, errMsg),
-					}, now)
+					if runes := []rune(errMsg); len(runes) > 240 {
+						errMsg = string(runes[:240]) + "..."
+					}
+					cur.ConsecutiveErrors++
+					cur.LastError = errMsg
+					cur.LastErrorAt = now.UTC().Format(time.RFC3339)
+					cursors[s.ID] = cur
+					if cur.ConsecutiveErrors == 3 {
+						skillName := s.Skill
+						if skillName == "" {
+							skillName = s.ID
+						}
+						_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
+							Tier:        outbox.TierBriefRollup,
+							SourceSkill: skillName,
+							Scope:       s.ID,
+							Title:       "Gatekeeper precheck failing: " + s.ID,
+							Summary:     fmt.Sprintf("Schedule %q failed 3 consecutive pre-checks without advancing cursor. Last error: %s", s.ID, errMsg),
+						}, now)
+					}
+					continue
 				}
-				continue
-			}
 
-			cur.ConsecutiveErrors = 0
-			cur.LastError = ""
-			cur.LastErrorAt = ""
+				cur.ConsecutiveErrors = 0
+				cur.LastError = ""
+				cur.LastErrorAt = ""
 
-			sum := sha256.Sum256([]byte(trimmedOut))
-			shaHex = hex.EncodeToString(sum[:])
+				sum := sha256.Sum256([]byte(trimmedOut))
+				shaHex = hex.EncodeToString(sum[:])
 
-			dedup := s.EffectiveDedupMode()
-			switch dedup {
-			case "none":
-				shouldSpawn = true
-			case "exit_zero_nonempty":
-				shouldSpawn = trimmedOut != ""
-			default: // "stdout_sha256"
-				if trimmedOut != "" && shaHex != cur.LastStdoutSHA256 {
+				dedup := s.EffectiveDedupMode()
+				switch dedup {
+				case "none":
 					shouldSpawn = true
-					nextStdoutSHA = shaHex
+				case "exit_zero_nonempty":
+					shouldSpawn = trimmedOut != ""
+				default: // "stdout_sha256"
+					if trimmedOut != "" && shaHex != cur.LastStdoutSHA256 {
+						shouldSpawn = true
+						nextStdoutSHA = shaHex
+					}
+				}
+
+				if !shouldSpawn {
+					cur.LastCronSlot = slotKey
+					cur.SkipsCount++
+					cursors[s.ID] = cur
+					zeroTokenSaves++
+					continue
+				}
+				if runes := []rune(trimmedOut); len(runes) > 300 {
+					precheckDigest = string(runes[:300]) + "..."
+				} else {
+					precheckDigest = trimmedOut
+				}
+			} else {
+				cur.ConsecutiveErrors = 0
+				cur.LastError = ""
+				cur.LastErrorAt = ""
+				shouldSpawn = true
+			}
+
+			if shouldSpawn {
+				modelID := resolveScheduleModel(vaultDir, s)
+				prompt := s.DefaultPrompt()
+				if precheckDigest != "" {
+					prompt += fmt.Sprintf("\n\nGatekeeper Delta Output:\n%s", precheckDigest)
+				}
+				if deliv := s.EffectiveDelivery(); deliv != "" {
+					prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
+				}
+				title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, s.Skill)
+				dedupKey := fmt.Sprintf("gatekeeper:%s:%s:%s", s.ID, slotKey, shaHex)
+				_, _, enqErr := events.Enqueue(vaultDir, events.Event{
+					Source:   "gatekeeper",
+					DedupKey: dedupKey,
+					ScopeKey: "gatekeeper:" + s.ID,
+					Skill:    s.Skill,
+					Model:    modelID,
+					Title:    title,
+					Prompt:   prompt,
+					Metadata: map[string]string{
+						"trigger":      "gatekeeper:" + s.ID,
+						"action_label": fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, s.Skill),
+						"schedule_id":  s.ID,
+					},
+				}, now)
+				if enqErr == nil {
+					cur.LastCronSlot = slotKey
+					cur.LastStdoutSHA256 = nextStdoutSHA
+					cur.LastTriggeredAt = now.UTC().Format(time.RFC3339)
+					cursors[s.ID] = cur
 				}
 			}
-
-			if !shouldSpawn {
-				cur.LastCronSlot = slotKey
-				cur.SkipsCount++
-				cursors[s.ID] = cur
-				zeroTokenSaves++
-				continue
-			}
-			if runes := []rune(trimmedOut); len(runes) > 300 {
-				precheckDigest = string(runes[:300]) + "..."
-			} else {
-				precheckDigest = trimmedOut
-			}
-		} else {
-			// isolated_worker without a precheck command (e.g., nightly sleep-consolidate)
-			cur.ConsecutiveErrors = 0
-			cur.LastError = ""
-			cur.LastErrorAt = ""
-			shouldSpawn = true
 		}
 
-		if shouldSpawn {
-			modelID, _, _ := ResolveModel(s.DefaultPrompt(), s.Model, "", "")
-			prompt := s.DefaultPrompt()
-			if precheckDigest != "" {
-				prompt += fmt.Sprintf("\n\nGatekeeper Delta Output:\n%s", precheckDigest)
-			}
-			if deliv := s.EffectiveDelivery(); deliv != "" {
-				prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
-			}
-			title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, s.Skill)
-			dedupKey := fmt.Sprintf("gatekeeper:%s:%s:%s", s.ID, slotKey, shaHex)
-			_, _, enqErr := events.Enqueue(vaultDir, events.Event{
-				Source:   "gatekeeper",
-				DedupKey: dedupKey,
-				ScopeKey: "gatekeeper:" + s.ID,
-				Skill:    s.Skill,
-				Model:    modelID,
-				Title:    title,
-				Prompt:   prompt,
-				Metadata: map[string]string{
-					"trigger":      "gatekeeper:" + s.ID,
-					"action_label": fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, s.Skill),
-					"schedule_id":  s.ID,
-				},
-			}, now)
-			if enqErr == nil {
-				cur.LastCronSlot = slotKey
-				cur.LastStdoutSHA256 = nextStdoutSHA
-				cur.LastTriggeredAt = now.UTC().Format(time.RFC3339)
-				cursors[s.ID] = cur
-			}
+		if dirtyCursors {
+			return saveTriggerCursorsUnlocked(vaultDir, cursors)
 		}
-	}
+		return nil
+	})
 
-	if dirtyCursors {
-		_ = SaveTriggerCursors(vaultDir, cursors)
-	}
 	if zeroTokenSaves > 0 {
 		st := LoadQuota(vaultDir)
 		st.GatekeeperSavesToday += zeroTokenSaves

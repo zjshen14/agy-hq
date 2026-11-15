@@ -16,6 +16,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
@@ -195,6 +196,7 @@ func isSingleHQCommand(cmdLine string) bool {
 func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
+	_ = hostpaths.PersistFromLiveEnv(vaultDir)
 
 	// Zero-touch auto-bootstrap: if USER.md does not exist yet in the target Vault,
 	// automatically initialize the private Vault from disk templates/ or embedded templates.FS.
@@ -297,6 +299,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 			fd, _ := kernel.GetFrontDesk(vaultDir)
 			_, unarmedTriggers := kernel.GetUnarmedTriggers(vaultDir)
+			disarmTriggers := kernel.GetDisarmTriggers(vaultDir)
 
 			roleBanner := fmt.Sprintf(
 				"## 🎯 Active Role: [HQ] Front Desk Coordinator (NON-BLOCKING)\n"+
@@ -309,6 +312,16 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				kernel.FrontDeskPinTip,
 			)
 			zone2Sections = append(zone2Sections, roleBanner)
+
+			if len(disarmTriggers) > 0 {
+				var disarmLines []string
+				disarmLines = append(disarmLines, "## ⏸️ Paused Schedules Requiring Front Desk Disarm")
+				for _, dt := range disarmTriggers {
+					disarmLines = append(disarmLines, fmt.Sprintf("- `%s` (`%s`): paused via `hq triggers pause` — cancel its active timer in this thread via `manage_task(Action=\"kill\")`.", dt.ID, dt.Cron))
+					_ = kernel.ClearArmedTrigger(vaultDir, dt.ID)
+				}
+				zone2Sections = append(zone2Sections, strings.Join(disarmLines, "\n"))
+			}
 
 			if !ok || !fd.ConsolePinned || len(unarmedTriggers) > 0 {
 				artDir := strings.TrimSpace(payload.ArtifactDirectoryPath)
@@ -520,7 +533,7 @@ var (
 
 	outboundCommandPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post|patch|update|delete)\b`),
-		regexp.MustCompile(`(?i)\bgmail(?:-[0-9]+)?\b.*\b(send-message|send-draft)\b`),
+		regexp.MustCompile(`(?i)(?:^|[;&|]\s*|\bAGY_ACCOUNT=\S+\s+)(?:\S+/)?gmail(?:-[0-9]+)?\b[^;&|\n]*\b(send-message|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gmail\s+send-draft\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gchat\s+(send|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bchat\.googleapis\.com/v1/spaces/[^\s]*messages\b`),
@@ -723,6 +736,24 @@ func canonicalizeHookPath(vaultDir, rawPath string) string {
 	}
 }
 
+func isSystemGeneratedTranscriptPath(cleanSlash string) bool {
+	return strings.Contains(cleanSlash, "/.system_generated/") || strings.HasSuffix(cleanSlash, "/.system_generated")
+}
+
+func pathHasSymlink(rawPath string) bool {
+	cur := filepath.Clean(rawPath)
+	for {
+		if st, err := os.Lstat(cur); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+}
+
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
 // as well as Front Desk non-blocking policy (blocking repo/worktree edits, test runs, and capping lookups at 3).
 func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
@@ -735,7 +766,10 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	}
 
 	if payload.ConversationID != "" {
-		_ = events.RenewLeaseByConversation(vaultDir, payload.ConversationID, time.Now(), events.DefaultLeaseTTL)
+		convID := payload.ConversationID
+		defer func() {
+			_, _ = events.TryRenewLeaseByConversation(vaultDir, convID, time.Now(), events.DefaultLeaseTTL)
+		}()
 	}
 
 	if payload.ToolCall.Name == "run_command" {
@@ -873,10 +907,18 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Protect deterministic proposal, RSI verification, and durable event/timer stores from direct LLM file tampering across all sessions
+	// Protect deterministic proposal, RSI verification, transcript logs (.system_generated), and durable event/timer stores from direct LLM file tampering across all sessions
 	if payload.ToolCall.Name == "write_file" || payload.ToolCall.Name == "edit_file" {
 		if pathArg, ok := payload.ToolCall.Args["Path"].(string); ok && strings.TrimSpace(pathArg) != "" {
 			canonPath := canonicalizeHookPath(vaultDir, pathArg)
+			rawCleanSlash := filepath.ToSlash(filepath.Clean(pathArg))
+			canonSlash := filepath.ToSlash(canonPath)
+			if isSystemGeneratedTranscriptPath(rawCleanSlash) || isSystemGeneratedTranscriptPath(canonSlash) {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   "Blocked by agy-hq integrity policy: direct file writes inside .system_generated transcript/log directories are prohibited across all sessions.",
+				})
+			}
 			canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 			for _, protectedSub := range []string{
 				filepath.Join(canonVault, "memory", "pending"),
@@ -1144,16 +1186,30 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	// Rule A: Block Direct Source/Worktree File Edits on the Front Desk (edit_file / write_file)
 	if payload.ToolCall.Name == "edit_file" || payload.ToolCall.Name == "write_file" {
 		pathArg, _ := payload.ToolCall.Args["Path"].(string)
-		cleanPath := filepath.Clean(pathArg)
+		cleanPath := canonicalizeHookPath(vaultDir, pathArg)
+		hasLink := pathHasSymlink(pathArg)
 
-		cleanArtDir := filepath.Clean(payload.ArtifactDirectoryPath)
-		fdArtDir := filepath.Clean(fd.ArtifactDir)
+		cleanArtDir := ""
+		if strings.TrimSpace(payload.ArtifactDirectoryPath) != "" {
+			cleanArtDir = canonicalizeHookPath(vaultDir, payload.ArtifactDirectoryPath)
+		}
+		fdArtDir := ""
+		if strings.TrimSpace(fd.ArtifactDir) != "" {
+			fdArtDir = canonicalizeHookPath(vaultDir, fd.ArtifactDir)
+		}
+		ownBrainConvDir := ""
+		if roots := hostpaths.Resolve(vaultDir); roots.BrainDir != "" && strings.TrimSpace(payload.ConversationID) != "" {
+			ownBrainConvDir = canonicalizeHookPath(vaultDir, filepath.Join(roots.BrainDir, strings.TrimSpace(payload.ConversationID)))
+		}
 
 		isArtifact := false
-		if (cleanArtDir != "." && cleanArtDir != "" && (cleanPath == cleanArtDir || strings.HasPrefix(cleanPath, cleanArtDir+string(filepath.Separator)))) ||
-			(fdArtDir != "." && fdArtDir != "" && (cleanPath == fdArtDir || strings.HasPrefix(cleanPath, fdArtDir+string(filepath.Separator)))) ||
-			strings.Contains(cleanPath, "/.gemini/antigravity/brain/") {
-			isArtifact = true
+		if !hasLink && !isSystemGeneratedTranscriptPath(filepath.ToSlash(cleanPath)) {
+			for _, allowedArt := range []string{cleanArtDir, fdArtDir, ownBrainConvDir} {
+				if allowedArt != "" && allowedArt != "." && (cleanPath == allowedArt || strings.HasPrefix(cleanPath, allowedArt+string(filepath.Separator))) {
+					isArtifact = true
+					break
+				}
+			}
 		}
 
 		cleanVaultDir := filepath.Clean(vaultDir)

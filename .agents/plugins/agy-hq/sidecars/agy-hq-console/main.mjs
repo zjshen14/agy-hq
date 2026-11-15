@@ -7,7 +7,10 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const homeDir = process.env.HOME || homedir();
+const homeDir = process.env.HQ_HOME_DIR || process.env.HOME || homedir();
+const geminiDir = process.env.HQ_GEMINI_DIR || join(homeDir, '.gemini');
+const configDir = process.env.ANTIGRAVITY_CONFIG_DIR || process.env.HQ_CONFIG_DIR || join(geminiDir, 'config');
+const appDataDir = process.env.ANTIGRAVITY_APP_DATA_DIR || join(geminiDir, 'antigravity');
 const TARGET_PORT = 4242;
 const TARGET_HOST = '127.0.0.1';
 
@@ -23,7 +26,7 @@ function isExecutable(p) {
 
 function resolveDefaultCwd() {
   try {
-    const cfgPath = join(homeDir, '.gemini', 'antigravity', 'hq', 'config.json');
+    const cfgPath = join(appDataDir, 'hq', 'config.json');
     if (existsSync(cfgPath)) {
       const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
       if (cfg?.sourceRepoDir && existsSync(cfg.sourceRepoDir)) {
@@ -92,8 +95,8 @@ function resolveHQBin() {
 // Preload JS location or fallback
 let preloadJS = '';
 const possiblePreloads = [
-  join(homeDir, '.gemini/config/node_modules/sidecar_sdk/preload.js'),
-  join(homeDir, '.gemini/antigravity/lib/node_modules/sidecar_sdk/preload.js'),
+  join(configDir, 'node_modules/sidecar_sdk/preload.js'),
+  join(appDataDir, 'lib/node_modules/sidecar_sdk/preload.js'),
   join(__dirname, 'preload.js'),
 ];
 for (const p of possiblePreloads) {

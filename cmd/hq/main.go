@@ -950,7 +950,7 @@ func main() {
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget
-		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
+		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
 		fullPrompt := *prompt
 		var wtDir string
 		var repoRootPath string
@@ -1065,7 +1065,7 @@ func main() {
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget
-		resolvedModel, resolvedTier, _ := kernel.ResolveModel(*prompt, *model, *depth, *tier)
+		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
 		subRole := *role
 		if subRole == "" {
 			subRole = fmt.Sprintf("[%s] general: %s", resolvedTier, *taskName)
@@ -1102,13 +1102,24 @@ func main() {
 		case "init", "add-account":
 			fs := flag.NewFlagSet("gmail "+os.Args[2], flag.ExitOnError)
 			alias := fs.String("alias", "primary", "Account alias (e.g. primary, personal-2, shopping)")
-			email := fs.String("email", "", "Gmail address (e.g. you@gmail.com)")
+			email := fs.String("email", "", "Gmail address (e.g. you@example.com)")
 			agyAcct := fs.String("agy-account", "", "Optional AGY_ACCOUNT name if signed in via Antigravity plugin")
 			tokenFile := fs.String("token-file", "", "Optional path to read-only OAuth2 token JSON for hq daemon sidecar")
+			cliPath := fs.String("cli-path", "", "Optional explicit path to gmail CLI binary")
+			installPlugin := fs.Bool("install-plugin", false, "Opt-in install of official Antigravity Gmail plugin via agy CLI")
 			query := fs.String("query", gmail.DefaultPrimaryQuery, "Default unread search query for sidecar precheck")
 			setDefault := fs.Bool("default", os.Args[2] == "init", "Set this account as the default Gmail account")
 			_ = fs.Parse(os.Args[3:])
-			cfg, err := gmail.InitOrAddAccount(vaultDir, *alias, *email, *agyAcct, *tokenFile, *query, *setDefault)
+			cfg, err := gmail.InitOrAddAccountWithOptions(vaultDir, gmail.InitAccountOptions{
+				Alias:         *alias,
+				Email:         *email,
+				AGYAccount:    *agyAcct,
+				TokenFile:     *tokenFile,
+				CLIPath:       *cliPath,
+				Query:         *query,
+				SetDefault:    *setDefault,
+				InstallPlugin: *installPlugin,
+			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gmail %s failed: %v\n", os.Args[2], err)
 				os.Exit(1)
@@ -2015,6 +2026,12 @@ func main() {
 
 	case "ci":
 		runCICLI(rootDir, os.Args[2:])
+
+	case "triggers":
+		runTriggersCLI(vaultDir, os.Args[2:])
+
+	case "dispatch":
+		runDispatchCLI(vaultDir, os.Args[2:])
 
 	default:
 		printUsage()
@@ -3390,6 +3407,8 @@ Commands:
   outbox <add|list|drain|eval>        4-tier attention outbox, quiet-hours DND & signal-to-noise eval
   events <enqueue|list|inspect|retry|drop|dispatch|token>  Durable crash-safe Event Inbox & webhook token
   timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
+  triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
+  dispatch resolve <skill>            Resolve active core or companion-pack skill target
   progress <save|show|list|archive>   Structured cross-run & pre-compaction task checkpoints
   exec-sandboxed [--net-isolated] -- <cmd>  Execute subprocess inside OS credential sandbox
   ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions
