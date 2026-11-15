@@ -18,6 +18,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/timers"
@@ -2040,6 +2041,23 @@ func ClassifyInboxFile(filename string) string {
 		if reSecFiling.MatchString(filename) {
 			return "thesis-check"
 		}
+	}
+	return "inbox-triage"
+}
+
+// ClassifyInboxFileForVault routes a filename in local/inbox/ to a domain skill only when
+// that skill is installed in <vault>/skills/<skill>/SKILL.md or overridden by a trusted companion pack;
+// otherwise it falls back to Core OS "inbox-triage".
+func ClassifyInboxFileForVault(vaultDir, filename string) string {
+	skill := ClassifyInboxFile(filename)
+	if skill == "inbox-triage" || strings.TrimSpace(vaultDir) == "" {
+		return skill
+	}
+	if _, err := os.Stat(filepath.Join(vaultDir, "skills", skill, "SKILL.md")); err == nil {
+		return skill
+	}
+	if res := extension.ResolveSkillDispatch(vaultDir, skill); res.Overridden && res.Trust == "ok" {
+		return skill
 	}
 	return "inbox-triage"
 }

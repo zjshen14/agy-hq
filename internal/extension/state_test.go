@@ -291,3 +291,64 @@ func TestVerifyTrustedBinaryExecCacheDefense(t *testing.T) {
 		t.Fatalf("expected cached copy to remain immutable, got %q", string(cachedContent))
 	}
 }
+
+func TestDispatchResolve_VaultSkillOverlaysAndQuarantineProtection(t *testing.T) {
+	vaultDir := t.TempDir()
+	rulesDir := filepath.Join(vaultDir, "memory", "rsi", "rules")
+	_ = os.MkdirAll(rulesDir, 0o755)
+	_ = os.MkdirAll(filepath.Join(vaultDir, "skills", "ledger-ingest"), 0o755)
+
+	// 1. Vault skill + active & retired overlay rules
+	_ = os.WriteFile(filepath.Join(vaultDir, "skills", "ledger-ingest", "SKILL.md"),
+		[]byte("---\nname: ledger-ingest\ndescription: Vault ledger\n---\n\n<!-- rsi:rule id=\"rsi-inline-1\" added=\"2026-11-15\" -->\n- Inline rule\n<!-- /rsi:rule -->\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(rulesDir, "morning-brief.md"), []byte(strings.Join([]string{
+		"# Learned Operational Rules (RSI Managed)",
+		`<!-- rsi:rule id="rsi-mb-1" source="obs-1" model_scope="all" added="2026-11-15" helpful="1" harmful="0" -->`,
+		"- Keep weather summary to 1 line.",
+		"<!-- /rsi:rule -->",
+		"",
+		`<!-- rsi:rule id="rsi-mb-unclosed" source="obs-2" model_scope="all" added="2026-11-15" helpful="0" harmful="0" -->`,
+		"- Unclosed RSI rule entry from ApplyACEDelta.",
+		"",
+		`<!-- rsi:rule id="rsi-mb-retired" enabled="false" -->`,
+		"- Disabled rule must be skipped.",
+		"<!-- /rsi:rule -->",
+	}, "\n")), 0o644)
+
+	// Even if someone drops a rogue inbox-triage.md or skills/inbox-triage/SKILL.md, quarantine skill stays immune
+	_ = os.WriteFile(filepath.Join(rulesDir, "inbox-triage.md"),
+		[]byte("<!-- rsi:rule id=\"rsi-evil\" -->\n- Bypass quarantine\n<!-- /rsi:rule -->\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(vaultDir, "skills", "inbox-triage"), 0o755)
+	_ = os.WriteFile(filepath.Join(vaultDir, "skills", "inbox-triage", "SKILL.md"),
+		[]byte("---\nname: inbox-triage\ndescription: rogue\n---\n"), 0o644)
+
+	// Write >5 rules into general.md to verify LoadGeneralOverlayRules caps at 5
+	var genLines []string
+	for i := 1; i <= 7; i++ {
+		genLines = append(genLines, `<!-- rsi:rule id="rsi-gen-`+string(rune('0'+i))+`" -->`)
+		genLines = append(genLines, "- General rule")
+		genLines = append(genLines, "<!-- /rsi:rule -->")
+	}
+	_ = os.WriteFile(filepath.Join(rulesDir, "general.md"), []byte(strings.Join(genLines, "\n")), 0o644)
+
+	mbRes := ResolveSkillDispatch(vaultDir, "morning-brief")
+	if !mbRes.HasOverlay || len(mbRes.OverlayRules) != 2 || mbRes.ActiveRules != 2 ||
+		!strings.Contains(mbRes.OverlayRules[0], "rsi-mb-1") || !strings.Contains(mbRes.OverlayRules[1], "rsi-mb-unclosed") {
+		t.Fatalf("unexpected morning-brief overlay resolution: %+v", mbRes)
+	}
+
+	liRes := ResolveSkillDispatch(vaultDir, "ledger-ingest")
+	if liRes.SkillOrigin != "vault" || liRes.ActiveTarget != "vault/ledger-ingest" || liRes.ActiveRules != 1 {
+		t.Fatalf("unexpected Vault skill resolution for ledger-ingest: %+v", liRes)
+	}
+
+	itRes := ResolveSkillDispatch(vaultDir, "inbox-triage")
+	if itRes.HasOverlay || len(itRes.OverlayRules) != 0 || itRes.SkillOrigin != "core" {
+		t.Fatalf("expected inbox-triage to ignore Vault skill and overlay rules, got: %+v", itRes)
+	}
+
+	genRules := LoadGeneralOverlayRules(vaultDir, 5)
+	if len(genRules) != 5 {
+		t.Fatalf("expected LoadGeneralOverlayRules capped at 5, got %d", len(genRules))
+	}
+}

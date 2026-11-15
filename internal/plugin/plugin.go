@@ -45,13 +45,14 @@ var RequiredPreToolMatchers = []string{
 
 // InstallOptions configures `hq plugin install` (project-scoped by default; `--global` opt-in).
 type InstallOptions struct {
-	SourceRepoDir string
-	PluginSrcDir  string
-	ProjectDir    string
-	BinDir        string
-	VaultDir      string
-	GlobalVault   bool
-	GlobalScope   bool
+	SourceRepoDir    string
+	PluginSrcDir     string
+	ProjectDir       string
+	BinDir           string
+	VaultDir         string
+	GlobalVault      bool
+	GlobalScope      bool
+	SkipAttachSkills bool
 }
 
 // InstallReport summarizes the actions performed by `hq plugin install`.
@@ -64,6 +65,7 @@ type InstallReport struct {
 	PluginDir              string `json:"pluginDir"`
 	ProjectDir             string `json:"projectDir,omitempty"`
 	ProjectPluginsManifest string `json:"projectPluginsManifest,omitempty"`
+	ProjectSkillsManifest  string `json:"projectSkillsManifest,omitempty"`
 	RemovedGlobalPluginDir string `json:"removedGlobalPluginDir,omitempty"`
 	RemovedLegacySidecar   string `json:"removedLegacySidecar,omitempty"`
 	BundleDigest           string `json:"bundleDigest"`
@@ -495,6 +497,62 @@ func AttachProjectPlugin(projectDir, sharedPluginsParent string) (string, error)
 	return manifestPath, nil
 }
 
+// AttachProjectVaultSkills writes or updates `<projectDir>/.agents/skills.json` so Antigravity
+// discovers user-space skills in `<vaultDir>/skills` inside `projectDir`.
+func AttachProjectVaultSkills(projectDir, vaultDir string) (string, error) {
+	if strings.TrimSpace(projectDir) == "" || strings.TrimSpace(vaultDir) == "" {
+		return "", nil
+	}
+	absProj, err := filepath.Abs(projectDir)
+	if err != nil {
+		return "", err
+	}
+	absVault, err := filepath.Abs(vaultDir)
+	if err != nil {
+		return "", err
+	}
+	skillsDir := filepath.Join(absVault, "skills")
+	entryPath := filepath.ToSlash(skillsDir)
+	if filepath.Clean(absVault) == filepath.Clean(filepath.Join(absProj, "local")) {
+		entryPath = "local/skills"
+	}
+
+	manifestPath := filepath.Join(absProj, ".agents", "skills.json")
+	var cfg struct {
+		Entries []pluginsManifestEntry `json:"entries"`
+	}
+	if raw, rErr := os.ReadFile(manifestPath); rErr == nil && len(strings.TrimSpace(string(raw))) > 0 {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	cleanTargetSlash := filepath.ToSlash(filepath.Clean(skillsDir))
+	for _, e := range cfg.Entries {
+		p := filepath.ToSlash(filepath.Clean(e.Path))
+		if e.Path == entryPath || p == cleanTargetSlash {
+			return manifestPath, nil
+		}
+		if !filepath.IsAbs(e.Path) && filepath.ToSlash(filepath.Clean(filepath.Join(absProj, filepath.FromSlash(e.Path)))) == cleanTargetSlash {
+			return manifestPath, nil
+		}
+	}
+
+	cfg.Entries = append(cfg.Entries, pluginsManifestEntry{Path: entryPath})
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		return "", err
+	}
+	outBytes, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := manifestPath + ".tmp"
+	if err := os.WriteFile(tmpPath, append(outBytes, '\n'), 0o644); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpPath, manifestPath); err != nil {
+		return "", err
+	}
+	return manifestPath, nil
+}
+
 // DetachProjectPlugin removes the `agy-hq` entry from `<projectDir>/.agents/plugins.json`,
 // deleting `plugins.json` cleanly if no other entries or inherits remain.
 func DetachProjectPlugin(projectDir string) (bool, error) {
@@ -818,6 +876,13 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 		return nil, fmt.Errorf("initialize/migrate vault at %s: %w", chosenVault, err)
 	}
 
+	var projectSkillsManifest string
+	if !opts.SkipAttachSkills && strings.TrimSpace(opts.ProjectDir) != "" && resolvedProjectDir != "" && !vault.IsAgyHQRepo(resolvedProjectDir) {
+		if sPath, sErr := AttachProjectVaultSkills(resolvedProjectDir, chosenVault); sErr == nil && sPath != "" {
+			projectSkillsManifest = sPath
+		}
+	}
+
 	// 4. Restart running :4242 daemon if version/commit skewed or if migrating off global/legacy sidecar
 	forceDaemonRestart := removedGlobalPlugin != "" || removedLegacySidecar != ""
 	restarted := EnsureDaemonSynced(chosenVault, targetBin, saveRepo, forceDaemonRestart)
@@ -835,6 +900,7 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 		PluginDir:              activePluginDir,
 		ProjectDir:             resolvedProjectDir,
 		ProjectPluginsManifest: projectManifest,
+		ProjectSkillsManifest:  projectSkillsManifest,
 		RemovedGlobalPluginDir: removedGlobalPlugin,
 		RemovedLegacySidecar:   removedLegacySidecar,
 		BundleDigest:           digest,

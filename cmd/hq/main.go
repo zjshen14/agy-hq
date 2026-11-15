@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -87,12 +88,17 @@ func main() {
 	case "plugin":
 		runPluginCLI(rootDir, vaultDir, os.Args[2:])
 
+	case "skill", "skills":
+		runSkillCLI(rootDir, vaultDir, os.Args[2:])
+
 	case "init":
 		fs := flag.NewFlagSet("init", flag.ExitOnError)
 		demo := fs.Bool("demo", false, "Seed synthetic [Sample] ACME 10-Q inbox filing, thesis, tasks, approval, and facts")
 		withSample := fs.Bool("with-sample-data", false, "Alias for --demo: seed synthetic [Sample] dataset")
 		globalVault := fs.Bool("global-vault", false, "Initialize and register the canonical global Vault (~/.gemini/antigravity/hq/vault)")
-		attachPlugin := fs.Bool("attach-plugin", false, "Write .agents/plugins.json in the current directory to enable project-scoped agy-hq")
+		attachPlugin := fs.Bool("attach-plugin", false, "Write .agents/plugins.json and .agents/skills.json in the current directory")
+		startersFlag := fs.String("starters", "", "Comma-separated starter skills to install (or 'all')")
+		allStarters := fs.Bool("all-starters", false, "Install all available starter skill templates into <vault>/skills/")
 		_ = fs.Parse(os.Args[2:])
 		if *globalVault {
 			if gv, gErr := vault.DefaultGlobalVaultDir(); gErr == nil && gv != "" {
@@ -105,6 +111,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
 			os.Exit(1)
 		}
+		var starterSlugs []string
+		if *allStarters || strings.EqualFold(strings.TrimSpace(*startersFlag), "all") {
+			starterSlugs = append(starterSlugs, vault.StarterSkillSlugs...)
+		} else if strings.TrimSpace(*startersFlag) != "" {
+			for _, part := range strings.Split(*startersFlag, ",") {
+				if s := strings.TrimSpace(part); s != "" {
+					starterSlugs = append(starterSlugs, s)
+				}
+			}
+		}
+		for _, slug := range starterSlugs {
+			if changed, dst, sErr := vault.AddStarterSkill(vaultDir, templateDir, slug, false); sErr != nil {
+				fmt.Fprintf(os.Stderr, "hq init starter skill %q failed: %v\n", slug, sErr)
+				os.Exit(1)
+			} else if changed {
+				created = append(created, dst+" (--starters)")
+			}
+		}
 		if *globalVault {
 			_ = vault.SaveGlobalConfig(vault.GlobalConfig{
 				VaultDir:    vaultDir,
@@ -116,6 +140,11 @@ func main() {
 			if wd, wErr := os.Getwd(); wErr == nil && wd != "" {
 				if mPath, aErr := plugin.AttachProjectPlugin(wd, ""); aErr == nil && mPath != "" {
 					created = append(created, mPath+" (project-scoped plugin)")
+				}
+				if !vault.IsAgyHQRepo(wd) {
+					if sPath, sErr := plugin.AttachProjectVaultSkills(wd, vaultDir); sErr == nil && sPath != "" {
+						created = append(created, sPath+" (vault skills)")
+					}
 				}
 			}
 		}
@@ -165,8 +194,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq migrate failed: %v\n", err)
 			os.Exit(1)
 		}
+		var rsiMig *rsi.OverlayMigrationReport
 		if vault.IsAgyHQRepo(rootDir) {
 			_, _ = ci.InstallGitHooks(rootDir)
+			if mr, mErr := rsi.MigrateOverlays(rootDir, vaultDir); mErr == nil {
+				rsiMig = mr
+			}
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if !*quiet {
@@ -179,6 +212,9 @@ func main() {
 			}
 			for _, key := range rep.AddedConfigKeys {
 				fmt.Printf("  [cfg]  added missing top-level key %s\n", key)
+			}
+			if rsiMig != nil && rsiMig.ExtractedRules > 0 {
+				fmt.Printf("  [rsi]  extracted %d legacy tracked rule(s) into Vault overlays (%s)\n", rsiMig.ExtractedRules, strings.Join(rsiMig.UpdatedTargets, ", "))
 			}
 		}
 
@@ -351,11 +387,11 @@ func main() {
 			proposeFlagArgs = append(proposeFlagArgs, a)
 		}
 		fs := flag.NewFlagSet("propose", flag.ExitOnError)
-		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, gchat_send, rsi_patch, rsi_skill_patch)")
+		actionType := fs.String("type", "external_action", "Action category (e.g., gmail_send, gchat_send, rsi_patch, rsi_skill_patch, rsi_overlay)")
 		summary := fs.String("summary", "", "Human-readable summary of the proposed action")
 		cmdStr := fs.String("cmd", "", "Exact deterministic shell command to execute upon approval")
 		draftID := fs.String("draft", "", "Optional Gmail or Google Chat draft ID when --type=gmail_send or --type=gchat_send")
-		rsiID := fs.String("rsi-id", "", "Optional verified RSI hypothesis ID when --type=rsi_patch or --type=rsi_skill_patch")
+		rsiID := fs.String("rsi-id", "", "Optional verified RSI hypothesis ID when --type=rsi_patch, rsi_skill_patch, or rsi_overlay")
 		account := fs.String("account", "", "Optional account alias when --type=gmail_send or --type=gchat_send")
 		workDir := fs.String("workdir", "", "Optional working directory for command execution")
 		convID := fs.String("conv", "", "Optional conversation ID")
@@ -1289,6 +1325,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq gchat %s failed: %v\n", os.Args[2], err)
 				os.Exit(1)
 			}
+			_, _, _ = vault.AddStarterSkill(vaultDir, resolveTemplateDir(rootDir), "gchat", false)
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Configured Google Chat account %q (%s) [type=%s, transport=%s, fallback=gmail:%s]\n",
 				cfg.Alias, cfg.Email, cfg.AccountType, cfg.Transport, cfg.GmailFallbackAlias)
@@ -1320,6 +1357,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq gchat login failed: %v\n", err)
 				os.Exit(1)
 			}
+			_, _, _ = vault.AddStarterSkill(vaultDir, resolveTemplateDir(rootDir), "gchat", false)
 			spaces, _ := gchat.ListSpaces(vaultDir, *account, "", 50)
 			fmt.Printf("Authenticated Google Chat session active in background headless mode (%s, %d space(s) cached)\n", ep, len(spaces))
 
@@ -2441,12 +2479,16 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 		fs := flag.NewFlagSet("rsi hypothesize", flag.ExitOnError)
 		obsFlag := fs.String("obs", "", "Optional observation ID or fingerprint")
 		force := fs.Bool("force", false, "Bypass Meta-ROI and 75% Quota Circuit Breaker thresholds")
+		upstream := fs.Bool("upstream", false, "Tier 2 Maintainer Mode: target tracked upstream skills inside an isolated git worktree")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
 		if *obsFlag != "" {
 			targetObs = *obsFlag
 		}
-		hyps, err := rsi.Hypothesize(rootDir, vaultDir, targetObs, *force)
+		hyps, err := rsi.HypothesizeWithOptions(rootDir, vaultDir, targetObs, rsi.HypothesizeOptions{
+			Force:    *force,
+			Upstream: *upstream,
+		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq rsi hypothesize failed: %v\n", err)
 			os.Exit(1)
@@ -2459,8 +2501,12 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 		}
 		fmt.Printf("RSI Stage 2 (Hypothesize): synthesized %d hypothesis specification(s)\n", len(hyps))
 		for _, h := range hyps {
-			fmt.Printf("  - %s [%s · fault:%s · savedSteps:%d]: %s\n",
-				h.ID, h.Ring.Label(), h.FaultLayer, h.ExpectedSavedSteps, h.Title)
+			tierTag := "tier:personal"
+			if h.Tier == "upstream" {
+				tierTag = fmt.Sprintf("tier:upstream branch:%s", h.Branch)
+			}
+			fmt.Printf("  - %s [%s · %s · fault:%s · savedSteps:%d]: %s\n",
+				h.ID, h.Ring.Label(), tierTag, h.FaultLayer, h.ExpectedSavedSteps, h.Title)
 		}
 
 	case "verify":
@@ -2573,8 +2619,74 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 			fmt.Printf("  Quota Circuit Breaker:             OK (<75%% rolling utilization)\n")
 		}
 
+	case "export":
+		fs := flag.NewFlagSet("rsi export", flag.ExitOnError)
+		upstream := fs.Bool("upstream", false, "Export clean Vault rule/hypothesis into Tier 2 upstream PR branch")
+		convID := fs.String("conv", "", "Optional conversation ID")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		var posID string
+		var flagArgs []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") && posID == "" {
+				posID = a
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		_ = fs.Parse(flagArgs)
+		if posID == "" && len(fs.Args()) > 0 {
+			posID = fs.Args()[0]
+		}
+		if posID == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq rsi export --upstream <rule-id-or-rsi-id> [--conv=<conv-id>] [--json]")
+			os.Exit(1)
+		}
+		if !*upstream {
+			fmt.Fprintln(os.Stderr, "hq rsi export currently requires --upstream to graduate a Vault rule to an upstream PR")
+			os.Exit(1)
+		}
+		if *convID == "" {
+			*convID = vault.ResolveConversationID()
+		}
+		prop, hyp, err := rsi.ExportUpstream(rootDir, vaultDir, posID, *convID, resolveProposalHQBin(rootDir))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi export failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"proposal":   prop,
+				"hypothesis": hyp,
+			})
+			return
+		}
+		fmt.Printf("Staged Tier 2 upstream RSI PR proposal %s for %s (branch: %s, worktree: %s, sha256: %s)\n",
+			prop.ID, posID, hyp.Branch, hyp.WorktreeDir, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+
+	case "migrate-overlays":
+		fs := flag.NewFlagSet("rsi migrate-overlays", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		rep, err := rsi.MigrateOverlays(rootDir, vaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq rsi migrate-overlays failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+		fmt.Printf("Migrated %d tracked RSI rule(s) into personal Vault overlays/skills (cleanedFiles=%d, updatedTargets=%d)\n",
+			rep.ExtractedRules, len(rep.CleanedFiles), len(rep.UpdatedTargets))
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown rsi subcommand: %s (expected mine, hypothesize, verify, propose, apply, ablate, status)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown rsi subcommand: %s (expected mine, hypothesize, verify, propose, apply, ablate, export, migrate-overlays, status)\n", sub)
 		os.Exit(1)
 	}
 }
@@ -3225,11 +3337,12 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		fs := flag.NewFlagSet("plugin install", flag.ExitOnError)
 		_ = fs.Bool("force", false, "Force reinstall even if already at the same version")
 		globalScope := fs.Bool("global", false, "Install into ~/.gemini/config/plugins/agy-hq/ across all projects (default: project-scoped)")
-		projectFlag := fs.String("project", "", "Optional target project directory to attach .agents/plugins.json in project-scoped mode")
+		projectFlag := fs.String("project", "", "Optional target project directory to attach .agents/plugins.json and .agents/skills.json in project-scoped mode")
 		globalVault := fs.Bool("global-vault", false, "Use canonical global Vault (~/.gemini/antigravity/hq/vault)")
 		vaultFlag := fs.String("vault-dir", "", "Explicit default Vault directory to register in ~/.gemini/antigravity/hq/config.json")
 		pluginSrcFlag := fs.String("plugin-dir", "", "Optional explicit source plugin directory")
 		binDirFlag := fs.String("bin-dir", "", "Optional destination bin directory (defaults to ~/.local/bin)")
+		attachSkills := fs.Bool("attach-skills", true, "Attach <vault>/skills in <project>/.agents/skills.json when --project is specified")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
 		targetVault := strings.TrimSpace(*vaultFlag)
@@ -3237,13 +3350,14 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 			targetVault = vaultDir
 		}
 		res, err := plugin.Install(plugin.InstallOptions{
-			SourceRepoDir: rootDir,
-			PluginSrcDir:  *pluginSrcFlag,
-			ProjectDir:    *projectFlag,
-			BinDir:        *binDirFlag,
-			VaultDir:      targetVault,
-			GlobalVault:   *globalVault,
-			GlobalScope:   *globalScope,
+			SourceRepoDir:    rootDir,
+			PluginSrcDir:     *pluginSrcFlag,
+			ProjectDir:       *projectFlag,
+			BinDir:           *binDirFlag,
+			VaultDir:         targetVault,
+			GlobalVault:      *globalVault,
+			GlobalScope:      *globalScope,
+			SkipAttachSkills: !*attachSkills,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq plugin install failed: %v\n", err)
@@ -3271,6 +3385,9 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		}
 		if res.ProjectPluginsManifest != "" {
 			fmt.Printf("  Project Cfg:  %s\n", res.ProjectPluginsManifest)
+		}
+		if res.ProjectSkillsManifest != "" {
+			fmt.Printf("  Skills Cfg:   %s\n", res.ProjectSkillsManifest)
 		}
 		if res.RemovedGlobalPluginDir != "" {
 			fmt.Printf("  Tidied Up:    removed global plugin at %s (scoped strictly to project)\n", res.RemovedGlobalPluginDir)
@@ -3436,6 +3553,147 @@ func formatBodyVerificationSummary(body string) string {
 		len(body), utf8.RuneCountInString(body), dollarCount, first, last)
 }
 
+func runSkillCLI(rootDir, vaultDir string, args []string) {
+	sub := "list"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+	templateDir := resolveTemplateDir(rootDir)
+
+	switch sub {
+	case "list", "ls":
+		fs := flag.NewFlagSet("skill list", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(args)
+		items, err := vault.ListSkills(rootDir, vaultDir, templateDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq skill list failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(items)
+			return
+		}
+		var core, installed, available []vault.SkillInfo
+		for _, it := range items {
+			switch it.Tier {
+			case "core":
+				core = append(core, it)
+			case "starter-available":
+				available = append(available, it)
+			default:
+				installed = append(installed, it)
+			}
+		}
+		fmt.Printf("Core OS Skills (%d):\n", len(core))
+		for _, it := range core {
+			overlayNote := ""
+			if it.ActiveRSIRules > 0 {
+				overlayNote = fmt.Sprintf(" [overlay: %d rule(s)]", it.ActiveRSIRules)
+			}
+			fmt.Printf("  - %-20s%s\n", it.Name, overlayNote)
+		}
+		fmt.Printf("\nInstalled Vault User-Space Skills (%s/skills, %d):\n", vaultDir, len(installed))
+		if len(installed) == 0 {
+			fmt.Println("  (none installed yet — install a starter with `hq skill add <slug>` or create <vault>/skills/<name>/SKILL.md)")
+		}
+		for _, it := range installed {
+			status := it.Tier
+			if it.Modified {
+				status += ", modified"
+			}
+			if it.ActiveRSIRules > 0 {
+				status += fmt.Sprintf(", %d rsi rule(s)", it.ActiveRSIRules)
+			}
+			fmt.Printf("  - %-20s (%s)\n", it.Name, status)
+		}
+		fmt.Printf("\nAvailable Starter Templates (`hq skill add <slug|--all>`, %d):\n", len(available))
+		if len(available) == 0 {
+			fmt.Println("  (all starter templates installed)")
+		}
+		for _, it := range available {
+			fmt.Printf("  - %-20s %s\n", it.Name, truncateDisplay(it.Description, 68))
+		}
+
+	case "add", "install":
+		fs := flag.NewFlagSet("skill add", flag.ExitOnError)
+		all := fs.Bool("all", false, "Install all starter skill templates into <vault>/skills/")
+		force := fs.Bool("force", false, "Overwrite base template markdown while preserving existing RSI rules")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		var slugs []string
+		var flagArgs []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") {
+				slugs = append(slugs, a)
+			} else {
+				flagArgs = append(flagArgs, a)
+			}
+		}
+		_ = fs.Parse(flagArgs)
+		for _, a := range fs.Args() {
+			slugs = append(slugs, a)
+		}
+		if *all {
+			slugs = append([]string(nil), vault.StarterSkillSlugs...)
+		}
+		if len(slugs) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq skill add <slug...> [--all] [--force] [--json]")
+			fmt.Fprintf(os.Stderr, "available starters: %s\n", strings.Join(vault.StarterSkillSlugs, ", "))
+			os.Exit(1)
+		}
+		sort.Strings(slugs)
+		type addResult struct {
+			Slug    string `json:"slug"`
+			Path    string `json:"path"`
+			Changed bool   `json:"changed"`
+		}
+		var results []addResult
+		for _, slug := range slugs {
+			changed, dstPath, err := vault.AddStarterSkill(vaultDir, templateDir, slug, *force)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq skill add %q failed: %v\n", slug, err)
+				os.Exit(1)
+			}
+			results = append(results, addResult{Slug: slug, Path: dstPath, Changed: changed})
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(results)
+			return
+		}
+		for _, r := range results {
+			state := "already installed"
+			if r.Changed {
+				state = "installed"
+			}
+			fmt.Printf("Vault skill %-16s: %s (%s)\n", r.Slug, state, r.Path)
+		}
+
+	case "remove", "rm", "uninstall":
+		fs := flag.NewFlagSet("skill remove", flag.ExitOnError)
+		_ = fs.Parse(args)
+		if len(fs.Args()) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq skill remove <slug>")
+			os.Exit(1)
+		}
+		for _, slug := range fs.Args() {
+			if err := vault.RemoveVaultSkill(vaultDir, slug); err != nil {
+				fmt.Fprintf(os.Stderr, "hq skill remove %q failed: %v\n", slug, err)
+				os.Exit(1)
+			}
+			fmt.Printf("Removed Vault skill %q (pre-removal Vault snapshot recorded if git-initialized)\n", slug)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown skill subcommand: %s (expected list, add, remove)\n", sub)
+		os.Exit(1)
+	}
+}
+
 func printUsage() {
 	fmt.Println(`Usage: hq <command> [args]
 
@@ -3443,7 +3701,8 @@ Commands:
   version [--json]                    Show hq binary SemVer, git commit, and Vault schema version
   vault-path [--json]                 Print the resolved private Vault path and resolution source
   plugin <install|uninstall|status|validate>  Manage project-scoped (default) or --global plugin & hq binary
-  init [--demo] [--global-vault] [--attach-plugin]  Initialize private Vault (optionally seed [Sample] dataset)
+  skill <list|add|remove>             Manage opt-in Vault user-space skills (<vault>/skills/)
+  init [--demo] [--global-vault] [--attach-plugin] [--starters=...|all-starters]  Initialize private Vault
   upgrade [--no-pull]                 Pull latest agy-hq commits, rebuild hq, sync plugin & migrate Vault
   migrate [--quiet]                   Run non-destructive Vault schema & template migrations
   doctor [--json]                     Check Antigravity sandbox, CLI, plugin sync, and Vault health
@@ -3455,7 +3714,7 @@ Commands:
   events <enqueue|list|inspect|retry|drop|dispatch|token>  Durable crash-safe Event Inbox & webhook token
   timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
   triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
-  dispatch resolve <skill>            Resolve active core or companion-pack skill target
+  dispatch resolve <skill>            Resolve active core, Vault skill, or RSI overlay rules
   extension <list|lint|enable|disable|trust|doctor>  Manage companion extension packs & trust hashes
   connector <list|lint|migrate|doctor|test>  Manage modular JSON-RPC/CLI connectors & fixtures
   watch <precheck|read|query|ack>     Proactive watcher precheck, tainted read/query, and event ack
@@ -3468,7 +3727,7 @@ Commands:
   spaces <list|active|pin|hide|auto>  Manage schedule-aware Console Spaces
   obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability
   memory <status|topics|add-fact|prune-fact|forget|entities|add-entity|lookup|compact|verify-transcript|commit>  5-layer living memory engine
-  rsi <mine|hypothesize|verify|propose|apply|ablate|status>  4-Stage Agent Recursive Self-Improvement engine
+  rsi <mine|hypothesize|verify|propose|apply|ablate|export|migrate-overlays|status>  Two-Tier 4-Stage Agent Recursive Self-Improvement engine
   ci <check-pii|check-harness|scrub-history|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service

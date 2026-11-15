@@ -24,5 +24,5 @@ hq doctor
 
 - **Global OS Rules (`rules/AGENTS.md`):** Role-scoped `[HQ] Front Desk` coordinator vs. unrestricted repository coding sessions, private Vault boundary, model routing, and mandatory `hq propose` payload previews.
 - **Zero-Token Lifecycle Hooks (`hooks.json`):** Automatic `SessionStart` Vault context injection, `PreToolUse` approval/credential/quarantine guardrails, and `Stop` ground-truth turn journaling.
-- **9 Progressive-Disclosure Skills (`skills/*/SKILL.md`):** `morning-brief`, `inbox-triage`, `gchat`, `swe-pulse`, `sleep-consolidate`, `thesis-check`, `filing-diff`, `ledger-ingest`, and `tax-prep`.
+- **3 Core OS Progressive-Disclosure Skills (`skills/*/SKILL.md`):** `inbox-triage`, `morning-brief`, and `sleep-consolidate` (with 6 opt-in domain/channel starters—`gchat`, `swe-pulse`, `ledger-ingest`, `tax-prep`, `thesis-check`, `filing-diff`—installable into `<vault>/skills/` via `hq skill add`).
 - **Auto-Discovered HQ Console Sidecar (`sidecars/agy-hq-console/sidecar.json`):** Live `:4242` Aux Pane control console for approvals, Task Board, token observability, and schedule-aware Spaces.

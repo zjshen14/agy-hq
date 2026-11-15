@@ -14,8 +14,8 @@ Produce a concise, vendor-neutral daily brief across active connectors, structur
 
 ## Steps
 
-0. **Dispatch & Schedule Guard:**
-   - Run `hq dispatch resolve --skill=morning-brief --trigger=core/morning-brief --json`: if `enabled == false`, stop cleanly with zero chat output; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file.
+0. **Dispatch, Overlay & Schedule Guard:**
+   - Run `hq dispatch resolve --skill=morning-brief --trigger=core/morning-brief --json`: if `enabled == false`, stop cleanly with zero chat output; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file; if `has_overlay == true` with non-empty `overlay_rules`, apply those active personal rules for this run without reading extra files.
 1. **Lease-Based Non-Destructive Collection:**
    - Run `hq brief collect --lease --json` to lease overnight `brief_rollup` items (20m TTL, zero loss on crash), TTL-annotated pending proposals (`expires_soon` when `< 4h` remaining, `expired_overnight`), due goals/overdue `WaitingOn` SLAs, active worktrees, stat-cached 24h token telemetry, and bounded connector/extension digests.
    - Run `hq ideas list` to surface top pending `ideas_feed` suggestions and check `local/inbox/` for unprocessed file drops.

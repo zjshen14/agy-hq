@@ -34,9 +34,20 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 		t.Fatalf("unexpected empty heartbeat status: %q (%v)", status, err)
 	}
 
-	// 2. Drop a CSV file in local/inbox/ and run heartbeat in dry-run mode
+	// 2. Drop a CSV file in local/inbox/ without ledger-ingest installed -> falls back to /inbox-triage
 	inboxDir := filepath.Join(vaultDir, "inbox")
 	_ = os.MkdirAll(inboxDir, 0o755)
+	_ = os.WriteFile(filepath.Join(inboxDir, "unmatched.csv"), []byte("date,amount\n"), 0o644)
+
+	statusFallback, err := RunHeartbeat(vaultDir, true)
+	if err != nil || !strings.Contains(statusFallback, "unmatched.csv -> /inbox-triage") {
+		t.Fatalf("expected unmatched.csv without starter skill to fall back to /inbox-triage, got: %q (%v)", statusFallback, err)
+	}
+
+	// 2b. Install local/skills/ledger-ingest/SKILL.md -> CSV drop routes to /ledger-ingest
+	ledgerSkillDir := filepath.Join(vaultDir, "skills", "ledger-ingest")
+	_ = os.MkdirAll(ledgerSkillDir, 0o755)
+	_ = os.WriteFile(filepath.Join(ledgerSkillDir, "SKILL.md"), []byte("---\nname: ledger-ingest\ndescription: test\n---\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(inboxDir, "stmt.csv"), []byte("date,amount\n"), 0o644)
 
 	status2, err := RunHeartbeat(vaultDir, true)
@@ -45,8 +56,8 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	}
 
 	q := LoadQuota(vaultDir)
-	if q.SpawnsToday != 1 {
-		t.Fatalf("expected SpawnsToday == 1, got %d", q.SpawnsToday)
+	if q.SpawnsToday != 2 {
+		t.Fatalf("expected SpawnsToday == 2, got %d", q.SpawnsToday)
 	}
 
 	// 3. Verify smart model + depth routing and user overrides

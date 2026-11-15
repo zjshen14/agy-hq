@@ -985,3 +985,102 @@ func TestMacOSTempAncestorSymlinkAndSymlinkEscapeGuards(t *testing.T) {
 		}
 	}
 }
+
+func TestTwoTierRSI_SessionStartGeneralOverlayAndPreToolUseGuards(t *testing.T) {
+	vaultDir := t.TempDir()
+	rulesDir := filepath.Join(vaultDir, "memory", "rsi", "rules")
+	_ = os.MkdirAll(rulesDir, 0o755)
+	_ = os.WriteFile(filepath.Join(vaultDir, "USER.md"), []byte("Concise style"), 0o644)
+	_ = os.WriteFile(filepath.Join(rulesDir, "general.md"), []byte(strings.Join([]string{
+		"# Learned Operational Rules (RSI Managed)",
+		`<!-- rsi:rule id="rsi-gen-hook-1" source="obs-1" model_scope="all" added="2026-11-15" helpful="1" harmful="0" -->`,
+		"- **[Learned Rule]:** Use `--sha256=` on canonical `hq approve`.",
+		"<!-- /rsi:rule -->",
+	}, "\n")), 0o644)
+
+	// 1. Untainted SessionStart includes general.md learned rules
+	var out bytes.Buffer
+	if err := HandleSessionStart(strings.NewReader(`{"conversationId":"conv-clean-gen"}`), &out, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart untainted failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "rsi-gen-hook-1") || !strings.Contains(out.String(), "Learned Personal RSI Rules") {
+		t.Fatalf("expected untainted SessionStart to inject general.md rules, got:\n%s", out.String())
+	}
+
+	// 2. Tainted SessionStart MUST NOT inject personal general.md rules
+	_ = gmail.MarkSessionTainted(vaultDir, "conv-tainted-gen", "gmail:thread:t1")
+	out.Reset()
+	if err := HandleSessionStart(strings.NewReader(`{"conversationId":"conv-tainted-gen"}`), &out, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart tainted failed: %v", err)
+	}
+	if strings.Contains(out.String(), "rsi-gen-hook-1") {
+		t.Fatalf("expected tainted SessionStart NOT to inject general.md rules, got:\n%s", out.String())
+	}
+
+	// 3. Direct write_file/edit_file to <vault>/memory/rsi/rules/*.md is blocked in ALL sessions
+	rulePath := filepath.Join(rulesDir, "morning-brief.md")
+	writeReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-clean-gen",
+		"toolCall": map[string]interface{}{
+			"name": "write_file",
+			"args": map[string]interface{}{"Path": rulePath, "Content": "# bypass"},
+		},
+	})
+	out.Reset()
+	if err := HandlePreToolUse(bytes.NewReader(writeReq), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse write_file: %v", err)
+	}
+	if !strings.Contains(out.String(), `"decision":"deny"`) {
+		t.Fatalf("expected PreToolUse to block direct write to memory/rsi/rules, got: %s", out.String())
+	}
+
+	// 4. Canonical ask_question formats `rsi_overlay` proposals cleanly
+	prop, err := approvals.CreateWithMetadata(vaultDir, "rsi_overlay", "Add morning-brief overlay", "./bin/hq rsi apply rsi-1 --expect-diff-sha256=abcdef123456", "", "conv-clean-gen", map[string]string{
+		"ringLabel":            "Ring 2 (Skill / Trigger Delta)",
+		"rsiId":                "rsi-1",
+		"title":                "Morning brief format rule",
+		"faultLayer":           "worker_aci_or_skill",
+		"targetFiles":          "local/memory/rsi/rules/morning-brief.md",
+		"gateSummary":          "Gate 1 (TCB/AST): PASS",
+		"canonicalDiffPreview": "+- Keep weather to 1 line.",
+	})
+	if err != nil {
+		t.Fatalf("approvals.CreateWithMetadata rsi_overlay: %v", err)
+	}
+	askReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-clean-gen",
+		"toolCall": map[string]interface{}{
+			"name": "ask_question",
+			"args": map[string]interface{}{"questions": []map[string]interface{}{{"question": "Approve " + prop.ID + "?", "options": []string{"Approve", "Reject"}}}},
+		},
+	})
+	out.Reset()
+	if err := HandlePreToolUse(bytes.NewReader(askReq), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse ask_question: %v", err)
+	}
+	if !strings.Contains(out.String(), "Approve RSI Self-Improvement Patch "+prop.ID) {
+		t.Fatalf("expected rsi_overlay canonical ask_question preview, got: %s", out.String())
+	}
+
+	// 5. Front Desk Rule C exempts SKILL.md and memory/rsi/rules/*.md from the 3-lookup cap
+	_ = kernel.SetFrontDesk(vaultDir, "conv-fd-overlay", filepath.Join(vaultDir, "art-fd"))
+	for i := 1; i <= 5; i++ {
+		p := filepath.Join(rulesDir, fmt.Sprintf("skill-%d.md", i))
+		if i == 1 {
+			p = filepath.Join(vaultDir, "skills", "ledger-ingest", "SKILL.md")
+		}
+		readReq, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-fd-overlay",
+			"stepIdx":        i,
+			"toolCall": map[string]interface{}{
+				"name": "read_file",
+				"args": map[string]interface{}{"Path": p},
+			},
+		})
+		out.Reset()
+		_ = HandlePreToolUse(bytes.NewReader(readReq), &out, vaultDir)
+		if !strings.Contains(out.String(), `"decision":"allow"`) {
+			t.Fatalf("expected Front Desk Rule C to exempt SKILL.md & memory/rsi/rules/*.md read #%d (%s), got: %s", i, p, out.String())
+		}
+	}
+}

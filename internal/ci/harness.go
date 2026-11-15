@@ -10,13 +10,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/rsi"
+	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 )
 
@@ -77,8 +77,16 @@ func CheckHarness(rootDir string) ([]HarnessCheckResult, bool) {
 	return results, allOK
 }
 
+func discoverTemplateSkillFiles(rootDir string) []string {
+	matches, _ := filepath.Glob(filepath.Join(rootDir, "templates", "skills", "*", "SKILL.md"))
+	return matches
+}
+
 func checkGateH1Skills(rootDir string) (bool, string) {
-	skills := rsi.DiscoverAllSkillFiles(rootDir)
+	coreSkills := rsi.DiscoverAllSkillFiles(rootDir)
+	starterSkills := discoverTemplateSkillFiles(rootDir)
+	skills := append([]string{}, coreSkills...)
+	skills = append(skills, starterSkills...)
 	if len(skills) == 0 {
 		return false, "no SKILL.md files found under .agents/plugins/agy-hq/skills/"
 	}
@@ -87,8 +95,6 @@ func checkGateH1Skills(rootDir string) (bool, string) {
 	}
 
 	totalFrontmatterChars := 0
-	seenRuleIDs := make(map[string]string)
-	totalRules := 0
 
 	for _, absPath := range skills {
 		rel, err := filepath.Rel(rootDir, absPath)
@@ -128,21 +134,8 @@ func checkGateH1Skills(rootDir string) (bool, string) {
 		}
 
 		rules := rsi.ParseRSIRules(rel, content)
-		if len(rules) > rsi.MaxActiveRSIRules {
-			return false, fmt.Sprintf("%s has %d active rsi:rule blocks (exceeds %d-rule cap)", rel, len(rules), rsi.MaxActiveRSIRules)
-		}
-		for _, r := range rules {
-			totalRules++
-			if strings.TrimSpace(r.ID) == "" || strings.TrimSpace(r.Source) == "" || strings.TrimSpace(r.ModelScope) == "" || strings.TrimSpace(r.Added) == "" {
-				return false, fmt.Sprintf("%s contains rsi:rule with missing required metadata (id=%q source=%q model_scope=%q added=%q)", rel, r.ID, r.Source, r.ModelScope, r.Added)
-			}
-			if _, err := time.Parse("2006-01-02", r.Added); err != nil {
-				return false, fmt.Sprintf("%s rsi:rule %s has invalid added date %q (expected YYYY-MM-DD)", rel, r.ID, r.Added)
-			}
-			if prevFile, dup := seenRuleIDs[r.ID]; dup {
-				return false, fmt.Sprintf("duplicate rsi:rule id %q across %s and %s", r.ID, prevFile, rel)
-			}
-			seenRuleIDs[r.ID] = rel
+		if len(rules) > 0 {
+			return false, fmt.Sprintf("%s contains %d tracked rsi:rule block(s) (tracked repo skills must have 0 personal rsi:rule blocks; use <vault>/memory/rsi/rules/ overlays instead)", rel, len(rules))
 		}
 
 		lower := strings.ToLower(content)
@@ -170,7 +163,67 @@ func checkGateH1Skills(rootDir string) (bool, string) {
 		return false, fmt.Sprintf("global frontmatter token estimate %d exceeds cap %d", estTokens, MaxGlobalFrontmatterTokens)
 	}
 
-	return true, fmt.Sprintf("%d skills verified (<=%d lines each, %d active rsi:rule block(s), ~%d frontmatter tokens)", len(skills), rsi.MaxSkillMarkdownLines, totalRules, estTokens)
+	// Enforce RFC-0019 Core OS vs Starter template boundary + .agents/skills.json on full plugin checkouts.
+	if _, statErr := os.Stat(filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "plugin.json")); statErr == nil {
+		coreFound := make(map[string]bool, len(coreSkills))
+		for _, p := range coreSkills {
+			slug := filepath.Base(filepath.Dir(p))
+			if !vault.IsCoreOSSkill(slug) {
+				return false, fmt.Sprintf(".agents/plugins/agy-hq/skills/%s is not an allowed Core OS skill (move domain/channel skills to templates/skills/ or local/skills/)", slug)
+			}
+			coreFound[slug] = true
+		}
+		for _, reqCore := range vault.CoreOSSkillSlugs {
+			if !coreFound[reqCore] {
+				return false, fmt.Sprintf(".agents/plugins/agy-hq/skills/%s/SKILL.md is missing (expected all 3 Core OS skills)", reqCore)
+			}
+		}
+
+		starterFound := make(map[string]bool, len(starterSkills))
+		for _, p := range starterSkills {
+			slug := filepath.Base(filepath.Dir(p))
+			if vault.IsCoreOSSkill(slug) {
+				return false, fmt.Sprintf("templates/skills/%s overlaps with Core OS skill slug", slug)
+			}
+			if !vault.IsStarterSkill(slug) {
+				return false, fmt.Sprintf("templates/skills/%s is not listed in vault.StarterSkillSlugs", slug)
+			}
+			starterFound[slug] = true
+		}
+		for _, reqStarter := range vault.StarterSkillSlugs {
+			if !starterFound[reqStarter] {
+				return false, fmt.Sprintf("templates/skills/%s/SKILL.md is missing (expected all %d starter templates)", reqStarter, len(vault.StarterSkillSlugs))
+			}
+		}
+
+		skillsManifestPath := filepath.Join(rootDir, ".agents", "skills.json")
+		rawManifest, mErr := os.ReadFile(skillsManifestPath)
+		if mErr != nil {
+			return false, fmt.Sprintf("missing .agents/skills.json: %v", mErr)
+		}
+		var manifest struct {
+			Entries []struct {
+				Path string `json:"path"`
+			} `json:"entries"`
+		}
+		if jErr := json.Unmarshal(rawManifest, &manifest); jErr != nil {
+			return false, fmt.Sprintf("invalid JSON in .agents/skills.json: %v", jErr)
+		}
+		hasLocalSkills := false
+		for _, e := range manifest.Entries {
+			if filepath.ToSlash(filepath.Clean(strings.TrimSpace(e.Path))) == "local/skills" {
+				hasLocalSkills = true
+				break
+			}
+		}
+		if !hasLocalSkills {
+			return false, `.agents/skills.json must register {"path": "local/skills"}`
+		}
+		return true, fmt.Sprintf("%d core + %d starter skills verified (0 rsi:rule blocks, <=%d lines each, ~%d frontmatter tokens, .agents/skills.json OK)",
+			len(coreSkills), len(starterSkills), rsi.MaxSkillMarkdownLines, estTokens)
+	}
+
+	return true, fmt.Sprintf("%d skills verified (<=%d lines each, 0 active rsi:rule block(s), ~%d frontmatter tokens)", len(skills), rsi.MaxSkillMarkdownLines, estTokens)
 }
 
 func checkGateH2HooksJSONParity(rootDir string) (bool, string) {
@@ -248,7 +301,7 @@ var (
 		"daemon": true, "webui": true, "memory": true,
 		"tasks": true, "outbox": true, "ideas": true, "goals": true,
 		"events": true, "timers": true, "progress": true, "exec-sandboxed": true,
-		"spaces": true, "obs": true, "rsi": true, "ci": true,
+		"spaces": true, "skill": true, "skills": true, "obs": true, "rsi": true, "ci": true,
 		"watch": true, "offer": true, "brief": true, "dispatch": true,
 		"extension": true, "connector": true, "triggers": true, "sidecar": true,
 		"connector-driver": true,
@@ -556,7 +609,8 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 	}
 
 	// 7. Verify SKILL.md CLI subcommands against valid top-level hq commands
-	for _, skPath := range rsi.DiscoverAllSkillFiles(rootDir) {
+	allSkillDocs := append(rsi.DiscoverAllSkillFiles(rootDir), discoverTemplateSkillFiles(rootDir)...)
+	for _, skPath := range allSkillDocs {
 		b, rErr := os.ReadFile(skPath)
 		if rErr != nil {
 			continue
@@ -635,9 +689,12 @@ func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {
 			return false, fmt.Sprintf("schedule %q in templates/triggers.yaml has invalid 5-field cron %q", s.ID, s.FiveFieldCron())
 		}
 		if s.Skill != "" {
-			skillPath := filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills", s.Skill, "SKILL.md")
-			if _, statErr := os.Stat(skillPath); statErr != nil {
-				return false, fmt.Sprintf("schedule %q in templates/triggers.yaml references non-existent skill %q (%s)", s.ID, s.Skill, skillPath)
+			coreSkillPath := filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills", s.Skill, "SKILL.md")
+			starterSkillPath := filepath.Join(rootDir, "templates", "skills", s.Skill, "SKILL.md")
+			_, coreErr := os.Stat(coreSkillPath)
+			_, starterErr := os.Stat(starterSkillPath)
+			if coreErr != nil && starterErr != nil {
+				return false, fmt.Sprintf("schedule %q in templates/triggers.yaml references non-existent skill %q (checked %s and %s)", s.ID, s.Skill, coreSkillPath, starterSkillPath)
 			}
 		}
 	}
