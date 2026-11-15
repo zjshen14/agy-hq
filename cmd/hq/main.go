@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/ci"
@@ -1159,9 +1160,16 @@ func main() {
 			cc := fs.String("cc", "", "Optional CC email address(es)")
 			subject := fs.String("subject", "", "Email subject line")
 			body := fs.String("body", "", "Plain-text email body")
+			bodyStdin := fs.Bool("body-stdin", false, "Read plain-text email body from stdin (avoids shell quote expansion)")
+			bodyFile := fs.String("body-file", "", "Read plain-text email body from file path")
 			convID := fs.String("conv", "", "Optional conversation ID")
 			_ = fs.Parse(os.Args[3:])
-			spec, err := gmail.CreateOrUpdateDraft(vaultDir, *account, *draftID, *threadID, *to, *cc, *subject, *body, *convID)
+			resolvedBody, bErr := resolveBodyInput(*body, *bodyStdin, *bodyFile, os.Stdin)
+			if bErr != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail draft failed: %v\n", bErr)
+				os.Exit(1)
+			}
+			spec, err := gmail.CreateOrUpdateDraft(vaultDir, *account, *draftID, *threadID, *to, *cc, *subject, resolvedBody, *convID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gmail draft failed: %v\n", err)
 				os.Exit(1)
@@ -1382,13 +1390,20 @@ func main() {
 			spaceName := fs.String("space-name", "", "Optional display name of the target space")
 			threadID := fs.String("thread", "", "Optional thread ID being replied to")
 			body := fs.String("body", "", "Plain-text message body")
+			bodyStdin := fs.Bool("body-stdin", false, "Read plain-text message body from stdin (avoids shell quote expansion)")
+			bodyFile := fs.String("body-file", "", "Read plain-text message body from file path")
 			convID := fs.String("conv", "", "Optional conversation ID")
 			_ = fs.Parse(os.Args[3:])
+			resolvedBody, bErr := resolveBodyInput(*body, *bodyStdin, *bodyFile, os.Stdin)
+			if bErr != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat draft failed: %v\n", bErr)
+				os.Exit(1)
+			}
 			target := strings.TrimSpace(*toSpace)
 			if target == "" {
 				target = strings.TrimSpace(*spaceID)
 			}
-			spec, err := gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, target, *spaceName, *threadID, *body, *convID)
+			spec, err := gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, target, *spaceName, *threadID, resolvedBody, *convID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gchat draft failed: %v\n", err)
 				os.Exit(1)
@@ -1405,10 +1420,17 @@ func main() {
 			spaceName := fs.String("space-name", "", "Optional display name of the target space")
 			threadID := fs.String("thread", "", "Optional thread ID being replied to")
 			body := fs.String("body", "", "Plain-text message body")
+			bodyStdin := fs.Bool("body-stdin", false, "Read plain-text message body from stdin (avoids shell quote expansion)")
+			bodyFile := fs.String("body-file", "", "Read plain-text message body from file path")
 			convID := fs.String("conv", "", "Optional conversation ID")
 			resumeOnDecide := fs.Bool("resume-on-decide", false, "Wake the originating conversation upon human approve or reject")
 			continuation := fs.String("continuation", "", "Optional continuation instruction injected when resuming")
 			_ = fs.Parse(os.Args[3:])
+			resolvedBody, bErr := resolveBodyInput(*body, *bodyStdin, *bodyFile, os.Stdin)
+			if bErr != nil {
+				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", bErr)
+				os.Exit(1)
+			}
 			if *convID == "" {
 				*convID = vault.ResolveConversationID()
 			}
@@ -1418,10 +1440,10 @@ func main() {
 			}
 			var spec gchat.DraftSpec
 			var err error
-			if target == "" && *body == "" && *draftID != "" {
+			if target == "" && resolvedBody == "" && *draftID != "" {
 				spec, err = gchat.GetDraft(vaultDir, *account, *draftID)
 			} else {
-				spec, err = gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, target, *spaceName, *threadID, *body, *convID)
+				spec, err = gchat.CreateOrUpdateDraft(vaultDir, *account, *draftID, target, *spaceName, *threadID, resolvedBody, *convID)
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq gchat propose failed: %v\n", err)
@@ -1470,6 +1492,7 @@ func main() {
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fmt.Printf("Staged Google Chat proposal %s (draft: %s, space: %s [%s], sha256: %s)\n",
 				prop.ID, spec.DraftID, spec.SpaceName, spec.SpaceID, prop.SHA256[:12])
+			fmt.Printf("  %s\n", formatBodyVerificationSummary(spec.Body))
 			fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 		case "send-draft", "send":
@@ -3296,6 +3319,57 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		fmt.Fprintf(os.Stderr, "unknown plugin subcommand: %s (expected install, uninstall, status, validate)\n", sub)
 		os.Exit(1)
 	}
+}
+
+// resolveBodyInput selects the message body from --body, --body-stdin, or --body-file,
+// rejecting conflicting flags so callers cannot accidentally mix inline and piped inputs.
+func resolveBodyInput(bodyFlag string, bodyStdin bool, bodyFile string, stdin io.Reader) (string, error) {
+	bodyFile = strings.TrimSpace(bodyFile)
+	if bodyStdin && bodyFile != "" {
+		return "", fmt.Errorf("cannot specify both --body-stdin and --body-file")
+	}
+	if (bodyStdin || bodyFile != "") && bodyFlag != "" {
+		return "", fmt.Errorf("cannot combine --body with --body-stdin or --body-file")
+	}
+	if bodyStdin {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("read --body-stdin: %w", err)
+		}
+		return string(b), nil
+	}
+	if bodyFile != "" {
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return "", fmt.Errorf("read --body-file %q: %w", bodyFile, err)
+		}
+		return string(b), nil
+	}
+	return bodyFlag, nil
+}
+
+func truncateLinePreview(s string, maxRunes int) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes]) + "..."
+}
+
+// formatBodyVerificationSummary returns a concise verification line showing byte/rune counts,
+// literal '$' count, and first/last line previews so callers can verify no shell expansion occurred.
+func formatBodyVerificationSummary(body string) string {
+	dollarCount := strings.Count(body, "$")
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	first := truncateLinePreview(lines[0], 60)
+	if len(lines) == 1 {
+		return fmt.Sprintf("Body verified: %d bytes, %d runes, %d '$' chars | line: %q",
+			len(body), utf8.RuneCountInString(body), dollarCount, first)
+	}
+	last := truncateLinePreview(lines[len(lines)-1], 60)
+	return fmt.Sprintf("Body verified: %d bytes, %d runes, %d '$' chars | first: %q | last: %q",
+		len(body), utf8.RuneCountInString(body), dollarCount, first, last)
 }
 
 func printUsage() {

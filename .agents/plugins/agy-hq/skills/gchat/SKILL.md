@@ -18,8 +18,16 @@ When the user asks to send a message to a Google Chat space or DM (even from `[H
 
 1. **Stage Draft + Proposal in 1 Command (Supports Natural Space Names or IDs):**
    ```sh
+   # Simple single-line message without '$'
    hq gchat propose --to="Project Launch Space" --body="Your message text here"
+
+   # Multi-line or messages containing '$' (e.g. currency like $382.34) — ALWAYS use --body-stdin with <<'EOF'
+   cat <<'EOF' | hq gchat propose --to="Project Launch Space" --body-stdin
+   Total reimbursement is $382.34.
+   Please confirm when received.
+   EOF
    ```
+   - **Quote-Safety Rule (Enforced by `PreToolUse`):** **Never** use double-quoted `--body="..."` when the message contains `$` (e.g. `$382.34` silently expands `$3` in bash to `82.34`). Always use `--body-stdin` with a single-quoted heredoc (`<<'EOF'`) or `--body-file=<path>`, and verify the echoed `Body verified: ... '$' chars` line matches your intended text.
    - `--to` accepts:
      - A human-friendly Space/DM name (e.g., `"Project Launch Space"`, `"Engineering Core"`, `"Alice Chen"`),
      - Any **email address or username handle** (`"alice@gmail.com"`, `"alex_dev"`)—even if they have no existing DM in the top 20 sidebar spaces (`hq gchat propose` automatically runs Google Chat's `"New chat"` PeopleKit search in Go in ~2 seconds and caches the resulting DM `spaceId`), or

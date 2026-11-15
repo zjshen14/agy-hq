@@ -532,6 +532,9 @@ var (
 	}
 
 	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
+	reHQOutboundBodyCmd      = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
+	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
+	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
 	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
@@ -557,6 +560,47 @@ func isAutoConversation(vaultDir, convID string) bool {
 	}
 	t, ok := kernel.FindTaskByConversationID(vaultDir, convID)
 	return ok && t.EffectiveKind() == "auto"
+}
+
+func containsUnescapedDollar(s string) bool {
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if s[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if s[i] == '$' {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUnsafeDoubleQuotedDollar returns true if a double-quoted --body or --message
+// argument on an hq outbound/draft command contains an unescaped '$' that bash will
+// expand before hq receives it (e.g. "$382.34" -> "82.34"). An exact single-variable
+// reference like "$MSG" or "${MSG}" is permitted.
+func hasUnsafeDoubleQuotedDollar(cmdLine string) bool {
+	if !reHQOutboundBodyCmd.MatchString(cmdLine) {
+		return false
+	}
+	for _, m := range reDoubleQuotedBodyFlag.FindAllStringSubmatch(cmdLine, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		inner := m[1]
+		if reSingleShellVarOnly.MatchString(inner) {
+			continue
+		}
+		if containsUnescapedDollar(inner) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasNonLoopbackURL(cmdLine string) bool {
@@ -760,6 +804,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
 				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,pii-denylist.txt,daemon_token} is strictly prohibited across all sessions. Use `./bin/hq gmail`, `./bin/hq gchat`, or `./bin/hq memory forget` instead.",
+			})
+		}
+		if hasUnsafeDoubleQuotedDollar(cmdLine) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq outbound quote-safety policy: double-quoted --body/--message containing '$' risks silent bash variable expansion (e.g. \"$382.34\" -> \"82.34\"). Use --body-stdin with single-quoted heredoc instead: `cat <<'EOF' | ./bin/hq gchat propose --to=\"...\" --body-stdin`.",
 			})
 		}
 		checkLine := cmdLine

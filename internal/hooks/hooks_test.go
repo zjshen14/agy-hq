@@ -611,3 +611,66 @@ func TestLeanAutoSessionStartGrayZoneGuardAndCompactionNudge(t *testing.T) {
 		t.Fatalf("expected second immediate PreToolUse not to re-emit compaction nudge, got: %s", nudgeOut2.String())
 	}
 }
+
+func TestPreToolUseOutboundDoubleQuotedDollarGuard(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	runPreTool := func(cmdLine string) map[string]interface{} {
+		t.Helper()
+		payload, err := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-quote-safety",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": cmdLine},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		var out bytes.Buffer
+		if err := HandlePreToolUse(bytes.NewReader(payload), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse(%q): %v", cmdLine, err)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response for %q (%s): %v", cmdLine, out.String(), err)
+		}
+		return resp
+	}
+
+	denyCases := []string{
+		`hq gchat propose --to="Finance" --body="Total is $382.34"`,
+		`./bin/hq gchat propose --to="Finance" --body="Line 1\nBalance: $1,250.00"`,
+		`./bin/hq gchat draft --to="Finance" --body "Cost $100"`,
+		`go run ./cmd/hq gchat propose --to="Finance" --body="Refund $42"`,
+		`hq propose --type=gchat_send --summary="Pay" --message="Send $50"`,
+		`hq gmail draft --to="alice@example.com" --subject="Invoice" --body="Amount due: $99.50"`,
+		`hq gchat propose --to="Finance" --body="Hello $(whoami)"`,
+	}
+	for _, cmd := range denyCases {
+		resp := runPreTool(cmd)
+		if resp["decision"] != "deny" {
+			t.Fatalf("expected deny for %q, got: %v", cmd, resp)
+		}
+		reason, _ := resp["reason"].(string)
+		if !strings.Contains(reason, "--body-stdin") || !strings.Contains(reason, "<<'EOF'") {
+			t.Fatalf("expected --body-stdin and <<'EOF' guidance in deny reason for %q, got: %q", cmd, reason)
+		}
+	}
+
+	allowCases := []string{
+		"cat <<'EOF' | ./bin/hq gchat propose --to=\"Finance\" --body-stdin\nTotal is $382.34\nEOF",
+		`./bin/hq gchat propose --to="Finance" --body='Total is $382.34'`,
+		`./bin/hq gchat propose --to="Finance" --body="Total is \$382.34"`,
+		`./bin/hq gchat propose --to="Finance" --body="$MSG"`,
+		`./bin/hq gchat propose --to="Finance" --body="${MSG}"`,
+		`./bin/hq gchat propose --to="Finance" --body="No dollar sign here"`,
+		`git commit -m "test --body=\"$382.34\""`,
+	}
+	for _, cmd := range allowCases {
+		resp := runPreTool(cmd)
+		if resp["decision"] != "allow" {
+			t.Fatalf("expected allow for %q, got: %v", cmd, resp)
+		}
+	}
+}
