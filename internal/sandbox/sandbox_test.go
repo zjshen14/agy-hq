@@ -41,8 +41,8 @@ func TestSanitizedEnvAndSandboxProfileGeneration(t *testing.T) {
 		t.Fatalf("expected network deny and private subpath deny in Seatbelt profile, got:\n%s", sbpl)
 	}
 
-	// If OS sandbox is active on this runner, verify child command truly cannot see tokens.json!
-	cmd, sandboxed, err := BuildCommand(context.Background(), vaultDir, vaultDir, false, []string{"sh", "-c", "test -f " + secretFile + " && echo LEAKED || echo MASKED"})
+	// If OS sandbox is active on this runner, verify child command truly cannot read tokens.json!
+	cmd, sandboxed, err := BuildCommand(context.Background(), vaultDir, vaultDir, false, []string{"sh", "-c", "cat " + secretFile + " >/dev/null 2>&1 && echo LEAKED || echo MASKED"})
 	if err != nil {
 		t.Fatalf("BuildCommand: %v", err)
 	}
@@ -52,5 +52,20 @@ func TestSanitizedEnvAndSandboxProfileGeneration(t *testing.T) {
 	}
 	if sandboxed && !strings.Contains(string(out), "MASKED") {
 		t.Fatalf("expected private/gmail/tokens.json to be masked inside OS sandbox, got: %s", string(out))
+	}
+
+	// Verify Seatbelt profile includes canonical resolved path when vaultDir traverses a symlink (e.g. macOS /var -> /private/var)
+	symBase := t.TempDir()
+	realPrivateVar := filepath.Join(symBase, "private", "var", "vault")
+	aliasVar := filepath.Join(symBase, "var")
+	if err := os.MkdirAll(filepath.Join(realPrivateVar, "private"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(symBase, "private", "var"), aliasVar); err != nil {
+		t.Fatal(err)
+	}
+	symProfile := BuildSeatbeltProfile(filepath.Join(aliasVar, "vault"), false)
+	if !strings.Contains(symProfile, filepath.Join(realPrivateVar, "private")) {
+		t.Fatalf("expected Seatbelt profile to include canonical resolved subpath %s, got:\n%s", filepath.Join(realPrivateVar, "private"), symProfile)
 	}
 }

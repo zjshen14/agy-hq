@@ -98,12 +98,14 @@ func TestVaultResolutionPrecedenceAndStandaloneTemplates(t *testing.T) {
 		t.Fatalf("expected (%s, global-config), got (%s, %s)", customVault, gotVault, gotSrc)
 	}
 
-	// 4. Tier 3: <Vault>/worktrees/<slug> ancestor resolution
+	// 4. Tier 3: <Vault>/worktrees/<slug> ancestor resolution (canonicalize for macOS /var -> /private/var cwd)
 	wtDir := filepath.Join(wantGlobal, "worktrees", "webapp-feature", "pkg")
 	_ = os.MkdirAll(wtDir, 0o755)
 	_ = os.Chdir(wtDir)
 	gotVault, gotSrc, _ = vault.ResolveVaultDirWithSource()
-	if gotVault != wantGlobal || gotSrc != "worktree-ancestor" {
+	evalGot, _ := filepath.EvalSymlinks(gotVault)
+	evalWant, _ := filepath.EvalSymlinks(wantGlobal)
+	if (gotVault != wantGlobal && (evalGot == "" || evalGot != evalWant)) || gotSrc != "worktree-ancestor" {
 		t.Fatalf("expected (%s, worktree-ancestor), got (%s, %s)", wantGlobal, gotVault, gotSrc)
 	}
 

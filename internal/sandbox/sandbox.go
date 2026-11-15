@@ -206,11 +206,53 @@ func SanitizedEnv(vaultDir string, extra ...string) []string {
 	return out
 }
 
+func canonicalizeSandboxPath(rawPath string) string {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		abs = filepath.Clean(trimmed)
+	}
+	cur := filepath.Clean(abs)
+	var tail []string
+	for {
+		if resolved, rErr := filepath.EvalSymlinks(cur); rErr == nil && resolved != "" {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return filepath.Clean(resolved)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(abs)
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+func appendUniquePathWithCanonical(dirs []string, seen map[string]bool, p string) []string {
+	clean := filepath.Clean(p)
+	if clean != "" && !seen[clean] {
+		seen[clean] = true
+		dirs = append(dirs, clean)
+	}
+	canon := canonicalizeSandboxPath(clean)
+	if canon != "" && !seen[canon] {
+		seen[canon] = true
+		dirs = append(dirs, canon)
+	}
+	return dirs
+}
+
 func sensitiveMaskDirs(vaultDir string) []string {
 	var dirs []string
+	seen := make(map[string]bool)
 	if strings.TrimSpace(vaultDir) != "" {
 		if absV, err := filepath.Abs(vaultDir); err == nil {
-			dirs = append(dirs, filepath.Join(absV, "private"))
+			dirs = appendUniquePathWithCanonical(dirs, seen, filepath.Join(absV, "private"))
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -221,7 +263,7 @@ func sensitiveMaskDirs(vaultDir string) []string {
 			filepath.Join(".config", "gcloud"),
 			filepath.Join(".config", "gh"),
 		} {
-			dirs = append(dirs, filepath.Join(home, rel))
+			dirs = appendUniquePathWithCanonical(dirs, seen, filepath.Join(home, rel))
 		}
 	}
 	return dirs
@@ -258,6 +300,9 @@ func BuildBwrapArgs(vaultDir, workDir string, networkIsolated bool, argv []strin
 	}
 	// Mount empty tmpfs over sensitive directories AFTER any broader binds so credentials are invisible.
 	for _, maskDir := range sensitiveMaskDirs(vaultDir) {
+		if lstat, lErr := os.Lstat(maskDir); lErr == nil && lstat.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		if st, err := os.Stat(maskDir); err == nil && st.IsDir() {
 			args = append(args, "--tmpfs", maskDir)
 		}
