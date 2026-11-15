@@ -8,7 +8,7 @@ Welcome to the **`agy-hq` (Headquarter)** engine and plugin source repository.
 
 1. **Mandatory `Research -> RFC -> Approval -> Code` Gate for Large Changes:**
    - When adding a major capability, external integration, or architectural subsystem to `agy-hq`, **never jump straight into coding** (even inside a subagent).
-   - Start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/` + `docs/README.md` index row)** on `deep` tier (`pro` / `gemini-4-carbon-high`) inside an isolated worktree (`hq spawn --repo=. --task=<slug> --depth=high` or `[deep] <Scope>: Research & RFC Architect` subagent).
+   - Start with **Phase 1: Deep Research & Technical RFC (`docs/design/NNNN-<slug>.md` + `docs/research/` + `docs/README.md` index row)** on `deep` tier (`pro` / `gemini-4-carbon-high`) inside an isolated worktree using a dedicated sidebar task conversation as the explicit default (`hq spawn --repo=. --task=<slug> --depth=high`), since RFCs invite multi-turn review and follow-up Q&A.
    - Commit and push Phase 1 RFC/research docs cleanly on `hq/<slug>` before pausing for user review; begin Phase 2 code implementation only after user approval.
 
 2. **Two-Layer Repo Hygiene & Ring-0 Trusted Computing Base:**
