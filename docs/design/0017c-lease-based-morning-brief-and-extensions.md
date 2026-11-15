@@ -43,15 +43,14 @@ flowchart TD
 
 ## 3. Two-Phase Non-Destructive Collection (`internal/brief` + `hq brief`)
 
-### 3.1 Idempotent Peek vs. `--lease` / `hq brief commit`
+### 3.1 Idempotent Peek vs. Caller-Bound `--lease` / `hq brief commit` (`S19`, `P1-3`)
 1. **Default Read-Only Peek (`hq brief collect [--json]`):**
-   - Performs **zero** state mutations on `memory/outbox/items.jsonl` or `reported.jsonl`. Safe for CLI previews, debugging, and dry runs at any time.
-2. **Lease Acquisition (`hq brief collect --lease [--ttl=20m] [--json]`):**
-   - Acquires `internal/store` `flock` on `memory/outbox/items.jsonl`, generates `lease_token = "blease_<random128>"`, and stamps `LeaseToken` + `LeaseExpiresAt = now + 20m` onto eligible pending `brief_rollup` items (plus overnight quiet-hours-held `interrupt` items created before `quiet_hours.end`, preventing double-notification between quiet-hours end and `07:30`).
-   - Items remain `Status: "pending"` until committed; if a turn crashes or hits `429`, expired leases revert automatically on the next read or `OutboxDispatcher` tick.
+   - Performs **zero** file writes on `memory/outbox/items.jsonl` or `reported.jsonl`; expired leases (`now > LeaseExpiresAt`) are evaluated as a **computed read view** so previews stay 100% side-effect-free.
+2. **Caller-Bound Lease Acquisition (`hq brief collect --lease [--ttl=20m] [--json]`):**
+   - Acquires `internal/store` `RankOutbox` on `memory/outbox/items.jsonl`, mints `lease_token = "blease_<random128>"`, and stores **`LeaseTokenHash = sha256(lease_token)`** + `LeaseConvID = envConvID` + `LeaseExpiresAt = now + 20m` (preventing readable-outbox lease theft; `OutboxDispatcher` skips items carrying an unexpired `LeaseTokenHash` and dispatches interrupts via 3-phase claim → unlocked deliver → commit).
 3. **Post-Write Commit (`hq brief commit --lease=<token> --brief-file=<path>`):**
-   - Verifies `<brief-file>` exists and is non-empty, then atomically transitions items matching `lease_token` to `Status: "delivered"` and records nonce-fenced entries in `reported.jsonl`.
-   - **Legacy `hq outbox drain` Migration:** Updates `skills/morning-brief/SKILL.md` in the same commit to use `--lease` / `commit`; `hq outbox drain` becomes a compatibility wrapper emitting a deprecation notice on `stderr`.
+   - Verifies caller `envConvID == LeaseConvID`, confines `<brief-file>` canonically under `<vault>/notes/` (`no symlinks`, non-empty), and atomically transitions matching `LeaseTokenHash` items to `Status: "delivered"` + batch-appends nonce-fenced entries to `reported.jsonl` inside the same `RankOutbox` critical section.
+   - **Backward-Compatible `hq outbox drain` Wrapper (`CUJ-21`):** Updates `.agents/plugins/agy-hq/skills/morning-brief/SKILL.md` to use `--lease` / `commit` while preserving `hq outbox drain`'s exact stdout (`"Drained N brief_rollup item(s)"`) and emitting its deprecation notice strictly on `stderr`.
 
 ### 3.2 Realistic Bounded Execution & Proposal TTL Warnings (`C14`, `§5.7`)
 - **Bounded Parallel Fan-Out:** Connector `brief` capabilities and deterministic `argv` extensions execute inside the [RFC-0017a](0017a-connector-protocol-and-watcher-engine.md) bounded worker pool (`per_connector_timeout` default `3s`, overall collector deadline `5s`). Offline corporate VPNs or expired SSO tokens return `{section, connector, status: "offline", error_code: "transient"|"auth_expired"}` without stalling the brief.

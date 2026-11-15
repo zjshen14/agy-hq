@@ -51,11 +51,11 @@ Because `agy-hq` enforces `0` external Go dependencies (`ADR-0002` / CI Gate `H4
 
 | File | Responsibility | Pinned in `private/trust.json`? | Writer |
 |---|---|---|---|
-| `connectors/<id>/connector.json` (pack, Vault override, or embedded `core/*`) | Driver, `transport.kind`, `cli.path`, verb `argv` templates, output `jsonmap`, capabilities, `env_allow`, `requires_desktop_session` | **Yes** ([RFC-0017d §3](0017d-enterprise-extensibility-and-portability.md)); `hq` self-drivers pinned by `(version, commit)` | Pack author or human (`hq extension trust`) |
-| `<vault>/connectors/<id>/instance.json` (Vault only, `0600`) | Account aliases, email, `agy_account`, `default_query`, `watch_spaces`, `enabled`, `default_account`, `token_ref` → `private/...` | **No** — strict schema rejecting any `path`/`argv`/`env` executable keys | `hq gmail init`, `hq gchat init`, `hq connector account add` |
-| `<vault>/private/<id>/tokens/*.json` (`0600`) | OAuth / bearer secrets | All-session read/write guarded (`hooks.go`) | Interactive login flows |
+| `connectors/<id>/connector.json` (pack, Vault override, or embedded `core/*`) | Driver, `transport.kind`, `cli.path`, verb `argv` templates, output `jsonmap`, capabilities, `env_allow`, `requires_desktop_session` | **Yes** ([RFC-0017d §3](0017d-enterprise-extensibility-and-portability.md)); `hq` self-verbs execute via `os.Executable()` | Pack author or human (`hq extension trust`) |
+| `<vault>/private/connectors/<id>/instance.json` (Vault only, `0600`) | Account aliases, email, `agy_account`, per-account `transport` override, `default_query`, `watch_spaces`, `enabled`, `default_account`, `token_refs: {read, send, webhook}` → `private/<id>/tokens/...` | **No** — all-session credential-guarded (`hooks.go`); strict schema rejecting any `path`/`argv`/`env` executable keys (`trustedDomains` moved to Vault-justified `trust.json`) | `hq gmail init`, `hq gchat init`, `hq connector account add` |
+| `<vault>/private/<id>/tokens/*.json` (`0600`) | OAuth / bearer / webhook secrets | All-session read/write guarded (`hooks.go`) | Interactive login flows |
 
-- **Fail-Closed Defaults & Flag-Fused `{{param}}` Rules (`hq connector lint`):** `ParticipantLock *bool` defaults to **`true`** when omitted (loosening is Vault-only with a $\ge 16$-char justification per [RFC-0017d §2.2](0017d-enterprise-extensibility-and-portability.md)). `{{param}}` placeholders are permitted **only** fused to a flag (`--flag={{x}}`, `--flag={{?opt}}` omitted when empty, `--flag={{*list}}` expanded per element) or after `--`; standalone `"{{param}}"` before `--` is rejected by `hq connector lint`.
+- **Fail-Closed Defaults & Strict `{{param}}` Rules (`hq connector lint`):** `ParticipantLock *bool` defaults to **`true`** when omitted (loosening is Vault-only with a $\ge 16$-char justification bound to `(fqid, component_sha256)` per [RFC-0017d §2.2](0017d-enterprise-extensibility-and-portability.md)). `{{param}}` placeholders are permitted **only** fused to a flag (`--flag={{x}}`, `--flag={{?opt}}` dropping the entire element when empty, `--flag={{*list}}` expanded per element); runtime values must match `^[A-Za-z0-9._:/-]{1,128}$` with **no leading `-` or `@`** (blocking `@file` read semantics), free text is passed exclusively via `{{payload_file}}` (`/dev/fd/3` `ExtraFiles` pipe), and `cli.path` basenames `sh|bash|zsh|ssh|env|xargs|python*|node|perl|ruby` are rejected whenever `{{...}}` is used.
 
 ### 3.2 Unified `transport.kind: "cli"` Profile for Gmail (`#2`) & Google Chat (`#3`)
 To eliminate dual-config drift across `private/{gmail,gchat}/accounts.json` and support custom enterprise CLIs without glue scripts, built-in `gmail` and `gchat` drivers share `transport.kind: "cli"` resolved via **`connector.Resolve("<id>")`**:
@@ -101,7 +101,7 @@ To eliminate dual-config drift across `private/{gmail,gchat}/accounts.json` and 
   }
 }
 ```
-`<vault>/connectors/gchat/instance.json`:
+`<vault>/private/connectors/gchat/instance.json`:
 ```json
 {
   "schema_version": 1,
@@ -113,14 +113,14 @@ To eliminate dual-config drift across `private/{gmail,gchat}/accounts.json` and 
       "agy_account": "user@acme.com",
       "enabled": true,
       "watch_spaces": ["spaces/AAAA"],
-      "token_ref": null
+      "token_refs": { "read": null, "send": null, "webhook": null }
     }
   }
 }
 ```
 - **Single Resolver Across Interactive & Proactive Surfaces:** `hq gmail search|read-quarantined|draft`, interactive 1-step **`hq gchat propose`**, `hq watch precheck`, `WaitingOn` `inspect_thread`, and `hq brief collect` all execute against `connector.Resolve("<id>")`. Built-in Go drivers retain vendor security semantics (MIME/base64url decode, DKIM/SPF-aligned participants, payload hash binding) while delegating process invocation to `transport.cli`.
-- **Safe Write Verbs & Zero Unsolicited Plugin Downloads (`#2`):** Write verbs (`create_draft`, `send_draft`, `send`) execute **only at `hq approve` time** via `Proposal.CommandArgv`, passing bodies exclusively in the immutable `0600` payload file (`--body-file={{payload_file}}`), never in `argv`. **`auto_install_plugin` defaults to `false`** (`--no-plugin-install` aliases it), retiring `ensureAntigravityGmailPlugin()`'s unpinned zip download (`gmail.go:291-330`); when explicitly opted in, installation uses sanctioned `agy plugin install`, and missing CLIs print the exact `cli.path` remedy.
-- **One-Release `accounts.json` Migration & Drift Guard:** `hq connector migrate gmail|gchat` converts legacy `private/{gmail,gchat}/accounts.json` into `<vault>/connectors/<id>/instance.json` (preserving `oauth | cdp | gmail-bridge | webhook | mock` as built-in `transport.kind` values) and writes a `migrated_to` tombstone. Reads fall back for one release while writes target `instance.json` exclusively, and `hq doctor` flags any drift.
+- **TOCTOU-Free Write Verbs & Zero Unsolicited Plugin Downloads (`#2`, `S11`):** Write verbs (`create_draft`, `send_draft`, `send`) execute **only at `hq approve` time** via `Proposal.CommandArgv`; `hq approve` reads and SHA-256-verifies the payload into memory and passes it via `cmd.ExtraFiles` (`/dev/fd/3` substituted for `{{payload_file}}`), eliminating file-swap TOCTOU races. **`auto_install_plugin` defaults to `false`** (`--no-plugin-install` aliases it), retiring `ensureAntigravityGmailPlugin()`'s unpinned zip download (`gmail.go:291-330`); when explicitly opted in, installation uses sanctioned `agy plugin install`.
+- **Non-Destructive `accounts.json` Migration & Version-Skew Drift Guard:** `hq connector migrate gmail|gchat` writes `<vault>/private/connectors/<id>/instance.json` (`fsync`) while keeping legacy `private/{gmail,gchat}/accounts.json` intact during the 1-release dual-read window (preserving per-account `transport` overrides and `read`/`send`/`webhook` token separation); `hq doctor` compares content hashes to flag version-skew drift.
 
 ### 3.3 Layered Discovery & Unified Trust Consumption (`RFC-0017d`)
 Connectors resolve in strict order: `<vault>/connectors/<id>/connector.json` → enabled & trusted companion packs (`<plugin>/hq-extension.json` `components.connectors` / `connector_defaults`, resolved via `internal/hostpaths` in [RFC-0017d §2, §5.2](0017d-enterprise-extensibility-and-portability.md)) → embedded `templates/connectors/{gmail,gchat,gcalendar}/connector.json` (`//go:embed`). Every non-embedded `connector.json` and external `cli.path` binary is SHA-256 verified before every `exec` against `<vault>/private/trust.json` ([RFC-0017d §3](0017d-enterprise-extensibility-and-portability.md)), failing closed with at most one `brief_rollup` notice per `(id, sha256)`.
@@ -201,25 +201,22 @@ All connector polls, `WaitingOn` `inspect_thread` calls, and `hq brief collect` 
 
 ## 6. Locked Stores, Direct Event Enqueue & Single Commit Authority (`internal/store`, `internal/watcher`)
 
-### 6.1 Shared Locked Atomic Store (`internal/store`)
-A pure-Go `internal/store` package (`syscall.Flock` `.lock` file + temp file + `Sync()` + `os.Rename`, `0600`) upgrades `memory/outbox/items.jsonl`, `memory/goals.json`, `memory/trigger_cursors.json`, `<vault>/extensions.json`, and `<vault>/memory/watchers/<connector>-<account>.json`, eliminating concurrent lost-update races.
+### 6.1 Ranked Deadlock-Free Locked Store (`internal/store`)
+A pure-Go `internal/store` package provides **per-path `sync.Mutex` + `syscall.Flock` + explicit `Rank` ordering checked on `context.Context`** (`RankExtensions < RankTriggerCur < RankWatcher < RankEvents < RankGoals < RankOutbox < RankTaint < RankTimers`, panicking under `testing.Testing()` on any rank inversion) plus `WriteAtomic` (`CreateTemp` + `Sync` + `Rename` + parent-dir `Sync`, mode `0600`). Locks are **never** held across subprocess `exec`, HTTP/RPC calls, or LLM spawns.
 
-### 6.2 Direct Per-Item `events.Enqueue` With `Metadata["tier"]`
+### 6.2 `EnqueueBatch`, `PollCursor` vs. `AckedItemIDs` & Lease-Time Batch Tiering
 `hq watch precheck` retires 300-rune `GatekeeperEnvelope` stdout parsing:
-1. Paginates enabled connectors concurrently up to `max_pages` using `cursor` / `next_cursor` so bursts $> \text{page\_size}$ never drop oldest items.
-2. Items with `IsAutomated == true && !HasSecurityOverride && !HasSchedule` and no `WaitingOn` or private `<vault>/config.yaml` `attention.priority_rules` match (`templates/config.yaml` ships `priority_rules: []`, enforced empty by CI) roll directly into a 0-token `brief_rollup` entry (`HasSecurityOverride` preserves 2FA/security alerts).
-3. Actionable items enqueue **one durable `Event` per item** directly into `events.json`:
-   - `DedupKey: "watch:<connector>:<account>:<item_id>"` (`7d` active/done window),
-   - `ScopeKey: "triage:<connector>:<account>"` (coalesced per account under `15m` `DefaultLeaseTTL`),
-   - `Source: "connector:<connector>"` (triggers lease-time `[hq-spawn:<token>]` auto-taint in [RFC-0017b §2.1](0017b-provenance-taint-and-offer-gateway.md)),
-   - `Metadata`: **opaque IDs and tier enum only** (`connector`, `account`, `item_id`, `thread_key`, and **`tier`** = `"quick"` for 1–3 routine items or `"routine"` for `WaitingOn`, `HasSchedule`, `HasSecurityOverride`, `priority_rules`, or $\ge 4$ items — resolved at dispatch via `routing.ResolveTier` in [RFC-0017d §5.1](0017d-enterprise-extensibility-and-portability.md); zero untrusted `Sender`/`Subject` text).
+1. Paginates enabled connectors concurrently up to `max_pages` (`8 MiB` `io.LimitReader`, `1 MiB` scanner buffer, aborting on repeated `next_page_token`, validating `item_id`/`thread_key` against `^[A-Za-z0-9._:@/-]{1,128}$`).
+2. Items with `IsAutomated == true && !HasSecurityOverride && !HasSchedule` and no `WaitingOn` or private `<vault>/config.yaml` `attention.priority_rules` match roll directly into a 0-token `brief_rollup` entry.
+3. Actionable items commit in **one locked `events.EnqueueBatch` call** (single archive scan, `DedupIncludesDropped: true` so dropped poison items never re-enqueue, hex/hash-separated `DedupKey` over `(connector, account, item_id)`), then advance `PollCursor` immediately so a slow worker never stalls provider history tokens (`historyId`).
+   - `LeaseNextBatches` caps coalescing at `MaxBatchEvents = 25` per worker run and computes effective batch `tier` at **lease time** (`"quick"` for 1–3 routine items; `"routine"` when $\ge 4$ items or any item carries `WaitingOn`, `HasSchedule`, `HasSecurityOverride`, or `priority_rules`), resolved via `routing.Resolve(vaultDir, ...)` ([RFC-0017d §5.1](0017d-enterprise-extensibility-and-portability.md)).
 
-### 6.3 Single Commit Authority (`hq watch ack`) & Poison Dead-Letter Set
-- **`hq watch ack --item=<item_id>` = "Triage Complete":** Sole authority advancing watcher watermarks (`LastCursor` + bounded in-horizon `AckedItemIDs`), validated server-side against the caller's leased batch. Staging an offer (including `ResumeOnDecide` proposals awaiting user approval) or logging an outbox digest counts as triage complete, so `Stop` while awaiting approval never re-triages the item.
-- **Partial-Batch Safe `Stop` & Poison Set:** On `Stop`, `Source: "connector:*"` batches mark **only acked** item events `done` and **requeue unacked** items (`AttemptCount++`). Items reaching `StatusDropped` (`MaxAttempts` exhausted) enter `PoisonedItems` and emit **one** `brief_rollup` dead-letter notice so poison items never loop infinitely.
+### 6.3 Single-Lock Event Ack (`events.AckItems` / `FinalizeConversation`) & Poison Set
+- **Single-Lock Authority (Zero Cross-Store Lock Inversion):** `hq watch ack --item=<item_id>` calls `events.AckItems(convID, itemIDs)` under `RankEvents` only (stamping `Metadata["acked"] = "1"` when `LeaseConvID == convID`), then updates watcher `AckedItemIDs` monotonically after releasing the events lock. Staging an offer (`ResumeOnDecide`) or logging an outbox digest counts as **"triage complete"**.
+- **Partial-Batch Safe `Stop` & Poison Set:** `Stop` calls `events.FinalizeConversation(convID)` in one `RankEvents` critical section—archiving acked items as `done` and requeuing unacked items (`AttemptCount++`, transitioning exhausted items to `StatusDropped`). Dropped `connector:*` items are recorded in `PoisonedItems` outside the lock and emit **one** `brief_rollup` dead-letter notice.
 
-### 6.4 Reference Connectors, `WaitingOn` Inspection & Quiet-Hours Alignment
-- Retires `RunHeartbeat`'s hardcoded 30m `gmail`/`gchat` loops (`kernel.go:2330-2410`); fixes Gmail direct OAuth REST (`expiry` refresh, metadata headers, MIME/base64url decode, REST draft CRUD); adds `(Connector, Account, ThreadKey, LastItemID, Priority)` to `GoalWaitingOn` with worker-pool `inspect_thread` verification; and fixes `ParseAttentionConfig` to honor both `tz:` and `timezone:`, default `QuietHours.Enabled = true` (`end: "07:30"`), resolve `tz: local` at `hq init`, and align `quotaDeferred` `AvailableAt = max(nextQuotaReset, quietHoursEnd)`.
+### 6.4 Reference Connectors, `WaitingOn` Inspection & Hermetic Quiet-Hours Alignment
+- Retires `RunHeartbeat`'s hardcoded 30m `gmail`/`gchat` loops (`kernel.go:2330-2410`); fixes Gmail direct OAuth REST (`expiry` refresh, metadata headers, MIME/base64url decode, REST draft CRUD); adds `(Connector, Account, ThreadKey, LastItemID, Priority)` to `GoalWaitingOn` with worker-pool `inspect_thread` verification; and updates `ParseAttentionConfig` to honor both `tz:` and `timezone:` and enable quiet hours whenever a `quiet_hours:` block is present (`end: "07:30"`, keeping zero-config in-code fallback `Enabled: false` for hermetic unit tests while `hq init` writes `tz: local`).
 
 ---
 

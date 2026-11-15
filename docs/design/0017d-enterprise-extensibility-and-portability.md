@@ -56,21 +56,16 @@ flowchart TD
     RES --> D3["Front Desk crons + SKILL.md trampolines + Zone-1 hints"]
 ```
 
-### 2.2 Namespaced FQIDs & Two-Lattice Virtual Merge
-- **Pack Identities & FQIDs:** Embedded templates form pack `core` (`core/morning-brief`), companion plugins use `<pack>/<id>` (`id` must equal `plugin.json` `name`), and local Vault files form pack `vault` (`vault/<id>`). Unqualified ID collisions across enabled packs fail closed with an explicit error unless `<vault>/extensions.json` names a winner.
-- **Discovery Preconditions:** A companion pack participates only when (1) enabled in Antigravity (`agy plugin list` / `Roots.ConfigDir`), (2) listed in `<vault>/extensions.json` `enabled_packs`, and (3) hash-verified against `<vault>/private/trust.json`.
-- **Two Merge Lattices (Preventing Precedence = Privilege Escalation):**
-  1. **Preference Lattice** (`cron`, `tz`, `tier`, `delivery`, `section`, `order`, `timeout_ms`, `enabled`, `catch_up`): `Vault (<vault>/extensions.json) > packs (in enabled_packs order) > core`.
-  2. **Security Lattice** (`participant_lock`, `quarantined`, `sensitivity`, `requires_desktop_session`, taint-surface membership): **monotonic-restrictive**. Companion packs may only **tighten** core defaults (`hq extension lint` rejects `quarantined: false` or `participant_lock: false` in packs). Only `<vault>/extensions.json` `security_loosening` may relax a security boolean, requiring a $\ge 16$-character `justification` pinned inside `<vault>/private/trust.json`.
+### 2.2 Namespaced FQIDs & Two-Lattice Virtual Merge (`P1-10` Hardened)
+- **Reserved & Namespaced Pack Identities:** `core` and `vault` are reserved pack IDs; companion plugins use `<pack>/<id>` (`id` must equal `plugin.json` `name`, resolved root path pinned in `private/trust.json`), with a canonical alias map (`morning-brief` ↔ `core/morning-brief`) so legacy cursor keys and Front Desk crons never duplicate. Unqualified ID collisions across enabled packs fail closed unless `<vault>/extensions.json` names a winner.
+- **Discovery Preconditions:** A companion pack participates only when (1) enabled in Antigravity (`agy plugin list --json` / `Roots.ConfigDir`), (2) listed in `<vault>/extensions.json` ordered `enabled_packs`, and (3) hash-verified against `<vault>/private/trust.json` (a mismatch on `hq-extension.json` itself disables the entire pack; component mismatches fail closed per component).
+- **Two Merge Lattices:**
+  1. **Preference Lattice** (`cron`, `tz`, `tier`, `delivery`, `section`, `order`, `timeout_ms`, `enabled`, `catch_up`): `Vault (<vault>/extensions.json) > packs (in enabled_packs order, scoped to their own <pack>/* FQIDs) > core` (`packs` cannot disable or alter `core/*` schedules or pre-empt core `tax-prep`/`ledger-ingest` inbox rules without an explicit Vault override; `routing_defaults` requires Vault opt-in or empty `routing.tiers`).
+  2. **Security Lattice** (`participant_lock: true`, `quarantined: true`, `sensitivity: "private"`, `requires_desktop_session: true`, taint-surface membership): **monotonic-restrictive**. Companion packs may only tighten defaults (`hq extension lint` rejects loosening in packs and rejects companion `PreToolUse`/`PreInvocation` hooks unless explicitly Vault-loosened). Only `<vault>/extensions.json` `security_loosening` (bound to `(fqid, component_sha256)` with a $\ge 16$-char `justification` pinned in `private/trust.json`) may relax a security boolean.
 
-### 2.3 Virtual Schedule / Gatekeeper Merge & Per-Schedule `enabled` (`#4`, `#7`)
-- **In-Memory Virtual Merge & Strict Triggers Parsing:** Effective schedules merge `core` + enabled packs' `schedules` + `<vault>/triggers.yaml` (hardened so unknown keys return a validation error instead of silently failing open) + locked JSON `<vault>/extensions.json`. `hq` never round-trips machine edits back into YAML.
-- **Gatekeepers Unified Under `schedules`:** A gatekeeper is simply a schedule carrying `precheck: {argv, dedup_mode, timeout_ms}`, hash-pinned in `trust.json` and executed inside the [RFC-0017a](0017a-connector-protocol-and-watcher-engine.md) scrubbed worker pool.
-- **`hq triggers pause|resume <fqid>` (`#7`):**
-  - Writes **only** `<vault>/extensions.json` (`internal/store` `flock` + atomic rename).
-  - FQID-keyed cursors (`trigger_cursors.json` and watcher cursors) remain **untouched** while paused; watcher schedules do not poll when paused, advancing zero watermarks.
-  - `catch_up: "none"` (default) skips missed intervals on resume; `catch_up: "last"` fires once if the prior window was missed (ideal for `core/morning-brief`). Already-queued events remain unless `--drop-queued` is passed.
-- **`front_desk_cron` Disarm & Step-0 Mechanical Guard:** Because `front_desk_cron` schedules are armed inside `[HQ] Front Desk` via the native `schedule` tool, Front Desk `SessionStart` emits both **arm** and **disarm** lists (`manage_task(Action="kill")`), and every cron prompt is prefixed `[hq-trigger:<fqid>]` paired with step-0 `hq dispatch resolve --trigger=<fqid>`, turning stale armed crons into a deterministic 0-op when `disabled`.
+### 2.3 Virtual Schedule / Gatekeeper Merge & Unified `hq triggers` CLI (`#4`, `#7`, `P1-8`, `P1-9`)
+- **Per-Schedule Resilient Parsing & Tainted External Prechecks:** `<vault>/triggers.yaml` accepts legacy aliases (`model:`, `precheck_cmd:`, `dedup_mode:`), rejects malformed individual entries with a `doctor` warning rather than dropping healthy schedules like `sleep-consolidate`, and tags non-`hq` gatekeeper `precheck` runs as `Source: "quarantined:precheck:<fqid>"` so external CLI stdout never enters an untainted prompt. `DaemonInfo.SchedulesCount` preserves raw `triggers.yaml` counts (`CUJ-12`) alongside `EffectiveSchedulesCount`.
+- **`hq triggers <list|pause|resume|fire> <fqid>` (`#7`):** Writes **only** `<vault>/extensions.json` (`internal/store` `RankExtensions`); FQID cursors remain untouched while paused; unknown/removed FQIDs resolve to `{enabled: false, reason: "unknown"}`; and Front Desk `SessionStart` emits both **arm** and **disarm** lists paired with `[hq-trigger:<fqid>]` Step-0 `hq dispatch resolve --trigger=<fqid>` guards.
 
 ### 2.4 Canonical `hq-extension.json` & `<vault>/extensions.json` Schemas
 ```json
@@ -180,30 +175,24 @@ Because Antigravity loads every enabled plugin's `skills/` directory statically,
 
 ## 5. Host Portability & Desktop-SSO Polling (`#1`, `#5`, `#6`, `N4`)
 
-### 5.1 Tier-Only Model Routing (`internal/routing`, `#1`)
-- **`routing.ResolveTier(tier)`:** Resolves `quick | routine | standard | heavy | deep-medium | deep` in order: `<vault>/config.yaml` `routing.tiers` → enabled pack `routing_defaults.tiers` → built-in default table (`ResolveModel` retains prompt-based tier classification only, delegating `tier -> model`; `fallback_on_429` also accepts a tier name).
-- **Zero Hardcoded Model Literals:** Migrates `timers.go:197` (`tier: "quick"`), `events_dispatch.go:359` (`tier: "standard"`), `gatekeeper.go:298` / `ScheduleTrigger` (`Tier`), `templates/triggers.yaml`, `templates/sidecars/hq-*` (calling `hq trigger fire <fqid>` instead of `agentapi new-conversation --model=...`), `migrate.go:419`, `demo.go`, `obs` attribution (recording both `tier` and resolved `model`), and rules/skills prose (`SessionStart` injects the host's resolved tier table). `hq extension lint` rejects literal model IDs outside `routing_defaults`.
-- **Host Catalog Validation:** `hq doctor` checks every configured tier against the host catalog (`GetCascadeModelConfigData`) whenever Language Server credentials are reachable.
+### 5.1 Pure `ResolveModel` + Vault-Scoped `internal/routing` (`#1`, `P0-8`)
+- **Preserving Pure `kernel.ResolveModel` (`H3` & `CUJ-4`):** `routing.Builtin(prompt, model, depth, tier)` backs `kernel.ResolveModel` with zero Vault I/O (preserving the exact 3-class `Class` return and CI hermeticity), while **`routing.Resolve(vaultDir, req)`** resolves the 6-tier enum (`quick | routine | standard | heavy | deep-medium | deep`) in order: `<vault>/config.yaml` `routing.tiers` (`deep_routine` accepted as alias for `deep-medium`) → Vault-opted-in pack `routing_defaults.tiers` → `routing.Builtin`.
+- **Migrating Runtime Call Sites:** `timers.go:197`, `events_dispatch.go:359`, `gatekeeper.go:298`, `ScheduleTrigger`, `templates/sidecars/hq-*` (`hq triggers fire <fqid>`), `migrate.go:419`, `fallback_on_429`, and `obs` attribution route through `routing.Resolve(vaultDir, ...)`, while `hq doctor` validates configured tiers against `GetCascadeModelConfigData` when LS credentials exist.
 
-### 5.2 Relocatable Host Roots & Canonical Brain Prefix Guard (`internal/hostpaths`, `#6`)
-- **`hostpaths.Resolve()`** returns `Roots{GeminiDir, ConfigDir, AppDataDir, BrainDir, PluginsDir}` using strict precedence:
-  1. Explicit `HQ_{GEMINI,CONFIG,APP_DATA}_DIR` environment overrides.
-  2. Antigravity session environment (`ANTIGRAVITY_GEMINI_DIR`, `ANTIGRAVITY_CONFIG_REL_DIR`, `ANTIGRAVITY_APP_DATA_DIR`).
-  3. External bootstrap locator **`$XDG_CONFIG_HOME/agy-hq/roots.json`** (`0600`, written outside `AppDataDir` by `hq plugin install` and `SessionStart` whenever Antigravity env vars are present so CLI/daemon invocations locate relocated AppData deterministically).
-  4. Standard defaults (`~/.gemini`, `config`, `antigravity`).
-- **Call-Site & Security Fixes:** Updates `vault.go`, `plugin.go` (exact canonical path match replacing `HasSuffix("/.gemini/antigravity/hq/plugins")`), `doctor.go`, `gmail.go`, `main.mjs`, CLI help strings, **and `hooks.go:1105`**—replacing the bypassable substring check `strings.Contains(path, "/.gemini/antigravity/brain/")` with a canonical `filepath.Clean` + ` EvalSymlinks`-safe prefix check against `Roots.BrainDir`.
+### 5.2 Hermetic `hostpaths.Resolve(vaultDir)` & Own-Conversation Brain Guard (`#6`, `S3`, `P0-9`)
+- **`hostpaths.Resolve(vaultDir)`** returns `Roots{GeminiDir, ConfigDir, AppDataDir, BrainDir, PluginsDir}`:
+  1. Explicit `HQ_{HOME,GEMINI,CONFIG,APP_DATA,BRAIN}_DIR` overrides.
+  2. **Test Hermeticity Guard:** When `vault.IsTempPath(EvalSymlinks(vaultDir))` is true, `hostpaths` ignores real host `roots.json` / non-temp `ANTIGRAVITY_*` env and **never** writes `$XDG_CONFIG_HOME/agy-hq/roots.json`, keeping `go test ./...` 100% isolated from the developer's workstation.
+  3. Antigravity session env (`ANTIGRAVITY_GEMINI_DIR`, `ANTIGRAVITY_CONFIG_REL_DIR`, `ANTIGRAVITY_APP_DATA_DIR`).
+  4. External locator `$XDG_CONFIG_HOME/agy-hq/roots.json` (`0600`, owner-UID, non-symlink, write-protected in `PreToolUse`).
+  5. Defaults (`~/.gemini`, `config`, `antigravity`).
+- **Own-Conversation Brain Guard (`hooks.go:1105`, `S3`):** Replaces the substring check with canonical prefix matching against **`filepath.Join(Roots.BrainDir, payload.ConversationID)`** (plus `Lstat` no-symlink check) and blocks `**/.system_generated/**` across all sessions.
 
-### 5.3 Go-Native `hq sidecar console` & `builtin: "schedule"` Sidecars (`#5`)
-- **`hq sidecar console`:** Pure-Go subcommand reading `ANTIGRAVITY_SIDECAR_WEB_PORT` and `ANTIGRAVITY_SIDECAR_UI_TOKEN`, serving/proxying `:4242`, and supervising `hq daemon` under `SanitizedDaemonEnv`.
-- **Smooth Transition & `ValidateBundle` Update:** Reduces `main.mjs` to a ~15-line trampoline invoking `hq sidecar console` on Desktop while updating `plugin.ValidateBundle` (`internal/plugin/plugin.go:289-303`) to accept either `{command: "node", args: ["main.mjs"]}` or direct Go `{command: "<hq>", args: ["sidecar", "console"]}` once headless sidecar `command` path expansion is confirmed. Scheduled plugin sidecars standardize on `node`-free `builtin: "schedule"` invoking `hq trigger fire <fqid>`.
+### 5.3 Go-Native `hq sidecar console` & `builtin: "schedule"` Sidecars (`#5`, `H2-C`)
+- **`hq sidecar console`:** Pure-Go subcommand reading `ANTIGRAVITY_SIDECAR_WEB_PORT`, minting an in-memory session secret alongside `ANTIGRAVITY_SIDECAR_UI_TOKEN`, serving/proxying `:4242`, and supervising `hq daemon` under `SanitizedDaemonEnv`. Both copies of `main.mjs` remain byte-identical (`H2-C`) as a minimal trampoline while `plugin.ValidateBundle` accepts both `node` and direct `hq` commands.
 
-### 5.4 Corrected `requires_desktop_session: true` Polling (`N4` Closed)
-Empirical inspection of `/proc/<pid>/environ` key names on live Antigravity `2.31.2` proved that `agy-hq-console` sidecar and `hq daemon` carry `ANTIGRAVITY_APP_DATA_DIR` and `ANTIGRAVITY_SIDECAR_*`, **but neither carries `ANTIGRAVITY_CREDENTIAL_SCOPE` nor `ANTIGRAVITY_PLUGIN_SHIM_DIR`**—Desktop-SSO bearer scopes exist exclusively inside conversation-scoped processes:
-1. **Primary Path — Opportunistic Hook Piggyback (`0` LLM Tokens, `node`-Free):**
-   - Whenever `Stop` or `PostToolUse` executes with non-empty `ANTIGRAVITY_CREDENTIAL_SCOPE`, `hq` opportunistically spawns a detached, `flock`-singleflight, rate-limited ($\ge 15\text{m}$ since last poll) `hq watch precheck --desktop-only` background process inheriting the scrubbed connector env + live `ANTIGRAVITY_CREDENTIAL_SCOPE` + sentinel `ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel`.
-   - `ANTIGRAVITY_CREDENTIAL_SCOPE` is **never** written to disk. When no Desktop conversation is active, `hq status` reports `paused (no active desktop conversation)` with `0` errors.
-2. **Fallback Path — `builtin: "schedule"` Lean Poll Trigger:**
-   - If a host build omits `ANTIGRAVITY_CREDENTIAL_SCOPE` from hook environments (verified by Phase-2 spike `(a)` and `hq doctor`), `core/watch-desktop` runs as an opt-in `30–60m` `builtin: "schedule"` `tier:quick` `[Auto]` trigger whose tool environment carries live `SCOPE` and coalesces polling with triage.
+### 5.4 `Stop`-Only Detached Desktop-SSO Piggyback (`N4`, `P1-12` Closed)
+To avoid adding latency or a new `hooks.json` event on every tool call (`H2-A`), Desktop-SSO piggyback runs **exclusively from `Stop`**: when `ANTIGRAVITY_CREDENTIAL_SCOPE` is non-empty, `Stop` launches a detached (`Setsid: true`, stdio `/dev/null`, `LOCK_EX|LOCK_NB` singleflight, $\ge 15\text{m}$ rate limit) `hq watch precheck --desktop-only` child that verifies account identity against `instance.agy_account` and never persists `SCOPE` to disk (with opt-in `builtin: "schedule"` `core/watch-desktop` fallback).
 
 ---
 
