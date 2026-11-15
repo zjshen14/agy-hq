@@ -397,6 +397,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 	dirs := []string{
 		vaultDir,
 		filepath.Join(vaultDir, "inbox"),
+		filepath.Join(vaultDir, "skills"),
 		filepath.Join(vaultDir, "notes", "briefs"),
 		filepath.Join(vaultDir, "notes", "investing"),
 		filepath.Join(vaultDir, "notes", "writing"),
@@ -412,6 +413,7 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 		filepath.Join(vaultDir, "memory", "outbox"),
 		filepath.Join(vaultDir, "memory", "proposals"),
 		filepath.Join(vaultDir, "memory", "rsi", "hypotheses"),
+		filepath.Join(vaultDir, "memory", "rsi", "rules"),
 		filepath.Join(vaultDir, "console_spaces"),
 	}
 

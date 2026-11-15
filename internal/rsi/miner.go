@@ -119,26 +119,42 @@ func computeFingerprint(cat FrictionCategory, skillOrPkg, toolName, normalizedSi
 	return hex.EncodeToString(h[:])[:16]
 }
 
-func inferSkillOrPkg(cmdOrContent string, filesModified []string) string {
+func inferSkillOrPkg(cmdOrContent string, filesModified []string, vaultSkills ...[]string) string {
 	lower := strings.ToLower(cmdOrContent)
+	if len(vaultSkills) > 0 {
+		for _, sk := range vaultSkills[0] {
+			skLower := strings.ToLower(strings.TrimSpace(sk))
+			if skLower == "" {
+				continue
+			}
+			if strings.Contains(lower, "/"+skLower) ||
+				strings.Contains(lower, "skills/"+skLower) ||
+				strings.Contains(lower, " "+skLower+" ") ||
+				strings.HasPrefix(lower, skLower+" ") ||
+				strings.HasSuffix(lower, " "+skLower) ||
+				lower == skLower {
+				return sk
+			}
+		}
+	}
 	switch {
 	case strings.Contains(lower, "gchat"):
 		return "gchat"
-	case strings.Contains(lower, "gmail"):
-		return "gmail"
+	case strings.Contains(lower, "inbox-triage"):
+		return "inbox-triage"
 	case strings.Contains(lower, "thesis") || strings.Contains(lower, "10-k") || strings.Contains(lower, "10-q"):
 		return "thesis-check"
 	case strings.Contains(lower, "filing-diff"):
 		return "filing-diff"
 	case strings.Contains(lower, "tax"):
 		return "tax-prep"
-	case strings.Contains(lower, "ledger") || strings.Contains(lower, "beancount"):
+	case strings.Contains(lower, "ledger") || strings.Contains(lower, "beancount") || strings.Contains(lower, "hledger"):
 		return "ledger-ingest"
 	case strings.Contains(lower, "sleep-consolidate") || strings.Contains(lower, "verify-transcript"):
 		return "sleep-consolidate"
 	case strings.Contains(lower, "morning-brief"):
 		return "morning-brief"
-	case strings.Contains(lower, "worktree") || strings.Contains(lower, "gh pr"):
+	case strings.Contains(lower, "worktree") || strings.Contains(lower, "gh pr") || strings.Contains(lower, "swe-pulse"):
 		return "swe-pulse"
 	}
 	for _, fp := range filesModified {
@@ -159,7 +175,26 @@ func inferSkillOrPkg(cmdOrContent string, filesModified []string) string {
 			return "internal/kernel"
 		}
 	}
-	return "swe-pulse"
+	return "general"
+}
+
+func listInstalledVaultSkillSlugs(vaultDir string) []string {
+	skillsDir := filepath.Join(vaultDir, "skills")
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if _, sErr := os.Stat(filepath.Join(skillsDir, e.Name(), "SKILL.md")); sErr == nil {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
 }
 
 func attributeFaultLayer(parentConvID, modelName string, firstFailStepIdx int, wastedSteps int, errorExcerpt string) AttributionFaultLayer {
@@ -294,6 +329,7 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 	}
 
 	// 1. Scan turn journals in local/memory/journal/*/*.json and their linked transcripts
+	vaultSkills := listInstalledVaultSkillSlugs(vaultDir)
 	journalRoot := filepath.Join(vaultDir, "memory", "journal")
 	var observedCleanSkills = make(map[string]int)
 	var observedFingerprintsThisRun = make(map[string]bool)
@@ -328,13 +364,13 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 						parentConv = t.ParentConversationID
 					}
 				}
-				skillOrPkg := inferSkillOrPkg(je.UserPrompt+" "+je.ResponseSummary, je.FilesModified)
+				skillOrPkg := inferSkillOrPkg(je.UserPrompt+" "+je.ResponseSummary, je.FilesModified, vaultSkills)
 				if je.TurnErrorCount == 0 && je.ToolErrorCount == 0 {
 					observedCleanSkills[skillOrPkg]++
 				}
 
 				if je.TranscriptPath != "" {
-					mineTranscript(je, parentConv, skillOrPkg, upsert, observedFingerprintsThisRun)
+					mineTranscript(je, parentConv, skillOrPkg, vaultSkills, upsert, observedFingerprintsThisRun)
 				}
 			}
 		}
@@ -371,7 +407,7 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 				continue
 			}
 			if item.Type == "user_feedback" && (item.Summary != "" || item.Lesson != "") {
-				skill := inferSkillOrPkg(item.Category+" "+item.Summary+" "+item.Lesson, nil)
+				skill := inferSkillOrPkg(item.Category+" "+item.Summary+" "+item.Lesson, nil, vaultSkills)
 				upsert(
 					FrictionUserIntervention,
 					FaultWorkerACIOrSkill,
@@ -400,7 +436,7 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 				cmd = item.Proposal.Command
 			}
 			if propID != "" && (item.Decision == "rejected" || item.Reason != "") {
-				skill := inferSkillOrPkg(actType+" "+cmd+" "+summary, nil)
+				skill := inferSkillOrPkg(actType+" "+cmd+" "+summary, nil, vaultSkills)
 				upsert(
 					FrictionUserIntervention,
 					FaultWorkerACIOrSkill,
@@ -491,10 +527,11 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 				}
 			}
 			cm := obsIdx.Conversations[anom.ConversationID]
+			anomSkill := inferSkillOrPkg(anom.TaskSlug+" "+cm.Title, nil, vaultSkills)
 			upsert(
 				FrictionQuotaAnomaly,
 				FaultModelRouting,
-				"swe-pulse",
+				anomSkill,
 				anom.Kind,
 				anom.Code+":"+anom.TaskSlug,
 				anom.Summary,
@@ -567,6 +604,7 @@ func mineTranscript(
 	je hooks.JournalEntry,
 	parentConv string,
 	defaultSkill string,
+	vaultSkills []string,
 	upsert func(cat FrictionCategory, fault AttributionFaultLayer, skillOrPkg, toolName, cmdPat, errExcerpt, recovery string, wasted int, convID, parentConv, modelName, ts string, tainted bool),
 	observedFPs map[string]bool,
 ) {
@@ -698,7 +736,10 @@ func mineTranscript(
 			if tool == "" {
 				tool = "run_command"
 			}
-			skill := inferSkillOrPkg(s.CmdLine+" "+s.Content, je.FilesModified)
+			skill := inferSkillOrPkg(s.CmdLine+" "+s.Content, je.FilesModified, vaultSkills)
+			if (skill == "" || skill == "general") && defaultSkill != "" {
+				skill = defaultSkill
+			}
 			excerpt := firstLineExcerpt(s.Content, 180)
 			fp := computeFingerprint(FrictionPreTool, skill, tool, s.CmdLine)
 			observedFPs[fp] = true
@@ -749,8 +790,8 @@ func mineTranscript(
 		if tool == "" {
 			tool = "run_command"
 		}
-		skill := inferSkillOrPkg(s.CmdLine+" "+s.Content, je.FilesModified)
-		if skill == "" {
+		skill := inferSkillOrPkg(s.CmdLine+" "+s.Content, je.FilesModified, vaultSkills)
+		if (skill == "" || skill == "general") && defaultSkill != "" {
 			skill = defaultSkill
 		}
 		excerpt := firstLineExcerpt(s.Content, 180)

@@ -112,19 +112,26 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 
 ## Built-In Skills
 
-`agy-hq` is **100% general-purpose out of the box**—you can ask it to debug any repository, write an essay, or plan a trip without pre-registering workflows. For recurring high-stakes domains, it includes **9 progressive-disclosure skills** (`<= 150` lines each, loaded only when relevant):
+`agy-hq` is **100% general-purpose out of the box**—you can ask it to debug any repository, write an essay, or plan a trip without pre-registering workflows. Following [RFC-0019](docs/design/0019-two-tier-rsi-vault-overlay.md), skills are separated into **3 Core OS Skills** (bundled cleanly with the plugin and upgraded atomically via `hq upgrade`) and **6 Opt-In Starter Templates** (`templates/skills/`, installed into your private `local/skills/` Vault via `./bin/hq skill add <name|--all>`):
+
+### Core OS Harness Skills (`.agents/plugins/agy-hq/skills/`)
 
 | Skill | Trigger / Use Case | Built-In Guardrail |
 | :--- | :--- | :--- |
 | [`morning-brief`](.agents/plugins/agy-hq/skills/morning-brief/SKILL.md) | 7:30 AM daily digest across calendar, triaged inbox, PRs/worktrees, and watchlist alerts | Read-only synthesis; outbound replies staged via `hq propose` |
 | [`sleep-consolidate`](.agents/plugins/agy-hq/skills/sleep-consolidate/SKILL.md) | 11:30 PM silent nightly dreaming, transcript verification, Topic Wiki distillation & Vault git commit | Zero Front Desk chat output; verifies claims via `hq memory verify-transcript` |
-| [`swe-pulse`](.agents/plugins/agy-hq/skills/swe-pulse/SKILL.md) | Multi-repo software engineering in isolated `local/worktrees/<repo>-<task>/` checkouts + PR/CI checks | Third-party PR merges & external pushes gated by `hq propose` |
 | [`inbox-triage`](.agents/plugins/agy-hq/skills/inbox-triage/SKILL.md) | Quarantined triage of files dropped into `local/inbox/` or unread messages | Tainted-session lockdown blocks web egress, file writes & private Vault reads |
-| [`gchat`](.agents/plugins/agy-hq/skills/gchat/SKILL.md) | Search, quarantined read, and 1-step outbound staging (`hq gchat propose`) for Google Chat Spaces/DMs | Network-jailed CDP / OAuth transport + 1-tap SHA-256 send approval |
-| [`thesis-check`](.agents/plugins/agy-hq/skills/thesis-check/SKILL.md) | Evaluates earnings releases and 10-K/10-Q/8-K filings against written theses & kill criteria | Mandatory filing/page citations; zero brokerage execution tools |
-| [`filing-diff`](.agents/plugins/agy-hq/skills/filing-diff/SKILL.md) | Section-by-section semantic diff of consecutive SEC 10-K / 10-Q filings (risk factors, footnotes, MD&A) | Deterministic section pairing & verbatim delta citations |
-| [`ledger-ingest`](.agents/plugins/agy-hq/skills/ledger-ingest/SKILL.md) | Parses bank CSV/OFX drops from `local/inbox/` into double-entry Beancount/hledger postings | Enforces zero-balance accounting integrity inside `local/private/ledger/` |
-| [`tax-prep`](.agents/plugins/agy-hq/skills/tax-prep/SKILL.md) | Extracts W-2, 1099, 1098, and K-1 forms into checklists and deterministic tax workpapers | Confined to `local/private/taxes/` with script-verified arithmetic |
+
+### Opt-In Domain & Channel Starter Templates (`templates/skills/` → `local/skills/`)
+
+| Starter Skill | Trigger / Use Case | Built-In Guardrail |
+| :--- | :--- | :--- |
+| [`gchat`](templates/skills/gchat/SKILL.md) | Search, quarantined read, and 1-step outbound staging (`hq gchat propose`) for Google Chat Spaces/DMs *(auto-seeded on `hq gchat login`)* | Network-jailed CDP / OAuth transport + 1-tap SHA-256 send approval |
+| [`swe-pulse`](templates/skills/swe-pulse/SKILL.md) | Multi-repo software engineering in isolated `local/worktrees/<repo>-<task>/` checkouts + PR/CI checks | Third-party PR merges & external pushes gated by `hq propose` |
+| [`thesis-check`](templates/skills/thesis-check/SKILL.md) | Evaluates earnings releases and 10-K/10-Q/8-K filings against written theses & kill criteria | Mandatory filing/page citations; zero brokerage execution tools |
+| [`filing-diff`](templates/skills/filing-diff/SKILL.md) | Section-by-section semantic diff of consecutive SEC 10-K / 10-Q filings (risk factors, footnotes, MD&A) | Deterministic section pairing & verbatim delta citations |
+| [`ledger-ingest`](templates/skills/ledger-ingest/SKILL.md) | Parses bank CSV/OFX drops from `local/inbox/` into double-entry Beancount/hledger postings | Enforces zero-balance accounting integrity inside `local/private/ledger/` |
+| [`tax-prep`](templates/skills/tax-prep/SKILL.md) | Extracts W-2, 1099, 1098, and K-1 forms into checklists and deterministic tax workpapers | Confined to `local/private/taxes/` with script-verified arithmetic |
 
 ---
 

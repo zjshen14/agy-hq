@@ -456,6 +456,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				zone1Sections = append(zone1Sections, "## Active Companion Skill Overrides\n"+strings.Join(ovLines, "\n"))
 			}
 		}
+		if genRules := extension.LoadGeneralOverlayRules(vaultDir, 5); len(genRules) > 0 {
+			zone1Sections = append(zone1Sections, "## Learned Personal RSI Rules (`general`)\n"+strings.Join(genRules, "\n\n"))
+		}
 	}
 
 	// Zone 2: Role-Scoped Dynamic Tail
@@ -1152,6 +1155,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				filepath.Join(canonVault, "approvals"),
 				filepath.Join(canonVault, "memory", "pending"),
 				filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
+				filepath.Join(canonVault, "memory", "rsi", "rules"),
 				filepath.Join(canonVault, "memory", "rsi", "archive.jsonl"),
 				filepath.Join(canonVault, "memory", "interventions.jsonl"),
 				filepath.Join(canonVault, "memory", "events.json"),
@@ -1309,7 +1313,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 							bodyPreview,
 							hashShort,
 						)
-					} else if prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch" {
+					} else if prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch" || prop.ActionType == "rsi_overlay" {
 						canonicalQ = fmt.Sprintf(
 							"Approve RSI Self-Improvement Patch %s (%s)?\n• Hypothesis: %s (%s)\n• Fault Layer: %s\n• Target Files: %s\n• Verification Scorecard: %s\n• Diff SHA-256: %s\n• Diff Preview:\n%s",
 							prop.ID,
@@ -1505,9 +1509,12 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	switch payload.ToolCall.Name {
 	case "read_file":
 		pathArg, _ := payload.ToolCall.Args["Path"].(string)
-		base := filepath.Base(filepath.Clean(pathArg))
-		// Turn-1 housekeeping reads (CONSOLE.md, hq_console.md, triggers.yaml) are exempt from the 3-lookup cap.
-		if base != "CONSOLE.md" && base != "hq_console.md" && base != "triggers.yaml" {
+		cleanPath := filepath.Clean(pathArg)
+		cleanSlash := filepath.ToSlash(cleanPath)
+		base := filepath.Base(cleanPath)
+		isOverlayRule := (strings.Contains(cleanSlash, "/memory/rsi/rules/") || strings.HasPrefix(cleanSlash, "memory/rsi/rules/")) && strings.HasSuffix(cleanSlash, ".md")
+		// Turn-1 housekeeping & skill/overlay instruction reads are exempt from the 3-lookup cap.
+		if base != "CONSOLE.md" && base != "hq_console.md" && base != "triggers.yaml" && base != "SKILL.md" && !isOverlayRule {
 			isResearchTool = true
 		}
 	case "grep_search", "find_by_name":

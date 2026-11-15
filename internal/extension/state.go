@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -274,22 +275,95 @@ var NonOverridableCoreSkills = map[string]bool{
 
 // DispatchResolution reports the active target for a logical core skill or schedule (`hq dispatch resolve`).
 type DispatchResolution struct {
-	FQID         string `json:"fqid,omitempty"`
-	LogicalSkill string `json:"logical_skill,omitempty"`
-	ActiveTarget string `json:"active_target,omitempty"` // "core/<skill>" or "<pack>/<skill>"
-	Skill        string `json:"skill,omitempty"`
-	SkillOrigin  string `json:"skill_origin,omitempty"` // "core" or "pack:<id>"
-	Overridden   bool   `json:"overridden"`
-	SkillPath    string `json:"skill_path,omitempty"`
-	Enabled      bool   `json:"enabled"`
-	Tier         string `json:"tier,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Trust        string `json:"trust,omitempty"` // "ok" | "untrusted" | "builtin"
-	Reason       string `json:"reason,omitempty"`
+	FQID         string   `json:"fqid,omitempty"`
+	LogicalSkill string   `json:"logical_skill,omitempty"`
+	ActiveTarget string   `json:"active_target,omitempty"` // "core/<skill>", "vault/<skill>", or "<pack>/<skill>"
+	Skill        string   `json:"skill,omitempty"`
+	SkillOrigin  string   `json:"skill_origin,omitempty"` // "core", "vault", or "pack:<id>"
+	Overridden   bool     `json:"overridden"`
+	SkillPath    string   `json:"skill_path,omitempty"`
+	HasOverlay   bool     `json:"has_overlay,omitempty"`
+	OverlayPath  string   `json:"overlay_path,omitempty"`
+	ActiveRules  int      `json:"active_rules,omitempty"`
+	OverlayRules []string `json:"overlay_rules,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Tier         string   `json:"tier,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Trust        string   `json:"trust,omitempty"` // "ok" | "untrusted" | "builtin"
+	Reason       string   `json:"reason,omitempty"`
 }
 
-// ResolveSkillDispatch resolves whether logicalSkill should execute its core SKILL.md or an enabled,
-// trust-verified companion pack override (failing closed back to core if untrusted or tampered).
+// MaxOverlayRulesPerSkill caps the number of active RSI overlay rules injected for a single skill.
+const MaxOverlayRulesPerSkill = 10
+
+var reExtRSIRuleOpen = regexp.MustCompile(`<!--\s*rsi:rule\s+([^>]+)-->`)
+
+func extractActiveRSIRuleBlocks(content string) []string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		m := reExtRSIRuleOpen.FindStringSubmatch(lines[i])
+		if len(m) < 2 {
+			continue
+		}
+		attrs := strings.ToLower(m[1])
+		disabled := strings.Contains(attrs, `enabled="false"`) ||
+			strings.Contains(attrs, `status="disabled"`) ||
+			strings.Contains(attrs, `ablation="retired"`)
+
+		block := []string{lines[i]}
+		closedAt := -1
+		nextStop := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			trimmed := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(trimmed, "<!-- /rsi:rule") {
+				block = append(block, lines[j])
+				closedAt = j
+				break
+			}
+			if trimmed == "" || strings.HasPrefix(trimmed, "<!-- rsi:rule") || strings.HasPrefix(trimmed, "## ") {
+				nextStop = j
+				break
+			}
+			block = append(block, lines[j])
+		}
+		if closedAt >= 0 {
+			i = closedAt
+		} else {
+			i = nextStop - 1
+		}
+		if disabled {
+			continue
+		}
+		if blk := strings.TrimSpace(strings.Join(block, "\n")); blk != "" {
+			out = append(out, blk)
+		}
+	}
+	return out
+}
+
+// LoadGeneralOverlayRules loads up to maxRules active learned personal rules from <vault>/memory/rsi/rules/general.md.
+func LoadGeneralOverlayRules(vaultDir string, maxRules int) []string {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	if maxRules <= 0 {
+		maxRules = 5
+	}
+	b, err := os.ReadFile(filepath.Join(vaultDir, "memory", "rsi", "rules", "general.md"))
+	if err != nil {
+		return nil
+	}
+	blocks := extractActiveRSIRuleBlocks(string(b))
+	if len(blocks) > maxRules {
+		blocks = blocks[:maxRules]
+	}
+	return blocks
+}
+
+// ResolveSkillDispatch resolves whether logicalSkill should execute its core SKILL.md, a Vault SKILL.md,
+// or an enabled, trust-verified companion pack override (failing closed back to core if untrusted or tampered),
+// and composes active Tier 1B RSI overlay rules from <vault>/memory/rsi/rules/<skill>.md.
 func ResolveSkillDispatch(vaultDir, logicalSkill string) DispatchResolution {
 	skill := strings.TrimSpace(strings.TrimPrefix(logicalSkill, "/"))
 	res := DispatchResolution{
@@ -308,34 +382,59 @@ func ResolveSkillDispatch(vaultDir, logicalSkill string) DispatchResolution {
 		}
 		return res
 	}
-	st, err := LoadVaultState(vaultDir)
-	if err != nil {
-		return res
+
+	packResolved := false
+	if st, err := LoadVaultState(vaultDir); err == nil {
+		target := strings.TrimSpace(st.SkillOverrides[skill])
+		if target != "" && target != "core" && target != "core/"+skill {
+			parts := strings.SplitN(target, "/", 2)
+			if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+				packID, targetSkill := parts[0], parts[1]
+				if packAct, ok := st.Packs[packID]; ok && packAct.Enabled && strings.TrimSpace(packAct.Path) != "" {
+					cand := filepath.Join(packAct.Path, "skills", targetSkill, "SKILL.md")
+					if _, vErr := VerifyTrustedFileReadOnly(vaultDir, "pack:"+packID, cand); vErr != nil {
+						res.Trust = "untrusted"
+						res.Reason = vErr.Error()
+						return res
+					}
+					res.ActiveTarget = target
+					res.Skill = targetSkill
+					res.SkillOrigin = "pack:" + packID
+					res.SkillPath = cand
+					res.Overridden = true
+					res.Trust = "ok"
+					packResolved = true
+				}
+			}
+		}
 	}
-	target := strings.TrimSpace(st.SkillOverrides[skill])
-	if target == "" || target == "core" || target == "core/"+skill {
-		return res
+
+	if !packResolved && strings.TrimSpace(vaultDir) != "" {
+		vaultSkillPath := filepath.Join(vaultDir, "skills", skill, "SKILL.md")
+		if b, rErr := os.ReadFile(vaultSkillPath); rErr == nil {
+			res.FQID = "vault/" + skill
+			res.ActiveTarget = "vault/" + skill
+			res.SkillOrigin = "vault"
+			res.SkillPath = vaultSkillPath
+			res.Trust = "ok"
+			res.ActiveRules += len(extractActiveRSIRuleBlocks(string(b)))
+		}
 	}
-	parts := strings.SplitN(target, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return res
+
+	if strings.TrimSpace(vaultDir) != "" {
+		overlayPath := filepath.Join(vaultDir, "memory", "rsi", "rules", skill+".md")
+		if b, oErr := os.ReadFile(overlayPath); oErr == nil {
+			blocks := extractActiveRSIRuleBlocks(string(b))
+			if len(blocks) > MaxOverlayRulesPerSkill {
+				blocks = blocks[:MaxOverlayRulesPerSkill]
+			}
+			if len(blocks) > 0 {
+				res.HasOverlay = true
+				res.OverlayPath = overlayPath
+				res.OverlayRules = blocks
+				res.ActiveRules += len(blocks)
+			}
+		}
 	}
-	packID, targetSkill := parts[0], parts[1]
-	packAct, ok := st.Packs[packID]
-	if !ok || !packAct.Enabled || strings.TrimSpace(packAct.Path) == "" {
-		return res
-	}
-	cand := filepath.Join(packAct.Path, "skills", targetSkill, "SKILL.md")
-	if _, vErr := VerifyTrustedFileReadOnly(vaultDir, "pack:"+packID, cand); vErr != nil {
-		res.Trust = "untrusted"
-		res.Reason = vErr.Error()
-		return res
-	}
-	res.ActiveTarget = target
-	res.Skill = targetSkill
-	res.SkillOrigin = "pack:" + packID
-	res.SkillPath = cand
-	res.Overridden = true
-	res.Trust = "ok"
 	return res
 }

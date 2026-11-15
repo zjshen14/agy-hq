@@ -12,7 +12,7 @@ Organize tax documents and build source-traceable tax workpapers inside `local/p
 
 ## Steps
 
-0. **Extension Dispatch Check:** Run `hq dispatch resolve --skill=tax-prep --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file.
+0. **Extension Dispatch & Overlay Check:** Run `hq dispatch resolve --skill=tax-prep --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file; if `has_overlay == true` with non-empty `overlay_rules`, apply those active personal rules for this run.
 1. **Checklist & Document Inventory:**
    - Organize forms under `local/private/taxes/<tax-year>/docs/` and update `local/private/taxes/<tax-year>/checklist.md` comparing received forms (`W-2`, `1099-INT`, `1099-DIV`, `1099-B`, `1098`, `K-1`) against prior-year issuers.
 2. **Structured Box Extraction:**

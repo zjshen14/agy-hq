@@ -169,6 +169,13 @@ func Propose(rootDir, vaultDir, rsiID, convID, hqBin string) (*approvals.Proposa
 	actionType := "rsi_skill_patch"
 	if h.Ring == Ring1KernelCode {
 		actionType = "rsi_patch"
+	} else if isOverlayTargetList(h.TargetFiles) {
+		actionType = "rsi_overlay"
+	}
+
+	tierLabel := strings.TrimSpace(h.Tier)
+	if tierLabel == "" {
+		tierLabel = "personal"
 	}
 
 	summary := fmt.Sprintf("[%s] %s (rsi:%s · diff:%s)", h.Ring.Label(), h.Title, h.ID, shaShort)
@@ -185,6 +192,7 @@ func Propose(rootDir, vaultDir, rsiID, convID, hqBin string) (*approvals.Proposa
 		"rsiId":                h.ID,
 		"ring":                 fmt.Sprintf("%d", int(h.Ring)),
 		"ringLabel":            h.Ring.Label(),
+		"tier":                 tierLabel,
 		"title":                h.Title,
 		"faultLayer":           string(h.FaultLayer),
 		"targetFiles":          strings.Join(h.TargetFiles, ", "),
@@ -192,8 +200,18 @@ func Propose(rootDir, vaultDir, rsiID, convID, hqBin string) (*approvals.Proposa
 		"diffSha256":           h.DiffSHA256,
 		"canonicalDiffPreview": diffPreview,
 	}
+	if h.WorktreeDir != "" {
+		meta["worktreeDir"] = h.WorktreeDir
+	}
+	if h.Branch != "" {
+		meta["branch"] = h.Branch
+	}
 
-	prop, err := approvals.CreateWithMetadata(vaultDir, actionType, summary, cmdStr, rootDir, convID, meta)
+	workDir := rootDir
+	if h.WorktreeDir != "" {
+		workDir = h.WorktreeDir
+	}
+	prop, err := approvals.CreateWithMetadata(vaultDir, actionType, summary, cmdStr, workDir, convID, meta)
 	if err != nil {
 		return nil, h, err
 	}
@@ -233,14 +251,6 @@ func Apply(rootDir, vaultDir, rsiID, expectDiffSHA string) (string, error) {
 		return "", fmt.Errorf("apply blocked by TCB re-verification: %s", reason)
 	}
 
-	cleanRoot, err := filepath.Abs(rootDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve rootDir: %w", err)
-	}
-	if evalRoot, rErr := filepath.EvalSymlinks(cleanRoot); rErr == nil {
-		cleanRoot = evalRoot
-	}
-
 	// Take Dual-Repo Pre-Apply Snapshot in local/.git
 	snapshotTaken := vault.SnapshotVault(vaultDir, "pre-rsi-apply-"+h.ID)
 	snapRef := "clean"
@@ -250,27 +260,23 @@ func Apply(rootDir, vaultDir, rsiID, expectDiffSHA string) (string, error) {
 
 	if h.DeltaOp != nil {
 		for _, tf := range h.TargetFiles {
-			if filepath.IsAbs(tf) {
-				return "", fmt.Errorf("refusing absolute target file path %q in RSI apply", tf)
+			absPath, pathErr := ResolveHypothesisTargetPath(rootDir, vaultDir, h, tf)
+			if pathErr != nil {
+				return "", fmt.Errorf("refusing target file %q: %w", tf, pathErr)
 			}
-			absPath := filepath.Clean(filepath.Join(cleanRoot, filepath.FromSlash(tf)))
-			if evalPath, eErr := filepath.EvalSymlinks(absPath); eErr == nil {
-				absPath = evalPath
-			}
-			rel, relErr := filepath.Rel(cleanRoot, absPath)
-			if relErr != nil || rel == "." || strings.HasPrefix(rel, "..") {
-				return "", fmt.Errorf("refusing target file %q escaping repository root", tf)
-			}
-			if IsRing0Path(rel) {
+			if IsRing0Path(tf) {
 				return "", fmt.Errorf("refusing target file %q inside Ring 0 Immutable TCB", tf)
 			}
-			rawBytes, err := os.ReadFile(absPath)
-			if err != nil {
-				return "", fmt.Errorf("read target %s: %w", tf, err)
+			rawContent, rErr := EnsureOverlaySkeletonContent(absPath, tf)
+			if rErr != nil {
+				return "", fmt.Errorf("read target %s: %w", tf, rErr)
 			}
-			after, err := ApplyACEDelta(string(rawBytes), *h.DeltaOp)
+			after, err := ApplyACEDelta(rawContent, *h.DeltaOp)
 			if err != nil {
 				return "", fmt.Errorf("apply ACE delta to %s: %w", tf, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+				return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(absPath), err)
 			}
 			if err := os.WriteFile(absPath, []byte(after), 0o644); err != nil {
 				return "", fmt.Errorf("write target %s: %w", tf, err)
@@ -328,16 +334,12 @@ func Ablate(rootDir, vaultDir, currentModel string) ([]RSIHypothesis, error) {
 	today := now.Format("20060102")
 	var staged []RSIHypothesis
 
-	for _, absPath := range DiscoverAllSkillFiles(rootDir) {
+	for _, absPath := range DiscoverAllSkillFiles("", vaultDir) {
 		b, err := os.ReadFile(absPath)
 		if err != nil {
 			continue
 		}
-		rel, err := filepath.Rel(rootDir, absPath)
-		if err != nil {
-			rel = absPath
-		}
-		rel = filepath.ToSlash(rel)
+		rel := targetRelativePath(rootDir, vaultDir, absPath)
 
 		rules := ParseRSIRules(rel, string(b))
 		for _, r := range rules {
@@ -441,7 +443,7 @@ func GetStatus(rootDir, vaultDir string) StatusSummary {
 		}
 	}
 
-	skills := DiscoverAllSkillFiles(rootDir)
+	skills := DiscoverAllSkillFiles(rootDir, vaultDir)
 	activeRules := 0
 	for _, sp := range skills {
 		if b, err := os.ReadFile(sp); err == nil {
@@ -464,6 +466,15 @@ func GetStatus(rootDir, vaultDir string) StatusSummary {
 		Hypotheses:        hyps,
 		Archive:           arch,
 	}
+}
+
+func isOverlayTargetList(targets []string) bool {
+	for _, t := range targets {
+		if strings.HasPrefix(filepath.ToSlash(t), "local/memory/rsi/rules/") {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadHypothesesSafe returns all hypotheses without error if directory doesn't exist.

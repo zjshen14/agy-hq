@@ -166,6 +166,11 @@ func TestGatekeeperPrecheckFailureHealthAndStrandedInboxRecovery(t *testing.T) {
 	}
 
 	// Stranded inbox file in local/inbox/queued/ while CircuitOpen -> deferred without loss, then completed -> moved to processed/
+	// Install ledger-ingest starter skill so stranded-2026.csv routes to /ledger-ingest
+	ledgerSkillDir := filepath.Join(vaultDir, "skills", "ledger-ingest")
+	_ = os.MkdirAll(ledgerSkillDir, 0o755)
+	_ = os.WriteFile(filepath.Join(ledgerSkillDir, "SKILL.md"), []byte("---\nname: ledger-ingest\ndescription: test\n---\n"), 0o644)
+
 	queuedDir := filepath.Join(vaultDir, "inbox", "queued")
 	_ = os.MkdirAll(queuedDir, 0o755)
 	strandedFile := filepath.Join(queuedDir, "stranded-2026.csv")

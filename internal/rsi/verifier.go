@@ -14,10 +14,14 @@ import (
 )
 
 const (
-	MaxSkillMarkdownLines = 150
-	MaxActiveRSIRules     = 30
-	MaxGlobalSkills       = 25
-	MaxRing1NonTestLines  = 250
+	MaxSkillMarkdownLines  = 150
+	MaxActiveRSIRules      = 30
+	MaxGlobalSkills        = 25
+	MaxRing1NonTestLines   = 250
+	MaxRulesPerOverlay     = 10
+	MaxOverlayLines        = 50
+	MaxGeneralOverlayRules = 5
+	MaxGlobalActiveRules   = 50
 )
 
 // VerificationReport records the results of Stage 3's 4-Gate Sandboxed Verification Harness.
@@ -113,15 +117,15 @@ func runGate2Counterfactual(rootDir, vaultDir string, h *RSIHypothesis, observat
 	}
 
 	for _, tf := range h.TargetFiles {
-		absPath := tf
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(rootDir, filepath.FromSlash(tf))
+		absPath, err := ResolveHypothesisTargetPath(rootDir, vaultDir, h, tf)
+		if err != nil {
+			return false, fmt.Sprintf("Gate 2B violation: %v", err), ""
 		}
-		rawBytes, err := os.ReadFile(absPath)
+		rawContent, err := EnsureOverlaySkeletonContent(absPath, tf)
 		if err != nil {
 			return false, fmt.Sprintf("Gate 2B violation: target file %s does not exist on disk", tf), ""
 		}
-		after, err := ApplyACEDelta(string(rawBytes), *h.DeltaOp)
+		after, err := ApplyACEDelta(rawContent, *h.DeltaOp)
 		if err != nil {
 			return false, fmt.Sprintf("Gate 2B violation: ApplyACEDelta failed on %s: %v", tf, err), ""
 		}
@@ -184,6 +188,14 @@ func runGate3RegressionAndPIIGuard(rootDir, vaultDir string, h *RSIHypothesis) (
 		return false, fmt.Sprintf("Gate 3 PII Guard violation: personal email address %q detected in ProposedDiff", email)
 	}
 
+	if h.Tier == "upstream" {
+		for _, secretPrefix := range []string{"ghp_", "ya29.", "sk-", "AIza"} {
+			if strings.Contains(h.ProposedDiff, secretPrefix) {
+				return false, fmt.Sprintf("Gate 3 PII Guard violation: credential prefix %q detected in upstream ProposedDiff", secretPrefix)
+			}
+		}
+	}
+
 	return true, "Gate 3 PASS (Zero PII in diff; package & schema checks clean)"
 }
 
@@ -196,10 +208,10 @@ func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothe
 		}
 	}
 
-	// 2. Check global skill catalog count <= 25
-	skills := DiscoverAllSkillFiles(rootDir)
+	// 2. Check global skill + overlay file count <= 25
+	skills := DiscoverAllSkillFiles(rootDir, vaultDir)
 	if len(skills) > MaxGlobalSkills {
-		return false, fmt.Sprintf("Gate 4 Budget violation: global skill catalog has %d skills (exceeds %d-skill cap)", len(skills), MaxGlobalSkills)
+		return false, fmt.Sprintf("Gate 4 Budget violation: skill/overlay catalog has %d files (exceeds %d-file cap)", len(skills), MaxGlobalSkills)
 	}
 
 	// 3. Check Ring 1 non-test line count <= 250 lines
@@ -220,33 +232,70 @@ func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothe
 		}
 	}
 
-	// 4. Check SKILL.md <= 150 lines and <= 30 active rsi:rule blocks after applying DeltaOp
+	// 4. Check SKILL.md (<=150 lines / <=30 rules), overlay (<=50 lines / <=10 rules, general.md <=5 rules),
+	//    and global active rule budget (<=50 rules).
+	simulatedContent := make(map[string]string)
 	if h.DeltaOp != nil {
 		for _, tf := range h.TargetFiles {
-			if !strings.HasSuffix(tf, "SKILL.md") {
-				continue
+			absPath, err := ResolveHypothesisTargetPath(rootDir, vaultDir, h, tf)
+			if err != nil {
+				return false, fmt.Sprintf("Gate 4 violation: %v", err)
 			}
-			absPath := tf
-			if !filepath.IsAbs(absPath) {
-				absPath = filepath.Join(rootDir, filepath.FromSlash(tf))
-			}
-			rawBytes, err := os.ReadFile(absPath)
+			rawContent, err := EnsureOverlaySkeletonContent(absPath, tf)
 			if err != nil {
 				continue
 			}
-			after, err := ApplyACEDelta(string(rawBytes), *h.DeltaOp)
+			after, err := ApplyACEDelta(rawContent, *h.DeltaOp)
 			if err != nil {
 				return false, fmt.Sprintf("Gate 4 violation: ApplyACEDelta error on %s: %v", tf, err)
 			}
+			simulatedContent[filepath.Clean(absPath)] = after
 			lineCount := len(strings.Split(strings.TrimRight(after, "\n"), "\n"))
-			if lineCount > MaxSkillMarkdownLines {
-				return false, fmt.Sprintf("Gate 4 Budget violation: %s would reach %d lines (exceeds %d-line SKILL.md cap; compact or promote existing rules first)", tf, lineCount, MaxSkillMarkdownLines)
-			}
 			rules := ParseRSIRules(tf, after)
-			if len(rules) > MaxActiveRSIRules {
-				return false, fmt.Sprintf("Gate 4 Budget violation: %s would have %d active rsi:rule blocks (exceeds %d-rule cap)", tf, len(rules), MaxActiveRSIRules)
+
+			slashTF := filepath.ToSlash(tf)
+			if strings.HasPrefix(slashTF, "local/memory/rsi/rules/") {
+				if lineCount > MaxOverlayLines {
+					return false, fmt.Sprintf("Gate 4 Budget violation: overlay %s would reach %d lines (exceeds %d-line cap)", tf, lineCount, MaxOverlayLines)
+				}
+				ruleCap := MaxRulesPerOverlay
+				if filepath.Base(slashTF) == "general.md" {
+					ruleCap = MaxGeneralOverlayRules
+				}
+				if len(rules) > ruleCap {
+					return false, fmt.Sprintf("Gate 4 Budget violation: overlay %s would have %d active rsi:rule blocks (exceeds %d-rule cap)", tf, len(rules), ruleCap)
+				}
+			} else if strings.HasSuffix(tf, "SKILL.md") {
+				if lineCount > MaxSkillMarkdownLines {
+					return false, fmt.Sprintf("Gate 4 Budget violation: %s would reach %d lines (exceeds %d-line SKILL.md cap; compact or promote existing rules first)", tf, lineCount, MaxSkillMarkdownLines)
+				}
+				if len(rules) > MaxActiveRSIRules {
+					return false, fmt.Sprintf("Gate 4 Budget violation: %s would have %d active rsi:rule blocks (exceeds %d-rule cap)", tf, len(rules), MaxActiveRSIRules)
+				}
 			}
 		}
+	}
+
+	globalActive := 0
+	seenAbs := make(map[string]bool)
+	for _, absPath := range DiscoverAllSkillFiles("", vaultDir) {
+		clean := filepath.Clean(absPath)
+		seenAbs[clean] = true
+		content, ok := simulatedContent[clean]
+		if !ok {
+			if b, err := os.ReadFile(clean); err == nil {
+				content = string(b)
+			}
+		}
+		globalActive += len(ParseRSIRules(clean, content))
+	}
+	for absPath, content := range simulatedContent {
+		if !seenAbs[absPath] && strings.Contains(filepath.ToSlash(absPath), "/memory/rsi/rules/") {
+			globalActive += len(ParseRSIRules(absPath, content))
+		}
+	}
+	if globalActive > MaxGlobalActiveRules {
+		return false, fmt.Sprintf("Gate 4 Budget violation: global active RSI rules would reach %d (exceeds %d-rule cap)", globalActive, MaxGlobalActiveRules)
 	}
 
 	// 5. Cross-Rule Contradiction Guard against AGENTS.md & USER.md core safety invariants

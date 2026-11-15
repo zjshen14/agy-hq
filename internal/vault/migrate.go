@@ -12,7 +12,7 @@ import (
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -170,6 +170,18 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 			filepath.Join(vaultDir, ".gitignore"),
 		)
 		recordStep("v8_global_plugin_packaging", fmt.Sprintf("Upgraded triggers for standalone global plugin PATH execution (rewrittenPrecheck=%v, gitignoreRulesAdded=%d)", rewrittenTriggers, mergedIgnore))
+	}
+
+	// Migration v8 -> v9: Two-Tier RSI & Vault Skill Overlay (RFC-0019) — auto-seed starter skills
+	// ONLY for existing pre-v9 Vaults that already contain domain state (never bloat brand-new Vaults).
+	if prev.Version > 0 && prev.Version < 9 {
+		seededStarters := seedActiveExistingVaultStarters(vaultDir, templateDir)
+		recordStep("v9_vault_skill_overlay", fmt.Sprintf("Initialized Vault skill user space & auto-seeded %d active domain starter skill(s): %s", len(seededStarters), strings.Join(seededStarters, ", ")))
+	}
+
+	// 3. Synchronize unedited installed starter templates (dpkg-style, preserving RSI rule blocks)
+	if synced, preserved, sErr := SyncStarterSkills(vaultDir, templateDir); sErr == nil && (len(synced) > 0 || len(preserved) > 0) {
+		recordStep("sync_starter_skills", fmt.Sprintf("Starter skill templates synced=%d (%s), customized-preserved=%d (%s)", len(synced), strings.Join(synced, ","), len(preserved), strings.Join(preserved, ",")))
 	}
 
 	// 3. Additive top-level key synchronization for config.yaml and triggers.yaml
@@ -474,6 +486,46 @@ func upgradeV8GlobalPluginTriggers(vaultDir string) bool {
 		return false
 	}
 	return os.WriteFile(trigPath, []byte(updated), 0o600) == nil
+}
+
+func dirHasEntries(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func seedActiveExistingVaultStarters(vaultDir, templateDir string) []string {
+	var seeded []string
+	trySeed := func(slug string) {
+		if changed, _, err := AddStarterSkill(vaultDir, templateDir, slug, false); err == nil && changed {
+			seeded = append(seeded, slug)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(vaultDir, "private", "gchat")); err == nil || dirHasEntries(filepath.Join(vaultDir, "connectors", "gchat")) {
+		trySeed("gchat")
+	}
+	if _, err := os.Stat(filepath.Join(vaultDir, "memory", "tasks.json")); err == nil || dirHasEntries(filepath.Join(vaultDir, "worktrees")) {
+		trySeed("swe-pulse")
+	}
+	if dirHasEntries(filepath.Join(vaultDir, "private", "ledger")) {
+		trySeed("ledger-ingest")
+	}
+	if dirHasEntries(filepath.Join(vaultDir, "private", "taxes")) {
+		trySeed("tax-prep")
+	}
+	if dirHasEntries(filepath.Join(vaultDir, "notes", "investing")) {
+		trySeed("thesis-check")
+		trySeed("filing-diff")
+	}
+	return seeded
 }
 
 // mergeMissingTopLevelYAMLBlocksFromTemplate checks if template YAML (from disk or embedded FS)

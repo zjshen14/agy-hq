@@ -1657,6 +1657,9 @@ func runDispatchCLI(vaultDir string, args []string) {
 		} else {
 			fmt.Printf("[%s] %s -> %s (model=%s)\n", stateTag, res.LogicalSkill, res.ActiveTarget, res.Model)
 		}
+		if res.HasOverlay && len(res.OverlayRules) > 0 {
+			fmt.Printf("Overlay: %s (%d active rule(s)):\n%s\n", res.OverlayPath, len(res.OverlayRules), strings.Join(res.OverlayRules, "\n\n"))
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown dispatch subcommand %q (expected resolve)\n", sub)
 		os.Exit(1)

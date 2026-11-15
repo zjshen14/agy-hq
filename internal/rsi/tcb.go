@@ -105,13 +105,18 @@ func CheckTCBAndAntiGoodhart(rootDir, vaultDir string, h *RSIHypothesis, observa
 		}
 	}
 
+	// 2b. Non-overridable quarantine skill guard & Tier 1 tracked-repo isolation
+	if err := checkTierAndQuarantineTargets(h); err != nil {
+		return false, err.Error()
+	}
+
 	// 3. Anti-Collapse Wholesale-Rewrite Check on SKILL.md, AGENTS.md, and MEMORY.md
 	for _, tf := range h.TargetFiles {
 		base := filepath.Base(tf)
-		if base == "SKILL.md" || base == "AGENTS.md" || base == "MEMORY.md" {
-			absPath := tf
-			if !filepath.IsAbs(absPath) {
-				absPath = filepath.Join(rootDir, filepath.FromSlash(tf))
+		if base == "SKILL.md" || base == "AGENTS.md" || base == "MEMORY.md" || strings.HasPrefix(filepath.ToSlash(tf), "local/memory/rsi/rules/") {
+			absPath, rErr := ResolveHypothesisTargetPath(rootDir, vaultDir, h, tf)
+			if rErr != nil {
+				return false, fmt.Sprintf("Gate 1 violation: %v", rErr)
 			}
 			if existingBytes, err := os.ReadFile(absPath); err == nil {
 				existingLines := len(strings.Split(strings.TrimSpace(string(existingBytes)), "\n"))
@@ -147,6 +152,39 @@ func countDiffDeletions(diff string) int {
 		}
 	}
 	return deleted
+}
+
+func checkTierAndQuarantineTargets(h *RSIHypothesis) error {
+	if h == nil {
+		return nil
+	}
+	isTrackedSkillPath := func(slash string) bool {
+		return strings.HasPrefix(slash, ".agents/plugins/agy-hq/skills/") ||
+			strings.HasPrefix(slash, "templates/skills/") ||
+			strings.HasPrefix(slash, ".agents/skills/")
+	}
+	for _, tf := range h.TargetFiles {
+		slash := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(tf)), "./")
+		for qSkill := range NonOverridableQuarantineSkills {
+			if strings.Contains(slash, "/"+qSkill+"/") || strings.HasSuffix(slash, "/"+qSkill+".md") || slash == qSkill {
+				return fmt.Errorf("Gate 1 violation: quarantine skill %q is non-overridable and cannot be modified via RSI", qSkill)
+			}
+		}
+		if h.Ring == Ring2SkillTrigger && h.Tier != "upstream" && isTrackedSkillPath(slash) {
+			return fmt.Errorf("Gate 1 violation: Tier 1 personal RSI cannot mutate tracked skill %q (target local/skills/ or local/memory/rsi/rules/, or pass --upstream)", tf)
+		}
+	}
+	if h.Ring == Ring2SkillTrigger && h.Tier != "upstream" {
+		for _, line := range strings.Split(h.ProposedDiff, "\n") {
+			if strings.HasPrefix(line, "--- a/") || strings.HasPrefix(line, "+++ b/") {
+				p := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(strings.TrimSpace(line[6:]))), "./")
+				if isTrackedSkillPath(p) {
+					return fmt.Errorf("Gate 1 violation: Tier 1 diff header %q targets tracked skill outside personal Vault", p)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 var (

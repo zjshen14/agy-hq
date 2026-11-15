@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 // MutationRing defines the 4-Ring Mutability Lattice from RFC-0010.
@@ -20,9 +22,15 @@ type MutationRing int
 const (
 	Ring0ImmutableTCB MutationRing = 0 // Immutable: approvals, tcb.go, verifier.go, .gitignore, .git/hooks
 	Ring1KernelCode   MutationRing = 1 // Approval-bound: internal/*, cmd/hq/*, AGENTS.md, hooks.json
-	Ring2SkillTrigger MutationRing = 2 // Approval-bound: .agents/plugins/agy-hq/skills/*/SKILL.md, triggers.yaml
+	Ring2SkillTrigger MutationRing = 2 // Approval-bound: Vault skills/overlays (Tier 1) & opt-in --upstream skills (Tier 2)
 	Ring3MemoryWiki   MutationRing = 3 // Auto-consolidated: local/MEMORY.md, local/memory/topics/*.md, facts.jsonl
 )
+
+// NonOverridableQuarantineSkills cannot be overridden or mutated via personal RSI overlays.
+var NonOverridableQuarantineSkills = map[string]bool{
+	"inbox-triage":              true,
+	"quarantined-digest-reader": true,
+}
 
 func (r MutationRing) Label() string {
 	switch r {
@@ -64,7 +72,10 @@ type RSIHypothesis struct {
 	ReplayTestName     string                `json:"replayTestName,omitempty"`
 	ExpectedSavedSteps int                   `json:"expectedSavedSteps"`
 	Verification       *VerificationReport   `json:"verification,omitempty"`
-	Status             string                `json:"status"` // "draft", "verified", "failed", "proposed", "approved", "rejected"
+	Status             string                `json:"status"`                // "draft", "verified", "failed", "proposed", "approved", "rejected"
+	Tier               string                `json:"tier,omitempty"`        // "personal" (Tier 1 default) or "upstream" (Tier 2)
+	WorktreeDir        string                `json:"worktreeDir,omitempty"` // Isolated worktree path for Tier 2 upstream hypotheses
+	Branch             string                `json:"branch,omitempty"`      // Git branch hq/rsi-<id> for Tier 2 upstream hypotheses
 	CreatedAt          string                `json:"createdAt"`
 }
 
@@ -153,12 +164,126 @@ func CheckQuotaCircuitBreaker(vaultDir string) (bool, string) {
 	return true, ""
 }
 
-// ResolveSkillFile locates the SKILL.md path for a skill slug in rootDir (checking .agents/plugins/agy-hq/skills/ first, then .agents/skills/).
-func ResolveSkillFile(rootDir, skillSlug string) (string, string) {
+// ResolveHypothesisTargetPath maps a hypothesis target path ("local/skills/...", "local/memory/rsi/rules/...",
+// or repository/worktree relative path) to an absolute path while strictly enforcing containment inside vaultDir or rootDir/WorktreeDir.
+func ResolveHypothesisTargetPath(rootDir, vaultDir string, h *RSIHypothesis, tf string) (string, error) {
+	if strings.TrimSpace(tf) == "" || filepath.IsAbs(tf) {
+		return "", fmt.Errorf("invalid target file path %q", tf)
+	}
+	slash := filepath.ToSlash(filepath.Clean(tf))
+	slash = strings.TrimPrefix(slash, "./")
+	if slash == "." || slash == ".." || strings.HasPrefix(slash, "../") {
+		return "", fmt.Errorf("target path %q escapes root", tf)
+	}
+
+	if strings.HasPrefix(slash, "local/") {
+		cleanVault, err := filepath.Abs(vaultDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve vaultDir: %w", err)
+		}
+		if evalVault, err := filepath.EvalSymlinks(cleanVault); err == nil {
+			cleanVault = evalVault
+		}
+		sub := strings.TrimPrefix(slash, "local/")
+		absTarget := filepath.Clean(filepath.Join(cleanVault, filepath.FromSlash(sub)))
+		if evalTarget, err := filepath.EvalSymlinks(absTarget); err == nil {
+			absTarget = evalTarget
+		}
+		rel, err := filepath.Rel(cleanVault, absTarget)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			return "", fmt.Errorf("target file %q escapes Vault root", tf)
+		}
+		return absTarget, nil
+	}
+
+	baseRoot := rootDir
+	if h != nil && h.Tier == "upstream" && strings.TrimSpace(h.WorktreeDir) != "" {
+		baseRoot = h.WorktreeDir
+	}
+	cleanRoot, err := filepath.Abs(baseRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve rootDir: %w", err)
+	}
+	if evalRoot, err := filepath.EvalSymlinks(cleanRoot); err == nil {
+		cleanRoot = evalRoot
+	}
+	absTarget := filepath.Clean(filepath.Join(cleanRoot, filepath.FromSlash(slash)))
+	if evalTarget, err := filepath.EvalSymlinks(absTarget); err == nil {
+		absTarget = evalTarget
+	}
+	rel, err := filepath.Rel(cleanRoot, absTarget)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("target file %q escapes repository root", tf)
+	}
+	return absTarget, nil
+}
+
+// OverlaySkeleton returns the minimal markdown header for a new personal RSI overlay rule file.
+func OverlaySkeleton(skillSlug string) string {
+	slug := strings.TrimSpace(skillSlug)
+	if slug == "" {
+		slug = "general"
+	}
+	return fmt.Sprintf("# Personal RSI Overlay: %s\n", slug)
+}
+
+// EnsureOverlaySkeletonContent reads absPath if present on disk; if missing and relTarget
+// is a personal RSI overlay path (local/memory/rsi/rules/<slug>.md), returns its skeleton header.
+func EnsureOverlaySkeletonContent(absPath, relTarget string) (string, error) {
+	if b, err := os.ReadFile(absPath); err == nil {
+		return string(b), nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	slash := filepath.ToSlash(relTarget)
+	if strings.HasPrefix(slash, "local/memory/rsi/rules/") {
+		slug := strings.TrimSuffix(filepath.Base(slash), ".md")
+		return OverlaySkeleton(slug), nil
+	}
+	return "", os.ErrNotExist
+}
+
+// ResolveTier1Target selects the Tier 1 personal mutation path for skillSlug inside vaultDir:
+// - Tier 1A: local/skills/<slug>/SKILL.md when installed in Vault user space (and not a Core OS skill)
+// - Tier 1B: local/memory/rsi/rules/<slug>.md for Core OS skills, "general", or uninstalled templates
+// Quarantine skills (inbox-triage, quarantined-digest-reader) are unconditionally rejected.
+func ResolveTier1Target(vaultDir, skillSlug string) (relTarget string, absTarget string, isOverlay bool, err error) {
+	slug := strings.TrimSpace(skillSlug)
+	if slug == "" || strings.HasPrefix(slug, "internal/") {
+		slug = "general"
+	}
+	if NonOverridableQuarantineSkills[slug] {
+		return "", "", false, fmt.Errorf("quarantine skill %q is non-overridable", slug)
+	}
+	if !vault.IsCoreOSSkill(slug) {
+		vaultSkillAbs := filepath.Join(vaultDir, "skills", slug, "SKILL.md")
+		if _, sErr := os.Stat(vaultSkillAbs); sErr == nil {
+			return filepath.ToSlash(filepath.Join("local", "skills", slug, "SKILL.md")), vaultSkillAbs, false, nil
+		}
+	}
+	relOverlay := filepath.ToSlash(filepath.Join("local", "memory", "rsi", "rules", slug+".md"))
+	absOverlay := filepath.Join(vaultDir, "memory", "rsi", "rules", slug+".md")
+	return relOverlay, absOverlay, true, nil
+}
+
+// ResolveSkillFile locates the SKILL.md path for a skill slug (checking Vault skills if vaultDir
+// is supplied, then .agents/plugins/agy-hq/skills/, then templates/skills/, then .agents/skills/).
+func ResolveSkillFile(rootDir, skillSlug string, vaultDir ...string) (string, string) {
+	if len(vaultDir) > 0 && strings.TrimSpace(vaultDir[0]) != "" {
+		absVaultSkill := filepath.Join(vaultDir[0], "skills", skillSlug, "SKILL.md")
+		if _, err := os.Stat(absVaultSkill); err == nil {
+			return filepath.ToSlash(filepath.Join("local", "skills", skillSlug, "SKILL.md")), absVaultSkill
+		}
+	}
 	relPlugin := filepath.ToSlash(filepath.Join(".agents", "plugins", "agy-hq", "skills", skillSlug, "SKILL.md"))
 	absPlugin := filepath.Join(rootDir, filepath.FromSlash(relPlugin))
 	if _, err := os.Stat(absPlugin); err == nil {
 		return relPlugin, absPlugin
+	}
+	relTemplate := filepath.ToSlash(filepath.Join("templates", "skills", skillSlug, "SKILL.md"))
+	absTemplate := filepath.Join(rootDir, filepath.FromSlash(relTemplate))
+	if _, err := os.Stat(absTemplate); err == nil {
+		return relTemplate, absTemplate
 	}
 	relLegacy := filepath.ToSlash(filepath.Join(".agents", "skills", skillSlug, "SKILL.md"))
 	absLegacy := filepath.Join(rootDir, filepath.FromSlash(relLegacy))
@@ -168,27 +293,50 @@ func ResolveSkillFile(rootDir, skillSlug string) (string, string) {
 	return relPlugin, absPlugin
 }
 
-// DiscoverAllSkillFiles returns all relative and absolute SKILL.md paths in rootDir.
-func DiscoverAllSkillFiles(rootDir string) []string {
+// DiscoverAllSkillFiles returns all SKILL.md and overlay rule markdown paths across rootDir and optional vaultDir.
+func DiscoverAllSkillFiles(rootDir string, vaultDir ...string) []string {
 	var paths []string
 	seen := make(map[string]bool)
-	for _, base := range []string{
-		filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills"),
-		filepath.Join(rootDir, ".agents", "skills"),
-	} {
+	addFile := func(p string) {
+		clean := filepath.Clean(p)
+		if !seen[clean] {
+			if _, err := os.Stat(clean); err == nil {
+				seen[clean] = true
+				paths = append(paths, clean)
+			}
+		}
+	}
+
+	var bases []string
+	if len(vaultDir) > 0 && strings.TrimSpace(vaultDir[0]) != "" {
+		v := vaultDir[0]
+		bases = append(bases, filepath.Join(v, "skills"))
+		rulesDir := filepath.Join(v, "memory", "rsi", "rules")
+		if rEntries, rErr := os.ReadDir(rulesDir); rErr == nil {
+			for _, re := range rEntries {
+				if !re.IsDir() && strings.HasSuffix(re.Name(), ".md") {
+					addFile(filepath.Join(rulesDir, re.Name()))
+				}
+			}
+		}
+	}
+	if rootDir != "" {
+		bases = append(bases,
+			filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills"),
+			filepath.Join(rootDir, ".agents", "skills"),
+		)
+	}
+
+	for _, base := range bases {
 		entries, err := os.ReadDir(base)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
-			p := filepath.Join(base, e.Name(), "SKILL.md")
-			if _, err := os.Stat(p); err == nil && !seen[p] {
-				seen[p] = true
-				paths = append(paths, p)
-			}
+			addFile(filepath.Join(base, e.Name(), "SKILL.md"))
 		}
 	}
 	sort.Strings(paths)
@@ -320,11 +468,26 @@ func BuildUnifiedDiff(relPath, before, after string) string {
 	return sb.String()
 }
 
+// HypothesizeOptions controls Tier 1 (default personal Vault) vs Tier 2 (--upstream worktree) synthesis.
+type HypothesizeOptions struct {
+	Force    bool
+	Upstream bool
+}
+
 // Hypothesize executes Stage 2 (Bounded Hypothesis & Mutation Synthesis), converting high-ROI
-// open FrictionEvents into structured RSIHypothesis specifications in local/memory/rsi/hypotheses/.
+// open FrictionEvents into Tier 1 personal Vault RSIHypothesis specifications.
 func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RSIHypothesis, error) {
-	if ok, reason := CheckQuotaCircuitBreaker(vaultDir); !ok && !force {
+	return HypothesizeWithOptions(rootDir, vaultDir, targetObsID, HypothesizeOptions{Force: force})
+}
+
+// HypothesizeWithOptions synthesizes either Tier 1 personal Vault mutations (default)
+// or Tier 2 upstream contributor PR mutations in an isolated git worktree (`--upstream`).
+func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts HypothesizeOptions) ([]RSIHypothesis, error) {
+	if ok, reason := CheckQuotaCircuitBreaker(vaultDir); !ok && !opts.Force {
 		return nil, fmt.Errorf("%s", reason)
+	}
+	if opts.Upstream && !vault.IsAgyHQRepo(rootDir) {
+		return nil, fmt.Errorf("--upstream requires running inside an agy-hq repository checkout")
 	}
 
 	observations, err := LoadObservations(vaultDir)
@@ -351,21 +514,69 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 
 		expectedSaved := ev.OccurrenceCount * ev.WastedSteps
 		highPriority := ev.Category == FrictionUserIntervention || ev.Category == FrictionDraftEdited
-		if !force && targetObsID == "" && !highPriority && expectedSaved < 4 {
+		if !opts.Force && targetObsID == "" && !highPriority && expectedSaved < 4 {
 			continue
 		}
 
-		skillSlug := ev.SkillOrPkg
+		skillSlug := strings.TrimSpace(ev.SkillOrPkg)
 		if strings.HasPrefix(skillSlug, "internal/") || skillSlug == "" {
-			skillSlug = "swe-pulse"
+			skillSlug = "general"
 		}
-		relSkill, absSkill := ResolveSkillFile(rootDir, skillSlug)
-		skillBytes, err := os.ReadFile(absSkill)
-		if err != nil {
-			// Fallback to swe-pulse if the inferred skill directory does not exist
-			skillSlug = "swe-pulse"
-			relSkill, absSkill = ResolveSkillFile(rootDir, skillSlug)
-			skillBytes, _ = os.ReadFile(absSkill)
+		if NonOverridableQuarantineSkills[skillSlug] {
+			if targetObsID != "" {
+				return created, fmt.Errorf("quarantine skill %q is non-overridable; cannot synthesize RSI overlay", skillSlug)
+			}
+			continue
+		}
+
+		var relTarget string
+		var absTarget string
+		var beforeContent string
+		var tier string
+		var worktreeDir string
+		var branchName string
+
+		if opts.Upstream {
+			tier = "upstream"
+			relUp, _ := ResolveSkillFile(rootDir, skillSlug)
+			if strings.HasPrefix(relUp, "local/") || skillSlug == "general" {
+				if targetObsID != "" {
+					return created, fmt.Errorf("skill %q has no tracked upstream Core or starter template SKILL.md target", skillSlug)
+				}
+				continue
+			}
+			if _, sErr := os.Stat(filepath.Join(rootDir, filepath.FromSlash(relUp))); sErr != nil {
+				if targetObsID != "" {
+					return created, fmt.Errorf("upstream target %s not found in %s", relUp, rootDir)
+				}
+				continue
+			}
+			wtDir, br, wErr := ensureUpstreamRSIWorktree(rootDir, vaultDir, ev.Fingerprint[:6])
+			if wErr != nil {
+				return created, wErr
+			}
+			worktreeDir = wtDir
+			branchName = br
+			relTarget = relUp
+			absTarget = filepath.Join(wtDir, filepath.FromSlash(relUp))
+			rawBytes, rErr := os.ReadFile(absTarget)
+			if rErr != nil {
+				return created, fmt.Errorf("read upstream target %s in worktree: %w", relUp, rErr)
+			}
+			beforeContent = string(rawBytes)
+		} else {
+			tier = "personal"
+			rRel, rAbs, _, rErr := ResolveTier1Target(vaultDir, skillSlug)
+			if rErr != nil {
+				continue
+			}
+			relTarget = rRel
+			absTarget = rAbs
+			c, cErr := EnsureOverlaySkeletonContent(absTarget, relTarget)
+			if cErr != nil {
+				continue
+			}
+			beforeContent = c
 		}
 
 		ruleID := fmt.Sprintf("rsi-rule-%s-%s", skillSlug, ev.Fingerprint[:6])
@@ -408,11 +619,11 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 			ModelScope: modelScope,
 		}
 
-		afterContent, err := ApplyACEDelta(string(skillBytes), *delta)
+		afterContent, err := ApplyACEDelta(beforeContent, *delta)
 		if err != nil {
 			continue
 		}
-		diff := BuildUnifiedDiff(relSkill, string(skillBytes), afterContent)
+		diff := BuildUnifiedDiff(relTarget, beforeContent, afterContent)
 		sum := sha256.Sum256([]byte(diff))
 		diffSHA := hex.EncodeToString(sum[:])
 
@@ -425,12 +636,15 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 			FaultLayer:         ev.FaultLayer,
 			Title:              fmt.Sprintf("Add learned %s rule %s (%s)", skillSlug, ruleID, ev.Category),
 			RootCause:          fmt.Sprintf("Ground-truth telemetry recorded %d occurrence(s) of %s in %s (%s)", ev.OccurrenceCount, ev.Category, skillSlug, ev.ErrorExcerpt),
-			TargetFiles:        []string{relSkill},
+			TargetFiles:        []string{relTarget},
 			DeltaOp:            delta,
 			ProposedDiff:       diff,
 			DiffSHA256:         diffSHA,
 			ExpectedSavedSteps: expectedSaved,
 			Status:             "draft",
+			Tier:               tier,
+			WorktreeDir:        worktreeDir,
+			Branch:             branchName,
 			CreatedAt:          now.Format(time.RFC3339),
 		}
 
@@ -447,8 +661,10 @@ func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RS
 	}
 
 	// Check for LATM Tier B -> Tier C Skill-to-Code Promotion candidates (helpful >= 5)
-	if promos := findTierCPromotionCandidates(rootDir, vaultDir, today, now); len(promos) > 0 {
-		created = append(created, promos...)
+	if !opts.Upstream {
+		if promos := findTierCPromotionCandidates(rootDir, vaultDir, today, now); len(promos) > 0 {
+			created = append(created, promos...)
+		}
 	}
 
 	return created, nil
@@ -518,18 +734,30 @@ func ParseRSIRules(skillFile, content string) []ParsedRSIRule {
 	return out
 }
 
+func targetRelativePath(rootDir, vaultDir, absPath string) string {
+	if vaultDir != "" {
+		cleanV := filepath.Clean(vaultDir)
+		if rel, err := filepath.Rel(cleanV, absPath); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(filepath.Join("local", rel))
+		}
+	}
+	if rootDir != "" {
+		cleanR := filepath.Clean(rootDir)
+		if rel, err := filepath.Rel(cleanR, absPath); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(absPath)
+}
+
 func findTierCPromotionCandidates(rootDir, vaultDir, today string, now time.Time) []RSIHypothesis {
 	var promos []RSIHypothesis
-	for _, absPath := range DiscoverAllSkillFiles(rootDir) {
+	for _, absPath := range DiscoverAllSkillFiles("", vaultDir) {
 		b, err := os.ReadFile(absPath)
 		if err != nil {
 			continue
 		}
-		rel, err := filepath.Rel(rootDir, absPath)
-		if err != nil {
-			rel = absPath
-		}
-		rel = filepath.ToSlash(rel)
+		rel := targetRelativePath(rootDir, vaultDir, absPath)
 		for _, r := range ParseRSIRules(rel, string(b)) {
 			if r.Helpful >= 5 && r.Harmful == 0 {
 				hID := fmt.Sprintf("rsi-%s-promote-%s", today, r.ID)

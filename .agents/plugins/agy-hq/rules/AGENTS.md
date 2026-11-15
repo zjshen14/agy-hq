@@ -1,6 +1,6 @@
 # `agy-hq` Personal Agent OS Rules
 
-`agy-hq` provides your persistent private **Vault**, 4-layer memory, isolated Git worktrees, 9 workflow skills, and cryptographic SHA-256 outbound safety across every workspace in Google Antigravity (`hq` CLI on `PATH`).
+`agy-hq` provides your persistent private **Vault**, 4-layer memory, isolated Git worktrees, Core OS & Vault workflow skills, and cryptographic SHA-256 outbound safety across every workspace in Google Antigravity (`hq` CLI on `PATH`).
 
 ## 1. Private Vault Boundary & Silent Bookkeeping
 

@@ -17,6 +17,9 @@ description: >-
 
 ## Four-Stage Dreaming Workflow
 
+0. **Dispatch & Overlay Guard:**
+   - Run `hq dispatch resolve --skill=sleep-consolidate --trigger=core/sleep-consolidate --json`: if `enabled == false`, stop cleanly with zero output; if `has_overlay == true` with non-empty `overlay_rules`, apply those active personal rules for this run.
+
 ### Stage 1: Baseline Memory Audit, Subagent DAG Reconciliation & Stale Reference Check
 1. Run `hq obs reconcile` and `hq memory status` to inspect:
    - Ground-truth parent-child subagent attribution in `local/memory/tasks.json` and 24h token/context anomalies (`hq obs tokens --since=24h`).
@@ -48,14 +51,14 @@ description: >-
    - Add verified atomic facts via `hq memory add-fact --topic="<topic>" --statement="<concise fact>" --source="<convId>" --verified`.
 
 ### Stage 4: Verified Recursive Self-Improvement (`hq rsi`) & Private Vault Commit
-1. **Run the 4-Stage RSI Pipeline (RFC-0010 & RFC-0014 — Never Unilaterally Edit `SKILL.md` or Kernel Code):**
+1. **Run the Two-Tier 4-Stage RSI Pipeline (RFC-0010, RFC-0014, & RFC-0019 — Never Unilaterally Edit `SKILL.md`, Overlay Rules, or Kernel Code):**
    - Mine 0-token ground-truth friction events (error-recovery chains, `PreToolUse` denials, user interventions, `PRELUDE` draft edit-diffs, and `proactive_noise` idea dismissal rates $>70\%$) and update active canary records:
      ```sh
      hq rsi mine --since=24h
      ```
-   - Synthesize structured ACE delta hypotheses (`hq rsi hypothesize`) and run the 4-Gate Sandboxed Verification Harness + stage verified passes:
+   - Synthesize structured Tier 1 personal hypotheses targeting `<vault>/skills/<slug>/SKILL.md` or `<vault>/memory/rsi/rules/<slug>.md` (`0` dirty root git files; opt-in maintainers pass `--upstream` for Tier 2 upstream worktree PRs) and run the 4-Gate Sandboxed Verification Harness:
      ```sh
-     hq rsi verify <rsi-id> && hq rsi propose <rsi-id>
+     hq rsi hypothesize && hq rsi verify <rsi-id> && hq rsi propose <rsi-id>
      ```
    - When upgrading to a new frontier model, run `hq rsi ablate --model=<new-model>`.
 2. **Task Lifecycle Consolidation, Hot/Cold Rotation & Sidebar Archive Sync:**

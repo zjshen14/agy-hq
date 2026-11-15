@@ -30,14 +30,14 @@ Stepping back to first principles, procedural instructions in `agy-hq` can live 
 2. **Core OS Harness Skills (`.agents/plugins/agy-hq/skills/`):** Progressive disclosure (~30 tokens of frontmatter; body loaded only when invoked) **and** upgraded atomically alongside the `hq` Go binary via `hq upgrade`.
 3. **User-Space Vault Skills (`local/skills/`):** Progressive disclosure, **100% user-owned** inside the git-ignored private Vault (`local/.git`), never overwritten by `hq upgrade`.
 
-Applying both tests (**progressive disclosure** + **lockstep Go binary coupling**) cleanly separates the 9 existing skills into **4 Core OS Harness Skills** and **5 User-Space Domain Starter Playbooks**:
+Applying both tests (**progressive disclosure** + **lockstep Go binary coupling**) cleanly separates the 9 existing skills into **3 Core OS Harness Skills** and **6 User-Space Domain/Channel Starter Playbooks**:
 
 | Skill | Calls Internal `hq` Kernel Protocols? | Needed by Every Persona (e.g. Living-Expense User)? | Proper Architectural Layer |
 | :--- | :--- | :--- | :--- |
 | `inbox-triage` | Yes (`hq watch read`, `hq offer stage`, `hq outbox add` taint boundary) | Yes | **Core OS Harness** (`.agents/plugins/agy-hq/skills/`) |
 | `morning-brief` | Yes (`hq brief collect --lease`, `hq brief commit`) | Yes | **Core OS Harness** (`.agents/plugins/agy-hq/skills/`) |
 | `sleep-consolidate` | Yes (`hq obs`, `hq memory verify-transcript`, `hq rsi`, `hq tasks`) | Yes | **Core OS Harness** (`.agents/plugins/agy-hq/skills/`) |
-| `gchat` | Yes (`hq gchat` headless CDP driver, `--body-stdin` `$` guard) | Channel Driver | **Core OS Driver** (`.agents/plugins/agy-hq/skills/`) |
+| `gchat` | Optional channel driver (`hq gchat` headless CDP); auto-seeded by `hq gchat login` | No (Channel opt-in) | **User-Space Starter** (`templates/skills/` → `local/skills/`) |
 | `swe-pulse` | Only `hq worktree`/`hq spawn` (already in `rules/AGENTS.md`); assumes GitHub `gh` CLI | No (SWE-only) | **User-Space Starter** (`templates/skills/` → `local/skills/`) |
 | `ledger-ingest` | Zero `hq` commands; assumes Beancount/`hledger` | Opt-in Finance/Expense | **User-Space Starter** (`templates/skills/` → `local/skills/`) |
 | `tax-prep` | Zero `hq` commands; assumes US `W-2`/`1099`/`K-1` | Opt-in US Tax | **User-Space Starter** (`templates/skills/` → `local/skills/`) |
@@ -63,7 +63,7 @@ This solves the user-authored skill problem that `~/.gemini/config/skills/` and 
 - Putting domain starter skills (`hq skill add ledger-ingest`) and custom user skills (`local/skills/living-budget/SKILL.md`) in **`local/skills/`** gives native `/<name>` slash-command discovery, full `scripts/` support, **`0` dirty files** in `headquarter`, private `local/.git` versioning across machines, and **direct in-place evolution by `hq rsi`**!
 
 ### 2.2 Why Core OS Skills Still Use Inline `hq dispatch resolve` Overlays
-For the **4 Core OS skills** (`inbox-triage`, `morning-brief`, `sleep-consolidate`, `gchat`) that remain in `.agents/plugins/agy-hq/skills/` (Priority #1 in Antigravity's loader, higher than Priority #2 `.agents/skills.json`), wholesale shadowing in `local/skills/` would freeze the skill and miss future `hq upgrade` CLI flag updates.
+For the **3 Core OS skills** (`inbox-triage`, `morning-brief`, `sleep-consolidate`) that remain in `.agents/plugins/agy-hq/skills/` (Priority #1 in Antigravity's loader, higher than Priority #2 `.agents/skills.json`), wholesale shadowing in `local/skills/` would freeze the skill and miss future `hq upgrade` CLI flag updates.
 
 Instead, extending `hq dispatch resolve --skill=<name> --json` to return `has_overlay`, `overlay_path`, and **inline `overlay_rules`** from `<vault>/memory/rsi/rules/<name>.md` composes personal operational tweaks in **one `0`-cap `hq` call** during Step 0—zero extra `read_file` round-trips, zero Front Desk lookup-cap burn, and zero merge conflicts on `hq upgrade`.
 
@@ -76,4 +76,4 @@ Instead, extending `hq dispatch resolve --skill=<name> --json` to return `has_ov
 | **1. Declarative & Episodic Memory** | `<vault>/MEMORY.md`, `memory/topics/`, `memory/entities/`, `facts.jsonl` | Nightly `/sleep-consolidate` (`hq memory`) | `0` dirty files (committed to `local/.git`) |
 | **2A. User-Space Vault Skills** *(Starters + Custom)* | `<vault>/skills/<name>/SKILL.md` (+ `scripts/`) | User authoring, `hq skill add`, & in-place Tier 1A `hq rsi` | `0` dirty files (committed to `local/.git`) |
 | **2B. Core OS Skill & General Overlays** | `<vault>/memory/rsi/rules/<core-skill\|general>.md` | Tier 1B `hq rsi` + inline `hq dispatch resolve` | `0` dirty files (committed to `local/.git`) |
-| **3. Upstream Harness Evolution** | `.agents/plugins/agy-hq/skills/` (4 OS skills), `internal/*` | Tier 2 `hq rsi --upstream` in isolated worktree PR | Clean feature branch `hq/rsi-<id>` |
+| **3. Upstream Harness Evolution** | `.agents/plugins/agy-hq/skills/` (3 OS skills), `internal/*` | Tier 2 `hq rsi --upstream` in isolated worktree PR | Clean feature branch `hq/rsi-<id>` |

@@ -12,7 +12,7 @@ Compare a newly released `10-K` or `10-Q` against the prior period's filing to s
 
 ## Steps
 
-0. **Extension Dispatch Check:** Run `hq dispatch resolve --skill=filing-diff --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file.
+0. **Extension Dispatch & Overlay Check:** Run `hq dispatch resolve --skill=filing-diff --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file; if `has_overlay == true` with non-empty `overlay_rules`, apply those active personal rules for this run.
 1. **Locate Current & Prior Filings:**
    - Retrieve the target sections (`Item 1A Risk Factors`, `Item 7 MD&A`, key accounting footnotes) for both the current and prior filing.
 2. **Diff & Materiality Filter:**

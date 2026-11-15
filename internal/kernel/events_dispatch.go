@@ -387,7 +387,7 @@ func EnqueueInboxFiles(vaultDir string, now time.Time) error {
 }
 
 func enqueueQueuedInboxFile(vaultDir, dstPath, name string, now time.Time) {
-	skill := ClassifyInboxFile(name)
+	skill := ClassifyInboxFileForVault(vaultDir, name)
 	title := fmt.Sprintf("[Auto] Inbox Drop: %s (/%s)", name, skill)
 	prompt := fmt.Sprintf("A new file was dropped into the inbox and moved to %s. Activate the %s skill and process this file.", dstPath, skill)
 	modelID := routing.Resolve(vaultDir, routing.Request{Prompt: prompt, ExplicitTier: "standard"}).ModelID

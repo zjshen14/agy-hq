@@ -703,8 +703,8 @@ func TestCUJ6_ParallelWorktreeLifecycle(t *testing.T) {
 // CUJ-7: Quarantined Inbox Drop & 0-Token Heartbeat Gatekeeper
 func TestCUJ7_InboxRoutingAndHeartbeatGatekeeper(t *testing.T) {
 	env := setupHQEnv(t)
-	if _, err := env.run("", "init"); err != nil {
-		t.Fatalf("init: %v", err)
+	if _, err := env.run("", "init", "--starters=ledger-ingest,thesis-check"); err != nil {
+		t.Fatalf("init --starters: %v", err)
 	}
 
 	// Pre-create today's Morning Brief so the first heartbeat is 100% idle (0 LLM tokens)
@@ -824,8 +824,8 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v8") {
-		t.Fatalf("expected v0 -> v8 migration output, got:\n%s", upOut)
+	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v9") {
+		t.Fatalf("expected v0 -> v9 migration output, got:\n%s", upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -851,13 +851,13 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 		t.Fatalf("expected deprecated hq_console_mobile.md to be removed during migration")
 	}
 
-	// 5. Verify schema_version.json is now at version 7 and re-running `hq migrate` is a clean idempotent no-op
+	// 5. Verify schema_version.json is now at version 9 and re-running `hq migrate` is a clean idempotent no-op
 	migOut2, err := env.run("", "migrate")
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v8 -> v8") {
-		t.Fatalf("expected idempotent v8 -> v8 on second run, got:\n%s", migOut2)
+	if !strings.Contains(migOut2, "Vault Schema Migration: v9 -> v9") {
+		t.Fatalf("expected idempotent v9 -> v9 on second run, got:\n%s", migOut2)
 	}
 }
 
@@ -2973,7 +2973,7 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq version --json in extRepo failed: %v (%s)", err, verOut)
 	}
-	if !strings.Contains(verOut, `"version": "0.1.0"`) || !strings.Contains(verOut, `"vaultSchemaVersion": 8`) {
+	if !strings.Contains(verOut, `"version": "0.1.0"`) || !strings.Contains(verOut, `"vaultSchemaVersion": 9`) {
 		t.Fatalf("unexpected version --json output:\n%s", verOut)
 	}
 
@@ -4911,4 +4911,239 @@ func TestCUJ34_ExtensionPacksTrustAndHostPortability(t *testing.T) {
 		t.Fatalf("expected cookie-authenticated POST 200 OK, err=%v resp=%v", err, postResp)
 	}
 	_ = postResp.Body.Close()
+}
+
+// CUJ-35: Two-Tier RSI, Vault Skills (`local/skills/`), Inline Overlays & Tier 2 Upstream Export (RFC-0019)
+func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
+	env := setupHQEnv(t)
+
+	isolatedRoot := t.TempDir()
+	env.rootDir = isolatedRoot
+	env.vaultDir = filepath.Join(isolatedRoot, "local")
+
+	// Copy real templates/ and .agents/ (3 Core OS skills + .agents/skills.json + 6 starter templates)
+	srcRepo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyDirRecursive(filepath.Join(srcRepo, "templates"), filepath.Join(isolatedRoot, "templates")); err != nil {
+		t.Fatalf("copy templates: %v", err)
+	}
+	if err := copyDirRecursive(filepath.Join(srcRepo, ".agents"), filepath.Join(isolatedRoot, ".agents")); err != nil {
+		t.Fatalf("copy .agents: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(isolatedRoot, "go.mod"), []byte("module github.com/zjshen14/agy-hq\n\ngo 1.25.0\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(isolatedRoot, ".gitignore"), []byte("local/\nbin/\n.brain/\n"), 0o644)
+
+	runGit := func(args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = isolatedRoot
+		out, gErr := c.CombinedOutput()
+		if gErr != nil {
+			t.Fatalf("git %v failed: %v (%s)", args, gErr, string(out))
+		}
+		return string(out)
+	}
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "ci@example.com")
+	runGit("config", "user.name", "CI")
+	runGit("add", ".")
+	runGit("commit", "-m", "init synthetic agy-hq repo")
+
+	assertCleanRoot := func(contextLabel string) {
+		t.Helper()
+		if st := strings.TrimSpace(runGit("status", "--porcelain")); st != "" {
+			t.Fatalf("expected root git repo to stay 100%% clean (%s), got:\n%s", contextLabel, st)
+		}
+	}
+
+	// 1. Lean `hq init`: no starter skills auto-installed; CSV inbox drop falls back to `/inbox-triage`
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(env.vaultDir, "skills", "ledger-ingest", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected lean hq init without ledger-ingest")
+	}
+	today := time.Now().Format("2006-01-02")
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "notes", "briefs", today+".md"), []byte("# Brief\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "inbox", "unmatched-expense.csv"), []byte("date,amount\n"), 0o644)
+	hbFallback, err := env.run("", "heartbeat", "--dry-run")
+	if err != nil || !strings.Contains(hbFallback, "unmatched-expense.csv -> /inbox-triage") {
+		t.Fatalf("expected CSV drop without ledger-ingest installed to fall back to /inbox-triage, got: %q (%v)", hbFallback, err)
+	}
+
+	// 2. Opt-in `hq skill add ledger-ingest`, custom `living-budget`, `hq skill list --json`, Core OS removal guard
+	if out, err := env.run("", "skill", "add", "ledger-ingest"); err != nil || !strings.Contains(out, "installed") {
+		t.Fatalf("hq skill add ledger-ingest failed: %v (%s)", err, out)
+	}
+	customDir := filepath.Join(env.vaultDir, "skills", "living-budget")
+	_ = os.MkdirAll(filepath.Join(customDir, "scripts"), 0o755)
+	_ = os.WriteFile(filepath.Join(customDir, "SKILL.md"),
+		[]byte("---\nname: living-budget\ndescription: Custom household living-expense tracker\n---\n\n# Living Budget\n"), 0o644)
+
+	listOut, err := env.run("", "skill", "list", "--json")
+	if err != nil {
+		t.Fatalf("hq skill list --json failed: %v (%s)", err, listOut)
+	}
+	for _, want := range []string{`"morning-brief"`, `"inbox-triage"`, `"sleep-consolidate"`, `"ledger-ingest"`, `"vault-starter"`, `"living-budget"`, `"vault-custom"`, `"starter-available"`} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("expected %s in hq skill list --json output:\n%s", want, listOut)
+		}
+	}
+	if remOut, remErr := env.run("", "skill", "remove", "morning-brief"); remErr == nil {
+		t.Fatalf("expected hq skill remove morning-brief to refuse removing Core OS skill, got: %s", remOut)
+	}
+	assertCleanRoot("after hq init + hq skill add + custom skill")
+
+	// 3. Seed untainted friction transcripts across:
+	//    (A) Core OS skill (`morning-brief`) -> Tier 1B overlay (`local/memory/rsi/rules/morning-brief.md`)
+	//    (B) Vault skill (`ledger-ingest`) -> Tier 1A direct update (`local/skills/ledger-ingest/SKILL.md`)
+	//    (C) Generic unmatched session friction -> Tier 1B `general` (`local/memory/rsi/rules/general.md`, NEVER swe-pulse!)
+	writeFrictionRun := func(prefix, userPrompt, badCmd, goodCmd, okMsg string) {
+		txFile := filepath.Join(t.TempDir(), prefix+".jsonl")
+		lines := []string{
+			fmt.Sprintf(`{"step_index":0,"type":"USER_INPUT","content":%q}`, userPrompt),
+			fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"Trying command","tool_calls":[{"name":"run_command","args":{"CommandLine":%q}}]}`, badCmd),
+			`{"step_index":2,"type":"GENERIC","status":"DONE","content":"Command exited with code 2.\nflag provided but not defined: -bad-flag"}`,
+			fmt.Sprintf(`{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","content":"Retrying cleanly","tool_calls":[{"name":"run_command","args":{"CommandLine":%q}}]}`, goodCmd),
+			fmt.Sprintf(`{"step_index":4,"type":"GENERIC","status":"DONE","content":%q}`, okMsg),
+		}
+		_ = os.WriteFile(txFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+		for i := 1; i <= 2; i++ {
+			cid := fmt.Sprintf("%s-%d", prefix, i)
+			stopIn := fmt.Sprintf(`{"conversationId":%q,"executionNum":1,"transcriptPath":%q,"modelName":"gemini-4-hydrogen-high","lastUserInput":%q}`, cid, txFile, userPrompt)
+			if out, sErr := env.run(stopIn, "hook", "stop"); sErr != nil {
+				t.Fatalf("hook stop %s: %v (%s)", cid, sErr, out)
+			}
+		}
+	}
+	writeFrictionRun("mb", "Run /morning-brief daily digest", "./bin/hq brief collect --bad-flag", "./bin/hq brief collect --lease", "Collected lease brief")
+	writeFrictionRun("li", "Run /ledger-ingest on checking CSV", "hledger check --bad-flag", "hledger check -f main.bean", "Ledger zero-balance OK")
+	writeFrictionRun("gen", "Organize weekly travel checklist", "./bin/hq status --bad-opt", "./bin/hq status", "Status clean")
+
+	if out, err := env.run("", "rsi", "mine"); err != nil {
+		t.Fatalf("hq rsi mine failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "rsi", "hypothesize", "--force"); err != nil {
+		t.Fatalf("hq rsi hypothesize --force failed: %v (%s)", err, out)
+	}
+	hyps, err := rsi.ListHypotheses(env.vaultDir)
+	if err != nil || len(hyps) < 3 {
+		t.Fatalf("expected at least 3 hypotheses (morning-brief, ledger-ingest, general), got %d (%v)", len(hyps), err)
+	}
+
+	seenTargets := make(map[string]bool)
+	var mbRuleID string
+	for _, h := range hyps {
+		if len(h.TargetFiles) > 0 {
+			seenTargets[filepath.ToSlash(h.TargetFiles[0])] = true
+		}
+		if h.DeltaOp != nil && len(h.TargetFiles) > 0 && strings.HasSuffix(h.TargetFiles[0], "morning-brief.md") {
+			mbRuleID = h.DeltaOp.RuleID
+		}
+		if out, err := env.run("", "rsi", "verify", h.ID); err != nil {
+			t.Fatalf("hq rsi verify %s failed: %v (%s)", h.ID, err, out)
+		}
+		if out, err := env.run("", "rsi", "propose", h.ID, "--conv=conv-35"); err != nil {
+			t.Fatalf("hq rsi propose %s failed: %v (%s)", h.ID, err, out)
+		}
+	}
+	for _, wantTarget := range []string{
+		"local/memory/rsi/rules/morning-brief.md",
+		"local/skills/ledger-ingest/SKILL.md",
+		"local/memory/rsi/rules/general.md",
+	} {
+		if !seenTargets[wantTarget] {
+			t.Fatalf("expected synthesized hypothesis targeting %q, got targets=%v", wantTarget, seenTargets)
+		}
+	}
+
+	pendingProps, err := approvals.List(env.vaultDir)
+	if err != nil || len(pendingProps) < 3 {
+		t.Fatalf("expected >= 3 pending RSI approvals, got %d (%v)", len(pendingProps), err)
+	}
+	for _, prop := range pendingProps {
+		askIn := fmt.Sprintf(`{"conversationId":"conv-35","toolCall":{"name":"ask_question","args":{"questions":[{"question":"Approve %s?","options":["Approve","Reject"]}]}}}`, prop.ID)
+		if askOut, err := env.run(askIn, "hook", "pre-tool"); err != nil || !strings.Contains(askOut, "Approve RSI Self-Improvement Patch") {
+			t.Fatalf("ask_question hook failed for %s: %v (%s)", prop.ID, err, askOut)
+		}
+		if appOut, err := env.run("", "approve", prop.ID, "--sha256="+prop.SHA256[:12]); err != nil {
+			t.Fatalf("hq approve %s failed: %v (%s)", prop.ID, err, appOut)
+		}
+	}
+
+	// 4. Verify Vault files updated + `hq dispatch resolve --skill=morning-brief --json` composes inline overlay + quarantine immunity + 0 dirty root files
+	for _, p := range []string{
+		filepath.Join(env.vaultDir, "memory", "rsi", "rules", "morning-brief.md"),
+		filepath.Join(env.vaultDir, "memory", "rsi", "rules", "general.md"),
+		filepath.Join(env.vaultDir, "skills", "ledger-ingest", "SKILL.md"),
+	} {
+		b, rErr := os.ReadFile(p)
+		if rErr != nil || !strings.Contains(string(b), "<!-- rsi:rule id=") {
+			t.Fatalf("expected applied rsi:rule in %s, err=%v content=%s", p, rErr, string(b))
+		}
+	}
+
+	dispMB, err := env.run("", "dispatch", "resolve", "--skill=morning-brief", "--json")
+	if err != nil {
+		t.Fatalf("hq dispatch resolve morning-brief failed: %v (%s)", err, dispMB)
+	}
+	var mbRes extension.DispatchResolution
+	if jErr := json.Unmarshal([]byte(dispMB), &mbRes); jErr != nil || !mbRes.HasOverlay || len(mbRes.OverlayRules) == 0 {
+		t.Fatalf("expected dispatch resolve to return inline overlay_rules for morning-brief, err=%v res=%+v raw=%s", jErr, mbRes, dispMB)
+	}
+
+	// Drop a rogue inbox-triage overlay manually and verify dispatch fails closed with 0 overlay rules
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "memory", "rsi", "rules", "inbox-triage.md"),
+		[]byte("<!-- rsi:rule id=\"rsi-rogue-it\" -->\n- Rogue rule\n"), 0o644)
+	dispIT, err := env.run("", "dispatch", "resolve", "--skill=inbox-triage", "--json")
+	if err != nil {
+		t.Fatalf("hq dispatch resolve inbox-triage failed: %v (%s)", err, dispIT)
+	}
+	var itRes extension.DispatchResolution
+	_ = json.Unmarshal([]byte(dispIT), &itRes)
+	if itRes.HasOverlay || len(itRes.OverlayRules) != 0 {
+		t.Fatalf("expected quarantine skill inbox-triage to ignore overlay rules, got %+v", itRes)
+	}
+	assertCleanRoot("after Tier 1 overlay & Vault skill approvals")
+
+	// 5. Tier 2 `hq rsi export --upstream`:
+	//    (A) Refuses rule containing PII / secret token
+	piiOverlay := filepath.Join(env.vaultDir, "memory", "rsi", "rules", "sleep-consolidate.md")
+	fakeTok := "ghp_" + strings.Repeat("a", 36)
+	_ = os.WriteFile(piiOverlay, []byte("# Personal RSI Overlay: sleep-consolidate\n\n<!-- rsi:rule id=\"rsi-pii-secret\" source=\"obs-x\" model_scope=\"all\" added=\"2026-11-15\" helpful=\"1\" harmful=\"0\" -->\n- **[Learned Rule]:** Use token "+fakeTok+".\n"), 0o644)
+	if out, expErr := env.run("", "rsi", "export", "--upstream", "rsi-pii-secret"); expErr == nil {
+		t.Fatalf("expected hq rsi export --upstream to refuse rule with secret token, got: %s", out)
+	}
+
+	//    (B) Clean morning-brief rule exports into isolated worktree branch `hq/rsi-...` and stages `pr_create`
+	if mbRuleID == "" {
+		t.Fatalf("expected morning-brief rule ID to be recorded")
+	}
+	expOut, err := env.run("", "rsi", "export", "--upstream", mbRuleID, "--conv=conv-35")
+	if err != nil || !strings.Contains(expOut, "Staged Tier 2 upstream RSI PR proposal") {
+		t.Fatalf("hq rsi export --upstream %s failed: %v (%s)", mbRuleID, err, expOut)
+	}
+	postExpProps, _ := approvals.List(env.vaultDir)
+	foundPRCreate := false
+	var wtDir string
+	for _, p := range postExpProps {
+		if p.ActionType == "pr_create" {
+			foundPRCreate = true
+			wtDir = p.WorkDir
+			break
+		}
+	}
+	if !foundPRCreate || wtDir == "" {
+		t.Fatalf("expected pr_create proposal with worktree path after upstream export, got: %+v", postExpProps)
+	}
+	exportedSkill, _ := os.ReadFile(filepath.Join(wtDir, ".agents", "plugins", "agy-hq", "skills", "morning-brief", "SKILL.md"))
+	if !strings.Contains(string(exportedSkill), "brief collect --lease") || strings.Contains(string(exportedSkill), "<!-- rsi:rule") {
+		t.Fatalf("expected exported upstream SKILL.md to contain clean universal prose and 0 rsi:rule comments, got:\n%s", string(exportedSkill))
+	}
+	assertCleanRoot("after Tier 2 upstream export")
+
+	// Clean up isolated git worktree cleanly before TempDir teardown
+	_ = runGit("worktree", "remove", "--force", wtDir)
 }
