@@ -89,6 +89,7 @@ type CreateOptions struct {
 	TargetAccount    string
 	TargetThreadKey  string
 	PayloadSHA256    string
+	PayloadBytes     []byte
 	SupersedePrior   bool
 	ResumeOnDecide   bool
 	ContinuationNote string
@@ -195,6 +196,16 @@ func idemMarkerPath(vaultDir, idemKey string) string {
 		return ""
 	}
 	return filepath.Join(vaultDir, "memory", "pending", ".idem", sha256HexString(k))
+}
+
+func payloadFilePath(vaultDir, propID string) string {
+	return filepath.Join(vaultDir, "approvals", "payloads", propID+".json")
+}
+
+func removePayloadArtifact(vaultDir, propID string) {
+	if strings.TrimSpace(vaultDir) != "" && strings.TrimSpace(propID) != "" {
+		_ = os.Remove(payloadFilePath(vaultDir, propID))
+	}
 }
 
 func removeIdemMarker(vaultDir, idemKey string) {
@@ -335,6 +346,19 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		originSkill = strings.TrimSpace(opts.Metadata["originSkill"])
 	}
 
+	payloadSHA := strings.ToLower(strings.TrimSpace(opts.PayloadSHA256))
+	if len(opts.PayloadBytes) > 0 {
+		sum := sha256.Sum256(opts.PayloadBytes)
+		computed := hex.EncodeToString(sum[:])
+		if payloadSHA != "" && payloadSHA != computed {
+			if reservedIdem {
+				_ = os.Remove(idemPath)
+			}
+			return Proposal{}, fmt.Errorf("payload sha256 mismatch (%s != %s)", payloadSHA, computed)
+		}
+		payloadSHA = computed
+	}
+
 	var scanBuf strings.Builder
 	scanBuf.WriteString(opts.Summary)
 	scanBuf.WriteByte('\n')
@@ -342,6 +366,10 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 	if len(opts.CommandArgv) > 0 {
 		scanBuf.WriteByte('\n')
 		scanBuf.WriteString(strings.Join(opts.CommandArgv, " "))
+	}
+	if len(opts.PayloadBytes) > 0 {
+		scanBuf.WriteByte('\n')
+		scanBuf.Write(opts.PayloadBytes)
 	}
 	if opts.Metadata != nil {
 		for _, k := range []string{"draftPayload", "bodyPreview", "subject"} {
@@ -372,7 +400,7 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		TargetConnector:  strings.TrimSpace(opts.TargetConnector),
 		TargetAccount:    strings.TrimSpace(opts.TargetAccount),
 		TargetThreadKey:  strings.TrimSpace(opts.TargetThreadKey),
-		PayloadSHA256:    strings.ToLower(strings.TrimSpace(opts.PayloadSHA256)),
+		PayloadSHA256:    payloadSHA,
 		Status:           "pending",
 		RiskTier:         riskTier,
 		RiskFlags:        riskFlags,
@@ -382,6 +410,22 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		Metadata:         opts.Metadata,
 	}
 	prop.SHA256 = ComputeProposalHashV2(prop)
+
+	if len(opts.PayloadBytes) > 0 {
+		pDir := filepath.Join(vaultDir, "approvals", "payloads")
+		if err := os.MkdirAll(pDir, 0o700); err != nil {
+			if reservedIdem {
+				_ = os.Remove(idemPath)
+			}
+			return Proposal{}, err
+		}
+		if err := store.WriteAtomic(payloadFilePath(vaultDir, id), opts.PayloadBytes, 0o600); err != nil {
+			if reservedIdem {
+				_ = os.Remove(idemPath)
+			}
+			return Proposal{}, err
+		}
+	}
 
 	data, err := json.MarshalIndent(prop, "", "  ")
 	if err != nil {
@@ -444,6 +488,7 @@ func SupersedeByThread(vaultDir, connector, account, threadKey, newPropID string
 			p.TargetThreadKey == threadKey {
 			if os.Remove(fullPath) == nil {
 				removeIdemMarker(vaultDir, p.IdempotencyKey)
+				removePayloadArtifact(vaultDir, p.ID)
 				CleanupApprovalArtifacts(vaultDir, p.ID)
 				p.Status = "superseded"
 				p.SupersededBy = newPropID
@@ -495,6 +540,7 @@ func ExpireStaleProposals(vaultDir string, now time.Time) ([]Proposal, error) {
 		if p.IsExpired(now) {
 			if os.Remove(fullPath) == nil {
 				removeIdemMarker(vaultDir, p.IdempotencyKey)
+				removePayloadArtifact(vaultDir, p.ID)
 				CleanupApprovalArtifacts(vaultDir, p.ID)
 				p.Status = "expired"
 				appendIntervention(vaultDir, InterventionRecord{
@@ -567,7 +613,15 @@ func SanitizedApprovalEnv(vaultDir string) []string {
 		"XDG_CONFIG_HOME=",
 		"XDG_CACHE_HOME=",
 		"HQ_ROOT_DIR=",
+		"HQ_HOME_DIR=",
+		"HQ_GEMINI_DIR=",
+		"HQ_CONFIG_DIR=",
+		"HQ_APP_DATA_DIR=",
+		"HQ_BRAIN_DIR=",
+		"HQ_GMAIL_MOCK_DIR=",
+		"HQ_GCHAT_MOCK_DIR=",
 		"AGY_ACCOUNT=",
+		"ANTIGRAVITY_CREDENTIAL_SCOPE=",
 	}
 	var env []string
 	for _, kv := range os.Environ() {
@@ -637,6 +691,7 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	if prop.IsExpired(now) {
 		_ = os.Remove(pendingPath)
 		removeIdemMarker(vaultDir, prop.IdempotencyKey)
+		removePayloadArtifact(vaultDir, prop.ID)
 		CleanupApprovalArtifacts(vaultDir, prop.ID)
 		prop.Status = "expired"
 		appendIntervention(vaultDir, InterventionRecord{
@@ -659,9 +714,41 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	if err := os.Rename(pendingPath, claimPath); err != nil {
 		return "", fmt.Errorf("claim proposal %s (already approved or removed): %w", id, err)
 	}
-	defer func() { _ = os.Remove(claimPath) }()
+	defer func() {
+		_ = os.Remove(claimPath)
+		removePayloadArtifact(vaultDir, prop.ID)
+	}()
 	removeIdemMarker(vaultDir, prop.IdempotencyKey)
 	CleanupApprovalArtifacts(vaultDir, prop.ID)
+
+	var verifiedPayload []byte
+	needsPayloadPipe := false
+	for _, a := range prop.CommandArgv {
+		if strings.Contains(a, "{{payload_file}}") {
+			needsPayloadPipe = true
+			break
+		}
+	}
+	if needsPayloadPipe {
+		if strings.TrimSpace(prop.PayloadSHA256) == "" {
+			return "", fmt.Errorf("proposal %s uses {{payload_file}} without payloadSha256", id)
+		}
+		pPath := payloadFilePath(vaultDir, prop.ID)
+		st, lErr := os.Lstat(pPath)
+		if lErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+			return "", fmt.Errorf("proposal %s payload artifact missing or irregular: %v", id, lErr)
+		}
+		rawPay, rErr := os.ReadFile(pPath)
+		if rErr != nil {
+			return "", fmt.Errorf("read proposal %s payload: %w", id, rErr)
+		}
+		sum := sha256.Sum256(rawPay)
+		if hex.EncodeToString(sum[:]) != strings.ToLower(strings.TrimSpace(prop.PayloadSHA256)) {
+			return "", fmt.Errorf("proposal %s payload SHA-256 mismatch (tampered on disk)", id)
+		}
+		verifiedPayload = rawPay
+		_ = os.Remove(pPath) // Delete from disk before spawning subprocess; pass solely via /dev/fd/3 pipe
+	}
 
 	if RegisteredApplyPrecondition != nil {
 		if preErr := RegisteredApplyPrecondition(vaultDir, prop); preErr != nil {
@@ -677,8 +764,28 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	}
 
 	var cmd *exec.Cmd
+	var pipeReader *os.File
 	if len(prop.CommandArgv) > 0 && strings.TrimSpace(prop.CommandArgv[0]) != "" {
-		cmd = exec.Command(prop.CommandArgv[0], prop.CommandArgv[1:]...)
+		argv := append([]string(nil), prop.CommandArgv...)
+		if needsPayloadPipe {
+			pr, pw, pErr := os.Pipe()
+			if pErr != nil {
+				return "", fmt.Errorf("open payload pipe for %s: %w", id, pErr)
+			}
+			pipeReader = pr
+			payloadCopy := verifiedPayload
+			go func() {
+				_, _ = pw.Write(payloadCopy)
+				_ = pw.Close()
+			}()
+			for i := range argv {
+				argv[i] = strings.ReplaceAll(argv[i], "{{payload_file}}", "/dev/fd/3")
+			}
+		}
+		cmd = exec.Command(argv[0], argv[1:]...)
+		if pipeReader != nil {
+			cmd.ExtraFiles = []*os.File{pipeReader}
+		}
 	} else {
 		cmd = exec.Command("sh", "-c", prop.Command)
 	}
@@ -688,6 +795,9 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	cmd.Env = SanitizedApprovalEnv(vaultDir)
 
 	outBytes, execErr := cmd.CombinedOutput()
+	if pipeReader != nil {
+		_ = pipeReader.Close()
+	}
 	output := string(outBytes)
 
 	prop.Status = "approved"
@@ -733,6 +843,7 @@ func RejectProposal(vaultDir, id, reason string) error {
 	prop.Status = "rejected"
 	_ = os.Remove(pendingPath)
 	removeIdemMarker(vaultDir, prop.IdempotencyKey)
+	removePayloadArtifact(vaultDir, prop.ID)
 	CleanupApprovalArtifacts(vaultDir, prop.ID)
 
 	rec := InterventionRecord{

@@ -12,6 +12,7 @@ Work across any number of local or remote GitHub repositories in parallel from i
 
 ## Steps
 
+0. **Extension Dispatch Check:** Run `hq dispatch resolve --skill=swe-pulse --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file.
 1. **Create or Inspect Isolated Git Worktrees:**
    - To start a coding task on any repo (`~/Workspace/<repo>` or `owner/repo` on GitHub) without leaving `headquarter` or dirtying your main checkout:
      ```sh

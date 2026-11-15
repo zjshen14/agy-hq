@@ -17,6 +17,7 @@ Evaluate new filings or news against an explicit investment thesis and falsifica
 
 ## Steps
 
+0. **Extension Dispatch Check:** Run `hq dispatch resolve --skill=thesis-check --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file.
 1. **Load Existing Thesis:**
    - Read `local/notes/investing/tickers/<TICKER>/thesis.md` (or create a structured starter thesis with core bull case, bear case, key KPIs, and explicit kill criteria if tracking a new ticker).
 2. **Evidence Extraction with Exact Citations:**

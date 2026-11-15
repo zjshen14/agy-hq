@@ -20,18 +20,20 @@ import (
 
 // ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml (and optional extension packs).
 type ScheduleTrigger struct {
-	ID          string   `json:"id"`
-	Cron        string   `json:"cron"`
-	Mode        string   `json:"mode,omitempty"` // front_desk_cron | isolated_worker | daemon_gatekeeper
-	Tier        string   `json:"tier,omitempty"` // quick | routine | standard | heavy | deep_routine | deep
-	Model       string   `json:"model"`
-	Skill       string   `json:"skill"`
-	PrecheckCmd []string `json:"precheckCmd,omitempty"`
-	DedupMode   string   `json:"dedupMode,omitempty"` // none | exit_zero_nonempty | stdout_sha256
-	Delivery    string   `json:"delivery,omitempty"`  // interrupt | interrupt_on_breach | brief_rollup | ideas_feed | silent_ledger
-	Enabled     *bool    `json:"enabled,omitempty"`
-	CatchUp     string   `json:"catchUp,omitempty"` // none (default) | last
-	Source      string   `json:"source,omitempty"`  // "core" | "pack:<name>"
+	ID                string   `json:"id"`
+	Cron              string   `json:"cron"`
+	Mode              string   `json:"mode,omitempty"` // front_desk_cron | isolated_worker | daemon_gatekeeper
+	Tier              string   `json:"tier,omitempty"` // quick | routine | standard | heavy | deep_routine | deep
+	Model             string   `json:"model"`
+	Skill             string   `json:"skill"`
+	Prompt            string   `json:"prompt,omitempty"`
+	PrecheckCmd       []string `json:"precheckCmd,omitempty"`
+	PrecheckTimeoutMs int      `json:"precheckTimeoutMs,omitempty"`
+	DedupMode         string   `json:"dedupMode,omitempty"` // none | exit_zero_nonempty | stdout_sha256
+	Delivery          string   `json:"delivery,omitempty"`  // interrupt | interrupt_on_breach | brief_rollup | ideas_feed | silent_ledger
+	Enabled           *bool    `json:"enabled,omitempty"`
+	CatchUp           string   `json:"catchUp,omitempty"` // none (default) | last
+	Source            string   `json:"source,omitempty"`  // "core" | "pack:<name>"
 }
 
 // FQID returns the canonical fully qualified schedule ID ("core/<id>" or "<pack>/<id>").
@@ -104,6 +106,9 @@ func (s ScheduleTrigger) FiveFieldCron() string {
 // DefaultPrompt returns the canonical prompt string (tagged with [hq-trigger:<fqid>]) to pass to Antigravity's `schedule` tool.
 func (s ScheduleTrigger) DefaultPrompt() string {
 	tag := fmt.Sprintf(" [hq-trigger:%s]", s.FQID())
+	if strings.TrimSpace(s.Prompt) != "" {
+		return strings.TrimSpace(s.Prompt) + tag
+	}
 	switch s.ID {
 	case "morning-brief":
 		return "[Auto] Morning Brief: Activate the morning-brief skill to generate today's Morning Brief across calendar events, inbox triage, pending approvals, active worktrees, and investment watchlist." + tag
@@ -352,6 +357,68 @@ func LoadTriggers(vaultDir string) (*TriggersConfig, error) {
 // verified companion-pack schedules without introducing circular imports.
 var PackScheduleLoader func(vaultDir string) ([]ScheduleTrigger, []InboxRuleTrigger)
 
+func loadPackTriggersDefault(vaultDir string) ([]ScheduleTrigger, []InboxRuleTrigger) {
+	packs := extension.LoadActiveTrustedPacks(vaultDir)
+	if len(packs) == 0 {
+		return nil, nil
+	}
+	var scheds []ScheduleTrigger
+	var rules []InboxRuleTrigger
+	for _, dp := range packs {
+		for _, ps := range dp.Manifest.Components.Schedules {
+			id := strings.TrimSpace(ps.ID)
+			if id == "" {
+				continue
+			}
+			if !strings.HasPrefix(id, dp.ID+"/") {
+				id = dp.ID + "/" + id
+			}
+			cronExpr := strings.TrimSpace(ps.Cron)
+			if tz := strings.TrimSpace(ps.TZ); tz != "" && !strings.HasPrefix(strings.ToUpper(cronExpr), "CRON_TZ=") {
+				cronExpr = "CRON_TZ=" + tz + " " + cronExpr
+			}
+			st := ScheduleTrigger{
+				ID:       id,
+				Cron:     cronExpr,
+				Mode:     strings.TrimSpace(ps.Mode),
+				Tier:     strings.TrimSpace(ps.Tier),
+				Skill:    strings.TrimSpace(ps.Skill),
+				Prompt:   strings.TrimSpace(ps.Prompt),
+				Delivery: strings.TrimSpace(ps.Delivery),
+				Enabled:  ps.Enabled,
+				CatchUp:  strings.TrimSpace(ps.CatchUp),
+				Source:   "pack:" + dp.ID,
+			}
+			if ps.Precheck != nil && len(ps.Precheck.Argv) > 0 {
+				st.PrecheckCmd = append([]string(nil), ps.Precheck.Argv...)
+				st.DedupMode = strings.TrimSpace(ps.Precheck.DedupMode)
+				st.PrecheckTimeoutMs = ps.Precheck.TimeoutMs
+			}
+			scheds = append(scheds, st)
+		}
+		for _, ir := range dp.Manifest.Components.InboxRules {
+			rid := strings.TrimSpace(ir.ID)
+			if rid == "" {
+				rid = "rule"
+			}
+			if !strings.HasPrefix(rid, dp.ID+"/") {
+				rid = dp.ID + "/" + rid
+			}
+			rx := strings.TrimSpace(ir.FilenameRegex)
+			if rx == "" {
+				rx = strings.TrimSpace(ir.Pattern)
+			}
+			rules = append(rules, InboxRuleTrigger{
+				Name:          rid,
+				Extensions:    append([]string(nil), ir.Extensions...),
+				FilenameRegex: rx,
+				Skill:         strings.TrimSpace(ir.Skill),
+			})
+		}
+	}
+	return scheds, rules
+}
+
 // LoadEffectiveTriggers merges declared schedules (core + active companion packs) with
 // runtime overrides in <vault>/extensions.json (`hq triggers pause|resume`).
 func LoadEffectiveTriggers(vaultDir string) (*TriggersConfig, error) {
@@ -373,16 +440,18 @@ func LoadEffectiveTriggers(vaultDir string) (*TriggersConfig, error) {
 	}
 	rules := append([]InboxRuleTrigger(nil), base.InboxRules...)
 
-	if PackScheduleLoader != nil {
-		packScheds, packRules := PackScheduleLoader(vaultDir)
-		for _, ps := range packScheds {
-			if _, exists := seen[ps.FQID()]; !exists {
-				seen[ps.FQID()] = len(schedules)
-				schedules = append(schedules, ps)
-			}
-		}
-		rules = append(rules, packRules...)
+	loader := PackScheduleLoader
+	if loader == nil {
+		loader = loadPackTriggersDefault
 	}
+	packScheds, packRules := loader(vaultDir)
+	for _, ps := range packScheds {
+		if _, exists := seen[ps.FQID()]; !exists {
+			seen[ps.FQID()] = len(schedules)
+			schedules = append(schedules, ps)
+		}
+	}
+	rules = append(rules, packRules...)
 
 	extState, _ := extension.LoadVaultState(vaultDir)
 	for i := range schedules {

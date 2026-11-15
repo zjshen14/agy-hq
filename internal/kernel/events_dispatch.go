@@ -19,6 +19,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/taint"
+	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
 // DeliverMessageToSession injects a user/system message into an existing Antigravity conversation
@@ -163,6 +164,9 @@ func batchItemKeys(evs []events.Event) []string {
 			if ik := strings.TrimSpace(ev.Metadata["item_key"]); ik != "" {
 				keys = append(keys, ik)
 			}
+			if tk := strings.TrimSpace(ev.Metadata["thread_key"]); tk != "" {
+				keys = append(keys, tk)
+			}
 		}
 	}
 	return keys
@@ -176,6 +180,7 @@ func headMetaVal(ev events.Event, key string) string {
 }
 
 func emitDroppedEventAlerts(vaultDir string, dropped []events.Event, now time.Time) {
+	dropped = watcher.RecordPoisonedDrops(vaultDir, dropped, now)
 	for _, d := range dropped {
 		skillName := d.Skill
 		if skillName == "" {
@@ -231,14 +236,33 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		autoSlug := "auto-" + slugify(batch.ScopeKey+"-"+head.ID)
 		nowStr := now.UTC().Format(time.RFC3339)
 
+		effectiveModel := batch.Model
+		if strings.HasPrefix(head.Source, "connector:") {
+			effTier := "quick"
+			if len(batch.Events) >= 4 {
+				effTier = "routine"
+			} else {
+				for _, bev := range batch.Events {
+					if bev.Metadata != nil && bev.Metadata["tier"] == "routine" {
+						effTier = "routine"
+						break
+					}
+				}
+			}
+			effectiveModel = routing.Resolve(vaultDir, routing.Request{
+				Prompt:       batch.Prompt,
+				ExplicitTier: effTier,
+			}).ModelID
+		}
+
 		if !dryRun {
 			_ = RegisterTask(vaultDir, ActiveTask{
 				TaskSlug:      autoSlug,
 				Title:         batch.Title,
 				Kind:          "auto",
 				Scope:         batch.ScopeKey,
-				Tier:          inferTierFromModel(batch.Model),
-				Model:         batch.Model,
+				Tier:          inferTierFromModel(effectiveModel),
+				Model:         effectiveModel,
 				EventIDs:      ids,
 				CreatedAt:     nowStr,
 				LastUpdatedAt: nowStr,
@@ -251,7 +275,7 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 			spawnPrompt = spawnPrompt + "\n\n[hq-spawn:" + batch.SpawnToken + "]"
 		}
 
-		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, batch.Model, dryRun)
+		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, effectiveModel, dryRun)
 		if spawnErr != nil {
 			if !dryRun {
 				removeTaskBySlug(vaultDir, autoSlug)

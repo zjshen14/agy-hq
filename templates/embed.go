@@ -2,8 +2,8 @@ package templates
 
 import "embed"
 
-// FS embeds the default Vault bootstrap templates and HQ Console sidecar scripts
-// so a standalone ~/.local/bin/hq binary can initialize and migrate Vaults anywhere.
+// FS embeds the default Vault bootstrap templates, HQ Console sidecar scripts,
+// and reference connector manifests so a standalone hq binary works anywhere.
 //
-//go:embed USER.md MEMORY.md config.yaml triggers.yaml gitignore.tmpl sidecars
+//go:embed USER.md MEMORY.md config.yaml triggers.yaml gitignore.tmpl sidecars connectors
 var FS embed.FS

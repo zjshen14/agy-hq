@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/ci"
+	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
@@ -499,6 +501,22 @@ func Run(vaultDir string) []CheckResult {
 		Status: "PASS",
 		Detail: fmt.Sprintf("quick=%s (%s), routine=%s, deep=%s · appData=%s", rQuick.ModelID, rQuick.Source, rRoutine.ModelID, rDeep.ModelID, roots.AppDataDir),
 	})
+
+	// 16. Check Companion Extension Packs, Trust Pins & Connector Account Drift (RFC-0017a / RFC-0017d)
+	for _, pItem := range extension.DoctorPacks(vaultDir) {
+		results = append(results, CheckResult{
+			Name:   "Extension Pack (" + pItem.Name + ")",
+			Status: pItem.Status,
+			Detail: pItem.Detail,
+		})
+	}
+	for _, dItem := range connector.CheckDrift(vaultDir) {
+		results = append(results, CheckResult{
+			Name:   "Connector Drift (" + dItem.Name + ")",
+			Status: dItem.Status,
+			Detail: dItem.Detail,
+		})
+	}
 
 	return results
 }

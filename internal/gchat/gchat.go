@@ -2,6 +2,7 @@ package gchat
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,10 +16,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
@@ -152,6 +155,40 @@ func LoadRegistry(vaultDir string) (AccountRegistry, error) {
 	data, err := os.ReadFile(registryPath(vaultDir))
 	if err != nil {
 		if os.IsNotExist(err) {
+			if inst, iErr := connector.LoadInstance(vaultDir, "gchat"); iErr == nil && len(inst.Accounts) > 0 {
+				reg.DefaultAccount = inst.DefaultAccount
+				for alias, acc := range inst.Accounts {
+					tk := strings.TrimSpace(acc.TransportKind)
+					if tk == "" {
+						tk = "cli"
+					}
+					ownerSp := ""
+					if len(acc.WatchSpaces) > 0 {
+						ownerSp = acc.WatchSpaces[0]
+					}
+					var rTok, sTok, wTok string
+					if acc.TokenRefs.Read != nil {
+						rTok = *acc.TokenRefs.Read
+					}
+					if acc.TokenRefs.Send != nil {
+						sTok = *acc.TokenRefs.Send
+					}
+					if acc.TokenRefs.Webhook != nil {
+						wTok = *acc.TokenRefs.Webhook
+					}
+					reg.Accounts[alias] = AccountConfig{
+						Alias:         alias,
+						Email:         acc.Email,
+						AccountType:   inferAccountType(acc.Email),
+						Transport:     tk,
+						ReadTokenFile: rTok,
+						SendTokenFile: sTok,
+						WebhookFile:   wTok,
+						OwnerSpaceID:  ownerSp,
+						Enabled:       acc.IsEnabled(),
+					}
+				}
+			}
 			return reg, nil
 		}
 		return reg, err
@@ -210,9 +247,9 @@ func InitOrAddAccount(vaultDir, alias, email, transport, cdpEndpoint, chromeProf
 		}
 	}
 	switch transport {
-	case "cdp", "gmail-bridge", "oauth", "webhook", "mock":
+	case "cdp", "gmail-bridge", "oauth", "webhook", "cli", "mock":
 	default:
-		return AccountConfig{}, fmt.Errorf("unsupported transport %q (expected cdp, gmail-bridge, oauth, webhook, or mock)", transport)
+		return AccountConfig{}, fmt.Errorf("unsupported transport %q (expected cdp, gmail-bridge, oauth, webhook, cli, or mock)", transport)
 	}
 
 	if strings.TrimSpace(cdpEndpoint) == "" {
@@ -703,6 +740,13 @@ func ListSpaces(vaultDir, accountAlias, query string, maxResults int) ([]SpaceSu
 
 	// 2. Dispatch by configured transport (with automatic gmail-bridge fallback for personal @gmail.com)
 	switch cfg.Transport {
+	case "cli":
+		spaces, err := listSpacesViaConnectorCLI(vaultDir, cfg, query, maxResults)
+		if err == nil {
+			_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
+			return spaces, nil
+		}
+		return nil, err
 	case "oauth":
 		if spaces, err := listSpacesViaOAuth(cfg, query, maxResults); err == nil {
 			_ = saveCachedSpaces(vaultDir, cfg.Alias, spaces)
@@ -762,6 +806,8 @@ func SearchMessages(vaultDir, accountAlias, spaceID, query string, maxResults in
 	}
 
 	switch cfg.Transport {
+	case "cli":
+		return searchMessagesViaConnectorCLI(vaultDir, cfg, spaceID, query, maxResults)
 	case "oauth":
 		if msgs, err := searchMessagesViaOAuth(cfg, spaceID, query, maxResults); err == nil {
 			return msgs, nil
@@ -815,6 +861,8 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 		td, err = readMockThread(mDir, cfg.Alias, spaceID, threadID)
 	} else {
 		switch cfg.Transport {
+		case "cli":
+			td, err = readThreadViaConnectorCLI(vaultDir, cfg, spaceID, threadID, maxMessages)
 		case "oauth":
 			td, err = readThreadViaOAuth(cfg, spaceID, threadID, maxMessages)
 		case "cdp":
@@ -1017,6 +1065,8 @@ func VerifyAndSendDraft(vaultDir, accountAlias, draftID, expectedHash string) (s
 
 	var out string
 	switch cfg.Transport {
+	case "cli":
+		out, err = sendDraftViaConnectorCLI(vaultDir, cfg, spec)
 	case "oauth":
 		out, err = sendDraftViaOAuth(cfg, spec)
 	case "webhook":
@@ -1944,4 +1994,162 @@ func sendDraftViaWebhook(cfg AccountConfig, spec DraftSpec) (string, error) {
 		return "", fmt.Errorf("gchat webhook HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
 	}
 	return "delivered via webhook", nil
+}
+
+func listSpacesViaConnectorCLI(vaultDir string, cfg AccountConfig, query string, maxResults int) ([]SpaceSummary, error) {
+	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	params := map[string]string{}
+	if strings.TrimSpace(query) != "" {
+		params["query"] = strings.TrimSpace(query)
+	}
+	if maxResults > 0 {
+		params["max"] = strconv.Itoa(maxResults)
+	}
+	stdout, err := connector.ExecCLIVerb(context.Background(), vaultDir, "gchat", cfg.Alias, "list_spaces", params, nil, nil, allowDesktop)
+	if err != nil {
+		return nil, err
+	}
+	var arr []struct {
+		SpaceID     string `json:"spaceId"`
+		Name        string `json:"name"`
+		DisplayName string `json:"displayName"`
+		SpaceType   string `json:"spaceType"`
+	}
+	if json.Unmarshal(stdout, &arr) != nil {
+		var wrap struct {
+			Spaces []struct {
+				SpaceID     string `json:"spaceId"`
+				Name        string `json:"name"`
+				DisplayName string `json:"displayName"`
+				SpaceType   string `json:"spaceType"`
+			} `json:"spaces"`
+		}
+		if err := json.Unmarshal(stdout, &wrap); err != nil {
+			return nil, fmt.Errorf("decode gchat CLI list_spaces JSON: %w", err)
+		}
+		arr = wrap.Spaces
+	}
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	var out []SpaceSummary
+	for _, s := range arr {
+		id := strings.TrimSpace(s.SpaceID)
+		if id == "" {
+			id = strings.TrimSpace(s.Name)
+		}
+		if id == "" {
+			continue
+		}
+		if qLower != "" && !strings.Contains(strings.ToLower(s.DisplayName), qLower) && !strings.Contains(strings.ToLower(id), qLower) {
+			continue
+		}
+		out = append(out, SpaceSummary{
+			SpaceID:     id,
+			Account:     cfg.Alias,
+			DisplayName: s.DisplayName,
+			SpaceType:   s.SpaceType,
+			Source:      "cli",
+		})
+	}
+	return out, nil
+}
+
+func searchMessagesViaConnectorCLI(vaultDir string, cfg AccountConfig, spaceID, query string, maxResults int) ([]MessageSummary, error) {
+	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	targetSpace := strings.TrimSpace(spaceID)
+	if targetSpace == "" {
+		targetSpace = strings.TrimSpace(cfg.OwnerSpaceID)
+	}
+	if targetSpace == "" {
+		return nil, fmt.Errorf("--space=<spaceId> is required for CLI message listing")
+	}
+	resp, err := connector.Execute(context.Background(), vaultDir, connector.ProtocolRequest{
+		Op:        "poll",
+		Connector: "gchat",
+		Account:   cfg.Alias,
+		MaxItems:  maxResults,
+		Params: map[string]string{
+			"space": targetSpace,
+			"query": strings.TrimSpace(query),
+		},
+	}, allowDesktop)
+	if err != nil {
+		return nil, err
+	}
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	var out []MessageSummary
+	for _, it := range resp.Items {
+		if qLower != "" && !strings.Contains(strings.ToLower(it.Body), qLower) && !strings.Contains(strings.ToLower(it.Sender), qLower) {
+			continue
+		}
+		out = append(out, MessageSummary{
+			ID:         it.ItemID,
+			SpaceID:    targetSpace,
+			ThreadID:   it.ThreadKey,
+			Account:    cfg.Alias,
+			Sender:     it.Sender,
+			CreateTime: it.Timestamp,
+			Snippet:    it.Body,
+			Source:     "cli",
+		})
+	}
+	return out, nil
+}
+
+func readThreadViaConnectorCLI(vaultDir string, cfg AccountConfig, spaceID, threadID string, _ int) (ThreadDetail, error) {
+	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	tKey := strings.TrimSpace(threadID)
+	if tKey == "" {
+		tKey = strings.TrimSpace(spaceID)
+	}
+	resp, err := connector.Execute(context.Background(), vaultDir, connector.ProtocolRequest{
+		Op:        "read_quarantined",
+		Connector: "gchat",
+		Account:   cfg.Alias,
+		Params: map[string]string{
+			"space":      strings.TrimSpace(spaceID),
+			"thread_key": tKey,
+		},
+	}, allowDesktop)
+	if err != nil {
+		return ThreadDetail{}, err
+	}
+	td := ThreadDetail{
+		SpaceID:  spaceID,
+		ThreadID: threadID,
+		Account:  cfg.Alias,
+		Source:   "cli",
+	}
+	if resp.Thread != nil {
+		td.Participants = resp.Thread.AuthenticatedParticipants
+		for _, m := range resp.Thread.Messages {
+			td.Messages = append(td.Messages, MessageDetail{
+				ID:         m.ItemID,
+				SpaceID:    spaceID,
+				ThreadID:   threadID,
+				Sender:     m.Sender,
+				CreateTime: m.Timestamp,
+				PlainText:  m.Body,
+			})
+		}
+	}
+	return td, nil
+}
+
+func sendDraftViaConnectorCLI(vaultDir string, cfg AccountConfig, spec DraftSpec) (string, error) {
+	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	params := map[string]string{
+		"space": spec.SpaceID,
+	}
+	if strings.TrimSpace(spec.ThreadID) != "" {
+		params["thread_key"] = strings.TrimSpace(spec.ThreadID)
+	}
+	stdout, err := connector.ExecCLIVerb(context.Background(), vaultDir, "gchat", cfg.Alias, "send", params, nil, []byte(spec.Body), allowDesktop)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(stdout))
+	if s == "" {
+		return "delivered via cli", nil
+	}
+	return s, nil
 }

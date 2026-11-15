@@ -16,6 +16,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
 	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/timers"
@@ -138,6 +139,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 		fs := flag.NewFlagSet("outbox drain", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
+		fmt.Fprintln(os.Stderr, "warning: 'hq outbox drain' is deprecated; use 'hq brief collect --lease' and 'hq brief commit' instead.")
 		drained, err := outbox.DrainBriefRollup(vaultDir, now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq outbox drain failed: %v\n", err)
@@ -501,11 +503,16 @@ func runGoalsCLI(vaultDir string, args []string) {
 		fmt.Printf("Checked off milestone %q on goal %s\n", *msTarget, g.Slug)
 
 	case "wait-on":
+		denyIfCallerTainted(vaultDir, "goals wait-on")
 		fs := flag.NewFlagSet("goals wait-on", flag.ExitOnError)
 		goalSlug := fs.String("goal", "", "Goal slug")
 		counterparty := fs.String("counterparty", "", "Counterparty name, handle, or email")
 		channel := fs.String("channel", "gmail", "Channel (gmail, gchat, external)")
+		connFlag := fs.String("connector", "", "Optional canonical connector ID")
+		acctFlag := fs.String("account", "", "Optional connector account alias")
 		thread := fs.String("thread", "", "Optional thread or space ID")
+		lastItem := fs.String("last-item", "", "Optional head item ID at send time")
+		priority := fs.Bool("priority", false, "Escalate watcher triage tier when thread receives reply")
 		summary := fs.String("summary", "", "What we are waiting on")
 		slaStr := fs.String("sla", "48h", "Follow-up SLA duration (e.g. 24h, 48h, 72h)")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -514,7 +521,19 @@ func runGoalsCLI(vaultDir string, args []string) {
 		if err != nil || sla <= 0 {
 			sla = 48 * time.Hour
 		}
-		g, w, err := kernel.AddWaitingOn(vaultDir, *goalSlug, *counterparty, *channel, *thread, *summary, sla, now)
+		g, w, err := kernel.AddWaitingOnWithOptions(vaultDir, kernel.WaitingOnOptions{
+			GoalSlug:      *goalSlug,
+			Counterparty:  *counterparty,
+			Channel:       *channel,
+			Connector:     *connFlag,
+			Account:       *acctFlag,
+			ThreadKey:     *thread,
+			ThreadOrSpace: *thread,
+			LastItemID:    *lastItem,
+			Priority:      *priority,
+			Summary:       *summary,
+			SLA:           sla,
+		}, now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq goals wait-on failed: %v\n", err)
 			os.Exit(1)
@@ -541,10 +560,33 @@ func runGoalsCLI(vaultDir string, args []string) {
 		fs := flag.NewFlagSet("goals mark-replied", flag.ExitOnError)
 		goalSlug := fs.String("goal", "", "Optional goal slug filter")
 		target := fs.String("target", "", "Waiting-on ID or counterparty name")
+		threadFlag := fs.String("thread", "", "Optional bound thread key")
+		_ = fs.String("connector", "", "Optional connector ID")
+		_ = fs.String("account", "", "Optional account alias")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
 		if *target == "" && len(pos) >= 1 {
 			*target = pos[0]
+		}
+		if *target == "" && strings.TrimSpace(*threadFlag) != "" {
+			*target = strings.TrimSpace(*threadFlag)
+		}
+		if tRec, isTainted := checkCallerTaintedEnv(vaultDir); isTainted {
+			wantThread := strings.TrimSpace(*threadFlag)
+			if wantThread == "" {
+				wantThread = strings.TrimSpace(*target)
+			}
+			allowed := false
+			for _, ik := range tRec.ItemKeys {
+				if ik == wantThread {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				fmt.Fprintf(os.Stderr, "hq goals mark-replied blocked: quarantined session %s cannot resolve unbound thread %q\n", tRec.ConvID, wantThread)
+				os.Exit(1)
+			}
 		}
 		g, err := kernel.MarkWaitingReplied(vaultDir, *goalSlug, *target, now)
 		if err != nil {
@@ -1527,33 +1569,93 @@ func runDispatchCLI(vaultDir string, args []string) {
 	}
 	switch sub {
 	case "resolve":
-		var skillName string
+		var posSkill string
 		var flagArgs []string
 		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && skillName == "" {
-				skillName = a
+			if !strings.HasPrefix(a, "-") && posSkill == "" {
+				posSkill = a
 			} else {
 				flagArgs = append(flagArgs, a)
 			}
 		}
 		fs := flag.NewFlagSet("dispatch resolve", flag.ExitOnError)
+		skillFlag := fs.String("skill", "", "Logical core skill name")
+		triggerFlag := fs.String("trigger", "", "Optional schedule trigger FQID (e.g. core/morning-brief)")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
+		skillName := strings.TrimSpace(*skillFlag)
 		if skillName == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq dispatch resolve <skill> [--json]")
+			skillName = strings.TrimSpace(posSkill)
+		}
+		trigID := strings.TrimSpace(*triggerFlag)
+		if skillName == "" && trigID != "" {
+			if cfg, _ := kernel.LoadEffectiveTriggers(vaultDir); cfg != nil {
+				wantFQ := extension.NormalizeScheduleFQID(trigID)
+				for _, s := range cfg.Schedules {
+					if s.FQID() == wantFQ || s.ID == trigID {
+						skillName = s.Skill
+						if skillName == "" {
+							skillName = extension.BareCoreScheduleID(s.ID)
+						}
+						break
+					}
+				}
+			}
+			if skillName == "" {
+				skillName = extension.BareCoreScheduleID(trigID)
+			}
+		}
+		if skillName == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq dispatch resolve [<skill>|--skill=<name>] [--trigger=<fqid>] [--json]")
 			os.Exit(1)
 		}
 		res := extension.ResolveSkillDispatch(vaultDir, skillName)
+		tier := "routine"
+		if trigID != "" {
+			wantFQ := extension.NormalizeScheduleFQID(trigID)
+			res.FQID = wantFQ
+			if cfg, _ := kernel.LoadEffectiveTriggers(vaultDir); cfg != nil {
+				for _, s := range cfg.Schedules {
+					if s.FQID() == wantFQ || s.ID == trigID {
+						res.Enabled = s.IsEnabled()
+						if !res.Enabled && res.Reason == "" {
+							res.Reason = "schedule_paused"
+						}
+						if s.Tier != "" {
+							tier = s.Tier
+						}
+						break
+					}
+				}
+			}
+			if st, err := extension.LoadVaultState(vaultDir); err == nil {
+				if ov, ok := st.LookupScheduleOverride(wantFQ); ok && ov.Enabled != nil && !*ov.Enabled {
+					res.Enabled = false
+					if ov.PausedReason != "" {
+						res.Reason = ov.PausedReason
+					} else if res.Reason == "" {
+						res.Reason = "schedule_paused"
+					}
+				}
+			}
+		}
+		rModel := routing.Resolve(vaultDir, routing.Request{ExplicitTier: tier})
+		res.Tier = rModel.LogicalTier
+		res.Model = rModel.ModelID
 		if *asJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			_ = enc.Encode(res)
 			return
 		}
+		stateTag := "enabled"
+		if !res.Enabled {
+			stateTag = "PAUSED"
+		}
 		if res.Overridden {
-			fmt.Printf("%s -> %s (override: %s)\n", res.LogicalSkill, res.ActiveTarget, res.SkillPath)
+			fmt.Printf("[%s] %s -> %s (override: %s, model=%s)\n", stateTag, res.LogicalSkill, res.ActiveTarget, res.SkillPath, res.Model)
 		} else {
-			fmt.Printf("%s -> %s\n", res.LogicalSkill, res.ActiveTarget)
+			fmt.Printf("[%s] %s -> %s (model=%s)\n", stateTag, res.LogicalSkill, res.ActiveTarget, res.Model)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown dispatch subcommand %q (expected resolve)\n", sub)

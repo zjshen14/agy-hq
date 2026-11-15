@@ -1,7 +1,6 @@
 package gmail
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
@@ -176,6 +176,32 @@ func LoadRegistry(vaultDir string) (AccountRegistry, error) {
 	data, err := os.ReadFile(registryPath(vaultDir))
 	if err != nil {
 		if os.IsNotExist(err) {
+			if inst, iErr := connector.LoadInstance(vaultDir, "gmail"); iErr == nil && len(inst.Accounts) > 0 {
+				reg.DefaultAccount = inst.DefaultAccount
+				for alias, acc := range inst.Accounts {
+					tokFile := ""
+					if acc.TokenRefs.Read != nil {
+						tokFile = *acc.TokenRefs.Read
+					}
+					cliPath := ""
+					if rc, rErr := connector.Resolve(vaultDir, "gmail"); rErr == nil && rc.Manifest.Transport.CLI != nil {
+						cliPath = strings.TrimSpace(rc.Manifest.Transport.CLI.Path)
+					}
+					q := strings.TrimSpace(acc.DefaultQuery)
+					if q == "" {
+						q = DefaultPrimaryQuery
+					}
+					reg.Accounts[alias] = AccountConfig{
+						Alias:      alias,
+						Email:      acc.Email,
+						AGYAccount: acc.AgyAccount,
+						TokenFile:  tokFile,
+						CLIPath:    cliPath,
+						Query:      q,
+						Enabled:    acc.IsEnabled(),
+					}
+				}
+			}
 			return reg, nil
 		}
 		return reg, err
@@ -1005,11 +1031,17 @@ func runGmailCLI(cfg AccountConfig, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("gmail plugin binary not found")
 	}
 	cmd := exec.Command(bin, args...)
-	cmd.Env = os.Environ()
+	extra := map[string]string{}
 	if cfg.AGYAccount != "" {
-		cmd.Env = append(cmd.Env, "AGY_ACCOUNT="+cfg.AGYAccount)
+		extra["AGY_ACCOUNT"] = cfg.AGYAccount
 	}
-	return cmd.CombinedOutput()
+	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	cmd.Env = connector.SanitizedSubprocessEnv(os.Environ(), []string{"AGY_ACCOUNT"}, extra, allowDesktop)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return []byte(connector.SanitizeStderr(string(out))), err
+	}
+	return out, nil
 }
 
 type rawGmailPart struct {
@@ -1227,49 +1259,7 @@ func sendDraftViaPluginCLI(cfg AccountConfig, draftID string) (string, error) {
 }
 
 func loadAccessTokenFromFile(tokenFile string) (string, error) {
-	data, err := os.ReadFile(tokenFile)
-	if err != nil {
-		return "", err
-	}
-	var tok struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		TokenURI     string `json:"token_uri"`
-	}
-	if err := json.Unmarshal(data, &tok); err != nil {
-		return "", err
-	}
-	if tok.AccessToken != "" {
-		return tok.AccessToken, nil
-	}
-	if tok.RefreshToken != "" && tok.ClientID != "" && tok.ClientSecret != "" {
-		tokenURI := tok.TokenURI
-		if tokenURI == "" {
-			tokenURI = "https://oauth2.googleapis.com/token"
-		}
-		body := fmt.Sprintf("client_id=%s&client_secret=%s&refresh_token=%s&grant_type=refresh_token",
-			tok.ClientID, tok.ClientSecret, tok.RefreshToken)
-		req, err := http.NewRequest(http.MethodPost, tokenURI, bytes.NewBufferString(body))
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		var refreshed struct {
-			AccessToken string `json:"access_token"`
-		}
-		if json.NewDecoder(resp.Body).Decode(&refreshed) == nil && refreshed.AccessToken != "" {
-			return refreshed.AccessToken, nil
-		}
-	}
-	return "", fmt.Errorf("no valid access_token in %s", tokenFile)
+	return connector.RefreshableOAuthToken(tokenFile)
 }
 
 func searchViaOAuthToken(cfg AccountConfig, query string, maxResults int) ([]MessageSummary, error) {

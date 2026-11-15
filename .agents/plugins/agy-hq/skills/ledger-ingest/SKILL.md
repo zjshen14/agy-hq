@@ -12,6 +12,7 @@ Maintain a verifiable double-entry financial ledger inside `local/private/ledger
 
 ## Steps
 
+0. **Extension Dispatch Check:** Run `hq dispatch resolve --skill=ledger-ingest --json`; if `overridden == true`, activate the resolved companion skill (`skill_path`) and stop following this file.
 1. **Locate Statement & Ledger:**
    - Read the statement file from `local/inbox/` and inspect existing account definitions in `local/private/ledger/main.bean` (create starter chart of accounts if not yet initialized).
 2. **Generate Double-Entry Postings:**

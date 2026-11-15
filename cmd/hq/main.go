@@ -1950,6 +1950,7 @@ func main() {
 			}
 			if _, isTainted := checkCallerTaintedEnv(vaultDir); isTainted {
 				for i := range hits {
+					hits[i].Context = ""
 					hits[i].Notes = nil
 					hits[i].Spaces = nil
 					hits[i].Path = ""
@@ -2055,6 +2056,27 @@ func main() {
 
 	case "dispatch":
 		runDispatchCLI(vaultDir, os.Args[2:])
+
+	case "extension":
+		runExtensionCLI(rootDir, vaultDir, os.Args[2:])
+
+	case "connector":
+		runConnectorCLI(vaultDir, os.Args[2:])
+
+	case "connector-driver":
+		runConnectorDriverCLI(vaultDir, os.Args[2:])
+
+	case "watch":
+		runWatchCLI(vaultDir, os.Args[2:])
+
+	case "offer":
+		runOfferCLI(vaultDir, os.Args[2:])
+
+	case "brief":
+		runBriefCLI(vaultDir, os.Args[2:])
+
+	case "sidecar":
+		runSidecarCLI(vaultDir, os.Args[2:])
 
 	default:
 		printUsage()
@@ -3432,6 +3454,12 @@ Commands:
   timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
   triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
   dispatch resolve <skill>            Resolve active core or companion-pack skill target
+  extension <list|lint|enable|disable|trust|doctor>  Manage companion extension packs & trust hashes
+  connector <list|lint|migrate|doctor|test>  Manage modular JSON-RPC/CLI connectors & fixtures
+  watch <precheck|read|query|ack>     Proactive watcher precheck, tainted read/query, and event ack
+  offer stage --connector=...         Stage taint-safe outbound offers with participant_lock & /dev/fd/3
+  brief <collect|commit|format-quarantined>  Lease-based Morning Brief packet assembly & commit
+  sidecar console                     Run native Go stdio JSON-RPC console sidecar
   progress <save|show|list|archive>   Structured cross-run & pre-compaction task checkpoints
   exec-sandboxed [--net-isolated] -- <cmd>  Execute subprocess inside OS credential sandbox
   ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions

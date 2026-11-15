@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "gcalendar",
+  "description": "Reference Google Calendar connector providing low-sensitivity freebusy queries and Morning Brief schedule summaries.",
+  "participant_lock": true,
+  "allow_tainted_create": false,
+  "requires_desktop_session": true,
+  "env_allow": ["AGY_ACCOUNT"],
+  "driver": {
+    "builtin": "gcalendar"
+  },
+  "transport": {
+    "kind": "cli",
+    "cli": {
+      "path": "",
+      "auto_install_plugin": false,
+      "verbs": {
+        "freebusy": ["freebusy", "--start={{start}}", "--end={{end}}", "--json"],
+        "events": ["list", "--start={{start}}", "--end={{end}}", "--json"]
+      }
+    }
+  },
+  "queries": {
+    "freebusy": {
+      "verb": "freebusy",
+      "sensitivity": "low",
+      "allowed_params": ["start", "end"],
+      "project_fields": ["start", "end", "busy"]
+    },
+    "events": {
+      "verb": "events",
+      "sensitivity": "high",
+      "allowed_params": ["start", "end"]
+    }
+  },
+  "capabilities": {
+    "poll": {
+      "enabled": false
+    },
+    "brief": {
+      "enabled": true,
+      "quarantined": true,
+      "timeout_ms": 3000,
+      "section": "Schedule"
+    }
+  }
+}

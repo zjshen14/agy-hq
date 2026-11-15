@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "gmail",
+  "description": "Reference Gmail connector supporting direct OAuth REST and configurable CLI transport profiles.",
+  "participant_lock": true,
+  "allow_tainted_create": false,
+  "requires_desktop_session": false,
+  "env_allow": ["AGY_ACCOUNT"],
+  "driver": {
+    "builtin": "gmail"
+  },
+  "transport": {
+    "kind": "cli",
+    "cli": {
+      "path": "",
+      "auto_install_plugin": false,
+      "verbs": {
+        "search": ["readonly", "read", "--query={{query}}", "--max={{?max}}", "--json"],
+        "get_thread": ["readonly", "get-thread", "--thread={{thread_key}}", "--json"],
+        "create_draft": ["mutate", "create-draft", "--to={{to}}", "--cc={{?cc}}", "--subject={{subject}}", "--thread={{?thread_key}}", "--body-file={{payload_file}}", "--json"],
+        "send_draft": ["mutate", "send-draft", "--draft={{draft_id}}", "--json"],
+        "send": ["mutate", "send-message", "--to={{to}}", "--cc={{?cc}}", "--subject={{subject}}", "--thread={{?thread_key}}", "--body-file={{payload_file}}", "--json"]
+      }
+    }
+  },
+  "capabilities": {
+    "poll": {
+      "enabled": true,
+      "max_pages": 3,
+      "page_size": 50
+    },
+    "inspect_thread": {
+      "enabled": true
+    },
+    "read_quarantined": {
+      "enabled": true
+    },
+    "brief": {
+      "enabled": true,
+      "quarantined": true,
+      "timeout_ms": 3000,
+      "section": "Mail"
+    },
+    "offers": {
+      "reply": {
+        "verb": "create_draft",
+        "delivery_mode": "draft_only",
+        "recipient_params": {
+          "to": "email",
+          "cc": "email"
+        },
+        "supports_wait_on": true,
+        "requires_reply_thread": true
+      },
+      "send_reply": {
+        "verb": "send",
+        "delivery_mode": "direct_send",
+        "recipient_params": {
+          "to": "email",
+          "cc": "email"
+        },
+        "supports_wait_on": true,
+        "requires_reply_thread": true
+      }
+    }
+  }
+}

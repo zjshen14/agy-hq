@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -668,6 +670,141 @@ func DrainBriefRollup(vaultDir string, now time.Time) ([]OutboxItem, error) {
 		_ = RecordReportedFromItem(vaultDir, it, now)
 	}
 	return drained, nil
+}
+
+func hashBriefLeaseToken(rawTok string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(rawTok)))
+	return hex.EncodeToString(sum[:])
+}
+
+// PeekBriefItems returns all pending brief_rollup items (plus quiet-hours-held items) WITHOUT mutating
+// items.jsonl or reported.jsonl (100% zero-write computed view; expired leases are treated as available).
+func PeekBriefItems(vaultDir string, now time.Time) ([]OutboxItem, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var out []OutboxItem
+	err := WithOutboxLock(vaultDir, func() error {
+		items, lErr := LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		for _, it := range items {
+			if it.Tier == TierBriefRollup && it.Status == StatusPending && !hasActiveBriefLease(it, now) {
+				out = append(out, it)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt < out[j].CreatedAt
+	})
+	return out, nil
+}
+
+// LeaseBriefItems acquires a non-destructive caller-bound lease over all unleased pending brief_rollup items,
+// storing only SHA-256(leaseToken) in items.jsonl so readable outbox files never expose raw lease tokens.
+func LeaseBriefItems(vaultDir, callerConvID string, ttl time.Duration, now time.Time) (string, string, []OutboxItem, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if ttl <= 0 {
+		ttl = 20 * time.Minute
+	}
+	var rnd [16]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return "", "", nil, err
+	}
+	rawTok := "blease_" + hex.EncodeToString(rnd[:])
+	tokHash := hashBriefLeaseToken(rawTok)
+	expStr := now.Add(ttl).UTC().Format(time.RFC3339)
+	callerConvID = strings.TrimSpace(callerConvID)
+
+	var leased []OutboxItem
+	err := WithOutboxLock(vaultDir, func() error {
+		items, lErr := LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		dirty := false
+		nowStr := now.UTC().Format(time.RFC3339)
+		for i := range items {
+			if items[i].Tier == TierBriefRollup && items[i].Status == StatusPending && !hasActiveBriefLease(items[i], now) {
+				items[i].BriefLeaseID = tokHash
+				items[i].BriefLeaseConvID = callerConvID
+				items[i].BriefLeaseExpiresAt = expStr
+				items[i].UpdatedAt = nowStr
+				leased = append(leased, items[i])
+				dirty = true
+			}
+		}
+		if dirty {
+			return SaveCanonicalUnlocked(vaultDir, items)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", "", nil, err
+	}
+	return rawTok, expStr, leased, nil
+}
+
+// CommitBriefLease atomically marks all items matching rawLeaseToken (and callerConvID when non-empty)
+// as delivered and appends fenced entries to reported.jsonl.
+func CommitBriefLease(vaultDir, rawLeaseToken, callerConvID string, now time.Time) ([]OutboxItem, error) {
+	rawLeaseToken = strings.TrimSpace(rawLeaseToken)
+	if !strings.HasPrefix(rawLeaseToken, "blease_") || len(rawLeaseToken) < 16 {
+		return nil, fmt.Errorf("invalid brief lease token")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	wantHash := hashBriefLeaseToken(rawLeaseToken)
+	callerConvID = strings.TrimSpace(callerConvID)
+
+	var committed []OutboxItem
+	var convMismatch bool
+	err := WithOutboxLock(vaultDir, func() error {
+		items, lErr := LoadAllUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		for i := range items {
+			if items[i].Status != StatusPending || len(items[i].BriefLeaseID) != len(wantHash) {
+				continue
+			}
+			if subtle.ConstantTimeCompare([]byte(items[i].BriefLeaseID), []byte(wantHash)) != 1 {
+				continue
+			}
+			if items[i].BriefLeaseConvID != "" && items[i].BriefLeaseConvID != callerConvID {
+				convMismatch = true
+				continue
+			}
+			items[i].Status = StatusDelivered
+			items[i].BriefLeaseID = ""
+			items[i].BriefLeaseExpiresAt = ""
+			items[i].UpdatedAt = nowStr
+			committed = append(committed, items[i])
+		}
+		if convMismatch && len(committed) == 0 {
+			return fmt.Errorf("brief lease belongs to a different conversation")
+		}
+		if len(committed) > 0 {
+			return SaveCanonicalUnlocked(vaultDir, items)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range committed {
+		_ = RecordReportedFromItem(vaultDir, it, now)
+	}
+	return committed, nil
 }
 
 // PromoteIdea marks an OutboxItem as promoted so the caller can launch or register a task.

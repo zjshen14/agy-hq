@@ -18,12 +18,10 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
-	"github.com/zjshen14/agy-hq/internal/gchat"
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
-	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/timers"
+	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
@@ -2295,76 +2293,10 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 		return "", err
 	}
 
-	attCfg := outbox.LoadAttentionConfig(vaultDir)
-
-	var readyGmail []CoalescedTriageEntry
-	if batches, _, gErr := gmail.RunPrecheck(vaultDir, ""); gErr == nil && len(batches) > 0 {
-		for _, batch := range batches {
-			readyGmail = append(readyGmail, EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", batch.Account, batch.BatchID, batch.ThreadIDs, attCfg.CoalesceWindow, now)...)
+	if !dryRun {
+		if watchSum, wErr := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: now}); wErr == nil && watchSum.EnqueuedTotal > 0 {
+			inboxActions = append(inboxActions, fmt.Sprintf("watcher:enqueued=%d", watchSum.EnqueuedTotal))
 		}
-	} else if attCfg.CoalesceWindow > 0 {
-		readyGmail = EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", "", "", nil, attCfg.CoalesceWindow, now)
-	}
-	for _, entry := range readyGmail {
-		batchLabel := strings.Join(entry.BatchIDs, "+")
-		title := fmt.Sprintf("[Auto] Gmail Triage (%s · %s)", entry.Account, batchLabel)
-		prompt := fmt.Sprintf(
-			"Activate the inbox-triage skill to process Gmail triage batch %s (account=%s, threads=%s). "+
-				"Read each thread via `hq gmail read-quarantined --account=%s --thread=<threadId>`, "+
-				"create a plain-text draft reply via `hq gmail draft` if a reply is needed, "+
-				"stage a send proposal via `hq propose --type=gmail_send --draft=<draftId>`, "+
-				"and save your structured summary via `hq gmail triage-result --batch=%s`.",
-			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
-		)
-		flashModelID, _, _ := ResolveVaultModel(vaultDir, prompt, "", "", "standard")
-		_, _, _ = events.Enqueue(vaultDir, events.Event{
-			Source:   "gmail_precheck",
-			DedupKey: fmt.Sprintf("gmail:%s:%s", entry.Account, batchLabel),
-			ScopeKey: fmt.Sprintf("triage:gmail:%s", entry.Account),
-			Skill:    "inbox-triage",
-			Model:    flashModelID,
-			Title:    title,
-			Prompt:   prompt,
-			Metadata: map[string]string{
-				"trigger":      "gmail-precheck:" + batchLabel,
-				"action_label": fmt.Sprintf("gmail:%s -> /inbox-triage", batchLabel),
-			},
-		}, now)
-	}
-
-	var readyChat []CoalescedTriageEntry
-	if chatBatches, _, cErr := gchat.RunPrecheck(vaultDir, ""); cErr == nil && len(chatBatches) > 0 {
-		for _, batch := range chatBatches {
-			readyChat = append(readyChat, EnqueueOrFlushCoalescedTriage(vaultDir, "gchat", batch.Account, batch.BatchID, batch.SpaceIDs, attCfg.CoalesceWindow, now)...)
-		}
-	} else if attCfg.CoalesceWindow > 0 {
-		readyChat = EnqueueOrFlushCoalescedTriage(vaultDir, "gchat", "", "", nil, attCfg.CoalesceWindow, now)
-	}
-	for _, entry := range readyChat {
-		batchLabel := strings.Join(entry.BatchIDs, "+")
-		title := fmt.Sprintf("[Auto] GChat Triage (%s · %s)", entry.Account, batchLabel)
-		prompt := fmt.Sprintf(
-			"Activate the inbox-triage skill to process Google Chat triage batch %s (account=%s, spaces=%s). "+
-				"Read each space/thread via `hq gchat read-quarantined --account=%s --space=<spaceId>`, "+
-				"create a plain-text draft reply via `hq gchat draft` if a reply is needed, "+
-				"stage a send proposal via `hq propose --type=gchat_send --draft=<draftId>`, "+
-				"and save your structured summary via `hq gchat triage-result --batch=%s`.",
-			batchLabel, entry.Account, strings.Join(entry.Targets, ","), entry.Account, entry.BatchIDs[0],
-		)
-		flashModelID, _, _ := ResolveVaultModel(vaultDir, prompt, "", "", "standard")
-		_, _, _ = events.Enqueue(vaultDir, events.Event{
-			Source:   "gchat_precheck",
-			DedupKey: fmt.Sprintf("gchat:%s:%s", entry.Account, batchLabel),
-			ScopeKey: fmt.Sprintf("triage:gchat:%s", entry.Account),
-			Skill:    "inbox-triage",
-			Model:    flashModelID,
-			Title:    title,
-			Prompt:   prompt,
-			Metadata: map[string]string{
-				"trigger":      "gchat-precheck:" + batchLabel,
-				"action_label": fmt.Sprintf("gchat:%s -> /inbox-triage", batchLabel),
-			},
-		}, now)
 	}
 
 	if gkActions, _, gkErr := EvaluateDaemonGatekeepers(vaultDir, now, false, dryRun); gkErr == nil && len(gkActions) > 0 {

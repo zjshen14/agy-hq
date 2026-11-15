@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
@@ -23,6 +25,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
+	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -226,6 +229,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var matchedTask kernel.ActiveTask
 	var hasMatchedTask bool
 	leanAuto := false
+	isFrontDesk := false
 
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
@@ -278,7 +282,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 
 		isAutoWorker := hasMatchedTask && matchedTask.EffectiveKind() == "auto"
 		leanAuto = isSubagent || isAutoWorker || isTaintedStart
-		isFrontDesk := !leanAuto && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
+		isFrontDesk = !leanAuto && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
 		if isTaintedStart {
 			zone2Sections = append(zone2Sections, "## 🛡️ Active Role: Quarantined Triage Worker (TAINTED)\n- Untrusted external channel content is in scope. Private Vault memory (`MEMORY.md`, wiki topics, facts) is withheld, and outbound commands are restricted to `hq offer stage` and `hq outbox add`.")
 		}
@@ -429,9 +433,37 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			zone1Sections = append(zone1Sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
 		}
+		if extSt, eErr := extension.LoadVaultState(vaultDir); eErr == nil && len(extSt.SkillOverrides) > 0 {
+			keys := make([]string, 0, len(extSt.SkillOverrides))
+			for k := range extSt.SkillOverrides {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			var ovLines []string
+			for _, k := range keys {
+				res := extension.ResolveSkillDispatch(vaultDir, k)
+				if res.Overridden && res.Trust == "ok" && res.SkillPath != "" {
+					ovLines = append(ovLines, fmt.Sprintf("- `/%s` -> `%s` ([SKILL.md](file://%s))", k, res.ActiveTarget, res.SkillPath))
+				}
+			}
+			if len(ovLines) > 0 {
+				zone1Sections = append(zone1Sections, "## Active Companion Skill Overrides\n"+strings.Join(ovLines, "\n"))
+			}
+		}
 	}
 
 	// Zone 2: Role-Scoped Dynamic Tail
+	if !isTaintedStart && !leanAuto {
+		if isFrontDesk {
+			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "front_desk"); len(ovs) > 0 {
+				zone2Sections = append(zone2Sections, "## Companion Front Desk Policy Overlays (Advisory)\n"+strings.Join(ovs, "\n\n"))
+			}
+		} else if hasMatchedTask && strings.TrimSpace(matchedTask.Scope) != "" {
+			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "task:"+strings.TrimSpace(matchedTask.Scope)); len(ovs) > 0 {
+				zone2Sections = append(zone2Sections, "## Companion Task Policy Overlays (Advisory)\n"+strings.Join(ovs, "\n\n"))
+			}
+		}
+	}
 	if !isTaintedStart && hasMatchedTask && matchedTask.TaskSlug != "" {
 		if _, rawProg, foundProg, pErr := vault.LoadProgress(vaultDir, matchedTask.TaskSlug); pErr == nil && foundProg && strings.TrimSpace(rawProg) != "" {
 			zone2Sections = append(zone2Sections, "## Active Task Progress Checkpoint\n"+strings.TrimSpace(rawProg))
@@ -499,12 +531,14 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				zone2Sections = append(zone2Sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
 			}
 		}
-		if cfg, err := kernel.LoadTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
+		if cfg, err := kernel.LoadEffectiveTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
 			fd, _ := kernel.GetFrontDesk(vaultDir)
 			var lines []string
 			for _, s := range cfg.Schedules {
 				status := "UNARMED"
-				if fd.ArmedTriggers != nil {
+				if !s.IsEnabled() {
+					status = "PAUSED"
+				} else if fd.ArmedTriggers != nil {
 					if _, ok := fd.ArmedTriggers[s.ID]; ok {
 						status = "ARMED"
 					}
@@ -551,6 +585,8 @@ var (
 		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
 		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
 		regexp.MustCompile(`(?i)\bhq\s+rsi\s+apply\b`),
+		regexp.MustCompile(`(?i)\bhq\s+connector\s+apply-offer\b`),
+		regexp.MustCompile(`(?i)\bhq\s+extension\s+apply-trust\b`),
 		regexp.MustCompile(`(?i)/api/(?:approve|reject)\b`),
 	}
 
@@ -558,12 +594,12 @@ var (
 	reHQOutboundBodyCmd      = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
 	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
-	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
+	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|watch\s+(?:read|query|ack)|offer\s+stage|brief\s+format-quarantined|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
 	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|taint|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
-	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail|gchat)\s+read-quarantined\b`)
+	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
 	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
 
 	reCurlMutatingFlag = regexp.MustCompile(`(?i)(?:^|\s)(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b|(?:-d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form|--json|--upload-file|-T)(?:=|\s|$))`)
@@ -787,25 +823,39 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		"gmail", "gchat", "credentials", "connectors", "taint",
 		"trust.json", "approval_asks", "approval_caps", "pii-denylist.txt", "daemon_token",
 	}
-	rootsFileCanon := ""
+	var extraCredTargets []string
 	if rts := hostpaths.Resolve(vaultDir); rts.AppDataDir != "" {
-		rootsFileCanon = canonicalizeHookPath(vaultDir, filepath.Join(rts.AppDataDir, "hq", "roots.json"))
+		extraCredTargets = append(extraCredTargets, canonicalizeHookPath(vaultDir, filepath.Join(rts.AppDataDir, "hq", "roots.json")))
+	}
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		extraCredTargets = append(extraCredTargets, canonicalizeHookPath(vaultDir, filepath.Join(xdg, "agy-hq", "roots.json")))
 	}
 
 	if payload.ToolCall.Name == "run_command" {
 		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+		if isSystemGeneratedTranscriptPath(filepath.ToSlash(cmdLine)) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq integrity policy: direct shell access to .system_generated transcript/log directories is prohibited across all sessions.",
+			})
+		}
 		if reHQClaimDesk.MatchString(cmdLine) && (kernel.IsSubagentConversation(vaultDir, payload.ConversationID) || isAutoConversation(vaultDir, payload.ConversationID)) {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
 				"reason":   "Blocked by Front Desk Lease Subagent Invariant: subagents and autonomous background workers are ephemeral processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).",
 			})
 		}
-		// Universal Credential & Trust Vault Guard: block direct shell reads/mutations of raw OAuth tokens, connectors, taint, trust, approval_asks/caps, daemon_token, pii-denylist.txt, or roots.json across ALL sessions
+		// Universal Credential & Trust Vault Guard: block direct shell reads/mutations of raw OAuth tokens, connectors, taint, trust, approvals/payloads, approval_asks/caps, daemon_token, pii-denylist.txt, or roots.json across ALL sessions
 		cleanVault := filepath.Clean(vaultDir)
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 		credShellHit := reLocalCredentialShell.MatchString(cmdLine)
-		if !credShellHit && rootsFileCanon != "" && strings.Contains(cmdLine, rootsFileCanon) {
-			credShellHit = true
+		if !credShellHit {
+			for _, rt := range extraCredTargets {
+				if rt != "" && strings.Contains(cmdLine, rt) {
+					credShellHit = true
+					break
+				}
+			}
 		}
 		if !credShellHit {
 			vaultBases := []string{cleanVault}
@@ -815,6 +865,10 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			for _, vBase := range vaultBases {
 				if vBase == "" || vBase == "." {
 					continue
+				}
+				if strings.Contains(cmdLine, filepath.Join(vBase, "approvals")) {
+					credShellHit = true
+					break
 				}
 				for _, sub := range protectedPrivateSubs {
 					if strings.Contains(cmdLine, filepath.Join(vBase, "private", sub)) {
@@ -828,12 +882,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 		}
 		if !credShellHit && canonVault != "" {
-			var credTargets []string
+			credTargets := []string{filepath.Join(canonVault, "approvals")}
 			for _, sub := range protectedPrivateSubs {
 				credTargets = append(credTargets, filepath.Join(canonVault, "private", sub))
 			}
-			if rootsFileCanon != "" {
-				credTargets = append(credTargets, rootsFileCanon)
+			for _, rt := range extraCredTargets {
+				if rt != "" {
+					credTargets = append(credTargets, rt)
+				}
 			}
 			for _, tok := range strings.FieldsFunc(cmdLine, func(r rune) bool {
 				switch r {
@@ -938,16 +994,18 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, connectors, taint, trust, approval_asks/caps, daemon_token, pii-denylist.txt, and roots.json across ALL sessions (tainted or untainted)
+	// Universal Credential Vault Read/Write Guard: protect raw OAuth tokens, connectors, taint, trust, approvals/payloads, approval_asks/caps, daemon_token, pii-denylist.txt, and roots.json across ALL sessions (tainted or untainted)
 	switch payload.ToolCall.Name {
 	case "read_file", "write_file", "edit_file", "grep_search", "find_by_name":
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
-		var credPaths []string
+		credPaths := []string{filepath.Join(canonVault, "approvals")}
 		for _, sub := range protectedPrivateSubs {
 			credPaths = append(credPaths, filepath.Join(canonVault, "private", sub))
 		}
-		if rootsFileCanon != "" {
-			credPaths = append(credPaths, rootsFileCanon)
+		for _, rt := range extraCredTargets {
+			if rt != "" {
+				credPaths = append(credPaths, rt)
+			}
 		}
 		for _, key := range []string{"Path", "SearchPath", "SearchDirectory"} {
 			if rawArg, ok := payload.ToolCall.Args[key].(string); ok && strings.TrimSpace(rawArg) != "" {
@@ -979,6 +1037,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			canonVault := canonicalizeHookPath(vaultDir, vaultDir)
 			for _, protectedSub := range []string{
 				filepath.Join(canonVault, "extensions.json"),
+				filepath.Join(canonVault, "approvals"),
 				filepath.Join(canonVault, "memory", "pending"),
 				filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
 				filepath.Join(canonVault, "memory", "rsi", "archive.jsonl"),
@@ -987,6 +1046,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				filepath.Join(canonVault, "memory", "events_archive.jsonl"),
 				filepath.Join(canonVault, "memory", "timers.json"),
 				filepath.Join(canonVault, "memory", "outbox"),
+				filepath.Join(canonVault, "memory", "watcher"),
 				filepath.Join(canonVault, "memory", "watchers"),
 				filepath.Join(canonVault, "memory", "trigger_cursors.json"),
 			} {
@@ -1669,6 +1729,8 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 	if kernel.HasPendingSidebarSyncQueue(vaultDir) {
 		_, _ = kernel.DrainSidebarSyncQueue(vaultDir, kernel.DefaultSidebarStopHookTimeout)
 	}
+
+	watcher.MaybeLaunchDesktopPiggyback(vaultDir, time.Now())
 
 	_, err := w.Write([]byte(`{"decision":"stop"}` + "\n"))
 	return err

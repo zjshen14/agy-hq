@@ -73,6 +73,9 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, transcriptPath string) {
 				if ik := strings.TrimSpace(ev.Metadata["item_key"]); ik != "" {
 					itemKeys = append(itemKeys, ik)
 				}
+				if tk := strings.TrimSpace(ev.Metadata["thread_key"]); tk != "" {
+					itemKeys = append(itemKeys, tk)
+				}
 				if connector == "" {
 					connector = strings.TrimSpace(ev.Metadata["connector"])
 				}
@@ -231,12 +234,20 @@ func wrapScrubbedAutoShellCommand(cmdLine string) string {
 }
 
 // validateTaintedHQArgv enforces the strict Quarantined Worker CLI allowlist (RFC-0017b §3.2):
-// ONLY `watch read|query|ack`, `offer stage`, `outbox add`, `timers set`, `memory lookup`,
-// `status`, and `gmail|gchat read-quarantined|triage-result` are allowed.
+// ONLY `watch read|query|ack`, `offer stage`, `outbox add`, `timers set`, `goals mark-replied`,
+// `memory lookup`, `brief format-quarantined`, `status`, and `gmail|gchat read-quarantined|triage-result` are allowed.
 // `propose`, `approve`, `gmail draft`, `gchat draft`, `spawn`, `subagent`, and `exec-sandboxed` are DENIED.
 func validateTaintedHQArgv(argv []string) error {
 	if len(argv) < 2 || !isHQBinaryToken(argv[0]) {
 		return fmt.Errorf("only single canonical `hq` commands are permitted in quarantined sessions")
+	}
+	for _, tok := range argv[1:] {
+		if strings.HasPrefix(tok, "@") {
+			return fmt.Errorf("leading `@` file-inclusion token %q is forbidden in quarantined sessions", tok)
+		}
+		if _, val, ok := strings.Cut(tok, "="); ok && strings.HasPrefix(val, "@") {
+			return fmt.Errorf("leading `@` flag value in %q is forbidden in quarantined sessions", tok)
+		}
 	}
 	top := argv[1]
 	sub := ""
@@ -266,11 +277,21 @@ func validateTaintedHQArgv(argv []string) error {
 			return nil
 		}
 		return fmt.Errorf("quarantined `hq timers` allows only set (got %q)", sub)
+	case "goals":
+		if sub == "mark-replied" {
+			return nil
+		}
+		return fmt.Errorf("quarantined `hq goals` allows only mark-replied (got %q)", sub)
 	case "memory":
 		if sub == "lookup" {
 			return nil
 		}
 		return fmt.Errorf("quarantined `hq memory` allows only lookup (got %q)", sub)
+	case "brief":
+		if sub == "format-quarantined" {
+			return nil
+		}
+		return fmt.Errorf("quarantined `hq brief` allows only format-quarantined (got %q)", sub)
 	case "gmail", "gchat":
 		if sub == "read-quarantined" || sub == "read" || sub == "triage-result" {
 			return nil

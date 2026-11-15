@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "gchat",
+  "description": "Reference Google Chat connector unifying CLI, OAuth, webhook, and bridge transports.",
+  "participant_lock": true,
+  "allow_tainted_create": false,
+  "requires_desktop_session": false,
+  "env_allow": ["AGY_ACCOUNT"],
+  "driver": {
+    "builtin": "gchat"
+  },
+  "transport": {
+    "kind": "cli",
+    "cli": {
+      "path": "",
+      "auto_install_plugin": false,
+      "verbs": {
+        "list_spaces": ["list-spaces", "--query={{?query}}", "--max={{?max}}", "--json"],
+        "list_messages": ["list-messages", "--space={{space}}", "--after={{?cursor}}", "--max={{?max}}", "--json"],
+        "get_thread": ["get-thread", "--space={{space}}", "--thread={{?thread_key}}", "--json"],
+        "send": ["send", "--space={{space}}", "--thread={{?thread_key}}", "--body-file={{payload_file}}", "--json"]
+      },
+      "output": {
+        "list_messages": {
+          "jsonmap": {
+            "items_pointer": "/messages",
+            "item_id": "/name",
+            "thread_key": "/thread/name",
+            "sender": "/sender/email",
+            "timestamp": "/createTime",
+            "body": "/text"
+          }
+        }
+      }
+    }
+  },
+  "capabilities": {
+    "poll": {
+      "enabled": true,
+      "max_pages": 3,
+      "page_size": 50
+    },
+    "inspect_thread": {
+      "enabled": true
+    },
+    "read_quarantined": {
+      "enabled": true
+    },
+    "brief": {
+      "enabled": true,
+      "quarantined": true,
+      "timeout_ms": 3000,
+      "section": "Chat"
+    },
+    "offers": {
+      "reply": {
+        "verb": "send",
+        "delivery_mode": "direct_send",
+        "recipient_params": {
+          "space": "channel"
+        },
+        "supports_wait_on": true,
+        "requires_reply_thread": true
+      }
+    }
+  }
+}
