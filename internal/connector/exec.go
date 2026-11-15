@@ -28,29 +28,33 @@ var (
 )
 
 var safeBaseEnvKeys = map[string]bool{
-	"PATH":              true,
-	"HOME":              true,
-	"USER":              true,
-	"LOGNAME":           true,
-	"LANG":              true,
-	"LC_ALL":            true,
-	"TZ":                true,
-	"TMPDIR":            true,
-	"SSL_CERT_FILE":     true,
-	"SSL_CERT_DIR":      true,
-	"SYSTEMROOT":        true,
-	"XDG_CONFIG_HOME":   true,
-	"HQ_ROOT_DIR":       true,
-	"HQ_VAULT_DIR":      true,
-	"HQ_HOME_DIR":       true,
-	"HQ_GEMINI_DIR":     true,
-	"HQ_CONFIG_DIR":     true,
-	"HQ_APP_DATA_DIR":   true,
-	"HQ_BRAIN_DIR":      true,
-	"HQ_GMAIL_MOCK_DIR": true,
-	"HQ_GCHAT_MOCK_DIR": true,
-	"HQ_GMAIL_API_BASE": true,
-	"HQ_GCHAT_API_BASE": true,
+	"PATH":                       true,
+	"HOME":                       true,
+	"USER":                       true,
+	"LOGNAME":                    true,
+	"LANG":                       true,
+	"LC_ALL":                     true,
+	"TZ":                         true,
+	"TMPDIR":                     true,
+	"SSL_CERT_FILE":              true,
+	"SSL_CERT_DIR":               true,
+	"SYSTEMROOT":                 true,
+	"XDG_CONFIG_HOME":            true,
+	"HQ_ROOT_DIR":                true,
+	"HQ_VAULT_DIR":               true,
+	"HQ_HOME_DIR":                true,
+	"HQ_GEMINI_DIR":              true,
+	"HQ_CONFIG_DIR":              true,
+	"HQ_APP_DATA_DIR":            true,
+	"HQ_BRAIN_DIR":               true,
+	"HQ_GMAIL_MOCK_DIR":          true,
+	"HQ_GCHAT_MOCK_DIR":          true,
+	"HQ_GMAIL_API_BASE":          true,
+	"HQ_GCHAT_API_BASE":          true,
+	"ANTIGRAVITY_APP_DATA_DIR":   true,
+	"ANTIGRAVITY_GEMINI_DIR":     true,
+	"ANTIGRAVITY_CONFIG_REL_DIR": true,
+	"HQ_PLUGIN_CLI_HOST":         true,
 }
 
 var unconditionallyBlockedEnv = map[string]bool{
@@ -91,12 +95,22 @@ func SanitizedSubprocessEnv(base, envAllow []string, extra map[string]string, al
 		envMap[k] = v
 	}
 
+	var origShimDir string
 	for _, kv := range base {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok || unconditionallyBlockedEnv[k] {
 			continue
 		}
-		if k == "ANTIGRAVITY_CREDENTIAL_SCOPE" || k == "ANTIGRAVITY_PLUGIN_SHIM_DIR" {
+		if k == "ANTIGRAVITY_PLUGIN_SHIM_DIR" {
+			origShimDir = strings.TrimSpace(v)
+			if desktopAllowed && origShimDir != "" {
+				if info, err := os.Stat(origShimDir); err == nil && info.IsDir() {
+					setKV(k, origShimDir)
+				}
+			}
+			continue
+		}
+		if k == "ANTIGRAVITY_CREDENTIAL_SCOPE" {
 			if desktopAllowed {
 				setKV(k, v)
 			}
@@ -115,11 +129,33 @@ func SanitizedSubprocessEnv(base, envAllow []string, extra map[string]string, al
 		setKV(k, v)
 	}
 
+	const shimSentinel = "/nonexistent-hq-sentinel"
 	if !desktopAllowed {
 		delete(envMap, "ANTIGRAVITY_CREDENTIAL_SCOPE")
-		setKV("ANTIGRAVITY_PLUGIN_SHIM_DIR", "/nonexistent-hq-sentinel")
+		setKV("ANTIGRAVITY_PLUGIN_SHIM_DIR", shimSentinel)
 	} else if strings.TrimSpace(envMap["ANTIGRAVITY_PLUGIN_SHIM_DIR"]) == "" {
-		setKV("ANTIGRAVITY_PLUGIN_SHIM_DIR", "/nonexistent-hq-sentinel")
+		setKV("ANTIGRAVITY_PLUGIN_SHIM_DIR", shimSentinel)
+	}
+
+	if envMap["ANTIGRAVITY_PLUGIN_SHIM_DIR"] == shimSentinel {
+		if pathVal, ok := envMap["PATH"]; ok && pathVal != "" {
+			normOrig := strings.TrimRight(origShimDir, `/\`)
+			parts := strings.Split(pathVal, string(os.PathListSeparator))
+			filtered := make([]string, 0, len(parts))
+			for _, part := range parts {
+				normPart := strings.TrimRight(strings.TrimSpace(part), `/\`)
+				if normPart == "" {
+					continue
+				}
+				if (normOrig != "" && normPart == normOrig) ||
+					strings.Contains(normPart, "/agy-plugin-cli-") ||
+					strings.Contains(normPart, `\agy-plugin-cli-`) {
+					continue
+				}
+				filtered = append(filtered, part)
+			}
+			setKV("PATH", strings.Join(filtered, string(os.PathListSeparator)))
+		}
 	}
 
 	out := make([]string, 0, len(keyOrder))

@@ -261,8 +261,128 @@ func ExecCLIVerb(ctx context.Context, vaultDir, connID, account, verb string, sc
 	return execResolvedCLIVerb(ctx, vaultDir, rc, account, verb, scalarParams, listParams, payloadBytes, allowDesktopScope)
 }
 
+type runtimeLSSession struct {
+	AgentAPIExe string `json:"agentApiExe"`
+}
+
+// HasUsableTokenFile reports whether ref points to an existing JSON token file containing
+// a non-empty OAuth refresh_token or access_token.
+func HasUsableTokenFile(vaultDir string, ref *string) bool {
+	tokPath := resolveTokenPath(vaultDir, ref)
+	if tokPath == "" {
+		return false
+	}
+	raw, err := os.ReadFile(tokPath)
+	if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
+		return false
+	}
+	var tok struct {
+		RefreshToken string `json:"refresh_token"`
+		AccessToken  string `json:"access_token"`
+	}
+	if err := json.Unmarshal(raw, &tok); err != nil {
+		return false
+	}
+	return strings.TrimSpace(tok.RefreshToken) != "" || strings.TrimSpace(tok.AccessToken) != ""
+}
+
+func hasExplicitCLIPath(vaultDir string, rc ResolvedConnector) bool {
+	if rc.Manifest.Transport.CLI != nil {
+		p := strings.TrimSpace(rc.Manifest.Transport.CLI.Path)
+		if p != "" && p != rc.ID {
+			return true
+		}
+	}
+	return rc.ID == "gmail" && lookupLegacyGmailCLIPath(vaultDir) != ""
+}
+
+func isLivePluginShimBinary(binPath string) bool {
+	clean := filepath.Clean(strings.TrimSpace(binPath))
+	if clean == "" || clean == "." {
+		return false
+	}
+	dir := filepath.Dir(clean)
+	if shimDir := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PLUGIN_SHIM_DIR")); shimDir != "" && shimDir != "/nonexistent-hq-sentinel" {
+		if filepath.Clean(shimDir) == dir {
+			return true
+		}
+	}
+	return strings.Contains(filepath.ToSlash(dir), "/agy-plugin-cli-")
+}
+
+func isTempBinaryPath(binPath string) bool {
+	if strings.TrimSpace(binPath) == "" {
+		return false
+	}
+	tmp := filepath.Clean(os.TempDir())
+	clean := filepath.Clean(binPath)
+	return clean == tmp || strings.HasPrefix(clean, tmp+string(filepath.Separator))
+}
+
+func isExecutableRegularFile(p string) bool {
+	if p == "" || !filepath.IsAbs(p) {
+		return false
+	}
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if os.PathSeparator == '\\' {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+func resolvePluginCLIHost(vaultDir string) (hostPath string, explicitSource bool) {
+	if host := strings.TrimSpace(os.Getenv("HQ_PLUGIN_CLI_HOST")); isExecutableRegularFile(host) {
+		return filepath.Clean(host), true
+	}
+	if strings.TrimSpace(vaultDir) != "" {
+		raw, err := os.ReadFile(filepath.Join(vaultDir, "private", "runtime", "ls_session.json"))
+		if err == nil {
+			var sess runtimeLSSession
+			if json.Unmarshal(raw, &sess) == nil {
+				if p := strings.TrimSpace(sess.AgentAPIExe); isExecutableRegularFile(p) {
+					return filepath.Clean(p), true
+				}
+			}
+		}
+	}
+	if host := strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")); isExecutableRegularFile(host) {
+		return filepath.Clean(host), false
+	}
+	return "", false
+}
+
+// EffectiveRequiresDesktopSession returns whether executing account requires an active
+// Antigravity desktop credential scope rather than headless OAuth or a standalone CLI.
+func (rc ResolvedConnector) EffectiveRequiresDesktopSession(vaultDir, account string) bool {
+	if rc.ID == "gmail" {
+		acctName := strings.TrimSpace(account)
+		if acctName == "" {
+			acctName = strings.TrimSpace(rc.Instance.DefaultAccount)
+		}
+		if acctCfg, ok := rc.Instance.Accounts[acctName]; ok {
+			if acctCfg.TransportKind != "cli" && HasUsableTokenFile(vaultDir, acctCfg.TokenRefs.Read) {
+				return false
+			}
+		} else if len(rc.Instance.Accounts) == 1 {
+			for _, onlyCfg := range rc.Instance.Accounts {
+				if onlyCfg.TransportKind != "cli" && HasUsableTokenFile(vaultDir, onlyCfg.TokenRefs.Read) {
+					return false
+				}
+			}
+		}
+		if hasExplicitCLIPath(vaultDir, rc) && !rc.Manifest.RequiresDesktopSession {
+			return false
+		}
+		return true
+	}
+	return rc.Manifest.RequiresDesktopSession
+}
+
 func execResolvedCLIVerb(ctx context.Context, vaultDir string, rc ResolvedConnector, account, verb string, scalarParams map[string]string, listParams map[string][]string, payloadBytes []byte, allowDesktopScope bool) ([]byte, error) {
-	if rc.Manifest.RequiresDesktopSession && !allowDesktopScope {
+	if rc.EffectiveRequiresDesktopSession(vaultDir, account) && !allowDesktopScope {
 		return nil, &ProtocolError{
 			Code:    "auth_expired",
 			Message: "paused (no active desktop conversation)",
@@ -282,6 +402,14 @@ func execResolvedCLIVerb(ctx context.Context, vaultDir string, rc ResolvedConnec
 		}
 	}
 	binPath, err := resolveVerifiedCLIBinary(vaultDir, rc)
+	if allowDesktopScope && rc.SourceID == "builtin" && !hasExplicitCLIPath(vaultDir, rc) {
+		hostBin, explicitHost := resolvePluginCLIHost(vaultDir)
+		if hostBin != "" && ((err != nil && explicitHost) || (err == nil && !isLivePluginShimBinary(binPath) && (explicitHost || !isTempBinaryPath(binPath)))) {
+			binPath = hostBin
+			tmpl = append([]string{"plugin-cli", rc.ID}, tmpl...)
+			err = nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +460,7 @@ func Execute(ctx context.Context, vaultDir string, req ProtocolRequest, allowDes
 	if !accCfg.IsEnabled() {
 		return ProtocolResponse{ProtocolVersion: ProtocolVersionV1, OK: true}, nil
 	}
-	if rc.Manifest.RequiresDesktopSession && !allowDesktopScope && !hasConnectorMock(vaultDir, rc.ID) {
+	if rc.EffectiveRequiresDesktopSession(vaultDir, alias) && !allowDesktopScope && !hasConnectorMock(vaultDir, rc.ID) {
 		return ProtocolResponse{}, &ProtocolError{
 			Code:    "auth_expired",
 			Message: "paused (no active desktop conversation)",
@@ -826,9 +954,9 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 		return nil, "", true, nil
 	}
 
-	// 2. Direct OAuth REST when read token ref is configured and transport != "cli"
-	readTokPath := resolveTokenPath(vaultDir, accCfg.TokenRefs.Read)
-	if readTokPath != "" && accCfg.TransportKind != "cli" {
+	// 2. Direct OAuth REST when a usable read token file exists and transport != "cli"
+	if accCfg.TransportKind != "cli" && HasUsableTokenFile(vaultDir, accCfg.TokenRefs.Read) {
+		readTokPath := resolveTokenPath(vaultDir, accCfg.TokenRefs.Read)
 		tok, err := RefreshableOAuthToken(readTokPath)
 		if err != nil {
 			return nil, "", false, err
@@ -993,7 +1121,7 @@ func evalBuiltinGmail(ctx context.Context, vaultDir string, rc ResolvedConnector
 			q = strings.TrimSpace(req.Params["query"])
 		}
 		if q == "" {
-			q = "label:INBOX is:unread category:primary -label:promotions -label:social"
+			q = "label:INBOX is:unread -category:promotions -category:social -category:forums"
 		}
 		maxItems := req.MaxItems
 		if maxItems <= 0 {

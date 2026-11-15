@@ -234,3 +234,204 @@ func TestDKIMAndSPFDomainAlignmentStrictness(t *testing.T) {
 		}
 	}
 }
+
+func TestEndOfOptionsPositionalExpansionAndGuard(t *testing.T) {
+	vaultDir := t.TempDir()
+	rc, err := Resolve(vaultDir, "gmail")
+	if err != nil {
+		t.Fatalf("Resolve(gmail): %v", err)
+	}
+
+	argv, err := ExpandVerbArgv(rc.Manifest.Transport.CLI.Verbs["search"], map[string]string{
+		"query": "label:INBOX is:unread -category:promotions",
+		"max":   "25",
+	}, nil, "")
+	if err != nil {
+		t.Fatalf("ExpandVerbArgv(search): %v", err)
+	}
+	want := []string{"readonly", "read", "--max=25", "--json", "--", "label:INBOX is:unread -category:promotions"}
+	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("search argv = %q, want %q", argv, want)
+	}
+
+	threadArgv, err := ExpandVerbArgv(rc.Manifest.Transport.CLI.Verbs["get_thread"], map[string]string{
+		"thread_key": "th-abc123",
+	}, nil, "")
+	if err != nil {
+		t.Fatalf("ExpandVerbArgv(get_thread): %v", err)
+	}
+	wantThread := []string{"readonly", "get-thread", "--json", "--", "th-abc123"}
+	if strings.Join(threadArgv, "\x00") != strings.Join(wantThread, "\x00") {
+		t.Fatalf("get_thread argv = %q, want %q", threadArgv, wantThread)
+	}
+
+	// Trailing optional positional should omit dangling "--" when empty.
+	optArgv, err := ExpandVerbArgv([]string{"list", "--json", "--", "{{?cursor}}"}, map[string]string{}, nil, "")
+	if err != nil {
+		t.Fatalf("ExpandVerbArgv(empty optional positional): %v", err)
+	}
+	if strings.Join(optArgv, "\x00") != strings.Join([]string{"list", "--json"}, "\x00") {
+		t.Fatalf("expected dangling -- dropped when optional positional empty, got %q", optArgv)
+	}
+
+	// Bare placeholder BEFORE "--" must still be rejected by B5 fused-flag validation.
+	if _, err := LintManifest([]byte(`{
+  "schema_version": 1,
+  "id": "bad-before-sep",
+  "driver": {"builtin": "jsonmap"},
+  "transport": {"kind": "cli", "cli": {"path": "/usr/bin/tool", "verbs": {"search": ["read", "{{query}}", "--", "{{thread_key}}"]}}}
+}`), "vault"); err == nil || !strings.Contains(err.Error(), "fused-flag") {
+		t.Fatalf("expected fused-flag rejection before --, got: %v", err)
+	}
+
+	// {{payload_file}} is forbidden as raw positional after "--".
+	if _, err := LintManifest([]byte(`{
+  "schema_version": 1,
+  "id": "bad-payload-pos",
+  "driver": {"builtin": "jsonmap"},
+  "transport": {"kind": "cli", "cli": {"path": "/usr/bin/tool", "verbs": {"send": ["send", "--", "{{payload_file}}"]}}}
+}`), "vault"); err == nil {
+		t.Fatalf("expected rejection for {{payload_file}} after --")
+	}
+}
+
+func TestSanitizedSubprocessEnvShimPreservationAndPathStripping(t *testing.T) {
+	liveShimDir := filepath.Join(t.TempDir(), "agy-plugin-cli-live123")
+	if err := os.MkdirAll(liveShimDir, 0o700); err != nil {
+		t.Fatalf("mkdir liveShimDir: %v", err)
+	}
+	otherShimDir := filepath.Join(t.TempDir(), "agy-plugin-cli-stale999")
+	baseEnv := []string{
+		"PATH=" + liveShimDir + string(os.PathListSeparator) + otherShimDir + string(os.PathListSeparator) + "/usr/bin",
+		"ANTIGRAVITY_CREDENTIAL_SCOPE=desktop-scope",
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=" + liveShimDir,
+		"ANTIGRAVITY_APP_DATA_DIR=/tmp/app",
+		"ANTIGRAVITY_GEMINI_DIR=/tmp/gemini",
+		"ANTIGRAVITY_CONFIG_REL_DIR=antigravity",
+		"ANTIGRAVITY_LS_ADDRESS=127.0.0.1:43001",
+		"ANTIGRAVITY_CSRF_TOKEN=secret-csrf",
+		"HQ_PLUGIN_CLI_HOST=/usr/bin/language_server",
+	}
+
+	// 1. Live desktop session with existing shim dir preserves live shim & safe env, strips LS creds (B11).
+	liveOut := envSliceToMap(SanitizedSubprocessEnv(baseEnv, []string{"AGY_ACCOUNT"}, nil, true))
+	if liveOut["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != liveShimDir {
+		t.Fatalf("expected live shim preserved, got %q", liveOut["ANTIGRAVITY_PLUGIN_SHIM_DIR"])
+	}
+	if _, leaked := liveOut["ANTIGRAVITY_LS_ADDRESS"]; leaked {
+		t.Fatalf("B11 violation: ANTIGRAVITY_LS_ADDRESS leaked into subprocess env")
+	}
+	if _, leaked := liveOut["ANTIGRAVITY_CSRF_TOKEN"]; leaked {
+		t.Fatalf("B11 violation: ANTIGRAVITY_CSRF_TOKEN leaked into subprocess env")
+	}
+	if liveOut["ANTIGRAVITY_APP_DATA_DIR"] != "/tmp/app" || liveOut["HQ_PLUGIN_CLI_HOST"] != "/usr/bin/language_server" {
+		t.Fatalf("expected safe plugin env keys preserved, got %+v", liveOut)
+	}
+
+	// 2. Non-desktop (desktopAllowed=false) sets sentinel AND strips shim dirs from PATH.
+	headlessOut := envSliceToMap(SanitizedSubprocessEnv(baseEnv, []string{"AGY_ACCOUNT"}, nil, false))
+	if headlessOut["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != "/nonexistent-hq-sentinel" {
+		t.Fatalf("expected sentinel shim dir when headless, got %q", headlessOut["ANTIGRAVITY_PLUGIN_SHIM_DIR"])
+	}
+	if strings.Contains(headlessOut["PATH"], "agy-plugin-cli-") {
+		t.Fatalf("expected agy-plugin-cli- stripped from PATH when sentinel active, got %q", headlessOut["PATH"])
+	}
+	if !strings.Contains(headlessOut["PATH"], "/usr/bin") {
+		t.Fatalf("expected /usr/bin kept in PATH, got %q", headlessOut["PATH"])
+	}
+
+	// 3. desktopAllowed=true with missing/nonexistent shim dir falls back to sentinel and strips PATH shim dirs.
+	missingShimEnv := append([]string{}, baseEnv...)
+	missingShimEnv[2] = "ANTIGRAVITY_PLUGIN_SHIM_DIR=" + filepath.Join(t.TempDir(), "does-not-exist")
+	desktopStaleOut := envSliceToMap(SanitizedSubprocessEnv(missingShimEnv, nil, nil, true))
+	if desktopStaleOut["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != "/nonexistent-hq-sentinel" {
+		t.Fatalf("expected sentinel when shim dir nonexistent, got %q", desktopStaleOut["ANTIGRAVITY_PLUGIN_SHIM_DIR"])
+	}
+	if strings.Contains(desktopStaleOut["PATH"], "agy-plugin-cli-") {
+		t.Fatalf("expected agy-plugin-cli- stripped from PATH when fallback sentinel active, got %q", desktopStaleOut["PATH"])
+	}
+}
+
+func TestGmailHybridDesktopOptionAAndDirectOAuthOptionB(t *testing.T) {
+	vaultDir := t.TempDir()
+	tokDir := filepath.Join(vaultDir, "private", "gmail", "tokens")
+	if err := os.MkdirAll(tokDir, 0o700); err != nil {
+		t.Fatalf("mkdir tokens: %v", err)
+	}
+	emptyTokPath := filepath.Join(tokDir, "empty.json")
+	validTokPath := filepath.Join(tokDir, "valid.json")
+	_ = os.WriteFile(emptyTokPath, []byte(`{}`), 0o600)
+	_ = os.WriteFile(validTokPath, []byte(`{"refresh_token":"rt-test-valid"}`), 0o600)
+
+	if HasUsableTokenFile(vaultDir, nil) {
+		t.Fatalf("expected nil token ref to be unusable")
+	}
+	missing := filepath.Join(tokDir, "missing.json")
+	if HasUsableTokenFile(vaultDir, &missing) {
+		t.Fatalf("expected missing token file to be unusable")
+	}
+	if HasUsableTokenFile(vaultDir, &emptyTokPath) {
+		t.Fatalf("expected empty JSON token file to be unusable")
+	}
+	if !HasUsableTokenFile(vaultDir, &validTokPath) {
+		t.Fatalf("expected refresh_token JSON file to be usable")
+	}
+
+	if err := SaveInstance(context.Background(), vaultDir, InstanceConfig{
+		SchemaVersion:  ConnectorSchemaVersion,
+		Connector:      "gmail",
+		DefaultAccount: "optiona",
+		Accounts: map[string]AccountInstance{
+			"optiona": {Email: "a@example.com", TransportKind: "cli"},
+			"optionb": {
+				Email:         "b@example.com",
+				TransportKind: "direct_oauth",
+				TokenRefs:     TokenRefs{Read: &validTokPath},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveInstance: %v", err)
+	}
+	rc, err := Resolve(vaultDir, "gmail")
+	if err != nil {
+		t.Fatalf("Resolve(gmail): %v", err)
+	}
+	if !rc.EffectiveRequiresDesktopSession(vaultDir, "optiona") {
+		t.Fatalf("expected Option A account without token file to require desktop session")
+	}
+	if rc.EffectiveRequiresDesktopSession(vaultDir, "optionb") {
+		t.Fatalf("expected Option B account with valid token file NOT to require desktop session")
+	}
+
+	// Verify HQ_PLUGIN_CLI_HOST rewrites builtin gmail invocation to `<host> plugin-cli gmail ...`.
+	hostBin := filepath.Join(t.TempDir(), "fake-language-server")
+	script := `#!/bin/sh
+if [ "$1" = "plugin-cli" ] && [ "$2" = "gmail" ]; then
+  echo '[{"id":"msg-host-1","threadId":"th-host-1"}]'
+  exit 0
+fi
+exit 2
+`
+	if err := os.WriteFile(hostBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake host: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HQ_PLUGIN_CLI_HOST", hostBin)
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "desktop-test")
+	out, err := ExecCLIVerb(context.Background(), vaultDir, "gmail", "optiona", "search", map[string]string{
+		"query": "label:INBOX is:unread",
+	}, nil, nil, true)
+	if err != nil || !strings.Contains(string(out), "msg-host-1") {
+		t.Fatalf("expected HQ_PLUGIN_CLI_HOST plugin-cli rewrite to succeed, err=%v out=%s", err, string(out))
+	}
+}
+
+func envSliceToMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}

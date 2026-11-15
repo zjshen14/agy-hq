@@ -1,12 +1,19 @@
 package kernel
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/connector"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 )
 
@@ -216,5 +223,112 @@ func TestGatekeeperPrecheckFailureHealthAndStrandedInboxRecovery(t *testing.T) {
 	procFile := filepath.Join(vaultDir, "inbox", "processed", "2026-11-12_stranded-2026.csv")
 	if _, err := os.Stat(procFile); err != nil {
 		t.Fatalf("expected processed file at %s: %v", procFile, err)
+	}
+}
+
+func TestLSSessionPersistenceInjectionAndDesktopSweep(t *testing.T) {
+	vaultDir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rawAddr := strings.TrimPrefix(srv.URL, "http://")
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", rawAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-token-live")
+	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", "/opt/fake/language_server")
+
+	if err := RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession: %v", err)
+	}
+	sessBytes, err := os.ReadFile(lsSessionFilePath(vaultDir))
+	if err != nil {
+		t.Fatalf("read ls_session.json: %v", err)
+	}
+	var recorded lsCredentials
+	if err := json.Unmarshal(sessBytes, &recorded); err != nil {
+		t.Fatalf("unmarshal ls_session.json: %v", err)
+	}
+	if recorded.RawAddress != rawAddr || recorded.BaseURL != srv.URL || recorded.CSRFToken != "csrf-token-live" || recorded.AgentAPIExe != "/opt/fake/language_server" {
+		t.Fatalf("unexpected persisted LS credentials: %+v", recorded)
+	}
+
+	// Headless invocation without env vars must preserve ls_session.json and inject env during configureSpawnCommand.
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
+	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", "")
+	if err := RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession(headless): %v", err)
+	}
+	if !HasReachableLSSession(vaultDir) {
+		t.Fatalf("expected HasReachableLSSession=true while test server listening")
+	}
+
+	cmd := exec.Command("true")
+	configureSpawnCommand(cmd, vaultDir, "cron:test")
+	envMap := make(map[string]string)
+	for _, kv := range cmd.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			envMap[k] = v
+		}
+	}
+	if envMap["ANTIGRAVITY_LS_ADDRESS"] != rawAddr || envMap["ANTIGRAVITY_CSRF_TOKEN"] != "csrf-token-live" || envMap["ANTIGRAVITY_AGENTAPI_EXE"] != "/opt/fake/language_server" {
+		t.Fatalf("expected configureSpawnCommand to inject persisted LS env, got address=%q csrf=%q exe=%q",
+			envMap["ANTIGRAVITY_LS_ADDRESS"], envMap["ANTIGRAVITY_CSRF_TOKEN"], envMap["ANTIGRAVITY_AGENTAPI_EXE"])
+	}
+
+	// Seed an Option A Gmail account needing desktop polling + explicit quiet hours config.
+	if err := connector.SaveInstance(context.Background(), vaultDir, connector.InstanceConfig{
+		SchemaVersion:  connector.ConnectorSchemaVersion,
+		Connector:      "gmail",
+		DefaultAccount: "primary",
+		Accounts: map[string]connector.AccountInstance{
+			"primary": {Email: "owner@example.com", TransportKind: "cli"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveInstance(gmail): %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte("attention:\n  quiet_hours:\n    enabled: true\n    start: \"23:00\"\n    end: \"07:00\"\n    timezone: \"America/Los_Angeles\"\n"), 0o600)
+
+	loc, _ := time.LoadLocation("America/Los_Angeles")
+	quietNow := time.Date(2026, 11, 15, 2, 0, 0, 0, loc)
+	if MaybeEnqueueDesktopWatcherSweep(vaultDir, quietNow) {
+		t.Fatalf("expected desktop sweep suppressed during quiet hours")
+	}
+
+	dayNow := time.Date(2026, 11, 15, 14, 0, 0, 0, loc)
+	if !MaybeEnqueueDesktopWatcherSweep(vaultDir, dayNow) {
+		t.Fatalf("expected desktop sweep enqueued during waking hours with reachable LS session")
+	}
+	if MaybeEnqueueDesktopWatcherSweep(vaultDir, dayNow.Add(time.Minute)) {
+		t.Fatalf("expected desktop sweep cooldown/dedup to suppress immediate re-enqueue")
+	}
+	pending, err := events.List(vaultDir, "pending", false, 0)
+	if err != nil || len(pending) != 1 || pending[0].Source != "watcher:desktop-sweep" {
+		t.Fatalf("expected 1 watcher:desktop-sweep pending event, got err=%v pending=%+v", err, pending)
+	}
+
+	// Verify SpawnTask budget exemption for watcher:desktop-sweep while respecting CircuitOpen.
+	quota := LoadQuota(vaultDir)
+	quota.SpawnsToday = quota.MaxDailySpawns
+	quota.CircuitOpen = false
+	_ = SaveQuota(vaultDir, quota)
+	if _, err := SpawnTask(vaultDir, "watcher:desktop-sweep", "", "Sweep", "Run sweep", "gemini-4-hydrogen-low", true); err != nil {
+		t.Fatalf("expected watcher:desktop-sweep exempt from MaxDailySpawns, got: %v", err)
+	}
+	if after := LoadQuota(vaultDir); after.SpawnsToday != quota.MaxDailySpawns {
+		t.Fatalf("expected SpawnsToday unchanged (%d), got %d", quota.MaxDailySpawns, after.SpawnsToday)
+	}
+	quota.CircuitOpen = true
+	quota.CircuitReason = "429 RESOURCE_EXHAUSTED"
+	_ = SaveQuota(vaultDir, quota)
+	if _, err := SpawnTask(vaultDir, "watcher:desktop-sweep", "", "Sweep", "Run sweep", "gemini-4-hydrogen-low", true); err == nil || !strings.Contains(err.Error(), "OPEN") {
+		t.Fatalf("expected CircuitOpen to still block watcher:desktop-sweep, got: %v", err)
+	}
+
+	// Closing LS server must flip HasReachableLSSession to false cleanly.
+	srv.Close()
+	if HasReachableLSSession(vaultDir) {
+		t.Fatalf("expected HasReachableLSSession=false after LS server closed")
 	}
 }

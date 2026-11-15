@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/outbox"
@@ -195,5 +196,83 @@ func TestDesktopSessionConnectorPausesCleanlyWhenIdle(t *testing.T) {
 	obItems, _ := outbox.LoadAll(vaultDir)
 	if len(obItems) != 0 {
 		t.Fatalf("expected 0 outbox error spam when desktop session is idle, got %+v", obItems)
+	}
+}
+
+func TestDesktopPollNeededAndDesktopOnlyFiltering(t *testing.T) {
+	vaultDir := t.TempDir()
+	tokDir := filepath.Join(vaultDir, "private", "gmail", "tokens")
+	if err := os.MkdirAll(tokDir, 0o700); err != nil {
+		t.Fatalf("mkdir tokens: %v", err)
+	}
+	validTokPath := filepath.Join(tokDir, "oauth.json")
+	if err := os.WriteFile(validTokPath, []byte(`{"refresh_token":"rt-watcher-test"}`), 0o600); err != nil {
+		t.Fatalf("write oauth token: %v", err)
+	}
+	if err := connector.SaveInstance(context.Background(), vaultDir, connector.InstanceConfig{
+		SchemaVersion:  connector.ConnectorSchemaVersion,
+		Connector:      "gmail",
+		DefaultAccount: "desktop_acct",
+		Accounts: map[string]connector.AccountInstance{
+			"desktop_acct": {Email: "desk@example.com", TransportKind: "cli"},
+			"oauth_acct": {
+				Email:         "oauth@example.com",
+				TransportKind: "direct_oauth",
+				TokenRefs:     connector.TokenRefs{Read: &validTokPath},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveInstance(gmail): %v", err)
+	}
+
+	now := time.Date(2026, 11, 15, 14, 0, 0, 0, time.UTC)
+	due, needed := watcher.DesktopPollNeeded(vaultDir, 15*time.Minute, now)
+	if !needed || len(due) != 1 || due[0] != "gmail:desktop_acct" {
+		t.Fatalf("expected only gmail:desktop_acct due before first poll, got needed=%v due=%v", needed, due)
+	}
+
+	// Headless RunPrecheck without ANTIGRAVITY_CREDENTIAL_SCOPE leaves desktop_acct paused (not "ok").
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "")
+	pre, err := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{
+		DesktopOnly: true,
+		Now:         now,
+	})
+	if err != nil {
+		t.Fatalf("RunPrecheck(DesktopOnly): %v", err)
+	}
+	if len(pre.Results) != 1 || pre.Results[0].Account != "desktop_acct" {
+		t.Fatalf("expected DesktopOnly to target only desktop_acct, got %+v", pre.Results)
+	}
+	// Because LastStatus is paused (not "ok"), DesktopPollNeeded must still return true.
+	dueAfterPause, neededAfterPause := watcher.DesktopPollNeeded(vaultDir, 15*time.Minute, now.Add(time.Minute))
+	if !neededAfterPause || len(dueAfterPause) != 1 || dueAfterPause[0] != "gmail:desktop_acct" {
+		t.Fatalf("expected desktop_acct still due after headless pause, got needed=%v due=%v", neededAfterPause, dueAfterPause)
+	}
+
+	// Simulated successful poll marks desktop_acct "ok" at `now`; should stay suppressed until minInterval elapses.
+	statePath := filepath.Join(vaultDir, "memory", "watcher", "state.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	okState := watcher.State{
+		SchemaVersion: watcher.StateSchemaVersion,
+		Accounts: map[string]watcher.AccountWatchState{
+			"gmail:desktop_acct": {
+				Connector:    "gmail",
+				Account:      "desktop_acct",
+				LastStatus:   "ok",
+				LastPolledAt: now.Format(time.RFC3339),
+			},
+		},
+	}
+	rawState, _ := json.MarshalIndent(okState, "", "  ")
+	if err := os.WriteFile(statePath, rawState, 0o600); err != nil {
+		t.Fatalf("write ok state: %v", err)
+	}
+	if dueSoon, neededSoon := watcher.DesktopPollNeeded(vaultDir, 15*time.Minute, now.Add(5*time.Minute)); neededSoon {
+		t.Fatalf("expected desktop poll suppressed within cooldown, got due=%v", dueSoon)
+	}
+	if dueLater, neededLater := watcher.DesktopPollNeeded(vaultDir, 15*time.Minute, now.Add(16*time.Minute)); !neededLater || len(dueLater) != 1 {
+		t.Fatalf("expected desktop poll due after cooldown, got needed=%v due=%v", neededLater, dueLater)
 	}
 }

@@ -439,14 +439,14 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 		if connFilter != "" && rc.ID != connFilter && rc.FQID != connFilter {
 			continue
 		}
-		if opts.DesktopOnly && !rc.Manifest.RequiresDesktopSession {
-			continue
-		}
 		accts := resolveAccountsToPoll(vaultDir, rc, opts.AccountFilter)
 		if len(accts) == 0 && connFilter != "" {
 			accts = []string{"default"}
 		}
 		for _, acct := range accts {
+			if opts.DesktopOnly && !rc.EffectiveRequiresDesktopSession(vaultDir, acct) {
+				continue
+			}
 			targets = append(targets, pollTarget{rc: rc, acct: acct})
 		}
 	}
@@ -585,7 +585,7 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 				code = pe.Code
 				msg = connector.SanitizeStderr(pe.Message)
 			}
-			desktopIdle := out.target.rc.Manifest.RequiresDesktopSession && strings.Contains(strings.ToLower(msg), "no active desktop conversation")
+			desktopIdle := out.target.rc.EffectiveRequiresDesktopSession(vaultDir, out.target.acct) && strings.Contains(strings.ToLower(msg), "no active desktop conversation")
 			mut := stateMutation{
 				key:              aKey,
 				connID:           connID,

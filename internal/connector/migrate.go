@@ -95,16 +95,21 @@ func synthesizeLegacyInstance(vaultDir, connID string) (InstanceConfig, bool) {
 		}
 		for alias, a := range reg.Accounts {
 			en := a.Enabled
+			tokPtr := strPtrOrNil(a.TokenFile)
 			tk := "cli"
-			if strings.TrimSpace(a.TokenFile) != "" && strings.TrimSpace(a.CLIPath) == "" {
+			if strings.TrimSpace(a.CLIPath) == "" && HasUsableTokenFile(vaultDir, tokPtr) {
 				tk = "direct_oauth"
+			}
+			dq := strings.TrimSpace(a.Query)
+			if dq == "" || dq == "label:INBOX is:unread category:primary -label:promotions -label:social" {
+				dq = "label:INBOX is:unread -category:promotions -category:social -category:forums"
 			}
 			ic.Accounts[alias] = AccountInstance{
 				Email:         strings.TrimSpace(a.Email),
 				AgyAccount:    strings.TrimSpace(a.AGYAccount),
 				Enabled:       &en,
 				TransportKind: tk,
-				DefaultQuery:  strings.TrimSpace(a.Query),
+				DefaultQuery:  dq,
 				TokenRefs: TokenRefs{
 					Read: strPtrOrNil(a.TokenFile),
 					Send: strPtrOrNil(a.TokenFile),
@@ -255,8 +260,40 @@ func DoctorConnectors(vaultDir, filterID string) []ConnectorDoctorItem {
 		detail := fmt.Sprintf("fqid=%s source=%s accounts=%d participant_lock=%v",
 			rc.FQID, rc.SourceID, len(rc.Instance.Accounts), rc.EffectiveParticipantLock(vaultDir))
 		status := "PASS"
-		if rc.Manifest.RequiresDesktopSession && os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE") == "" {
-			detail += " [paused (no active desktop conversation)]"
+		hasDesktopReq := rc.Manifest.RequiresDesktopSession
+		hasUsableTok := false
+		needsGmailCLI := false
+		if len(rc.Instance.Accounts) == 0 {
+			hasDesktopReq = rc.EffectiveRequiresDesktopSession(vaultDir, rc.Instance.DefaultAccount)
+		} else {
+			for alias, acct := range rc.Instance.Accounts {
+				if !acct.IsEnabled() {
+					continue
+				}
+				if HasUsableTokenFile(vaultDir, acct.TokenRefs.Read) {
+					hasUsableTok = true
+				} else if rc.ID == "gmail" {
+					needsGmailCLI = true
+				}
+				if rc.EffectiveRequiresDesktopSession(vaultDir, alias) {
+					hasDesktopReq = true
+				}
+			}
+		}
+		if needsGmailCLI && !hasConnectorMock(vaultDir, rc.ID) {
+			hostBin, _ := resolvePluginCLIHost(vaultDir)
+			if _, cliErr := resolveVerifiedCLIBinary(vaultDir, rc); cliErr != nil && hostBin == "" {
+				status = "FAIL"
+				detail += " [missing usable token_file and gmail CLI]"
+			}
+		}
+		if hasUsableTok && !hasDesktopReq {
+			detail += " auth=direct-oauth"
+		} else if hasDesktopReq {
+			detail += " auth=desktop-sso"
+			if os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE") == "" {
+				detail += " [paused (no active desktop conversation)]"
+			}
 		}
 		if rc.Manifest.Transport.CLI != nil && strings.TrimSpace(rc.Manifest.Transport.CLI.Path) != "" {
 			binPath, bErr := resolveVerifiedCLIBinary(vaultDir, rc)

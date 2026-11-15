@@ -15,11 +15,11 @@
       "path": "",
       "auto_install_plugin": false,
       "verbs": {
-        "search": ["readonly", "read", "--query={{query}}", "--max={{?max}}", "--json"],
-        "get_thread": ["readonly", "get-thread", "--thread={{thread_key}}", "--json"],
+        "search": ["readonly", "read", "--max={{?max}}", "--page-token={{?page_token}}", "--json", "--", "{{query}}"],
+        "get_thread": ["readonly", "get-thread", "--json", "--", "{{thread_key}}"],
         "create_draft": ["mutate", "create-draft", "--to={{to}}", "--cc={{?cc}}", "--subject={{subject}}", "--thread={{?thread_key}}", "--body-file={{payload_file}}", "--json"],
-        "send_draft": ["mutate", "send-draft", "--draft={{draft_id}}", "--json"],
-        "send": ["mutate", "send-message", "--to={{to}}", "--cc={{?cc}}", "--subject={{subject}}", "--thread={{?thread_key}}", "--body-file={{payload_file}}", "--json"]
+        "send_draft": ["mutate", "send-draft", "--json", "--", "{{draft_id}}"],
+        "send": ["mutate", "send", "--to={{to}}", "--cc={{?cc}}", "--subject={{subject}}", "--body-file={{payload_file}}", "--json"]
       }
     }
   },

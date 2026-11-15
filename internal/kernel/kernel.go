@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +22,9 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 )
@@ -2244,6 +2248,39 @@ func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
 	if overrideProj && projectID != "" {
 		cleanEnv = append(cleanEnv, "ANTIGRAVITY_PROJECT_ID="+projectID)
 	}
+	hasEnvNonEmpty := func(env []string, key string) bool {
+		prefix := key + "="
+		for _, kv := range env {
+			if strings.HasPrefix(kv, prefix) && strings.TrimSpace(strings.TrimPrefix(kv, prefix)) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasEnvNonEmpty(cleanEnv, "ANTIGRAVITY_LS_ADDRESS") || !hasEnvNonEmpty(cleanEnv, "ANTIGRAVITY_CSRF_TOKEN") || !hasEnvNonEmpty(cleanEnv, "ANTIGRAVITY_AGENTAPI_EXE") {
+		if creds, ok := discoverLSCredentials(vaultDir); ok {
+			rawAddr := strings.TrimSpace(creds.RawAddress)
+			if rawAddr == "" {
+				rawAddr, _ = normalizeLSAddress(creds.BaseURL)
+			}
+			setIfMissing := func(key, val string) {
+				if val == "" || hasEnvNonEmpty(cleanEnv, key) {
+					return
+				}
+				prefix := key + "="
+				filtered := cleanEnv[:0]
+				for _, kv := range cleanEnv {
+					if !strings.HasPrefix(kv, prefix) {
+						filtered = append(filtered, kv)
+					}
+				}
+				cleanEnv = append(filtered, prefix+val)
+			}
+			setIfMissing("ANTIGRAVITY_LS_ADDRESS", rawAddr)
+			setIfMissing("ANTIGRAVITY_CSRF_TOKEN", strings.TrimSpace(creds.CSRFToken))
+			setIfMissing("ANTIGRAVITY_AGENTAPI_EXE", strings.TrimSpace(creds.AgentAPIExe))
+		}
+	}
 	cmd.Env = cleanEnv
 }
 
@@ -2314,11 +2351,12 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, "", "", "")
 	}
 	isForced := len(force) > 0 && force[0]
+	budgetExempt := trigger == "watcher:desktop-sweep"
 	state := LoadQuota(vaultDir)
 	if state.CircuitOpen && !isForced {
 		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
 	}
-	if state.SpawnsToday >= state.MaxDailySpawns && !isForced {
+	if state.SpawnsToday >= state.MaxDailySpawns && !isForced && !budgetExempt {
 		state.CircuitOpen = true
 		state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
 		_ = SaveQuota(vaultDir, state)
@@ -2387,7 +2425,9 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		}
 	}
 
-	state.SpawnsToday++
+	if !budgetExempt {
+		state.SpawnsToday++
+	}
 	state.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s [%s])", trigger, skill, modelID)
 	state.Events = append(state.Events, SpawnEvent{
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -2433,6 +2473,9 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	if !dryRun {
 		if watchSum, wErr := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: now}); wErr == nil && watchSum.EnqueuedTotal > 0 {
 			inboxActions = append(inboxActions, fmt.Sprintf("watcher:enqueued=%d", watchSum.EnqueuedTotal))
+		}
+		if MaybeEnqueueDesktopWatcherSweep(vaultDir, now) {
+			inboxActions = append(inboxActions, "watcher:desktop-sweep-enqueued")
 		}
 	}
 
@@ -3020,24 +3063,255 @@ var staticModelEnumMap = map[string]string{
 }
 
 type lsCredentials struct {
-	BaseURL   string
-	CSRFToken string
+	RawAddress  string `json:"address,omitempty"`
+	BaseURL     string `json:"baseUrl,omitempty"`
+	CSRFToken   string `json:"csrfToken,omitempty"`
+	AgentAPIExe string `json:"agentApiExe,omitempty"`
+	UpdatedAt   string `json:"updatedAt,omitempty"`
+}
+
+func lsSessionFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "private", "runtime", "ls_session.json")
+}
+
+func desktopSweepStampPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "private", "runtime", "desktop_sweep_stamp")
+}
+
+func normalizeLSAddress(addr string) (rawHostPort, baseURL string) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		baseURL = strings.TrimRight(addr, "/")
+		if u, err := url.Parse(baseURL); err == nil {
+			rawHostPort = u.Host
+		}
+		return rawHostPort, baseURL
+	}
+	rawHostPort = strings.TrimRight(addr, "/")
+	baseURL = "http://" + rawHostPort
+	return rawHostPort, baseURL
 }
 
 func normalizeLSBaseURL(addr string) string {
-	addr = strings.TrimSpace(addr)
-	if addr != "" && !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
-		addr = "http://" + addr
+	_, baseURL := normalizeLSAddress(addr)
+	return baseURL
+}
+
+func isTCPReachable(baseURL string) bool {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		return false
 	}
-	return strings.TrimRight(addr, "/")
+	u, err := url.Parse(trimmed)
+	hostPort := ""
+	scheme := ""
+	if err == nil && u.Host != "" {
+		hostPort = u.Host
+		scheme = u.Scheme
+	} else {
+		hostPort, _ = normalizeLSAddress(trimmed)
+	}
+	if hostPort == "" {
+		return false
+	}
+	if _, _, splitErr := net.SplitHostPort(hostPort); splitErr != nil {
+		if strings.EqualFold(scheme, "https") {
+			hostPort = net.JoinHostPort(hostPort, "443")
+		} else {
+			hostPort = net.JoinHostPort(hostPort, "80")
+		}
+	}
+	conn, dialErr := net.DialTimeout("tcp", hostPort, 250*time.Millisecond)
+	if dialErr != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// RecordLiveLSSession persists live Language Server session coordinates from the current
+// process environment into `<vault>/private/runtime/ls_session.json` (`0600`) without ever
+// clobbering existing credentials when run from a headless process.
+func RecordLiveLSSession(vaultDir string) error {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	p := lsSessionFilePath(vaultDir)
+	var existing lsCredentials
+	hasExisting := false
+	if raw, err := os.ReadFile(p); err == nil {
+		if json.Unmarshal(raw, &existing) == nil {
+			hasExisting = true
+		}
+	}
+
+	rawAddrEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
+	csrfEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
+	agentExeEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE"))
+
+	if rawAddrEnv == "" || csrfEnv == "" {
+		if agentExeEnv != "" && hasExisting && existing.BaseURL != "" && existing.CSRFToken != "" && existing.AgentAPIExe != agentExeEnv {
+			existing.AgentAPIExe = agentExeEnv
+			existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			data, err := json.MarshalIndent(existing, "", "  ")
+			if err != nil {
+				return err
+			}
+			return store.WriteAtomic(p, append(data, '\n'), 0o600)
+		}
+		return nil
+	}
+
+	normRaw, normBase := normalizeLSAddress(rawAddrEnv)
+	if normBase == "" {
+		return nil
+	}
+	effectiveAgentExe := agentExeEnv
+	if effectiveAgentExe == "" && hasExisting {
+		effectiveAgentExe = strings.TrimSpace(existing.AgentAPIExe)
+	}
+	if hasExisting &&
+		existing.RawAddress == normRaw &&
+		existing.BaseURL == normBase &&
+		existing.CSRFToken == csrfEnv &&
+		existing.AgentAPIExe == effectiveAgentExe {
+		if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(existing.UpdatedAt)); err == nil && time.Since(ts) < 60*time.Second {
+			return nil
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	creds := lsCredentials{
+		RawAddress:  normRaw,
+		BaseURL:     normBase,
+		CSRFToken:   csrfEnv,
+		AgentAPIExe: effectiveAgentExe,
+		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	return store.WriteAtomic(p, append(data, '\n'), 0o600)
+}
+
+func loadReachableLSSession(vaultDir string) (lsCredentials, bool) {
+	if strings.TrimSpace(vaultDir) == "" {
+		return lsCredentials{}, false
+	}
+	raw, err := os.ReadFile(lsSessionFilePath(vaultDir))
+	if err != nil {
+		return lsCredentials{}, false
+	}
+	var creds lsCredentials
+	if json.Unmarshal(raw, &creds) != nil {
+		return lsCredentials{}, false
+	}
+	if creds.BaseURL == "" && creds.RawAddress != "" {
+		creds.RawAddress, creds.BaseURL = normalizeLSAddress(creds.RawAddress)
+	} else if creds.RawAddress == "" && creds.BaseURL != "" {
+		creds.RawAddress, creds.BaseURL = normalizeLSAddress(creds.BaseURL)
+	}
+	creds.CSRFToken = strings.TrimSpace(creds.CSRFToken)
+	creds.AgentAPIExe = strings.TrimSpace(creds.AgentAPIExe)
+	if creds.BaseURL == "" || creds.CSRFToken == "" || !isTCPReachable(creds.BaseURL) {
+		return lsCredentials{}, false
+	}
+	return creds, true
+}
+
+// HasReachableLSSession reports whether live or persisted Antigravity LS credentials are
+// discoverable and currently listening on TCP.
+func HasReachableLSSession(vaultDir string) bool {
+	creds, ok := discoverLSCredentials(vaultDir)
+	if !ok {
+		return false
+	}
+	return isTCPReachable(creds.BaseURL)
+}
+
+// MaybeEnqueueDesktopWatcherSweep enqueues a lightweight waking-hours sweep event when
+// desktop-session connectors (such as Option A Gmail) are due for a poll and a reachable
+// desktop Language Server session exists.
+func MaybeEnqueueDesktopWatcherSweep(vaultDir string, now time.Time) bool {
+	if strings.TrimSpace(vaultDir) == "" {
+		return false
+	}
+	attCfg := outbox.LoadAttentionConfig(vaultDir)
+	if outbox.InQuietHours(attCfg, now) {
+		return false
+	}
+	if !attCfg.QuietHours.Enabled && strings.TrimSpace(attCfg.QuietHours.Start) == "" {
+		localNow := now
+		if tz := strings.TrimSpace(attCfg.QuietHours.Timezone); tz != "" {
+			if loc, err := time.LoadLocation(tz); err == nil {
+				localNow = now.In(loc)
+			}
+		}
+		if h := localNow.Hour(); h < 7 || h >= 23 {
+			return false
+		}
+	}
+	if LoadQuota(vaultDir).CircuitOpen {
+		return false
+	}
+
+	stampPath := desktopSweepStampPath(vaultDir)
+	if raw, err := os.ReadFile(stampPath); err == nil {
+		if ts, pErr := time.Parse(time.RFC3339, strings.TrimSpace(string(raw))); pErr == nil && now.Sub(ts) < watcher.DesktopPiggybackMinInterval {
+			return false
+		}
+	}
+
+	dueKeys, needed := watcher.DesktopPollNeeded(vaultDir, watcher.DesktopPiggybackMinInterval, now)
+	if !needed {
+		return false
+	}
+	if !HasReachableLSSession(vaultDir) {
+		return false
+	}
+
+	quickModel := strings.TrimSpace(routing.Resolve(vaultDir, routing.Request{ExplicitTier: "quick"}).ModelID)
+	bucket := now.UTC().Truncate(watcher.DesktopPiggybackMinInterval).Format("20060102T1504")
+	sweepPrompt := "Desktop-session connector poll sweep is due (" + strings.Join(dueKeys, ", ") + ").\n" +
+		"Run `hq watch precheck --desktop-only --json`. If `enqueued_total` > 0, immediately run `hq heartbeat`. Finish silently without chatting unless urgent alerts are emitted via outbox."
+	_, deduped, enqErr := events.Enqueue(vaultDir, events.Event{
+		Source:   "watcher:desktop-sweep",
+		DedupKey: "watcher:desktop-sweep:" + bucket,
+		ScopeKey: "watcher:desktop-sweep",
+		Model:    quickModel,
+		Title:    fmt.Sprintf("[Auto] Desktop Connector Poll Sweep (%d target(s))", len(dueKeys)),
+		Prompt:   sweepPrompt,
+		Metadata: map[string]string{
+			"targets": strings.Join(dueKeys, ","),
+		},
+		MaxAttempts: 2,
+	}, now)
+	if enqErr != nil || deduped {
+		return false
+	}
+	_ = os.MkdirAll(filepath.Dir(stampPath), 0o700)
+	_ = store.WriteAtomic(stampPath, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600)
+	return true
 }
 
 func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
 	if addr, csrf := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN")); addr != "" && csrf != "" {
+		rawAddr, baseURL := normalizeLSAddress(addr)
 		return lsCredentials{
-			BaseURL:   normalizeLSBaseURL(addr),
-			CSRFToken: csrf,
+			RawAddress:  rawAddr,
+			BaseURL:     baseURL,
+			CSRFToken:   csrf,
+			AgentAPIExe: strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")),
 		}, true
+	}
+	if creds, ok := loadReachableLSSession(vaultDir); ok {
+		return creds, true
 	}
 
 	roots := hostpaths.Resolve(vaultDir)
@@ -3083,9 +3357,14 @@ func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
 		if hub.PID > 0 && !isProcessAlive(hub.PID) {
 			continue
 		}
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", hub.HTTPPort)
+		if !isTCPReachable(baseURL) {
+			continue
+		}
 		return lsCredentials{
-			BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", hub.HTTPPort),
-			CSRFToken: strings.TrimSpace(hub.CSRFToken),
+			RawAddress: fmt.Sprintf("127.0.0.1:%d", hub.HTTPPort),
+			BaseURL:    baseURL,
+			CSRFToken:  strings.TrimSpace(hub.CSRFToken),
 		}, true
 	}
 	return lsCredentials{}, false

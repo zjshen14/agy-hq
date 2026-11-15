@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +28,55 @@ func piggybackLockPath(vaultDir string) string {
 // MaybeLaunchDesktopPiggyback launches a detached (`Setsid: true`) `hq watch precheck --desktop-only`
 // child from `Stop` when `ANTIGRAVITY_CREDENTIAL_SCOPE` is present in memory, rate-limited to once per 15m
 // with non-blocking singleflight locking and ZERO disk persistence of `ANTIGRAVITY_CREDENTIAL_SCOPE`.
+// DesktopPollNeeded reports enabled pollable connector accounts requiring a desktop session
+// whose last successful poll is missing or older than minInterval relative to now.
+func DesktopPollNeeded(vaultDir string, minInterval time.Duration, now time.Time) ([]string, bool) {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil, false
+	}
+	conns, err := connector.ListConnectors(vaultDir)
+	if err != nil || len(conns) == 0 {
+		return nil, false
+	}
+	state, err := LoadState(context.Background(), vaultDir)
+	if err != nil {
+		return nil, false
+	}
+	if minInterval <= 0 {
+		minInterval = DesktopPiggybackMinInterval
+	}
+	var needed []string
+	for _, rc := range conns {
+		if !rc.Instance.IsEnabled() {
+			continue
+		}
+		if rc.Manifest.Capabilities.Poll == nil || !rc.Manifest.Capabilities.Poll.Enabled {
+			continue
+		}
+		accts := resolveAccountsToPoll(vaultDir, rc, "")
+		for _, acct := range accts {
+			if !rc.EffectiveRequiresDesktopSession(vaultDir, acct) {
+				continue
+			}
+			aKey := accountKey(rc.ID, acct)
+			cur, ok := state.Accounts[aKey]
+			due := !ok || cur.LastStatus != "ok" || strings.TrimSpace(cur.LastPolledAt) == ""
+			if !due {
+				if ts, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(cur.LastPolledAt)); parseErr != nil {
+					due = true
+				} else if now.Sub(ts) >= minInterval {
+					due = true
+				}
+			}
+			if due {
+				needed = append(needed, aKey)
+			}
+		}
+	}
+	sort.Strings(needed)
+	return needed, len(needed) > 0
+}
+
 func MaybeLaunchDesktopPiggyback(vaultDir string, now time.Time) bool {
 	if strings.TrimSpace(vaultDir) == "" {
 		return false
@@ -81,11 +131,15 @@ func MaybeLaunchDesktopPiggyback(vaultDir string, now time.Time) bool {
 	}
 	defer devNull.Close()
 
+	extraEnv := map[string]string{
+		"HQ_VAULT_DIR": vaultDir,
+	}
+	if pluginCLIHost := strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")); pluginCLIHost != "" {
+		extraEnv["HQ_PLUGIN_CLI_HOST"] = pluginCLIHost
+	}
 	cmd := exec.Command(exe, "watch", "precheck", "--desktop-only")
 	cmd.Dir = vaultDir
-	cmd.Env = connector.SanitizedSubprocessEnv(nil, []string{"AGY_ACCOUNT", "ANTIGRAVITY_CREDENTIAL_SCOPE"}, map[string]string{
-		"HQ_VAULT_DIR": vaultDir,
-	}, true)
+	cmd.Env = connector.SanitizedSubprocessEnv(nil, []string{"AGY_ACCOUNT", "ANTIGRAVITY_CREDENTIAL_SCOPE"}, extraEnv, true)
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull

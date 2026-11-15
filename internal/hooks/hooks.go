@@ -207,6 +207,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var payload CommonPayload
 	_ = json.NewDecoder(r).Decode(&payload)
 	_ = hostpaths.PersistFromLiveEnv(vaultDir)
+	_ = kernel.RecordLiveLSSession(vaultDir)
 	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
 	_, isTaintedStart := taint.Check(vaultDir, payload.ConversationID)
 
@@ -586,7 +587,7 @@ var (
 
 	outboundCommandPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post|patch|update|delete)\b`),
-		regexp.MustCompile(`(?i)(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:\S+/)?gmail(?:-[0-9]+)?\s+[^;&|\n]*\b(send-message|send-draft)\b`),
+		regexp.MustCompile(`(?i)(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:["']?(?:\S+/)?language_server["']?\s+plugin-cli\s+)?["']?(?:\S+/)?gmail(?:-[0-9]+)?["']?\s+[^;&|\n]*\b(?:mutate\s+(?:send-message|send-draft|send-with-attachment|send|reply|forward)|send-message|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gmail\s+send-draft\b`),
 		regexp.MustCompile(`(?i)\bhq\s+gchat\s+(send|send-draft)\b`),
 		regexp.MustCompile(`(?i)\bchat\.googleapis\.com/v1/spaces/[^\s]*messages\b`),
@@ -604,7 +605,7 @@ var (
 	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|watch\s+(?:read|query|ack)|offer\s+stage|brief\s+format-quarantined|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|taint|exec-cache|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -928,6 +929,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		})
 	}
 
+	_ = kernel.RecordLiveLSSession(vaultDir)
 	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
 	convID := payload.ConversationID
 	defer func() {
@@ -935,7 +937,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	}()
 
 	protectedPrivateSubs := []string{
-		"gmail", "gchat", "credentials", "connectors", "taint", "exec-cache",
+		"gmail", "gchat", "credentials", "connectors", "runtime", "taint", "exec-cache",
 		"trust.json", "approval_asks", "approval_caps", "pii-denylist.txt", "daemon_token",
 	}
 	var extraCredTargets []string
@@ -1581,6 +1583,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 		_, wErr := w.Write([]byte(`{"decision":"stop"}` + "\n"))
 		return wErr
 	}
+	_ = kernel.RecordLiveLSSession(vaultDir)
 
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID

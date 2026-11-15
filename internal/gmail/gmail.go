@@ -22,8 +22,8 @@ import (
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
-// DefaultPrimaryQuery filters for unread human messages in the Primary tab.
-const DefaultPrimaryQuery = "label:INBOX is:unread category:primary -label:promotions -label:social"
+// DefaultPrimaryQuery filters for unread human and transactional updates (excluding Promotions, Social, and Forums).
+const DefaultPrimaryQuery = "label:INBOX is:unread -category:promotions -category:social -category:forums"
 
 // DefaultTrustedDomains is the initial sender allowlist for DKIM-verified attachment routing.
 var DefaultTrustedDomains = []string{
@@ -264,11 +264,6 @@ func InitOrAddAccountWithOptions(vaultDir string, opts InitAccountOptions) (Acco
 	if strings.TrimSpace(query) == "" {
 		query = DefaultPrimaryQuery
 	}
-	tokenFile := strings.TrimSpace(opts.TokenFile)
-	if tokenFile == "" {
-		tokenFile = filepath.Join(vaultDir, "private", "gmail", "tokens", alias+".json")
-	}
-
 	if err := os.MkdirAll(filepath.Join(vaultDir, "private", "gmail", "tokens"), 0o700); err != nil {
 		return AccountConfig{}, err
 	}
@@ -283,12 +278,28 @@ func InitOrAddAccountWithOptions(vaultDir string, opts InitAccountOptions) (Acco
 	if err != nil {
 		return AccountConfig{}, err
 	}
+	existing, hasExisting := reg.Accounts[alias]
+	agyAccount := strings.TrimSpace(opts.AGYAccount)
+	if agyAccount == "" && hasExisting {
+		agyAccount = strings.TrimSpace(existing.AGYAccount)
+	}
+	cliPath := strings.TrimSpace(opts.CLIPath)
+	if cliPath == "" && hasExisting {
+		cliPath = strings.TrimSpace(existing.CLIPath)
+	}
+	tokenFile := strings.TrimSpace(opts.TokenFile)
+	if tokenFile == "" && hasExisting {
+		tokenFile = strings.TrimSpace(existing.TokenFile)
+	}
+	if tokenFile == "" {
+		tokenFile = filepath.Join(vaultDir, "private", "gmail", "tokens", alias+".json")
+	}
 	cfg := AccountConfig{
 		Alias:      alias,
 		Email:      email,
-		AGYAccount: strings.TrimSpace(opts.AGYAccount),
+		AGYAccount: agyAccount,
 		TokenFile:  tokenFile,
-		CLIPath:    strings.TrimSpace(opts.CLIPath),
+		CLIPath:    cliPath,
 		Query:      query,
 		Enabled:    true,
 		AddedAt:    time.Now().Format(time.RFC3339),
@@ -1152,7 +1163,7 @@ func parseRawGmailMessage(rm rawGmailMessage, account string) (MessageSummary, M
 }
 
 func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]MessageSummary, error) {
-	out, err := runGmailCLI(cfg, "readonly", "read", query, fmt.Sprintf("--max=%d", maxResults), "--json")
+	out, err := runGmailCLI(cfg, "readonly", "read", fmt.Sprintf("--max=%d", maxResults), "--json", "--", query)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1184,7 +1195,7 @@ func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]Mess
 }
 
 func readThreadViaPluginCLI(cfg AccountConfig, threadID string) (ThreadDetail, error) {
-	out, err := runGmailCLI(cfg, "readonly", "get-thread", threadID, "--json")
+	out, err := runGmailCLI(cfg, "readonly", "get-thread", "--json", "--", threadID)
 	if err != nil {
 		return ThreadDetail{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1251,7 +1262,7 @@ func createDraftViaPluginCLI(cfg AccountConfig, draftID, threadID, to, cc, subje
 }
 
 func sendDraftViaPluginCLI(cfg AccountConfig, draftID string) (string, error) {
-	out, err := runGmailCLI(cfg, "mutate", "send-draft", draftID, "--json")
+	out, err := runGmailCLI(cfg, "mutate", "send-draft", "--json", "--", draftID)
 	if err != nil {
 		return "", fmt.Errorf("gmail send-draft failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

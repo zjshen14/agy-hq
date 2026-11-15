@@ -22,10 +22,11 @@ import (
 const ConnectorSchemaVersion = 1
 
 var (
-	reValidConnID      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
-	reFlagTemplate     = regexp.MustCompile(`^--[a-zA-Z0-9][a-zA-Z0-9_-]*=\{\{(\?|\*)?([a-zA-Z0-9_]+)\}\}$`)
-	reStrictScalarVal  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+=-]{0,127}$`)
-	reRelaxedQueryText = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+=, ()'"?!-]{0,255}$`)
+	reValidConnID        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	reFlagTemplate       = regexp.MustCompile(`^--[a-zA-Z0-9][a-zA-Z0-9_-]*=\{\{(\?|\*)?([a-zA-Z0-9_]+)\}\}$`)
+	rePositionalTemplate = regexp.MustCompile(`^\{\{(\??)([a-z][a-z0-9_]{0,31})\}\}$`)
+	reStrictScalarVal    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+=-]{0,127}$`)
+	reRelaxedQueryText   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+=, ()'"?!-]{0,255}$`)
 )
 
 var forbiddenShellBasenames = map[string]bool{
@@ -316,10 +317,20 @@ func LintManifest(raw []byte, sourceID string) (ConnectorManifest, error) {
 			if len(tmpl) == 0 {
 				return ConnectorManifest{}, fmt.Errorf("connector %q verb %q has empty argv template", m.ID, verbName)
 			}
+			afterEndOfOptions := false
 			for _, tok := range tmpl {
+				if tok == "--" && !afterEndOfOptions {
+					afterEndOfOptions = true
+					continue
+				}
 				if strings.Contains(tok, "{{") || strings.Contains(tok, "}}") {
 					hasPlaceholders = true
-					if !reFlagTemplate.MatchString(tok) {
+					if afterEndOfOptions {
+						pm := rePositionalTemplate.FindStringSubmatch(tok)
+						if pm == nil || pm[2] == "payload_file" {
+							return ConnectorManifest{}, fmt.Errorf("connector %q verb %q token %q violates post--- positional template rule (expected {{param}} or {{?opt}})", m.ID, verbName, tok)
+						}
+					} else if !reFlagTemplate.MatchString(tok) {
 						return ConnectorManifest{}, fmt.Errorf("connector %q verb %q token %q violates fused-flag template rule (expected --flag={{param}}, --flag={{?opt}}, --flag={{*list}}, or --flag={{payload_file}})", m.ID, verbName, tok)
 					}
 				}
@@ -452,13 +463,42 @@ func validateParamValue(paramName, val string) error {
 	return nil
 }
 
-// ExpandVerbArgv expands a validated verb template (`--flag={{param}}`, `--flag={{?opt}}`, `--flag={{*list}}`, `--flag={{payload_file}}`)
-// into a concrete literal argv slice without invoking any shell.
+// ExpandVerbArgv expands a validated verb template (`--flag={{param}}`, `--flag={{?opt}}`, `--flag={{*list}}`,
+// `--flag={{payload_file}}`, or post-`--` positional `{{param}}` / `{{?opt}}`) into a concrete literal argv slice without invoking any shell.
 func ExpandVerbArgv(tmpl []string, scalarParams map[string]string, listParams map[string][]string, payloadFile string) ([]string, error) {
 	var out []string
+	afterEndOfOptions := false
+	pendingEndOfOptions := false
+	emit := func(arg string) {
+		if pendingEndOfOptions {
+			out = append(out, "--")
+			pendingEndOfOptions = false
+		}
+		out = append(out, arg)
+	}
 	for _, tok := range tmpl {
+		if tok == "--" && !afterEndOfOptions {
+			afterEndOfOptions = true
+			pendingEndOfOptions = true
+			continue
+		}
 		if !strings.Contains(tok, "{{") && !strings.Contains(tok, "}}") {
-			out = append(out, tok)
+			emit(tok)
+			continue
+		}
+		if afterEndOfOptions {
+			pm := rePositionalTemplate.FindStringSubmatch(tok)
+			if pm == nil || pm[2] == "payload_file" {
+				return nil, fmt.Errorf("invalid post--- positional template token %q", tok)
+			}
+			val := strings.TrimSpace(scalarParams[pm[2]])
+			if pm[1] == "?" && val == "" {
+				continue
+			}
+			if err := validateParamValue(pm[2], val); err != nil {
+				return nil, err
+			}
+			emit(val)
 			continue
 		}
 		m := reFlagTemplate.FindStringSubmatch(tok)
@@ -474,7 +514,7 @@ func ExpandVerbArgv(tmpl []string, scalarParams map[string]string, listParams ma
 			if strings.TrimSpace(payloadFile) == "" {
 				return nil, fmt.Errorf("verb requires {{payload_file}} pipe")
 			}
-			out = append(out, flagPrefix+payloadFile)
+			emit(flagPrefix + payloadFile)
 			continue
 		}
 
@@ -487,7 +527,7 @@ func ExpandVerbArgv(tmpl []string, scalarParams map[string]string, listParams ma
 			if err := validateParamValue(key, val); err != nil {
 				return nil, err
 			}
-			out = append(out, flagPrefix+val)
+			emit(flagPrefix + val)
 		case "*":
 			items := listParams[key]
 			for _, item := range items {
@@ -498,14 +538,14 @@ func ExpandVerbArgv(tmpl []string, scalarParams map[string]string, listParams ma
 				if err := validateParamValue(key, item); err != nil {
 					return nil, err
 				}
-				out = append(out, flagPrefix+item)
+				emit(flagPrefix + item)
 			}
 		default:
 			val := strings.TrimSpace(scalarParams[key])
 			if err := validateParamValue(key, val); err != nil {
 				return nil, err
 			}
-			out = append(out, flagPrefix+val)
+			emit(flagPrefix + val)
 		}
 	}
 	return out, nil
