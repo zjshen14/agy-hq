@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -815,11 +816,50 @@ func TestAutoScrubBypassDefenseAndWorktreeRegexPrecision(t *testing.T) {
 		"-u ANTIGRAVITY_LS_ADDRESS",
 		"-u ANTIGRAVITY_AGENTAPI_EXE",
 		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel",
-		"-- sh -c '",
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel sh -c '",
 	} {
 		if !strings.Contains(wrapped, want) {
 			t.Fatalf("wrapScrubbedAutoShellCommand missing %q in %s", want, wrapped)
 		}
+	}
+	if strings.Contains(wrapped, "sentinel -- ") {
+		t.Fatalf("wrapScrubbedAutoShellCommand must not emit invalid POSIX/GNU env '--' separator after KEY=VAL: %s", wrapped)
+	}
+
+	// Execute both wrappers via real sh -c so GNU/BSD env regressions (like exit 127 on '--') fail loudly.
+	execAuto := wrapScrubbedAutoShellCommand(`printf 'csrf=%s|ls=%s|shim=%s\n' "${ANTIGRAVITY_CSRF_TOKEN:-UNSET}" "${ANTIGRAVITY_LS_ADDRESS:-UNSET}" "${ANTIGRAVITY_PLUGIN_SHIM_DIR:-UNSET}"`)
+	autoCmd := exec.Command("sh", "-c", execAuto)
+	autoCmd.Env = append(os.Environ(),
+		"ANTIGRAVITY_CSRF_TOKEN=secret-csrf",
+		"ANTIGRAVITY_LS_ADDRESS=127.0.0.1:9999",
+		"ANTIGRAVITY_AGENTAPI_EXE=/bin/true",
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/tmp/real-shim",
+	)
+	autoOut, autoErr := autoCmd.CombinedOutput()
+	if autoErr != nil || strings.TrimSpace(string(autoOut)) != "csrf=UNSET|ls=UNSET|shim=/nonexistent-hq-sentinel" {
+		t.Fatalf("wrapped auto shell failed: err=%v out=%q", autoErr, string(autoOut))
+	}
+
+	fakeBinDir := t.TempDir()
+	fakeHQ := filepath.Join(fakeBinDir, "hq")
+	fakeScript := "#!/bin/sh\nprintf 'argv=%s|csrf=%s|shim=%s\\n' \"$1\" \"${ANTIGRAVITY_CSRF_TOKEN:-UNSET}\" \"${ANTIGRAVITY_PLUGIN_SHIM_DIR:-UNSET}\"\n"
+	if err := os.WriteFile(fakeHQ, []byte(fakeScript), 0o755); err != nil {
+		t.Fatalf("write fake hq: %v", err)
+	}
+	execArgv := wrapScrubbedArgvCommand([]string{fakeHQ, "watch-ok"})
+	if strings.Contains(execArgv, "sentinel -- ") {
+		t.Fatalf("wrapScrubbedArgvCommand must not emit '--' after KEY=VAL: %s", execArgv)
+	}
+	argvCmd := exec.Command("sh", "-c", execArgv)
+	argvCmd.Env = append(os.Environ(),
+		"ANTIGRAVITY_CSRF_TOKEN=secret-csrf",
+		"ANTIGRAVITY_LS_ADDRESS=127.0.0.1:9999",
+		"ANTIGRAVITY_AGENTAPI_EXE=/bin/true",
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/tmp/real-shim",
+	)
+	argvOut, argvErr := argvCmd.CombinedOutput()
+	if argvErr != nil || strings.TrimSpace(string(argvOut)) != "argv=watch-ok|csrf=UNSET|shim=/nonexistent-hq-sentinel" {
+		t.Fatalf("wrapped argv shell failed: err=%v out=%q", argvErr, string(argvOut))
 	}
 
 	// 2. SEC-P2-1: `hq exec-sandboxed` is NOT treated as an inline non-blocking single HQ command

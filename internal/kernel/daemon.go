@@ -74,7 +74,7 @@ func (s ScheduleTrigger) EffectiveMode() string {
 func (s ScheduleTrigger) EffectiveDedupMode() string {
 	d := strings.ToLower(strings.TrimSpace(s.DedupMode))
 	switch d {
-	case "none", "exit_zero_nonempty", "stdout_sha256":
+	case "none", "exit_zero_nonempty", "stdout_sha256", "precheck_enqueues":
 		return d
 	}
 	if len(s.PrecheckCmd) > 0 {

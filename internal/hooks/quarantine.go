@@ -243,14 +243,13 @@ func resolveTrustedHQExecutable(fallback string) string {
 }
 
 func wrapScrubbedArgvCommand(argv []string) string {
-	quoted := make([]string, 0, len(argv)+7)
+	quoted := make([]string, 0, len(argv)+6)
 	quoted = append(quoted,
 		"env",
 		"-u", "ANTIGRAVITY_CSRF_TOKEN",
 		"-u", "ANTIGRAVITY_LS_ADDRESS",
 		"-u", "ANTIGRAVITY_AGENTAPI_EXE",
 		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel",
-		"--",
 	)
 	if len(argv) > 0 {
 		quoted = append(quoted, shellQuoteSingle(resolveTrustedHQExecutable(argv[0])))
@@ -263,7 +262,7 @@ func wrapScrubbedArgvCommand(argv []string) string {
 
 func wrapScrubbedAutoShellCommand(cmdLine string) string {
 	return "env -u ANTIGRAVITY_CSRF_TOKEN -u ANTIGRAVITY_LS_ADDRESS -u ANTIGRAVITY_AGENTAPI_EXE " +
-		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel -- sh -c " + shellQuoteSingle(cmdLine)
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel sh -c " + shellQuoteSingle(cmdLine)
 }
 
 // validateTaintedHQArgv enforces the strict Quarantined Worker CLI allowlist (RFC-0017b §3.2):

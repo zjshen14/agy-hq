@@ -277,11 +277,6 @@ func evaluateGatekeepersFiltered(vaultDir, onlyFQID string, now time.Time, force
 				if len(s.PrecheckCmd) == 0 {
 					continue
 				}
-			} else if onlyFQID == "" {
-				mode := s.EffectiveMode()
-				if mode != "daemon_gatekeeper" && mode != "isolated_worker" {
-					continue
-				}
 			}
 
 			cur := cursors[s.ID]
@@ -364,10 +359,10 @@ func evaluateGatekeepersFiltered(vaultDir, onlyFQID string, now time.Time, force
 					}
 				} else if exe, eErr := os.Executable(); eErr == nil && exe != "" && strings.HasPrefix(filepath.Base(exe), "hq") {
 					bin0 = exe
-				} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
-					bin0 = lp
 				} else if st, sErr := os.Stat(filepath.Join(rootDir, "bin", "hq")); sErr == nil && !st.IsDir() {
 					bin0 = filepath.Join(rootDir, "bin", "hq")
+				} else if lp, lErr := exec.LookPath("hq"); lErr == nil && lp != "" {
+					bin0 = lp
 				}
 			}
 
@@ -419,6 +414,26 @@ func evaluateGatekeepersFiltered(vaultDir, onlyFQID string, now time.Time, force
 
 			dedup := s.EffectiveDedupMode()
 			switch dedup {
+			case "precheck_enqueues":
+				// Precheck command (e.g. `hq watch precheck --json`) already enqueued connector:* events directly;
+				// never spawn a duplicate gatekeeper event. Still advance trigger cursor so cron slot isn't re-polled.
+				var preSum struct {
+					EnqueuedTotal int `json:"enqueued_total"`
+				}
+				if trimmedOut != "" {
+					_ = json.Unmarshal([]byte(trimmedOut), &preSum)
+				}
+				if preSum.EnqueuedTotal > 0 {
+					actions = append(actions, fmt.Sprintf("precheck_enqueued:%s=%d", s.ID, preSum.EnqueuedTotal))
+					mutations = append(mutations, cursorMutation{
+						id:            s.ID,
+						slotKey:       slotKey,
+						spawned:       true,
+						nextStdoutSHA: shaHex,
+					})
+					continue
+				}
+				shouldSpawn = false
 			case "none":
 				shouldSpawn = true
 			case "exit_zero_nonempty":
@@ -459,19 +474,27 @@ func evaluateGatekeepersFiltered(vaultDir, onlyFQID string, now time.Time, force
 			}
 			title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, s.Skill)
 			dedupKey := fmt.Sprintf("gatekeeper:%s:%s:%s", s.ID, slotKey, shaHex)
+			sessionID := ""
+			if s.EffectiveMode() == "front_desk_cron" {
+				if fd, hasFD := GetFrontDesk(vaultDir); hasFD && strings.TrimSpace(fd.ConversationID) != "" && HasReachableLSSession(vaultDir) {
+					sessionID = strings.TrimSpace(fd.ConversationID)
+				}
+			}
 			_, _, enqErr := events.Enqueue(vaultDir, events.Event{
 				Source:       "gatekeeper",
 				DedupKey:     dedupKey,
 				ScopeKey:     "gatekeeper:" + s.ID,
+				SessionID:    sessionID,
 				Skill:        s.Skill,
 				Model:        modelID,
 				Title:        title,
 				Prompt:       prompt,
 				TaintOnSpawn: isExternalPrecheck,
 				Metadata: map[string]string{
-					"trigger":      "gatekeeper:" + s.ID,
-					"action_label": fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, s.Skill),
-					"schedule_id":  s.ID,
+					"trigger":       "gatekeeper:" + s.ID,
+					"action_label":  fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, s.Skill),
+					"schedule_id":   s.ID,
+					"schedule_mode": s.EffectiveMode(),
 				},
 			}, now)
 			if enqErr == nil {

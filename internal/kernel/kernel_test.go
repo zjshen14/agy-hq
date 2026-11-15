@@ -743,3 +743,116 @@ func TestBackfillFrontDeskProjectID(t *testing.T) {
 		t.Fatalf("expected existing ProjectID to be preserved, got %q", fd.ProjectID)
 	}
 }
+
+func TestReconcileFrontDeskFiveCronsAndDaemonMigration(t *testing.T) {
+	vaultDir := t.TempDir()
+	trigYAML := `schedules:
+  - id: gmail-inbox-watch
+    cron: "CRON_TZ=America/Los_Angeles */15 7-22 * * *"
+    mode: daemon_gatekeeper
+    model: gemini-4-hydrogen-low
+    precheck_cmd: ["hq", "watch", "precheck", "--connector=gmail", "--json"]
+    dedup_mode: precheck_enqueues
+    skill: inbox-triage
+  - id: morning-brief
+    cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
+    mode: front_desk_cron
+    model: gemini-4-hydrogen-medium
+    skill: morning-brief
+  - id: hiive-opportunity-watch
+    cron: "CRON_TZ=America/Los_Angeles 0 11,16 * * 1-5"
+    mode: isolated_worker
+    model: gemini-4-hydrogen-low
+    skill: thesis-check
+  - id: edgar-close-watch
+    cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
+    mode: daemon_gatekeeper
+    model: gemini-4-hydrogen-medium
+    precheck_cmd: ["hq", "status", "--quiet"]
+    skill: thesis-check
+  - id: sleep-consolidate
+    cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
+    mode: isolated_worker
+    model: gemini-4-carbon-medium
+    skill: sleep-consolidate
+`
+	if err := os.WriteFile(filepath.Join(vaultDir, "triggers.yaml"), []byte(trigYAML), 0o600); err != nil {
+		t.Fatalf("write triggers.yaml: %v", err)
+	}
+
+	fdConv := "c15ecd75-f285-4ee0-8ee9-f97cb3979324"
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
+	if err := SetFrontDesk(vaultDir, fdConv, ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	transcriptPath := filepath.Join(vaultDir, "transcript.jsonl")
+	lines := []string{
+		`{"step_index":1316,"type":"PLANNER_RESPONSE","created_at":"2026-11-12T07:53:57Z","tool_calls":[{"name":"schedule","args":{"CronExpression":"\"30 23 * * *\"","IsDaemon":"true","Prompt":"\"[Auto] Nightly Sleep Consolidation: Run /sleep-consolidate to review today's turn journals.\""}},{"name":"schedule","args":{"CronExpression":"\"30 7 * * *\"","IsDaemon":"true","Prompt":"\"[Auto] Morning Brief: Run /morning-brief to generate today's morning briefing.\""}},{"name":"schedule","args":{"CronExpression":"\"30 13 * * 1-5\"","IsDaemon":"true","Prompt":"\"[Auto] EDGAR Close Watch: Run /thesis-check to monitor new 10-K, 10-Q, 8-K filings.\""}},{"name":"schedule","args":{"CronExpression":"\"30 6 * * 1\"","IsDaemon":"true","Prompt":"\"[Auto] NVDA Opening Bell Watch: Run /thesis-check on NVDA against local/notes/investing/nvda_thesis.md.\""}},{"name":"schedule","args":{"CronExpression":"\"0 11,16 * * 1-5\"","IsDaemon":"true","Prompt":"\"[Auto] Clarity (Hiive) Secondary Watch: Check for new deal emails.\""}}]}`,
+		`{"step_index":1317,"type":"GENERIC","created_at":"2026-11-12T07:54:00Z","content":"Tool is running as a background task with task id: c15ecd75-f285-4ee0-8ee9-f97cb3979324/task-1317\nTask Description: Cron: 30 23 * * *, Prompt: [Auto] Nightly Sleep Consolidation: Run /sleep-consolidate to review today's turn journals."}`,
+		`{"step_index":1318,"type":"GENERIC","created_at":"2026-11-12T07:54:00Z","content":"Tool is running as a background task with task id: c15ecd75-f285-4ee0-8ee9-f97cb3979324/task-1318\nTask Description: Cron: 30 7 * * *, Prompt: [Auto] Morning Brief: Run /morning-brief to generate today's morning briefing."}`,
+		`{"step_index":1319,"type":"GENERIC","created_at":"2026-11-12T07:54:01Z","content":"Tool is running as a background task with task id: c15ecd75-f285-4ee0-8ee9-f97cb3979324/task-1319\nTask Description: Cron: 30 13 * * 1-5, Prompt: [Auto] EDGAR Close Watch: Run /thesis-check to monitor new 10-K, 10-Q, 8-K filings."}`,
+		`{"step_index":1320,"type":"GENERIC","created_at":"2026-11-12T07:54:01Z","content":"Tool is running as a background task with task id: c15ecd75-f285-4ee0-8ee9-f97cb3979324/task-1320\nTask Description: Cron: 30 6 * * 1, Prompt: [Auto] NVDA Opening Bell Watch: Run /thesis-check on NVDA against local/notes/investing/nvda_thesis.md."}`,
+		`{"step_index":1321,"type":"GENERIC","created_at":"2026-11-12T07:54:01Z","content":"Tool is running as a background task with task id: c15ecd75-f285-4ee0-8ee9-f97cb3979324/task-1321\nTask Description: Cron: 0 11,16 * * 1-5, Prompt: [Auto] Clarity (Hiive) Secondary Watch: Check for new deal emails."}`,
+	}
+	if err := os.WriteFile(transcriptPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript.jsonl: %v", err)
+	}
+
+	if !ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath) {
+		t.Fatalf("expected ReconcileFrontDeskFromTranscript to return changed=true")
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok {
+		t.Fatalf("GetFrontDesk failed")
+	}
+	if len(fd.ArmedTriggers) != 4 {
+		t.Fatalf("expected exactly 4 triggers.yaml ArmedTriggers (5th cron stays ad-hoc), got %d: %+v", len(fd.ArmedTriggers), fd.ArmedTriggers)
+	}
+	expectedTaskIDs := map[string]string{
+		"sleep-consolidate":       fdConv + "/task-1317",
+		"morning-brief":           fdConv + "/task-1318",
+		"edgar-close-watch":       fdConv + "/task-1319",
+		"hiive-opportunity-watch": fdConv + "/task-1321",
+	}
+	for id, wantTID := range expectedTaskIDs {
+		if got := fd.ArmedTriggers[id].TaskID; got != wantTID {
+			t.Fatalf("ArmedTriggers[%s].TaskID = %q, want %q", id, got, wantTID)
+		}
+	}
+	if len(fd.AdHocCrons) != 1 || fd.AdHocCrons[0].TaskID != fdConv+"/task-1320" || fd.AdHocCrons[0].Cron != "30 6 * * 1" {
+		t.Fatalf("expected 1 preserved AdHocCron for NVDA task-1320, got %+v", fd.AdHocCrons)
+	}
+
+	// Simulate active hq daemon: all 5 schedules count as daemon-armed, and the 4 duplicate Front Desk timers are marked migrated_to_daemon (task-1320 untouched).
+	dBytes, _ := json.Marshal(daemonState{PID: os.Getpid(), Addr: "127.0.0.1:4799", StartedAt: time.Now().Format(time.RFC3339)})
+	if err := os.WriteFile(daemonStatePath(vaultDir), dBytes, 0o600); err != nil {
+		t.Fatalf("write daemon.json: %v", err)
+	}
+	armed, unarmed := GetUnarmedTriggers(vaultDir)
+	if len(armed) != 5 || len(unarmed) != 0 {
+		t.Fatalf("expected 5 armed in daemon / 0 unarmed, got armed=%d unarmed=%d", len(armed), len(unarmed))
+	}
+	disarm := GetDisarmTriggers(vaultDir)
+	if len(disarm) != 4 {
+		t.Fatalf("expected 4 GetDisarmTriggers items (excluding ad-hoc task-1320), got %+v", disarm)
+	}
+	for _, dt := range disarm {
+		if dt.Reason != "migrated_to_daemon" || dt.TaskID == "" {
+			t.Fatalf("expected Reason=migrated_to_daemon and non-empty TaskID, got %+v", dt)
+		}
+	}
+
+	// Killing task-1317 must remove sleep-consolidate and never resurrect it on subsequent transcript reconciliation.
+	if err := RecordKilledFrontDeskTask(vaultDir, fdConv, fdConv+"/task-1317"); err != nil {
+		t.Fatalf("RecordKilledFrontDeskTask: %v", err)
+	}
+	_ = ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath)
+	fdAfterKill, _ := GetFrontDesk(vaultDir)
+	if _, resurrected := fdAfterKill.ArmedTriggers["sleep-consolidate"]; resurrected {
+		t.Fatalf("killed task-1317 resurrected into ArmedTriggers after reconciliation")
+	}
+	if len(fdAfterKill.AdHocCrons) != 1 || fdAfterKill.AdHocCrons[0].TaskID != fdConv+"/task-1320" {
+		t.Fatalf("expected ad-hoc task-1320 preserved after killing task-1317, got %+v", fdAfterKill.AdHocCrons)
+	}
+}

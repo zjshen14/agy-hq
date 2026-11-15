@@ -198,17 +198,21 @@ func Run(vaultDir string) []CheckResult {
 	dInfo := kernel.GetDaemonInfo(vaultDir)
 	armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
 	totalTriggers := len(armed) + len(unarmed)
+	adHocNote := ""
+	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && len(fd.AdHocCrons) > 0 {
+		adHocNote = fmt.Sprintf(", %d ad-hoc conversation cron(s) in Front Desk", len(fd.AdHocCrons))
+	}
 	if dInfo.Running {
 		results = append(results, CheckResult{
 			Name:   "Scheduled Triggers & Heartbeat",
 			Status: "PASS",
-			Detail: fmt.Sprintf("Running (daemon PID %d, %d schedules declared, %d/%d armed in Front Desk)", dInfo.PID, dInfo.SchedulesCount, len(armed), totalTriggers),
+			Detail: fmt.Sprintf("Running (daemon PID %d, %d schedules declared, %d/%d active in daemon%s)", dInfo.PID, dInfo.SchedulesCount, len(armed), totalTriggers, adHocNote),
 		})
 	} else {
 		results = append(results, CheckResult{
 			Name:   "Scheduled Triggers & Heartbeat",
 			Status: "WARN",
-			Detail: fmt.Sprintf("%d schedules declared in triggers.yaml, but background daemon is inactive; run './bin/hq daemon install' or './bin/hq daemon' (%d/%d armed in Front Desk)", dInfo.SchedulesCount, len(armed), totalTriggers),
+			Detail: fmt.Sprintf("%d schedules declared in triggers.yaml, but background daemon is inactive; run './bin/hq daemon install' or './bin/hq daemon' (%d/%d armed in Front Desk%s)", dInfo.SchedulesCount, len(armed), totalTriggers, adHocNote),
 		})
 	}
 

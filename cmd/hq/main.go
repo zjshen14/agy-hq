@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,7 +30,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
-	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/webui"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
@@ -1697,25 +1695,12 @@ func main() {
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fastTicker := time.NewTicker(15 * time.Second)
 			cronTicker := time.NewTicker(30 * time.Second)
-			watchTicker := time.NewTicker(60 * time.Second)
 			hbTicker := time.NewTicker(30 * time.Minute)
 			defer fastTicker.Stop()
 			defer cronTicker.Stop()
-			defer watchTicker.Stop()
 			defer hbTicker.Stop()
 			for {
 				select {
-				case now := <-watchTicker.C:
-					watchSum, _ := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: now})
-					sweepEnqueued := kernel.MaybeEnqueueDesktopWatcherSweep(vaultDir, now)
-					acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-					if dErr != nil {
-						fmt.Fprintf(os.Stderr, "hq daemon watch-tick dispatch error: %v\n", dErr)
-					}
-					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-					if watchSum.EnqueuedTotal > 0 || sweepEnqueued || len(acts) > 0 || outDelivered > 0 {
-						_ = webui.SyncMarkdownConsole(vaultDir)
-					}
 				case <-wakeCh:
 					now := time.Now()
 					acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
@@ -1735,7 +1720,13 @@ func main() {
 						fmt.Fprintf(os.Stderr, "hq daemon fast-tick dispatch error: %v\n", dErr)
 					}
 					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-					if len(fired) > 0 || len(acts) > 0 || outDelivered > 0 {
+					var syncedSidebar int
+					if !*dryRun {
+						if rep, sErr := kernel.DrainSidebarSyncQueue(vaultDir, 2*time.Second); sErr == nil && rep != nil {
+							syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
+						}
+					}
+					if len(fired) > 0 || len(acts) > 0 || outDelivered > 0 || syncedSidebar > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-cronTicker.C:

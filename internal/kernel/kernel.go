@@ -22,7 +22,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
-	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/timers"
@@ -55,9 +54,20 @@ type SpawnEvent struct {
 // in the active Front Desk conversation via Antigravity's native `schedule` tool.
 type ArmedTrigger struct {
 	ID      string `json:"id"`
+	TaskID  string `json:"taskId,omitempty"`
 	Cron    string `json:"cron"`
 	Skill   string `json:"skill,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 	ArmedAt string `json:"armedAt"`
+}
+
+// AdHocCron tracks a user-requested recurring conversation cron in the active Front Desk
+// conversation that is NOT managed by local/triggers.yaml.
+type AdHocCron struct {
+	TaskID  string `json:"taskId,omitempty"`
+	Cron    string `json:"cron"`
+	Summary string `json:"summary"`
+	ArmedAt string `json:"armedAt,omitempty"`
 }
 
 // FrontDeskLease tracks the single active "Front Desk" intake conversationId in local/memory/front_desk.json
@@ -69,6 +79,8 @@ type FrontDeskLease struct {
 	WorkspaceDir   string                  `json:"workspaceDir,omitempty"`
 	ConsolePinned  bool                    `json:"consolePinned,omitempty"`
 	ArmedTriggers  map[string]ArmedTrigger `json:"armedTriggers,omitempty"`
+	AdHocCrons     []AdHocCron             `json:"adHocCrons,omitempty"`
+	KilledTaskIDs  []string                `json:"killedTaskIds,omitempty"`
 	UpdatedAt      string                  `json:"updatedAt"`
 }
 
@@ -1653,6 +1665,8 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if hasPrev && prev.ConversationID == convID {
 		lease.ConsolePinned = prev.ConsolePinned
 		lease.ArmedTriggers = prev.ArmedTriggers
+		lease.AdHocCrons = prev.AdHocCrons
+		lease.KilledTaskIDs = prev.KilledTaskIDs
 		lease.ProjectID = prev.ProjectID
 		lease.WorkspaceDir = prev.WorkspaceDir
 	}
@@ -1699,19 +1713,63 @@ func SetFrontDeskWorkspace(vaultDir, convID, workspaceDir string) error {
 	return saveFrontDeskLease(vaultDir, fd)
 }
 
-// BackfillFrontDeskProjectID persists ANTIGRAVITY_PROJECT_ID into front_desk.json when the
-// current process belongs to the active Front Desk conversation and fd.ProjectID is empty.
-func BackfillFrontDeskProjectID(vaultDir string) {
-	if vaultDir == "" || os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != "" {
-		return
+func primaryVaultWorkspaceDir(vaultDir string) string {
+	if strings.TrimSpace(vaultDir) == "" {
+		return ""
+	}
+	if fd, ok := GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.WorkspaceDir) != "" {
+		w := strings.TrimSpace(fd.WorkspaceDir)
+		if abs, err := filepath.Abs(w); err == nil {
+			w = abs
+		}
+		return filepath.Clean(w)
+	}
+	cleanV := filepath.Clean(vaultDir)
+	if abs, err := filepath.Abs(cleanV); err == nil {
+		cleanV = abs
+	}
+	if filepath.Base(cleanV) == "local" {
+		return filepath.Dir(cleanV)
+	}
+	return ""
+}
+
+func isCallerInPrimaryVaultWorkspace(vaultDir string) bool {
+	if strings.TrimSpace(vaultDir) == "" || os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != "" {
+		return false
 	}
 	convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	fd, hasFD := GetFrontDesk(vaultDir)
+	if convID != "" && hasFD && fd.ConversationID == convID {
+		return true
+	}
+	primary := primaryVaultWorkspaceDir(vaultDir)
+	if primary == "" {
+		return false
+	}
+	wd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(wd) == "" {
+		return false
+	}
+	if abs, aErr := filepath.Abs(wd); aErr == nil {
+		wd = abs
+	}
+	return filepath.Clean(wd) == filepath.Clean(primary)
+}
+
+// BackfillFrontDeskProjectID persists ANTIGRAVITY_PROJECT_ID into front_desk.json when the
+// current process belongs to the active Front Desk conversation or the primary Vault workspace
+// and fd.ProjectID is empty.
+func BackfillFrontDeskProjectID(vaultDir string) {
+	if !isCallerInPrimaryVaultWorkspace(vaultDir) {
+		return
+	}
 	projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
-	if convID == "" || projID == "" {
+	if projID == "" {
 		return
 	}
 	fd, ok := GetFrontDesk(vaultDir)
-	if !ok || fd.ConversationID != convID || strings.TrimSpace(fd.ProjectID) != "" {
+	if !ok || strings.TrimSpace(fd.ProjectID) != "" {
 		return
 	}
 	fd.ProjectID = projID
@@ -1736,22 +1794,38 @@ func MarkConsolePinned(vaultDir, convID string) error {
 	return saveFrontDeskLease(vaultDir, fd)
 }
 
-func matchScheduleTrigger(schedules []ScheduleTrigger, cronExpr, prompt string) (ScheduleTrigger, bool) {
-	normCron := strings.Join(strings.Fields(strings.TrimSpace(cronExpr)), " ")
+func normalizeFiveFieldCronExpr(cronExpr string) string {
+	normCron := strings.Join(strings.Fields(strings.Trim(strings.TrimSpace(cronExpr), "\"")), " ")
 	if strings.HasPrefix(strings.ToUpper(normCron), "CRON_TZ=") {
 		parts := strings.Fields(normCron)
 		if len(parts) > 1 {
 			normCron = strings.Join(parts[1:], " ")
 		}
 	}
-	lowerPrompt := strings.ToLower(prompt)
+	return normCron
+}
+
+func matchScheduleTrigger(schedules []ScheduleTrigger, cronExpr, prompt string) (ScheduleTrigger, bool) {
+	normCron := normalizeFiveFieldCronExpr(cronExpr)
+	lowerPrompt := strings.ToLower(strings.Trim(strings.TrimSpace(prompt), "\""))
 	for _, s := range schedules {
-		if normCron != "" && s.FiveFieldCron() == normCron {
+		if s.ID == "" {
+			continue
+		}
+		lowerID := strings.ToLower(s.ID)
+		if strings.Contains(lowerPrompt, "[hq-trigger:"+lowerID+"]") || strings.Contains(lowerPrompt, lowerID) {
 			return s, true
 		}
-		if s.ID != "" && strings.Contains(lowerPrompt, strings.ToLower(s.ID)) {
-			return s, true
+	}
+	if normCron != "" {
+		for _, s := range schedules {
+			if s.FiveFieldCron() == normCron {
+				return s, true
+			}
 		}
+		return ScheduleTrigger{}, false
+	}
+	for _, s := range schedules {
 		if s.Skill != "" && strings.Contains(lowerPrompt, strings.ToLower(s.Skill)) {
 			return s, true
 		}
@@ -1759,7 +1833,42 @@ func matchScheduleTrigger(schedules []ScheduleTrigger, cronExpr, prompt string) 
 	return ScheduleTrigger{}, false
 }
 
-// RecordArmedTrigger records a scheduled trigger armed in the active Front Desk via Antigravity's `schedule` tool.
+func loadAllKnownSchedules(vaultDir string) []ScheduleTrigger {
+	if cfg, err := LoadEffectiveTriggers(vaultDir); err == nil && cfg != nil && len(cfg.Schedules) > 0 {
+		return cfg.Schedules
+	}
+	if cfg, err := LoadTriggers(vaultDir); err == nil && cfg != nil {
+		return cfg.Schedules
+	}
+	return nil
+}
+
+func upsertAdHocCron(list []AdHocCron, item AdHocCron) ([]AdHocCron, bool) {
+	if item.TaskID == "" && item.Cron == "" {
+		return list, false
+	}
+	for i := range list {
+		cur := &list[i]
+		if item.TaskID != "" && cur.TaskID == item.TaskID {
+			if cur.Cron == item.Cron && cur.Summary == item.Summary {
+				return list, false
+			}
+			cur.Cron = item.Cron
+			cur.Summary = item.Summary
+			return list, true
+		}
+		if cur.Cron == item.Cron && cur.Summary == item.Summary {
+			if item.TaskID != "" && cur.TaskID == "" {
+				cur.TaskID = item.TaskID
+				return list, true
+			}
+			return list, false
+		}
+	}
+	return append(list, item), true
+}
+
+// RecordArmedTrigger records a scheduled trigger or ad-hoc user cron armed in the active Front Desk via `schedule`.
 func RecordArmedTrigger(vaultDir, convID, cronExpr, prompt string) (string, error) {
 	fd, ok := GetFrontDesk(vaultDir)
 	if !ok {
@@ -1768,17 +1877,17 @@ func RecordArmedTrigger(vaultDir, convID, cronExpr, prompt string) (string, erro
 	if convID != "" && fd.ConversationID != convID {
 		return "", nil
 	}
+	cleanCron := strings.Trim(strings.TrimSpace(cronExpr), "\"")
+	cleanPrompt := strings.Trim(strings.TrimSpace(prompt), "\"")
 	if fd.ArmedTriggers == nil {
 		fd.ArmedTriggers = make(map[string]ArmedTrigger)
 	}
-	cfg, _ := LoadTriggers(vaultDir)
-	var schedules []ScheduleTrigger
-	if cfg != nil {
-		schedules = cfg.Schedules
-	}
-	if matched, found := matchScheduleTrigger(schedules, cronExpr, prompt); found {
+	schedules := loadAllKnownSchedules(vaultDir)
+	if matched, found := matchScheduleTrigger(schedules, cleanCron, cleanPrompt); found {
+		prev := fd.ArmedTriggers[matched.ID]
 		fd.ArmedTriggers[matched.ID] = ArmedTrigger{
 			ID:      matched.ID,
+			TaskID:  prev.TaskID,
 			Cron:    matched.FiveFieldCron(),
 			Skill:   matched.Skill,
 			ArmedAt: time.Now().Format(time.RFC3339),
@@ -1786,21 +1895,103 @@ func RecordArmedTrigger(vaultDir, convID, cronExpr, prompt string) (string, erro
 		fd.UpdatedAt = time.Now().Format(time.RFC3339)
 		return matched.ID, saveFrontDeskLease(vaultDir, fd)
 	}
-	if strings.TrimSpace(cronExpr) != "" {
-		customID := "cron-" + slugify(cronExpr)
-		fd.ArmedTriggers[customID] = ArmedTrigger{
-			ID:      customID,
-			Cron:    strings.TrimSpace(cronExpr),
+	if cleanCron != "" {
+		summary := SanitizeTaskTitle(cleanPrompt, cleanCron)
+		updated, changed := upsertAdHocCron(fd.AdHocCrons, AdHocCron{
+			Cron:    cleanCron,
+			Summary: summary,
 			ArmedAt: time.Now().Format(time.RFC3339),
+		})
+		if changed {
+			fd.AdHocCrons = updated
+			fd.UpdatedAt = time.Now().Format(time.RFC3339)
+			return "adhoc-" + slugify(cleanCron), saveFrontDeskLease(vaultDir, fd)
 		}
-		fd.UpdatedAt = time.Now().Format(time.RFC3339)
-		return customID, saveFrontDeskLease(vaultDir, fd)
+		return "adhoc-" + slugify(cleanCron), nil
 	}
 	return "", nil
 }
 
+// RecordKilledFrontDeskTask marks a background timer/task in the active Front Desk as killed so
+// transcript reconciliation never resurrects it, and removes matching armed/ad-hoc entries.
+func RecordKilledFrontDeskTask(vaultDir, convID, taskID string) error {
+	taskID = strings.Trim(strings.TrimSpace(taskID), "\"")
+	if taskID == "" {
+		return nil
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok {
+		return nil
+	}
+	if convID != "" && fd.ConversationID != convID {
+		return nil
+	}
+	changed := false
+	seenKilled := false
+	for _, k := range fd.KilledTaskIDs {
+		if k == taskID {
+			seenKilled = true
+			break
+		}
+	}
+	if !seenKilled {
+		fd.KilledTaskIDs = append(fd.KilledTaskIDs, taskID)
+		changed = true
+	}
+	for id, at := range fd.ArmedTriggers {
+		if at.TaskID == taskID {
+			delete(fd.ArmedTriggers, id)
+			changed = true
+		}
+	}
+	if len(fd.AdHocCrons) > 0 {
+		kept := fd.AdHocCrons[:0]
+		for _, ac := range fd.AdHocCrons {
+			if ac.TaskID == taskID {
+				changed = true
+				continue
+			}
+			kept = append(kept, ac)
+		}
+		fd.AdHocCrons = kept
+	}
+	if !changed {
+		return nil
+	}
+	fd.UpdatedAt = time.Now().Format(time.RFC3339)
+	return saveFrontDeskLease(vaultDir, fd)
+}
+
+func parseGenericCronLaunchContent(content string) (taskID, cronExpr, prompt string, ok bool) {
+	if !strings.Contains(content, "Tool is running as a background task with task id:") ||
+		!strings.Contains(content, "Task Description: Cron:") {
+		return "", "", "", false
+	}
+	for _, rawLine := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "Tool is running as a background task with task id:") {
+			taskID = strings.TrimSpace(strings.TrimPrefix(line, "Tool is running as a background task with task id:"))
+		} else if strings.HasPrefix(line, "Task Description:") {
+			desc := strings.TrimSpace(strings.TrimPrefix(line, "Task Description:"))
+			if strings.HasPrefix(desc, "Cron:") {
+				rest := strings.TrimSpace(strings.TrimPrefix(desc, "Cron:"))
+				c, p, hasPrompt := strings.Cut(rest, ", Prompt:")
+				cronExpr = strings.Trim(strings.TrimSpace(c), "\"")
+				if hasPrompt {
+					prompt = strings.Trim(strings.TrimSpace(p), "\"")
+				}
+			}
+		}
+	}
+	if taskID == "" || cronExpr == "" {
+		return "", "", "", false
+	}
+	return taskID, cronExpr, prompt, true
+}
+
 // ReconcileFrontDeskFromTranscript inspects the active Front Desk conversation's transcript.jsonl
-// (if present on disk) to backfill ConsolePinned and ArmedTriggers state.
+// (if present on disk) to backfill ConsolePinned, harness ArmedTriggers (with TaskIDs), AdHocCrons,
+// and KilledTaskIDs.
 func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 	fd, ok := GetFrontDesk(vaultDir)
 	if !ok || fd.ConversationID == "" {
@@ -1818,11 +2009,31 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 	}
 	defer f.Close()
 
-	cfg, _ := LoadTriggers(vaultDir)
-	var schedules []ScheduleTrigger
-	if cfg != nil {
-		schedules = cfg.Schedules
+	schedules := loadAllKnownSchedules(vaultDir)
+	knownSched := make(map[string]bool, len(schedules)*2)
+	for _, s := range schedules {
+		if s.ID != "" {
+			knownSched[s.ID] = true
+			knownSched[s.FQID()] = true
+		}
 	}
+
+	killedSet := make(map[string]bool, len(fd.KilledTaskIDs))
+	for _, kid := range fd.KilledTaskIDs {
+		if k := strings.TrimSpace(kid); k != "" {
+			killedSet[k] = true
+		}
+	}
+
+	type transcriptCronItem struct {
+		taskID   string
+		cronExpr string
+		prompt   string
+		armedAt  string
+	}
+	var launchedCrons []transcriptCronItem
+	launchedKeys := make(map[string]bool)
+	var fallbackCalls []transcriptCronItem
 
 	changed := false
 	scanner := bufio.NewScanner(f)
@@ -1831,6 +2042,9 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 
 	for scanner.Scan() {
 		var step struct {
+			Type      string `json:"type"`
+			CreatedAt string `json:"created_at"`
+			Content   string `json:"content"`
 			ToolCalls []struct {
 				Name string                 `json:"name"`
 				Args map[string]interface{} `json:"args"`
@@ -1850,6 +2064,18 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 						changed = true
 					}
 				}
+			case "manage_task":
+				action, _ := tc.Args["Action"].(string)
+				if strings.EqualFold(strings.Trim(strings.TrimSpace(action), "\""), "kill") {
+					rawTID, _ := tc.Args["TaskId"].(string)
+					if tid := strings.Trim(strings.TrimSpace(rawTID), "\""); tid != "" {
+						if !killedSet[tid] {
+							killedSet[tid] = true
+							fd.KilledTaskIDs = append(fd.KilledTaskIDs, tid)
+							changed = true
+						}
+					}
+				}
 			case "schedule":
 				rawCron, _ := tc.Args["CronExpression"].(string)
 				rawPrompt, _ := tc.Args["Prompt"].(string)
@@ -1858,20 +2084,92 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 				if cronExpr == "" && prompt == "" {
 					continue
 				}
-				if fd.ArmedTriggers == nil {
-					fd.ArmedTriggers = make(map[string]ArmedTrigger)
+				fallbackCalls = append(fallbackCalls, transcriptCronItem{
+					cronExpr: cronExpr,
+					prompt:   prompt,
+					armedAt:  step.CreatedAt,
+				})
+			}
+		}
+		if tid, cExpr, pText, isCronLaunch := parseGenericCronLaunchContent(step.Content); isCronLaunch {
+			launchedCrons = append(launchedCrons, transcriptCronItem{
+				taskID:   tid,
+				cronExpr: cExpr,
+				prompt:   pText,
+				armedAt:  step.CreatedAt,
+			})
+			launchedKeys[normalizeFiveFieldCronExpr(cExpr)+"\x00"+pText] = true
+		}
+	}
+
+	if fd.ArmedTriggers == nil {
+		fd.ArmedTriggers = make(map[string]ArmedTrigger)
+	}
+	for id, at := range fd.ArmedTriggers {
+		if (at.TaskID != "" && killedSet[at.TaskID]) || !knownSched[id] {
+			delete(fd.ArmedTriggers, id)
+			changed = true
+		}
+	}
+	if len(fd.AdHocCrons) > 0 {
+		kept := fd.AdHocCrons[:0]
+		for _, ac := range fd.AdHocCrons {
+			if ac.TaskID != "" && killedSet[ac.TaskID] {
+				changed = true
+				continue
+			}
+			kept = append(kept, ac)
+		}
+		fd.AdHocCrons = kept
+	}
+
+	activeItems := make([]transcriptCronItem, 0, len(launchedCrons)+len(fallbackCalls))
+	for _, lc := range launchedCrons {
+		if lc.taskID != "" && killedSet[lc.taskID] {
+			continue
+		}
+		activeItems = append(activeItems, lc)
+	}
+	for _, fc := range fallbackCalls {
+		key := normalizeFiveFieldCronExpr(fc.cronExpr) + "\x00" + fc.prompt
+		if launchedKeys[key] {
+			continue
+		}
+		activeItems = append(activeItems, fc)
+	}
+
+	for _, item := range activeItems {
+		armedAt := strings.TrimSpace(item.armedAt)
+		if armedAt == "" {
+			armedAt = time.Now().Format(time.RFC3339)
+		}
+		if matched, found := matchScheduleTrigger(schedules, item.cronExpr, item.prompt); found {
+			prev, exists := fd.ArmedTriggers[matched.ID]
+			nextTaskID := item.taskID
+			if nextTaskID == "" {
+				nextTaskID = prev.TaskID
+			}
+			if !exists || prev.TaskID != nextTaskID || prev.Cron != matched.FiveFieldCron() {
+				fd.ArmedTriggers[matched.ID] = ArmedTrigger{
+					ID:      matched.ID,
+					TaskID:  nextTaskID,
+					Cron:    matched.FiveFieldCron(),
+					Skill:   matched.Skill,
+					ArmedAt: armedAt,
 				}
-				if matched, found := matchScheduleTrigger(schedules, cronExpr, prompt); found {
-					if _, exists := fd.ArmedTriggers[matched.ID]; !exists {
-						fd.ArmedTriggers[matched.ID] = ArmedTrigger{
-							ID:      matched.ID,
-							Cron:    matched.FiveFieldCron(),
-							Skill:   matched.Skill,
-							ArmedAt: time.Now().Format(time.RFC3339),
-						}
-						changed = true
-					}
-				}
+				changed = true
+			}
+		} else if item.cronExpr != "" {
+			summary := SanitizeTaskTitle(item.prompt, item.cronExpr)
+			nextAdHoc, adChanged := upsertAdHocCron(fd.AdHocCrons, AdHocCron{
+				TaskID:  item.taskID,
+				Cron:    item.cronExpr,
+				Summary: summary,
+				ArmedAt: armedAt,
+			})
+			if adChanged {
+				fd.AdHocCrons = nextAdHoc
+				changed = true
 			}
 		}
 	}
@@ -1884,7 +2182,7 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 }
 
 // GetUnarmedTriggers compares effective schedules (core + packs + extensions.json overrides) against the active Front Desk's ArmedTriggers
-// (and active background daemon coverage for daemon_gatekeeper / isolated_worker schedules)
+// (or active background daemon ownership when `hq daemon` is running)
 // and returns the armed and unarmed ScheduleTrigger slices for enabled schedules.
 func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []ScheduleTrigger) {
 	cfg, err := LoadEffectiveTriggers(vaultDir)
@@ -1900,7 +2198,7 @@ func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []Sch
 		if !s.IsEnabled() {
 			continue
 		}
-		if daemonActive && (s.EffectiveMode() == "daemon_gatekeeper" || s.EffectiveMode() == "isolated_worker") {
+		if daemonActive {
 			armed = append(armed, s)
 			continue
 		}
@@ -1919,8 +2217,10 @@ func GetUnarmedTriggers(vaultDir string) (armed []ScheduleTrigger, unarmed []Sch
 	return armed, unarmed
 }
 
-// GetDisarmTriggers returns armed Front Desk schedules that have since been paused/disabled via <vault>/extensions.json
-// so SessionStart can instruct the Front Desk coordinator to cancel the live schedule via manage_task(Action="kill").
+// GetDisarmTriggers returns armed Front Desk harness schedules that are either paused via
+// <vault>/extensions.json (`Reason: "paused"`) OR superseded because `hq daemon` is active
+// (`Reason: "migrated_to_daemon"`), so SessionStart can instruct the Front Desk coordinator to
+// cancel the duplicate timer via manage_task(Action="kill"). Ad-hoc user crons are never included.
 func GetDisarmTriggers(vaultDir string) []ArmedTrigger {
 	fd, ok := GetFrontDesk(vaultDir)
 	if !ok || len(fd.ArmedTriggers) == 0 {
@@ -1930,6 +2230,7 @@ func GetDisarmTriggers(vaultDir string) []ArmedTrigger {
 	if cfg == nil {
 		return nil
 	}
+	daemonActive := IsDaemonActiveFast(vaultDir)
 	disabled := make(map[string]bool)
 	for _, s := range cfg.Schedules {
 		if !s.IsEnabled() {
@@ -1940,6 +2241,10 @@ func GetDisarmTriggers(vaultDir string) []ArmedTrigger {
 	var out []ArmedTrigger
 	for k, at := range fd.ArmedTriggers {
 		if disabled[k] || disabled[at.ID] {
+			at.Reason = "paused"
+			out = append(out, at)
+		} else if daemonActive {
+			at.Reason = "migrated_to_daemon"
 			out = append(out, at)
 		}
 	}
@@ -2211,10 +2516,23 @@ func resolveSpawnTarget(vaultDir, trigger string) (workDir, projectID string) {
 		if hasFD {
 			projectID = strings.TrimSpace(fd.ProjectID)
 		}
+		if projectID == "" {
+			if sess, ok := loadReachableLSSession(vaultDir); ok && strings.TrimSpace(sess.ProjectID) != "" {
+				projectID = strings.TrimSpace(sess.ProjectID)
+			}
+		}
+		if projectID == "" && isCallerInPrimaryVaultWorkspace(vaultDir) {
+			projectID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+		}
 	} else {
 		projectID = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
 		if projectID == "" && hasFD {
 			projectID = strings.TrimSpace(fd.ProjectID)
+		}
+		if projectID == "" {
+			if sess, ok := loadReachableLSSession(vaultDir); ok && strings.TrimSpace(sess.ProjectID) != "" {
+				projectID = strings.TrimSpace(sess.ProjectID)
+			}
 		}
 	}
 	return workDir, projectID
@@ -2339,6 +2657,14 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 			return cascadeID, usedModel, false, fmt.Errorf("StartCascade succeeded (%s) but SendUserCascadeMessage failed: %w", cascadeID, sendErr)
 		}
 	}
+	if strings.TrimSpace(title) != "" {
+		_ = NewSidebarSyncClient(SidebarSyncConfig{
+			BaseURL:   creds.BaseURL,
+			CSRFToken: creds.CSRFToken,
+		}).UpdateConversationAnnotations(context.Background(), cascadeID, nil, lsConversationPatch{
+			Title: strings.TrimSpace(title),
+		}, 3*time.Second)
+	}
 	return cascadeID, usedModel, false, nil
 }
 
@@ -2351,12 +2677,11 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, "", "", "")
 	}
 	isForced := len(force) > 0 && force[0]
-	budgetExempt := trigger == "watcher:desktop-sweep"
 	state := LoadQuota(vaultDir)
 	if state.CircuitOpen && !isForced {
 		return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
 	}
-	if state.SpawnsToday >= state.MaxDailySpawns && !isForced && !budgetExempt {
+	if state.SpawnsToday >= state.MaxDailySpawns && !isForced {
 		state.CircuitOpen = true
 		state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", state.SpawnsToday, state.MaxDailySpawns)
 		_ = SaveQuota(vaultDir, state)
@@ -2425,9 +2750,7 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		}
 	}
 
-	if !budgetExempt {
-		state.SpawnsToday++
-	}
+	state.SpawnsToday++
 	state.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s [%s])", trigger, skill, modelID)
 	state.Events = append(state.Events, SpawnEvent{
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -2473,9 +2796,6 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	if !dryRun {
 		if watchSum, wErr := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: now}); wErr == nil && watchSum.EnqueuedTotal > 0 {
 			inboxActions = append(inboxActions, fmt.Sprintf("watcher:enqueued=%d", watchSum.EnqueuedTotal))
-		}
-		if MaybeEnqueueDesktopWatcherSweep(vaultDir, now) {
-			inboxActions = append(inboxActions, "watcher:desktop-sweep-enqueued")
 		}
 	}
 
@@ -3063,19 +3383,21 @@ var staticModelEnumMap = map[string]string{
 }
 
 type lsCredentials struct {
-	RawAddress  string `json:"address,omitempty"`
-	BaseURL     string `json:"baseUrl,omitempty"`
-	CSRFToken   string `json:"csrfToken,omitempty"`
-	AgentAPIExe string `json:"agentApiExe,omitempty"`
-	UpdatedAt   string `json:"updatedAt,omitempty"`
+	RawAddress      string `json:"address,omitempty"`
+	BaseURL         string `json:"baseUrl,omitempty"`
+	CSRFToken       string `json:"csrfToken,omitempty"`
+	AgentAPIExe     string `json:"agentApiExe,omitempty"`
+	PluginShimDir   string `json:"pluginShimDir,omitempty"`
+	CredentialScope string `json:"credentialScope,omitempty"`
+	AppDataDir      string `json:"appDataDir,omitempty"`
+	GeminiDir       string `json:"geminiDir,omitempty"`
+	ConfigRelDir    string `json:"configRelDir,omitempty"`
+	ProjectID       string `json:"projectId,omitempty"`
+	UpdatedAt       string `json:"updatedAt,omitempty"`
 }
 
 func lsSessionFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "private", "runtime", "ls_session.json")
-}
-
-func desktopSweepStampPath(vaultDir string) string {
-	return filepath.Join(vaultDir, "private", "runtime", "desktop_sweep_stamp")
 }
 
 func normalizeLSAddress(addr string) (rawHostPort, baseURL string) {
@@ -3134,7 +3456,7 @@ func isTCPReachable(baseURL string) bool {
 
 // RecordLiveLSSession persists live Language Server session coordinates from the current
 // process environment into `<vault>/private/runtime/ls_session.json` (`0600`) without ever
-// clobbering existing credentials when run from a headless process.
+// clobbering existing credentials or desktop plugin-CLI coordinates from headless/quarantined runs.
 func RecordLiveLSSession(vaultDir string) error {
 	if strings.TrimSpace(vaultDir) == "" {
 		return nil
@@ -3151,16 +3473,76 @@ func RecordLiveLSSession(vaultDir string) error {
 	rawAddrEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
 	csrfEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
 	agentExeEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE"))
+	shimDirEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PLUGIN_SHIM_DIR"))
+	scopeEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE"))
+	appDataEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_APP_DATA_DIR"))
+	geminiDirEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_GEMINI_DIR"))
+	configRelEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONFIG_REL_DIR"))
+	projEnv := ""
+	if isCallerInPrimaryVaultWorkspace(vaultDir) {
+		projEnv = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	}
+
+	// Never persist quarantined sentinel paths or non-existent shim directories.
+	if shimDirEnv == "/nonexistent-hq-sentinel" {
+		shimDirEnv = ""
+		scopeEnv = ""
+	} else if shimDirEnv != "" {
+		if st, err := os.Stat(shimDirEnv); err != nil || !st.IsDir() {
+			shimDirEnv = ""
+		}
+	}
+	if shimDirEnv == "" {
+		scopeEnv = ""
+	}
+
+	pick := func(cur, prev string) string {
+		if cur != "" {
+			return cur
+		}
+		return strings.TrimSpace(prev)
+	}
 
 	if rawAddrEnv == "" || csrfEnv == "" {
-		if agentExeEnv != "" && hasExisting && existing.BaseURL != "" && existing.CSRFToken != "" && existing.AgentAPIExe != agentExeEnv {
-			existing.AgentAPIExe = agentExeEnv
-			existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-			data, err := json.MarshalIndent(existing, "", "  ")
-			if err != nil {
-				return err
+		if hasExisting && existing.BaseURL != "" && existing.CSRFToken != "" {
+			updated := existing
+			changed := false
+			if agentExeEnv != "" && existing.AgentAPIExe != agentExeEnv {
+				updated.AgentAPIExe = agentExeEnv
+				changed = true
 			}
-			return store.WriteAtomic(p, append(data, '\n'), 0o600)
+			if shimDirEnv != "" && existing.PluginShimDir != shimDirEnv {
+				updated.PluginShimDir = shimDirEnv
+				changed = true
+			}
+			if scopeEnv != "" && existing.CredentialScope != scopeEnv {
+				updated.CredentialScope = scopeEnv
+				changed = true
+			}
+			if appDataEnv != "" && existing.AppDataDir != appDataEnv {
+				updated.AppDataDir = appDataEnv
+				changed = true
+			}
+			if geminiDirEnv != "" && existing.GeminiDir != geminiDirEnv {
+				updated.GeminiDir = geminiDirEnv
+				changed = true
+			}
+			if configRelEnv != "" && existing.ConfigRelDir != configRelEnv {
+				updated.ConfigRelDir = configRelEnv
+				changed = true
+			}
+			if projEnv != "" && existing.ProjectID != projEnv {
+				updated.ProjectID = projEnv
+				changed = true
+			}
+			if changed {
+				updated.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				data, err := json.MarshalIndent(updated, "", "  ")
+				if err != nil {
+					return err
+				}
+				return store.WriteAtomic(p, append(data, '\n'), 0o600)
+			}
 		}
 		return nil
 	}
@@ -3169,15 +3551,34 @@ func RecordLiveLSSession(vaultDir string) error {
 	if normBase == "" {
 		return nil
 	}
-	effectiveAgentExe := agentExeEnv
-	if effectiveAgentExe == "" && hasExisting {
-		effectiveAgentExe = strings.TrimSpace(existing.AgentAPIExe)
+	creds := lsCredentials{
+		RawAddress:      normRaw,
+		BaseURL:         normBase,
+		CSRFToken:       csrfEnv,
+		AgentAPIExe:     pick(agentExeEnv, existing.AgentAPIExe),
+		PluginShimDir:   pick(shimDirEnv, existing.PluginShimDir),
+		CredentialScope: pick(scopeEnv, existing.CredentialScope),
+		AppDataDir:      pick(appDataEnv, existing.AppDataDir),
+		GeminiDir:       pick(geminiDirEnv, existing.GeminiDir),
+		ConfigRelDir:    pick(configRelEnv, existing.ConfigRelDir),
+		ProjectID:       pick(projEnv, existing.ProjectID),
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if creds.PluginShimDir == "/nonexistent-hq-sentinel" {
+		creds.PluginShimDir = ""
+		creds.CredentialScope = ""
 	}
 	if hasExisting &&
-		existing.RawAddress == normRaw &&
-		existing.BaseURL == normBase &&
-		existing.CSRFToken == csrfEnv &&
-		existing.AgentAPIExe == effectiveAgentExe {
+		existing.RawAddress == creds.RawAddress &&
+		existing.BaseURL == creds.BaseURL &&
+		existing.CSRFToken == creds.CSRFToken &&
+		existing.AgentAPIExe == creds.AgentAPIExe &&
+		existing.PluginShimDir == creds.PluginShimDir &&
+		existing.CredentialScope == creds.CredentialScope &&
+		existing.AppDataDir == creds.AppDataDir &&
+		existing.GeminiDir == creds.GeminiDir &&
+		existing.ConfigRelDir == creds.ConfigRelDir &&
+		existing.ProjectID == creds.ProjectID {
 		if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(existing.UpdatedAt)); err == nil && time.Since(ts) < 60*time.Second {
 			return nil
 		}
@@ -3185,13 +3586,6 @@ func RecordLiveLSSession(vaultDir string) error {
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
-	}
-	creds := lsCredentials{
-		RawAddress:  normRaw,
-		BaseURL:     normBase,
-		CSRFToken:   csrfEnv,
-		AgentAPIExe: effectiveAgentExe,
-		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
@@ -3235,80 +3629,27 @@ func HasReachableLSSession(vaultDir string) bool {
 	return isTCPReachable(creds.BaseURL)
 }
 
-// MaybeEnqueueDesktopWatcherSweep enqueues a lightweight waking-hours sweep event when
-// desktop-session connectors (such as Option A Gmail) are due for a poll and a reachable
-// desktop Language Server session exists.
-func MaybeEnqueueDesktopWatcherSweep(vaultDir string, now time.Time) bool {
-	if strings.TrimSpace(vaultDir) == "" {
-		return false
-	}
-	attCfg := outbox.LoadAttentionConfig(vaultDir)
-	if outbox.InQuietHours(attCfg, now) {
-		return false
-	}
-	if !attCfg.QuietHours.Enabled && strings.TrimSpace(attCfg.QuietHours.Start) == "" {
-		localNow := now
-		if tz := strings.TrimSpace(attCfg.QuietHours.Timezone); tz != "" {
-			if loc, err := time.LoadLocation(tz); err == nil {
-				localNow = now.In(loc)
-			}
-		}
-		if h := localNow.Hour(); h < 7 || h >= 23 {
-			return false
-		}
-	}
-	if LoadQuota(vaultDir).CircuitOpen {
-		return false
-	}
-
-	stampPath := desktopSweepStampPath(vaultDir)
-	if raw, err := os.ReadFile(stampPath); err == nil {
-		if ts, pErr := time.Parse(time.RFC3339, strings.TrimSpace(string(raw))); pErr == nil && now.Sub(ts) < watcher.DesktopPiggybackMinInterval {
-			return false
-		}
-	}
-
-	dueKeys, needed := watcher.DesktopPollNeeded(vaultDir, watcher.DesktopPiggybackMinInterval, now)
-	if !needed {
-		return false
-	}
-	if !HasReachableLSSession(vaultDir) {
-		return false
-	}
-
-	quickModel := strings.TrimSpace(routing.Resolve(vaultDir, routing.Request{ExplicitTier: "quick"}).ModelID)
-	bucket := now.UTC().Truncate(watcher.DesktopPiggybackMinInterval).Format("20060102T1504")
-	sweepPrompt := "Desktop-session connector poll sweep is due (" + strings.Join(dueKeys, ", ") + ").\n" +
-		"Run `hq watch precheck --desktop-only --json`. If `enqueued_total` > 0, immediately run `hq heartbeat`. Finish silently without chatting unless urgent alerts are emitted via outbox."
-	_, deduped, enqErr := events.Enqueue(vaultDir, events.Event{
-		Source:   "watcher:desktop-sweep",
-		DedupKey: "watcher:desktop-sweep:" + bucket,
-		ScopeKey: "watcher:desktop-sweep",
-		Model:    quickModel,
-		Title:    fmt.Sprintf("[Auto] Desktop Connector Poll Sweep (%d target(s))", len(dueKeys)),
-		Prompt:   sweepPrompt,
-		Metadata: map[string]string{
-			"targets": strings.Join(dueKeys, ","),
-		},
-		MaxAttempts: 2,
-	}, now)
-	if enqErr != nil || deduped {
-		return false
-	}
-	_ = os.MkdirAll(filepath.Dir(stampPath), 0o700)
-	_ = store.WriteAtomic(stampPath, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600)
-	return true
-}
-
 func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
 	if addr, csrf := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN")); addr != "" && csrf != "" {
 		rawAddr, baseURL := normalizeLSAddress(addr)
-		return lsCredentials{
+		creds := lsCredentials{
 			RawAddress:  rawAddr,
 			BaseURL:     baseURL,
 			CSRFToken:   csrf,
 			AgentAPIExe: strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")),
-		}, true
+		}
+		if sess, ok := loadReachableLSSession(vaultDir); ok {
+			if creds.AgentAPIExe == "" {
+				creds.AgentAPIExe = sess.AgentAPIExe
+			}
+			creds.PluginShimDir = sess.PluginShimDir
+			creds.CredentialScope = sess.CredentialScope
+			creds.AppDataDir = sess.AppDataDir
+			creds.GeminiDir = sess.GeminiDir
+			creds.ConfigRelDir = sess.ConfigRelDir
+			creds.ProjectID = sess.ProjectID
+		}
+		return creds, true
 	}
 	if creds, ok := loadReachableLSSession(vaultDir); ok {
 		return creds, true

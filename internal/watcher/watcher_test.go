@@ -276,3 +276,91 @@ func TestDesktopPollNeededAndDesktopOnlyFiltering(t *testing.T) {
 		t.Fatalf("expected desktop poll due after cooldown, got needed=%v due=%v", neededLater, dueLater)
 	}
 }
+
+func TestResetPoisonedClearsDroppedEventsForReenqueue(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 15, 16, 0, 0, 0, time.UTC)
+
+	if err := connector.SaveInstance(context.Background(), vaultDir, connector.InstanceConfig{
+		SchemaVersion:  connector.ConnectorSchemaVersion,
+		Connector:      "gmail",
+		DefaultAccount: "main",
+		Accounts: map[string]connector.AccountInstance{
+			"main": {Email: "owner@example.com", TransportKind: "cli"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveInstance: %v", err)
+	}
+
+	ev, deduped, err := events.Enqueue(vaultDir, events.Event{
+		Source:               "connector:gmail:main",
+		DedupKey:             "gmail:main:msg-poison-1",
+		ScopeKey:             "connector:gmail:main",
+		Title:                "Gmail Triage",
+		Prompt:               "Triage msg-poison-1",
+		MaxAttempts:          1,
+		DedupIncludesDropped: true,
+	}, now)
+	if err != nil || deduped {
+		t.Fatalf("initial Enqueue failed: err=%v deduped=%v", err, deduped)
+	}
+	if _, err := events.DeferBatchOnSpawnError(vaultDir, []string{ev.ID}, "exit 127", false, now); err != nil {
+		t.Fatalf("DeferBatchOnSpawnError: %v", err)
+	}
+
+	// Verify DedupIncludesDropped blocks duplicate while in dropped archive.
+	if _, reDeduped, err := events.Enqueue(vaultDir, events.Event{
+		Source:               "connector:gmail:main",
+		DedupKey:             "gmail:main:msg-poison-1",
+		ScopeKey:             "connector:gmail:main",
+		Title:                "Gmail Triage",
+		Prompt:               "Triage msg-poison-1",
+		DedupIncludesDropped: true,
+	}, now.Add(time.Minute)); err != nil || !reDeduped {
+		t.Fatalf("expected dropped event to dedup before reset, err=%v deduped=%v", err, reDeduped)
+	}
+
+	statePath := filepath.Join(vaultDir, "memory", "watcher", "state.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	stData, _ := json.MarshalIndent(watcher.State{
+		SchemaVersion: watcher.StateSchemaVersion,
+		Accounts: map[string]watcher.AccountWatchState{
+			"gmail:main": {
+				Connector:            "gmail",
+				Account:              "main",
+				PoisonedItems:        []string{"msg-poison-1"},
+				ConsecutiveTransient: 2,
+				AuthNoticeActive:     true,
+				PausedConfigHash:     "stale-hash",
+				LastStatus:           "paused",
+				LastError:            "exit 127",
+			},
+		},
+	}, "", "  ")
+	if err := os.WriteFile(statePath, stData, 0o600); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+
+	clearedItems, clearedEvents, err := watcher.ResetPoisoned(context.Background(), vaultDir, "gmail", "main")
+	if err != nil {
+		t.Fatalf("ResetPoisoned: %v", err)
+	}
+	if clearedItems != 1 || clearedEvents != 1 {
+		t.Fatalf("unexpected ResetPoisoned counts: items=%d events=%d", clearedItems, clearedEvents)
+	}
+
+	// After ResetPoisoned, same DedupKey MUST be accepted again.
+	evAfter, afterDeduped, err := events.Enqueue(vaultDir, events.Event{
+		Source:               "connector:gmail:main",
+		DedupKey:             "gmail:main:msg-poison-1",
+		ScopeKey:             "connector:gmail:main",
+		Title:                "Gmail Triage",
+		Prompt:               "Triage msg-poison-1",
+		DedupIncludesDropped: true,
+	}, now.Add(2*time.Minute))
+	if err != nil || afterDeduped || evAfter.ID == "" {
+		t.Fatalf("expected re-enqueue after ResetPoisoned to succeed, err=%v deduped=%v id=%q", err, afterDeduped, evAfter.ID)
+	}
+}

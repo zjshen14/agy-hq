@@ -1702,7 +1702,14 @@ func SyncMarkdownConsole(vaultDir string) error {
 		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
 		totalTriggers := len(armed) + len(unarmed)
 		if totalTriggers > 0 {
-			fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d armed in Front Desk`\n", len(armed), totalTriggers)
+			if kernel.IsDaemonActiveFast(vaultDir) {
+				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d active in hq daemon`\n", len(armed), totalTriggers)
+			} else {
+				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d armed in Front Desk`\n", len(armed), totalTriggers)
+			}
+		}
+		if len(fd.AdHocCrons) > 0 {
+			fmt.Fprintf(&b, "- **Ad-Hoc Conversation Crons (Front Desk):** `%d active`\n", len(fd.AdHocCrons))
 		}
 	} else {
 		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")

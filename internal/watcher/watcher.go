@@ -418,7 +418,7 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 	if now.IsZero() {
 		now = time.Now()
 	}
-	allowDesktop := opts.AllowDesktopScope || strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	allowDesktop := opts.AllowDesktopScope || connector.HasActiveDesktopPluginScope(vaultDir)
 
 	// 1. Discover connectors first (RankExtensions = 10, never nested inside RankWatcher)
 	resolvedList, err := connector.ListConnectors(vaultDir)
@@ -950,7 +950,7 @@ func ReadItem(ctx context.Context, vaultDir, connID, account, threadOrItemKey, r
 		return "", connector.QuarantinedThread{}, fmt.Errorf("failed to persist quarantine taint before read: %w", mErr)
 	}
 
-	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	allowDesktop := connector.HasActiveDesktopPluginScope(vaultDir)
 	qt, err := connector.ReadQuarantined(ctx, vaultDir, rc.FQID, account, resolvedThreadKey, allowDesktop)
 	if err != nil {
 		return "", connector.QuarantinedThread{}, err
@@ -1011,7 +1011,7 @@ func Query(ctx context.Context, vaultDir, connID, account, queryName string, par
 			}
 		}
 	}
-	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	allowDesktop := connector.HasActiveDesktopPluginScope(vaultDir)
 	return connector.QueryContext(ctx, vaultDir, connID, account, queryName, params, callerTainted, allowDesktop)
 }
 
@@ -1155,4 +1155,64 @@ func RecordPoisonedDrops(vaultDir string, dropped []events.Event, now time.Time)
 		}, now)
 	}
 	return nonWatcher
+}
+
+// ResetPoisoned clears dead-lettered PoisonedItems and transient error counters from watcher state
+// (under RankWatcher), then prunes matching dropped `connector:*` records from the event archive
+// (under RankEvents, without nesting locks) so previously poisoned items can be cleanly re-polled.
+func ResetPoisoned(ctx context.Context, vaultDir, connFilter, acctFilter string) (clearedItems int, clearedEvents int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	connFilter = strings.TrimPrefix(strings.TrimSpace(connFilter), "core/")
+	acctFilter = strings.TrimSpace(acctFilter)
+
+	err = store.With(ctx, store.RankWatcher, stateLockPath(vaultDir), func(_ context.Context) error {
+		st, lErr := loadStateUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		changed := false
+		for aKey, cur := range st.Accounts {
+			cID := strings.TrimSpace(cur.Connector)
+			aID := strings.TrimSpace(cur.Account)
+			if cID == "" || aID == "" {
+				if p0, p1, ok := strings.Cut(aKey, ":"); ok {
+					if cID == "" {
+						cID = p0
+					}
+					if aID == "" {
+						aID = p1
+					}
+				}
+			}
+			if connFilter != "" && cID != connFilter {
+				continue
+			}
+			if acctFilter != "" && aID != acctFilter {
+				continue
+			}
+			if len(cur.PoisonedItems) > 0 || cur.ConsecutiveTransient > 0 || cur.PausedConfigHash != "" || strings.HasPrefix(cur.LastStatus, "error:") {
+				clearedItems += len(cur.PoisonedItems)
+				cur.PoisonedItems = nil
+				cur.ConsecutiveTransient = 0
+				cur.LastError = ""
+				cur.PausedConfigHash = ""
+				if strings.HasPrefix(cur.LastStatus, "error:") {
+					cur.LastStatus = ""
+				}
+				st.Accounts[aKey] = cur
+				changed = true
+			}
+		}
+		if changed {
+			return saveStateUnlocked(vaultDir, st)
+		}
+		return nil
+	})
+	if err != nil {
+		return clearedItems, 0, err
+	}
+	clearedEvents, err = events.ClearDroppedWatcherEvents(vaultDir, connFilter, acctFilter)
+	return clearedItems, clearedEvents, err
 }

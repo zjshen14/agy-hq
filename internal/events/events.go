@@ -2,6 +2,7 @@ package events
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -1382,4 +1383,100 @@ func ValidateDaemonToken(vaultDir, candidate string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(c)) == 1
+}
+
+func watcherEventMatchesFilter(ev Event, connFilter, acctFilter string) bool {
+	if !strings.HasPrefix(ev.Source, "connector:") {
+		return false
+	}
+	rest := strings.TrimPrefix(ev.Source, "connector:")
+	cPart, aPart, hasColon := strings.Cut(rest, ":")
+	evConn := strings.TrimSpace(cPart)
+	evAcct := "default"
+	if hasColon && strings.TrimSpace(aPart) != "" {
+		evAcct = strings.TrimSpace(aPart)
+	}
+	if ev.Metadata != nil {
+		if c := strings.TrimSpace(ev.Metadata["connector"]); c != "" {
+			evConn = c
+		}
+		if a := strings.TrimSpace(ev.Metadata["account"]); a != "" {
+			evAcct = a
+		}
+	}
+	if connFilter != "" && evConn != connFilter && "core/"+evConn != connFilter {
+		return false
+	}
+	if acctFilter != "" && evAcct != acctFilter {
+		return false
+	}
+	return true
+}
+
+// ClearDroppedWatcherEvents removes dropped `connector:*` events matching optional connector/account filters
+// from both active events.json and events_archive.jsonl so reset-poisoned items are not blocked by DedupIncludesDropped.
+func ClearDroppedWatcherEvents(vaultDir, connFilter, acctFilter string) (int, error) {
+	connFilter = strings.TrimSpace(connFilter)
+	acctFilter = strings.TrimSpace(acctFilter)
+	if strings.TrimSpace(vaultDir) == "" {
+		return 0, nil
+	}
+	removed := 0
+	err := withEventsLock(vaultDir, func() error {
+		if active, err := loadActiveUnlocked(vaultDir); err == nil {
+			kept := make([]Event, 0, len(active))
+			changed := false
+			for _, ev := range active {
+				if ev.Status == StatusDropped && watcherEventMatchesFilter(ev, connFilter, acctFilter) {
+					removed++
+					changed = true
+					continue
+				}
+				kept = append(kept, ev)
+			}
+			if changed {
+				if wErr := saveActiveUnlocked(vaultDir, kept); wErr != nil {
+					return wErr
+				}
+			}
+		}
+
+		archPath := archiveEventsPath(vaultDir)
+		f, oErr := os.Open(archPath)
+		if oErr != nil {
+			if os.IsNotExist(oErr) {
+				return nil
+			}
+			return oErr
+		}
+		var outBuf bytes.Buffer
+		archChanged := false
+		scanner := bufio.NewScanner(f)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+		for scanner.Scan() {
+			rawLine := strings.TrimSpace(scanner.Text())
+			if rawLine == "" {
+				continue
+			}
+			var ev Event
+			if json.Unmarshal([]byte(rawLine), &ev) == nil && ev.Status == StatusDropped && watcherEventMatchesFilter(ev, connFilter, acctFilter) {
+				removed++
+				archChanged = true
+				continue
+			}
+			outBuf.WriteString(rawLine)
+			outBuf.WriteByte('\n')
+		}
+		scanErr := scanner.Err()
+		_ = f.Close()
+		if scanErr != nil {
+			return scanErr
+		}
+		if archChanged {
+			return store.WriteAtomic(archPath, outBuf.Bytes(), 0o600)
+		}
+		return nil
+	})
+	return removed, err
 }

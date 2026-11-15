@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -262,7 +263,100 @@ func ExecCLIVerb(ctx context.Context, vaultDir, connID, account, verb string, sc
 }
 
 type runtimeLSSession struct {
-	AgentAPIExe string `json:"agentApiExe"`
+	RawAddress      string `json:"address,omitempty"`
+	BaseURL         string `json:"baseUrl,omitempty"`
+	CSRFToken       string `json:"csrfToken,omitempty"`
+	AgentAPIExe     string `json:"agentApiExe"`
+	PluginShimDir   string `json:"pluginShimDir,omitempty"`
+	CredentialScope string `json:"credentialScope,omitempty"`
+	AppDataDir      string `json:"appDataDir,omitempty"`
+	GeminiDir       string `json:"geminiDir,omitempty"`
+	ConfigRelDir    string `json:"configRelDir,omitempty"`
+}
+
+func isLSHostPortReachable(rawAddr, baseURL string) bool {
+	target := strings.TrimSpace(baseURL)
+	if target == "" {
+		target = strings.TrimSpace(rawAddr)
+	}
+	if target == "" {
+		return false
+	}
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		target = "http://" + target
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	hostPort := u.Host
+	if _, _, splitErr := net.SplitHostPort(hostPort); splitErr != nil {
+		if strings.EqualFold(u.Scheme, "https") {
+			hostPort = net.JoinHostPort(hostPort, "443")
+		} else {
+			hostPort = net.JoinHostPort(hostPort, "80")
+		}
+	}
+	conn, dialErr := net.DialTimeout("tcp", hostPort, 250*time.Millisecond)
+	if dialErr != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// LoadReachableDesktopPluginEnv loads persisted desktop plugin-CLI runtime coordinates from
+// `<vault>/private/runtime/ls_session.json` when the recorded Language Server is currently TCP-reachable
+// and its `pluginShimDir` is an existing directory distinct from the quarantine sentinel.
+func LoadReachableDesktopPluginEnv(vaultDir string) (map[string]string, bool) {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil, false
+	}
+	raw, err := os.ReadFile(filepath.Join(vaultDir, "private", "runtime", "ls_session.json"))
+	if err != nil {
+		return nil, false
+	}
+	var sess runtimeLSSession
+	if json.Unmarshal(raw, &sess) != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(sess.CSRFToken) == "" || !isLSHostPortReachable(sess.RawAddress, sess.BaseURL) {
+		return nil, false
+	}
+	scope := strings.TrimSpace(sess.CredentialScope)
+	shimDir := strings.TrimSpace(sess.PluginShimDir)
+	if scope == "" || shimDir == "" || shimDir == "/nonexistent-hq-sentinel" {
+		return nil, false
+	}
+	info, stErr := os.Stat(shimDir)
+	if stErr != nil || !info.IsDir() {
+		return nil, false
+	}
+	env := map[string]string{
+		"ANTIGRAVITY_CREDENTIAL_SCOPE": scope,
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR":  shimDir,
+	}
+	if v := strings.TrimSpace(sess.AppDataDir); v != "" {
+		env["ANTIGRAVITY_APP_DATA_DIR"] = v
+	}
+	if v := strings.TrimSpace(sess.GeminiDir); v != "" {
+		env["ANTIGRAVITY_GEMINI_DIR"] = v
+	}
+	if v := strings.TrimSpace(sess.ConfigRelDir); v != "" {
+		env["ANTIGRAVITY_CONFIG_REL_DIR"] = v
+	}
+	return env, true
+}
+
+// HasActiveDesktopPluginScope reports whether either the current process environment or a live,
+// TCP-reachable desktop LS session persisted in `<vault>/private/runtime/ls_session.json` provides
+// desktop plugin-CLI scope.
+func HasActiveDesktopPluginScope(vaultDir string) bool {
+	if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != "" {
+		return true
+	}
+	_, ok := LoadReachableDesktopPluginEnv(vaultDir)
+	return ok
 }
 
 // HasUsableTokenFile reports whether ref points to an existing JSON token file containing
@@ -302,10 +396,12 @@ func isLivePluginShimBinary(binPath string) bool {
 		return false
 	}
 	dir := filepath.Dir(clean)
-	if shimDir := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PLUGIN_SHIM_DIR")); shimDir != "" && shimDir != "/nonexistent-hq-sentinel" {
-		if filepath.Clean(shimDir) == dir {
-			return true
-		}
+	shimDir := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PLUGIN_SHIM_DIR"))
+	if shimDir == "/nonexistent-hq-sentinel" {
+		return false
+	}
+	if shimDir != "" {
+		return filepath.Clean(shimDir) == dir
 	}
 	return strings.Contains(filepath.ToSlash(dir), "/agy-plugin-cli-")
 }
@@ -423,6 +519,16 @@ func execResolvedCLIVerb(ctx context.Context, vaultDir string, rc ResolvedConnec
 	}
 	_, accCfg, _ := resolveAccountInstance(rc, account)
 	extraEnv := make(map[string]string)
+	if allowDesktopScope {
+		curShim := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PLUGIN_SHIM_DIR"))
+		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) == "" || curShim == "" || curShim == "/nonexistent-hq-sentinel" {
+			if hydrated, ok := LoadReachableDesktopPluginEnv(vaultDir); ok {
+				for k, v := range hydrated {
+					extraEnv[k] = v
+				}
+			}
+		}
+	}
 	if strings.TrimSpace(accCfg.AgyAccount) != "" {
 		extraEnv["AGY_ACCOUNT"] = strings.TrimSpace(accCfg.AgyAccount)
 	}

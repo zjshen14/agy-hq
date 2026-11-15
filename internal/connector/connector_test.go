@@ -2,6 +2,9 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -434,4 +437,74 @@ func envSliceToMap(env []string) map[string]string {
 		}
 	}
 	return m
+}
+
+func TestLoadReachableDesktopPluginEnvAndSanitizedExtra(t *testing.T) {
+	vaultDir := t.TempDir()
+	shimDir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rtDir := filepath.Join(vaultDir, "private", "runtime")
+	if err := os.MkdirAll(rtDir, 0o700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	sess := runtimeLSSession{
+		BaseURL:         srv.URL,
+		CSRFToken:       "csrf-secret-value",
+		AgentAPIExe:     "/opt/fake/language_server",
+		PluginShimDir:   shimDir,
+		CredentialScope: "user-desktop-scope",
+		AppDataDir:      "/tmp/fake-appdata",
+		GeminiDir:       "/tmp/fake-gemini",
+		ConfigRelDir:    ".gemini/config",
+	}
+	raw, _ := json.Marshal(sess)
+	if err := os.WriteFile(filepath.Join(rtDir, "ls_session.json"), raw, 0o600); err != nil {
+		t.Fatalf("write ls_session.json: %v", err)
+	}
+
+	hydrated, ok := LoadReachableDesktopPluginEnv(vaultDir)
+	if !ok {
+		t.Fatalf("expected LoadReachableDesktopPluginEnv=true while LS reachable and shimDir exists")
+	}
+	if hydrated["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != shimDir || hydrated["ANTIGRAVITY_CREDENTIAL_SCOPE"] != "user-desktop-scope" {
+		t.Fatalf("unexpected hydrated plugin env: %+v", hydrated)
+	}
+
+	// SanitizedSubprocessEnv with desktop scope enabled allows valid hydrated shim/scope
+	// while still stripping CSRF/LS_ADDRESS/AGENTAPI_EXE.
+	envWithDesktop := envSliceToMap(SanitizedSubprocessEnv([]string{
+		"PATH=/usr/bin",
+		"ANTIGRAVITY_CSRF_TOKEN=leak",
+		"ANTIGRAVITY_LS_ADDRESS=127.0.0.1:1234",
+	}, []string{"AGY_ACCOUNT"}, hydrated, true))
+	if envWithDesktop["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != shimDir || envWithDesktop["ANTIGRAVITY_CREDENTIAL_SCOPE"] != "user-desktop-scope" {
+		t.Fatalf("expected desktop shim/scope in sanitized env, got %+v", envWithDesktop)
+	}
+	if _, leaked := envWithDesktop["ANTIGRAVITY_CSRF_TOKEN"]; leaked {
+		t.Fatalf("CSRF token leaked into sanitized env")
+	}
+	if _, leaked := envWithDesktop["ANTIGRAVITY_LS_ADDRESS"]; leaked {
+		t.Fatalf("LS address leaked into sanitized env")
+	}
+
+	// When allowDesktopScope=false (untrusted), extra desktop shim/scope MUST NOT bypass sentinel.
+	envUntrusted := envSliceToMap(SanitizedSubprocessEnv([]string{"PATH=/usr/bin"}, []string{"AGY_ACCOUNT"}, hydrated, false))
+	if envUntrusted["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != "/nonexistent-hq-sentinel" {
+		t.Fatalf("expected sentinel shim for untrusted subprocess, got %q", envUntrusted["ANTIGRAVITY_PLUGIN_SHIM_DIR"])
+	}
+	if _, leaked := envUntrusted["ANTIGRAVITY_CREDENTIAL_SCOPE"]; leaked {
+		t.Fatalf("expected credential scope stripped when allowDesktopScope=false")
+	}
+
+	// Sentinel shimDir inside ls_session.json MUST be rejected.
+	sess.PluginShimDir = "/nonexistent-hq-sentinel"
+	rawSentinel, _ := json.Marshal(sess)
+	_ = os.WriteFile(filepath.Join(rtDir, "ls_session.json"), rawSentinel, 0o600)
+	if _, ok := LoadReachableDesktopPluginEnv(vaultDir); ok {
+		t.Fatalf("expected sentinel pluginShimDir in ls_session.json to be rejected")
+	}
 }

@@ -419,7 +419,7 @@ func runConnectorCLI(vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq connector apply-offer read failed: %v\n", err)
 			os.Exit(1)
 		}
-		allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+		allowDesktop := connector.HasActiveDesktopPluginScope(vaultDir)
 		out, err := connector.ApplyOfferPayload(context.Background(), vaultDir, raw, allowDesktop)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq connector apply-offer failed: %v\n", err)
@@ -462,7 +462,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		dryRun := fs.Bool("dry-run", false, "Poll without writing watcher state or enqueuing events")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
-		allowDesktop := *desktopOnly || strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+		allowDesktop := *desktopOnly || connector.HasActiveDesktopPluginScope(vaultDir)
 		sum, err := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{
 			ConnectorFilter:   *connFlag,
 			AccountFilter:     *acctFlag,
@@ -594,8 +594,31 @@ func runWatchCLI(vaultDir string, args []string) {
 		}
 		fmt.Printf("Acknowledged %d watcher event(s)\n", n)
 
+	case "reset-poisoned":
+		denyIfCallerTainted(vaultDir, "watch reset-poisoned")
+		fs := flag.NewFlagSet("watch reset-poisoned", flag.ExitOnError)
+		connFlag := fs.String("connector", "", "Optional connector ID filter")
+		acctFlag := fs.String("account", "", "Optional account alias filter")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		clearedItems, clearedEvents, err := watcher.ResetPoisoned(context.Background(), vaultDir, *connFlag, *acctFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq watch reset-poisoned failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"cleared_items":  clearedItems,
+				"cleared_events": clearedEvents,
+			})
+			return
+		}
+		fmt.Printf("Cleared %d poisoned watcher item(s) and %d dropped archive event(s).\n", clearedItems, clearedEvents)
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown watch subcommand %q (expected precheck, read, query, ack)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown watch subcommand %q (expected precheck, read, query, ack, reset-poisoned)\n", sub)
 		os.Exit(1)
 	}
 }

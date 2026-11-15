@@ -331,13 +331,28 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			zone2Sections = append(zone2Sections, roleBanner)
 
 			if len(disarmTriggers) > 0 {
-				var disarmLines []string
-				disarmLines = append(disarmLines, "## ⏸️ Paused Schedules Requiring Front Desk Disarm")
+				var pausedLines []string
+				var migratedLines []string
 				for _, dt := range disarmTriggers {
-					disarmLines = append(disarmLines, fmt.Sprintf("- `%s` (`%s`): paused via `hq triggers pause` — cancel its active timer in this thread via `manage_task(Action=\"kill\")`.", dt.ID, dt.Cron))
-					_ = kernel.ClearArmedTrigger(vaultDir, dt.ID)
+					killHint := `manage_task(Action="kill")`
+					if dt.TaskID != "" {
+						killHint = fmt.Sprintf(`manage_task(Action="kill", TaskId=%q)`, dt.TaskID)
+					}
+					if dt.Reason == "migrated_to_daemon" {
+						migratedLines = append(migratedLines, fmt.Sprintf("- `%s` (`%s`): now owned by `hq daemon` (`agy-hq.service`) — cancel duplicate timer in this thread via `%s`.", dt.ID, dt.Cron, killHint))
+					} else {
+						pausedLines = append(pausedLines, fmt.Sprintf("- `%s` (`%s`): paused via `hq triggers pause` — cancel its active timer in this thread via `%s`.", dt.ID, dt.Cron, killHint))
+					}
+					if dt.TaskID == "" {
+						_ = kernel.ClearArmedTrigger(vaultDir, dt.ID)
+					}
 				}
-				zone2Sections = append(zone2Sections, strings.Join(disarmLines, "\n"))
+				if len(migratedLines) > 0 {
+					zone2Sections = append(zone2Sections, "## 🔄 Daemon-Managed Schedules Requiring Duplicate Front Desk Disarm\n"+strings.Join(migratedLines, "\n"))
+				}
+				if len(pausedLines) > 0 {
+					zone2Sections = append(zone2Sections, "## ⏸️ Paused Schedules Requiring Front Desk Disarm\n"+strings.Join(pausedLines, "\n"))
+				}
 			}
 
 			if !ok || !fd.ConsolePinned || len(unarmedTriggers) > 0 {
@@ -543,19 +558,35 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 		if cfg, err := kernel.LoadEffectiveTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
 			fd, _ := kernel.GetFrontDesk(vaultDir)
+			daemonActive := kernel.IsDaemonActiveFast(vaultDir)
 			var lines []string
 			for _, s := range cfg.Schedules {
 				status := "UNARMED"
 				if !s.IsEnabled() {
 					status = "PAUSED"
+				} else if daemonActive {
+					status = "DAEMON_ACTIVE"
 				} else if fd.ArmedTriggers != nil {
 					if _, ok := fd.ArmedTriggers[s.ID]; ok {
 						status = "ARMED"
+					} else if _, okFQ := fd.ArmedTriggers[s.FQID()]; okFQ {
+						status = "ARMED"
 					}
 				}
-				lines = append(lines, fmt.Sprintf("- `%s` (`%s`, status: `%s`, skill: `%s`)", s.ID, s.Cron, status, s.Skill))
+				lines = append(lines, fmt.Sprintf("- `%s` (`%s`, mode: `%s`, status: `%s`, skill: `%s`)", s.ID, s.Cron, s.EffectiveMode(), status, s.Skill))
 			}
 			zone2Sections = append(zone2Sections, "## Proactive Triggers (`local/triggers.yaml`)\n"+strings.Join(lines, "\n"))
+			if len(fd.AdHocCrons) > 0 {
+				var adHocLines []string
+				for _, ac := range fd.AdHocCrons {
+					idPart := ""
+					if ac.TaskID != "" {
+						idPart = fmt.Sprintf("taskId: `%s`, ", ac.TaskID)
+					}
+					adHocLines = append(adHocLines, fmt.Sprintf("- **%s** (%s`%s`)", ac.Summary, idPart, ac.Cron))
+				}
+				zone2Sections = append(zone2Sections, "## Ad-Hoc Conversation Crons (Preserved in Front Desk)\n"+strings.Join(adHocLines, "\n"))
+			}
 		}
 	}
 
@@ -1425,6 +1456,19 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		return err
 	}
 
+	if payload.ToolCall.Name == "manage_task" {
+		action, _ := payload.ToolCall.Args["Action"].(string)
+		if strings.EqualFold(strings.TrimSpace(action), "kill") {
+			taskID, _ := payload.ToolCall.Args["TaskId"].(string)
+			taskID = strings.Trim(strings.TrimSpace(taskID), "\"")
+			if taskID != "" {
+				_ = kernel.RecordKilledFrontDeskTask(vaultDir, payload.ConversationID, taskID)
+			}
+		}
+		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+		return err
+	}
+
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
 
@@ -1754,12 +1798,18 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 
 					if alreadyTracked && matchedTask != nil {
-						// Subagent & [Auto] worker lifecycle transition: mark completed unless awaiting a resumable human approval
+						// Subagent & [Auto] worker lifecycle transition: mark completed (or immediately archived for unpinned [Auto] workers) unless awaiting a resumable human approval
 						isSubagent := matchedTask.EffectiveKind() == "subagent" || strings.HasPrefix(matchedTask.TaskSlug, "subagent-") || strings.HasPrefix(matchedTask.Title, "[Subagent:")
 						isAuto := matchedTask.EffectiveKind() == "auto"
 						newStatus := matchedTask.Status
-						if (isSubagent || (isAuto && !hasPendingResumableApproval(vaultDir, payload.ConversationID))) && matchedTask.Status == "active" {
+						if isSubagent && matchedTask.Status == "active" {
 							newStatus = "completed"
+						} else if isAuto && !hasPendingResumableApproval(vaultDir, payload.ConversationID) && matchedTask.Status == "active" {
+							if matchedTask.Pinned {
+								newStatus = "completed"
+							} else {
+								newStatus = "archived"
+							}
 						}
 						newSummary := summary
 						if strings.TrimSpace(newSummary) == "" {
@@ -1768,10 +1818,15 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 						if strings.TrimSpace(newSummary) == "" {
 							newSummary = "Task completed."
 						}
-						nowISO := time.Now().Format(time.RFC3339)
+						nowTime := time.Now()
+						nowISO := nowTime.Format(time.RFC3339)
 						completedAt := matchedTask.CompletedAt
-						if newStatus == "completed" && completedAt == "" {
+						if (newStatus == "completed" || newStatus == "archived") && completedAt == "" {
 							completedAt = nowISO
+						}
+						archivedAt := matchedTask.ArchivedAt
+						if newStatus == "archived" && archivedAt == "" {
+							archivedAt = nowISO
 						}
 						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 							TaskSlug:             matchedTask.TaskSlug,
@@ -1792,11 +1847,20 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							CreatedAt:            matchedTask.CreatedAt,
 							LastUpdatedAt:        nowISO,
 							CompletedAt:          completedAt,
-							ArchivedAt:           matchedTask.ArchivedAt,
+							ArchivedAt:           archivedAt,
 							SidebarArchived:      matchedTask.SidebarArchived,
 							SidebarSyncedAt:      matchedTask.SidebarSyncedAt,
 							LastSummary:          newSummary,
 						})
+						if isAuto && newStatus == "archived" && !matchedTask.Pinned && !matchedTask.SidebarArchived {
+							_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
+								ConversationID:  payload.ConversationID,
+								TaskSlug:        matchedTask.TaskSlug,
+								DesiredArchived: true,
+								NextRetryAt:     nowTime.Add(3 * time.Second).UTC().Format(time.RFC3339),
+								LastError:       "auto_stop_deferred",
+							}, nowTime)
+						}
 					} else if !alreadyTracked && !isNested {
 						title := ""
 						if strings.TrimSpace(userPrompt) != "" {

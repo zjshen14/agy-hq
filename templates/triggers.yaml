@@ -1,5 +1,15 @@
 # Declarative Proactive Triggers & Inbox Routing Rules
 schedules:
+  - id: gmail-inbox-watch
+    cron: "CRON_TZ=America/Los_Angeles */15 7-22 * * *"
+    mode: daemon_gatekeeper
+    tier: quick
+    model: gemini-4-hydrogen-low
+    precheck_cmd: ["hq", "watch", "precheck", "--connector=gmail", "--json"]
+    precheck_timeout_ms: 45000
+    dedup_mode: precheck_enqueues
+    delivery: brief_rollup
+    skill: inbox-triage
   - id: morning-brief
     cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
     mode: front_desk_cron

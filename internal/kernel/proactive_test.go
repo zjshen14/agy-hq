@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -226,17 +225,31 @@ func TestGatekeeperPrecheckFailureHealthAndStrandedInboxRecovery(t *testing.T) {
 	}
 }
 
-func TestLSSessionPersistenceInjectionAndDesktopSweep(t *testing.T) {
-	vaultDir := t.TempDir()
+func TestLSSessionPersistenceHydrationAndPrecheckEnqueues(t *testing.T) {
+	wsRoot := t.TempDir()
+	vaultDir := filepath.Join(wsRoot, "local")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatalf("mkdir vault: %v", err)
+	}
+	shimDir := t.TempDir()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
+	if err := SetFrontDesk(vaultDir, "conv-fd-ls-test", ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
 	rawAddr := strings.TrimPrefix(srv.URL, "http://")
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-fd-ls-test")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-hq-ls-test")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", rawAddr)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-token-live")
 	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", "/opt/fake/language_server")
+	t.Setenv("ANTIGRAVITY_PLUGIN_SHIM_DIR", shimDir)
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "scope-live-desktop")
 
 	if err := RecordLiveLSSession(vaultDir); err != nil {
 		t.Fatalf("RecordLiveLSSession: %v", err)
@@ -249,86 +262,122 @@ func TestLSSessionPersistenceInjectionAndDesktopSweep(t *testing.T) {
 	if err := json.Unmarshal(sessBytes, &recorded); err != nil {
 		t.Fatalf("unmarshal ls_session.json: %v", err)
 	}
-	if recorded.RawAddress != rawAddr || recorded.BaseURL != srv.URL || recorded.CSRFToken != "csrf-token-live" || recorded.AgentAPIExe != "/opt/fake/language_server" {
+	if recorded.RawAddress != rawAddr ||
+		recorded.BaseURL != srv.URL ||
+		recorded.CSRFToken != "csrf-token-live" ||
+		recorded.AgentAPIExe != "/opt/fake/language_server" ||
+		recorded.PluginShimDir != shimDir ||
+		recorded.CredentialScope != "scope-live-desktop" ||
+		recorded.ProjectID != "proj-hq-ls-test" {
 		t.Fatalf("unexpected persisted LS credentials: %+v", recorded)
 	}
 
-	// Headless invocation without env vars must preserve ls_session.json and inject env during configureSpawnCommand.
+	// Sentinel/quarantined invocation without desktop scope must NEVER clobber persisted desktop coords.
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
 	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", "")
+	t.Setenv("ANTIGRAVITY_PLUGIN_SHIM_DIR", "/nonexistent-hq-sentinel")
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "")
 	if err := RecordLiveLSSession(vaultDir); err != nil {
-		t.Fatalf("RecordLiveLSSession(headless): %v", err)
+		t.Fatalf("RecordLiveLSSession(headless/sentinel): %v", err)
 	}
 	if !HasReachableLSSession(vaultDir) {
 		t.Fatalf("expected HasReachableLSSession=true while test server listening")
 	}
 
+	// Desktop plugin env hydration must work after desktop env vars are unset in process env.
+	t.Setenv("ANTIGRAVITY_PLUGIN_SHIM_DIR", "")
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "")
+	hydrated, ok := connector.LoadReachableDesktopPluginEnv(vaultDir)
+	if !ok || hydrated["ANTIGRAVITY_PLUGIN_SHIM_DIR"] != shimDir || hydrated["ANTIGRAVITY_CREDENTIAL_SCOPE"] != "scope-live-desktop" {
+		t.Fatalf("expected LoadReachableDesktopPluginEnv to succeed, ok=%v hydrated=%+v", ok, hydrated)
+	}
+	if !connector.HasActiveDesktopPluginScope(vaultDir) {
+		t.Fatalf("expected HasActiveDesktopPluginScope=true from persisted reachable LS session")
+	}
+
+	// configureSpawnCommand still injects LS credentials and primary ProjectID when process env lacks them.
 	cmd := exec.Command("true")
 	configureSpawnCommand(cmd, vaultDir, "cron:test")
 	envMap := make(map[string]string)
 	for _, kv := range cmd.Env {
-		if k, v, ok := strings.Cut(kv, "="); ok {
+		if k, v, cutOK := strings.Cut(kv, "="); cutOK {
 			envMap[k] = v
 		}
 	}
-	if envMap["ANTIGRAVITY_LS_ADDRESS"] != rawAddr || envMap["ANTIGRAVITY_CSRF_TOKEN"] != "csrf-token-live" || envMap["ANTIGRAVITY_AGENTAPI_EXE"] != "/opt/fake/language_server" {
-		t.Fatalf("expected configureSpawnCommand to inject persisted LS env, got address=%q csrf=%q exe=%q",
-			envMap["ANTIGRAVITY_LS_ADDRESS"], envMap["ANTIGRAVITY_CSRF_TOKEN"], envMap["ANTIGRAVITY_AGENTAPI_EXE"])
+	if envMap["ANTIGRAVITY_LS_ADDRESS"] != rawAddr ||
+		envMap["ANTIGRAVITY_CSRF_TOKEN"] != "csrf-token-live" ||
+		envMap["ANTIGRAVITY_AGENTAPI_EXE"] != "/opt/fake/language_server" ||
+		envMap["ANTIGRAVITY_PROJECT_ID"] != "proj-hq-ls-test" {
+		t.Fatalf("expected configureSpawnCommand to inject persisted LS/project env, got %+v", envMap)
 	}
 
-	// Seed an Option A Gmail account needing desktop polling + explicit quiet hours config.
-	if err := connector.SaveInstance(context.Background(), vaultDir, connector.InstanceConfig{
-		SchemaVersion:  connector.ConnectorSchemaVersion,
-		Connector:      "gmail",
-		DefaultAccount: "primary",
-		Accounts: map[string]connector.AccountInstance{
-			"primary": {Email: "owner@example.com", TransportKind: "cli"},
-		},
-	}); err != nil {
-		t.Fatalf("SaveInstance(gmail): %v", err)
-	}
-	_ = os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte("attention:\n  quiet_hours:\n    enabled: true\n    start: \"23:00\"\n    end: \"07:00\"\n    timezone: \"America/Los_Angeles\"\n"), 0o600)
-
-	loc, _ := time.LoadLocation("America/Los_Angeles")
-	quietNow := time.Date(2026, 11, 15, 2, 0, 0, 0, loc)
-	if MaybeEnqueueDesktopWatcherSweep(vaultDir, quietNow) {
-		t.Fatalf("expected desktop sweep suppressed during quiet hours")
+	// Verify ScheduleTrigger.EffectiveDedupMode accepts precheck_enqueues cleanly.
+	if got := (ScheduleTrigger{ID: "gmail-inbox-watch", DedupMode: "precheck_enqueues"}).EffectiveDedupMode(); got != "precheck_enqueues" {
+		t.Fatalf("expected EffectiveDedupMode()=precheck_enqueues, got %q", got)
 	}
 
-	dayNow := time.Date(2026, 11, 15, 14, 0, 0, 0, loc)
-	if !MaybeEnqueueDesktopWatcherSweep(vaultDir, dayNow) {
-		t.Fatalf("expected desktop sweep enqueued during waking hours with reachable LS session")
-	}
-	if MaybeEnqueueDesktopWatcherSweep(vaultDir, dayNow.Add(time.Minute)) {
-		t.Fatalf("expected desktop sweep cooldown/dedup to suppress immediate re-enqueue")
-	}
-	pending, err := events.List(vaultDir, "pending", false, 0)
-	if err != nil || len(pending) != 1 || pending[0].Source != "watcher:desktop-sweep" {
-		t.Fatalf("expected 1 watcher:desktop-sweep pending event, got err=%v pending=%+v", err, pending)
-	}
-
-	// Verify SpawnTask budget exemption for watcher:desktop-sweep while respecting CircuitOpen.
-	quota := LoadQuota(vaultDir)
-	quota.SpawnsToday = quota.MaxDailySpawns
-	quota.CircuitOpen = false
-	_ = SaveQuota(vaultDir, quota)
-	if _, err := SpawnTask(vaultDir, "watcher:desktop-sweep", "", "Sweep", "Run sweep", "gemini-4-hydrogen-low", true); err != nil {
-		t.Fatalf("expected watcher:desktop-sweep exempt from MaxDailySpawns, got: %v", err)
-	}
-	if after := LoadQuota(vaultDir); after.SpawnsToday != quota.MaxDailySpawns {
-		t.Fatalf("expected SpawnsToday unchanged (%d), got %d", quota.MaxDailySpawns, after.SpawnsToday)
-	}
-	quota.CircuitOpen = true
-	quota.CircuitReason = "429 RESOURCE_EXHAUSTED"
-	_ = SaveQuota(vaultDir, quota)
-	if _, err := SpawnTask(vaultDir, "watcher:desktop-sweep", "", "Sweep", "Run sweep", "gemini-4-hydrogen-low", true); err == nil || !strings.Contains(err.Error(), "OPEN") {
-		t.Fatalf("expected CircuitOpen to still block watcher:desktop-sweep, got: %v", err)
-	}
-
-	// Closing LS server must flip HasReachableLSSession to false cleanly.
+	// Closing LS server must flip HasReachableLSSession and desktop plugin scope to false cleanly.
 	srv.Close()
 	if HasReachableLSSession(vaultDir) {
 		t.Fatalf("expected HasReachableLSSession=false after LS server closed")
+	}
+	if connector.HasActiveDesktopPluginScope(vaultDir) {
+		t.Fatalf("expected HasActiveDesktopPluginScope=false after LS server closed")
+	}
+}
+
+func TestPrecheckEnqueuesDoesNotDuplicateGatekeeperEventAndAdvancesSlot(t *testing.T) {
+	vaultDir := t.TempDir()
+	outFile := filepath.Join(vaultDir, "precheck_out.json")
+	_ = os.WriteFile(outFile, []byte(`{"enqueued_total":2}`+"\n"), 0o600)
+	trigYAML := `schedules:
+  - id: gmail-inbox-watch
+    cron: "CRON_TZ=America/Los_Angeles */15 7-22 * * *"
+    mode: daemon_gatekeeper
+    model: gemini-4-hydrogen-low
+    precheck_cmd: ["cat", "` + outFile + `"]
+    dedup_mode: precheck_enqueues
+    delivery: brief_rollup
+    skill: inbox-triage
+`
+	_ = os.WriteFile(filepath.Join(vaultDir, "triggers.yaml"), []byte(trigYAML), 0o600)
+
+	loc, _ := time.LoadLocation("America/Los_Angeles")
+	slot1 := time.Date(2026, 11, 15, 14, 15, 0, 0, loc)
+	actions1, zero1, err1 := EvaluateDaemonGatekeepers(vaultDir, slot1, false, true)
+	if err1 != nil {
+		t.Fatalf("EvaluateDaemonGatekeepers slot1: %v", err1)
+	}
+	if zero1 != 0 || len(actions1) != 1 || actions1[0] != "precheck_enqueued:gmail-inbox-watch=2" {
+		t.Fatalf("unexpected slot1 outcome: zero=%d actions=%v", zero1, actions1)
+	}
+	if pending, _ := events.List(vaultDir, "pending", false, 0); len(pending) != 0 {
+		t.Fatalf("expected precheck_enqueues NOT to enqueue duplicate gatekeeper event, got %+v", pending)
+	}
+	cursors := LoadTriggerCursors(vaultDir)
+	firstSlotKey := cursors["gmail-inbox-watch"].LastCronSlot
+	if firstSlotKey == "" {
+		t.Fatalf("expected LastCronSlot populated after precheck_enqueues hit")
+	}
+
+	// Second tick in the SAME cron slot must be skipped via slot dedup without re-running precheck_cmd.
+	actionsRepeat, zeroRepeat, errRepeat := EvaluateDaemonGatekeepers(vaultDir, slot1.Add(30*time.Second), false, true)
+	if errRepeat != nil || zeroRepeat != 0 || len(actionsRepeat) != 0 {
+		t.Fatalf("expected same cron slot to be skipped cleanly, err=%v zero=%d actions=%v", errRepeat, zeroRepeat, actionsRepeat)
+	}
+
+	// Slot with enqueued_total=0 increments zeroTokenSaves and still advances LastCronSlot.
+	_ = os.WriteFile(outFile, []byte(`{"enqueued_total":0}`+"\n"), 0o600)
+	slot2 := time.Date(2026, 11, 15, 14, 30, 0, 0, loc)
+	actions2, zero2, err2 := EvaluateDaemonGatekeepers(vaultDir, slot2, false, true)
+	if err2 != nil || zero2 != 1 || len(actions2) != 0 {
+		t.Fatalf("expected enqueued_total=0 to count 1 zero-token save, err=%v zero=%d actions=%v", err2, zero2, actions2)
+	}
+	cursors2 := LoadTriggerCursors(vaultDir)
+	if cursors2["gmail-inbox-watch"].LastCronSlot == "" || cursors2["gmail-inbox-watch"].LastCronSlot == firstSlotKey {
+		t.Fatalf("expected LastCronSlot to advance to slot2, got %q (was %q)", cursors2["gmail-inbox-watch"].LastCronSlot, firstSlotKey)
 	}
 }

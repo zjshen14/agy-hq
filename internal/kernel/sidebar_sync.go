@@ -105,6 +105,7 @@ type lsUpdateAnnotationsRequest struct {
 // when unarchiving (setting proto3_optional synthetic oneof `_archived` under mergeAnnotations=true)
 // while omitting unset fields when nil.
 type lsConversationPatch struct {
+	Title                   string `json:"title,omitempty"`
 	Archived                *bool  `json:"archived,omitempty"`
 	ArchivalStatusTimestamp string `json:"archivalStatusTimestamp,omitempty"`
 	Pinned                  *bool  `json:"pinned,omitempty"`
@@ -789,6 +790,18 @@ type SidebarSingleSyncResult struct {
 	SkippedReason string `json:"skippedReason,omitempty"`
 }
 
+func newSidebarSyncClientForVault(vaultDir string, cfg SidebarSyncConfig) *SidebarSyncClient {
+	client := NewSidebarSyncClient(cfg)
+	if !client.Available() && strings.TrimSpace(vaultDir) != "" {
+		if creds, ok := discoverLSCredentials(vaultDir); ok {
+			cfg.BaseURL = creds.BaseURL
+			cfg.CSRFToken = creds.CSRFToken
+			client = NewSidebarSyncClient(cfg)
+		}
+	}
+	return client
+}
+
 func syncSingleTaskArchiveState(ctx context.Context, vaultDir string, task *ActiveTask, desiredArchived bool, explicitSingle bool, force bool, cfg SidebarSyncConfig) SidebarSingleSyncResult {
 	if task == nil {
 		return SidebarSingleSyncResult{SkippedReason: "nil_task"}
@@ -798,7 +811,7 @@ func syncSingleTaskArchiveState(ctx context.Context, vaultDir string, task *Acti
 		return SidebarSingleSyncResult{SkippedReason: "invalid_uuid"}
 	}
 
-	client := NewSidebarSyncClient(cfg)
+	client := newSidebarSyncClientForVault(vaultDir, cfg)
 	now := client.nowFn()
 	nowUTC := now.UTC().Format(time.RFC3339Nano)
 
@@ -932,7 +945,7 @@ func SyncTaskPinnedBestEffort(vaultDir, convID string, pinned bool, cfg SidebarS
 	if !IsCanonicalUUID(cid) {
 		return
 	}
-	client := NewSidebarSyncClient(cfg)
+	client := newSidebarSyncClientForVault(vaultDir, cfg)
 	if !client.Available() {
 		return
 	}
@@ -1016,7 +1029,7 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 		fixedNow := opts.Now
 		opts.ClientConfig.Now = func() time.Time { return fixedNow }
 	}
-	client := NewSidebarSyncClient(opts.ClientConfig)
+	client := newSidebarSyncClientForVault(vaultDir, opts.ClientConfig)
 	now := client.nowFn()
 	if !opts.Now.IsZero() {
 		now = opts.Now

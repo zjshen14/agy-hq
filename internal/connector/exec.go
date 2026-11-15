@@ -121,15 +121,30 @@ func SanitizedSubprocessEnv(base, envAllow []string, extra map[string]string, al
 		}
 	}
 
+	const shimSentinel = "/nonexistent-hq-sentinel"
 	for k, v := range extra {
 		k = strings.TrimSpace(k)
 		if k == "" || unconditionallyBlockedEnv[k] {
 			continue
 		}
+		if k == "ANTIGRAVITY_PLUGIN_SHIM_DIR" {
+			v = strings.TrimSpace(v)
+			if !desktopAllowed || v == "" || v == shimSentinel {
+				continue
+			}
+			info, err := os.Stat(v)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+		} else if k == "ANTIGRAVITY_CREDENTIAL_SCOPE" {
+			v = strings.TrimSpace(v)
+			if !desktopAllowed || v == "" {
+				continue
+			}
+		}
 		setKV(k, v)
 	}
 
-	const shimSentinel = "/nonexistent-hq-sentinel"
 	if !desktopAllowed {
 		delete(envMap, "ANTIGRAVITY_CREDENTIAL_SCOPE")
 		setKV("ANTIGRAVITY_PLUGIN_SHIM_DIR", shimSentinel)

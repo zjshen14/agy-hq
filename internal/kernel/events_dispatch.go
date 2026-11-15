@@ -189,18 +189,24 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		if batch.SessionID != "" {
 			out, delivErr := DeliverMessageToSession(vaultDir, batch.SessionID, batch.Title, batch.Prompt, dryRun)
 			if delivErr != nil {
-				newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, delivErr.Error(), false, now)
-				emitDroppedEventAlerts(vaultDir, newlyDropped, now)
-				actions = append(actions, fmt.Sprintf("%s (deferred: %v)", label, delivErr))
+				if headMetaVal(head, "schedule_mode") == "front_desk_cron" {
+					// Fall back to an isolated [Auto] spawn if direct Front Desk delivery failed.
+					batch.SessionID = ""
+				} else {
+					newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, delivErr.Error(), false, now)
+					emitDroppedEventAlerts(vaultDir, newlyDropped, now)
+					actions = append(actions, fmt.Sprintf("%s (deferred: %v)", label, delivErr))
+					continue
+				}
+			} else {
+				// Once DeliverMessageToSession succeeds (HTTP 2xx from LanguageServerService or exit 0
+				// from agentapi send-message), the continuation is queued in the session's input stream;
+				// complete the event batch immediately so subsequent follow-ups/approvals are not blocked
+				// and the message is never duplicate-sent after lease expiry.
+				_, _ = events.CompleteIDs(vaultDir, ids, now)
+				actions = append(actions, fmt.Sprintf("%s (%s)", label, out))
 				continue
 			}
-			// Once DeliverMessageToSession succeeds (HTTP 2xx from LanguageServerService or exit 0
-			// from agentapi send-message), the continuation is queued in the session's input stream;
-			// complete the event batch immediately so subsequent follow-ups/approvals are not blocked
-			// and the message is never duplicate-sent after lease expiry.
-			_, _ = events.CompleteIDs(vaultDir, ids, now)
-			actions = append(actions, fmt.Sprintf("%s (%s)", label, out))
-			continue
 		}
 
 		trigger := batchTriggerName(batch)
@@ -260,6 +266,19 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		if dryRun {
 			_, _ = events.CompleteIDs(vaultDir, ids, now)
 		} else if uuid := ExtractUUID(out); uuid != "" {
+			if existingTasks, lErr := ListTasks(vaultDir); lErr == nil {
+				for _, prev := range existingTasks {
+					if prev.TaskSlug == autoSlug && prev.ConversationID != "" && prev.ConversationID != uuid && !prev.Pinned {
+						_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
+							ConversationID:  prev.ConversationID,
+							TaskSlug:        autoSlug,
+							DesiredArchived: true,
+							NextRetryAt:     now.Add(3 * time.Second).UTC().Format(time.RFC3339),
+							LastError:       "superseded_by_retry",
+						}, now)
+					}
+				}
+			}
 			_ = RegisterTask(vaultDir, ActiveTask{
 				TaskSlug:       autoSlug,
 				ConversationID: uuid,
