@@ -1190,7 +1190,9 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		}
 	}
 
-	// Step 1: Auto-archive eligible completed (>24h) or dormant (>48h) top-level tasks with clean worktrees
+	// Step 1: Auto-archive eligible completed (>24h) or dormant (>48h) top-level tasks with clean worktrees,
+	// and reconcile stuck active `[Auto]` workers whose bound events have already finished or been acked.
+	autoPinnedCompleted := 0
 	for i := range tasks {
 		t := &tasks[i]
 		kind := t.EffectiveKind()
@@ -1205,12 +1207,31 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 			shouldArchive = true
 		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && areAllTaskWorktreesMergedAndClean(vaultDir, *t) {
 			shouldArchive = true
+		} else if kind == "auto" && st == "active" {
+			if ready, ackedIDs := isAutoTaskReadyToArchive(vaultDir, *t, DefaultAutoAckGracePeriod, opts.Now); ready {
+				if !opts.DryRun && len(ackedIDs) > 0 {
+					_, _ = events.CompleteIDs(vaultDir, ackedIDs, opts.Now)
+				}
+				if t.Pinned {
+					t.Status = "completed"
+					if t.CompletedAt == "" {
+						t.CompletedAt = nowStr
+					}
+					t.LastUpdatedAt = nowStr
+					autoPinnedCompleted++
+				} else {
+					shouldArchive = true
+				}
+			}
 		}
 		if shouldArchive {
 			if !opts.DryRun {
 				_ = removeTaskWorktrees(vaultDir, t, false, false)
 			}
 			t.Status = "archived"
+			if t.CompletedAt == "" {
+				t.CompletedAt = nowStr
+			}
 			if t.ArchivedAt == "" {
 				t.ArchivedAt = nowStr
 			}
@@ -1288,7 +1309,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 				return rep, err
 			}
 		}
-		if len(rotatedCold) > 0 || len(rep.AutoArchivedSlugs) > 0 {
+		if len(rotatedCold) > 0 || len(rep.AutoArchivedSlugs) > 0 || autoPinnedCompleted > 0 {
 			data, err := json.MarshalIndent(keptHot, "", "  ")
 			if err != nil {
 				return rep, err
@@ -1670,16 +1691,26 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 		lease.ProjectID = prev.ProjectID
 		lease.WorkspaceDir = prev.WorkspaceDir
 	}
-	if os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") == "" {
-		if projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")); projID != "" {
-			lease.ProjectID = projID
-		}
-	}
 	if lease.WorkspaceDir == "" && vaultDir != "" {
 		cleanV := filepath.Clean(vaultDir)
 		if filepath.Base(cleanV) == "local" {
 			lease.WorkspaceDir = filepath.Dir(cleanV)
 		}
+	}
+	candProjID := lease.ProjectID
+	if os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") == "" {
+		envConv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+		if projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")); projID != "" && (envConv == "" || envConv == convID) {
+			if valid, regAvail := ValidateProjectMatchesWorkspace(vaultDir, projID, lease.WorkspaceDir); !regAvail || valid {
+				candProjID = projID
+			}
+		}
+	}
+	if lease.WorkspaceDir != "" {
+		verifiedProjID, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, lease.WorkspaceDir, candProjID)
+		lease.ProjectID = verifiedProjID
+	} else {
+		lease.ProjectID = candProjID
 	}
 	if artifactDir != "" {
 		_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(artifactDir), 0o644)
@@ -1705,10 +1736,12 @@ func SetFrontDeskWorkspace(vaultDir, convID, workspaceDir string) error {
 	if abs, err := filepath.Abs(workspaceDir); err == nil {
 		workspaceDir = abs
 	}
-	if fd.WorkspaceDir == workspaceDir {
+	verifiedProjID, _, repaired := ResolveVerifiedWorkspaceProjectID(vaultDir, workspaceDir, fd.ProjectID)
+	if fd.WorkspaceDir == workspaceDir && (!repaired || fd.ProjectID == verifiedProjID) {
 		return nil
 	}
 	fd.WorkspaceDir = workspaceDir
+	fd.ProjectID = verifiedProjID
 	fd.UpdatedAt = time.Now().Format(time.RFC3339)
 	return saveFrontDeskLease(vaultDir, fd)
 }
@@ -1738,14 +1771,39 @@ func isCallerInPrimaryVaultWorkspace(vaultDir string) bool {
 	if strings.TrimSpace(vaultDir) == "" || os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != "" {
 		return false
 	}
+	primary := primaryVaultWorkspaceDir(vaultDir)
+	envProj := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	if envProj != "" && primary != "" {
+		if valid, regAvail := ValidateProjectMatchesWorkspace(vaultDir, envProj, primary); regAvail && !valid {
+			return false
+		}
+	}
 	convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
 	fd, hasFD := GetFrontDesk(vaultDir)
-	if convID != "" && hasFD && fd.ConversationID == convID {
-		return true
+	if convID != "" {
+		if hasFD && fd.ConversationID == convID {
+			return true
+		}
+		if envProj != "" && primary != "" {
+			if valid, regAvail := ValidateProjectMatchesWorkspace(vaultDir, envProj, primary); regAvail && valid {
+				return true
+			}
+		}
+		if hasFD && fd.ConversationID != "" {
+			// A different conversation without registry proof must never impersonate the primary Vault project via cwd alone.
+			return false
+		}
 	}
-	primary := primaryVaultWorkspaceDir(vaultDir)
 	if primary == "" {
 		return false
+	}
+	if envProj != "" {
+		if valid, regAvail := ValidateProjectMatchesWorkspace(vaultDir, envProj, primary); regAvail {
+			return valid
+		}
+		if hasFD && strings.TrimSpace(fd.ProjectID) != "" && envProj != strings.TrimSpace(fd.ProjectID) {
+			return false
+		}
 	}
 	wd, err := os.Getwd()
 	if err != nil || strings.TrimSpace(wd) == "" {
@@ -1757,22 +1815,43 @@ func isCallerInPrimaryVaultWorkspace(vaultDir string) bool {
 	return filepath.Clean(wd) == filepath.Clean(primary)
 }
 
-// BackfillFrontDeskProjectID persists ANTIGRAVITY_PROJECT_ID into front_desk.json when the
-// current process belongs to the active Front Desk conversation or the primary Vault workspace
-// and fd.ProjectID is empty.
+// BackfillFrontDeskProjectID persists or repairs ANTIGRAVITY_PROJECT_ID in front_desk.json,
+// validating existing and candidate projectIds against Antigravity's `<ConfigDir>/projects/*.json` registry.
 func BackfillFrontDeskProjectID(vaultDir string) {
-	if !isCallerInPrimaryVaultWorkspace(vaultDir) {
-		return
-	}
-	projID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
-	if projID == "" {
-		return
-	}
 	fd, ok := GetFrontDesk(vaultDir)
-	if !ok || strings.TrimSpace(fd.ProjectID) != "" {
+	if !ok {
 		return
 	}
-	fd.ProjectID = projID
+	wsDir := primaryVaultWorkspaceDir(vaultDir)
+	curProj := strings.TrimSpace(fd.ProjectID)
+	if curProj != "" {
+		valid, regAvail := ValidateProjectMatchesWorkspace(vaultDir, curProj, wsDir)
+		if !regAvail || valid {
+			return
+		}
+		// Existing ProjectID is poisoned (points to an unrelated workspace); repair or clear it.
+		cand := ""
+		if isCallerInPrimaryVaultWorkspace(vaultDir) {
+			cand = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+		}
+		repairedID, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, wsDir, cand)
+		if repairedID != curProj {
+			fd.ProjectID = repairedID
+			fd.UpdatedAt = time.Now().Format(time.RFC3339)
+			_ = saveFrontDeskLease(vaultDir, fd)
+		}
+		return
+	}
+
+	cand := ""
+	if isCallerInPrimaryVaultWorkspace(vaultDir) {
+		cand = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	}
+	verifiedID, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, wsDir, cand)
+	if verifiedID == "" {
+		return
+	}
+	fd.ProjectID = verifiedID
 	fd.UpdatedAt = time.Now().Format(time.RFC3339)
 	_ = saveFrontDeskLease(vaultDir, fd)
 }
@@ -2561,6 +2640,15 @@ func resolveSpawnTarget(vaultDir, trigger string) (workDir, projectID string) {
 			}
 		}
 	}
+	if workDir != "" {
+		verifiedProjID, _, repaired := ResolveVerifiedWorkspaceProjectID(vaultDir, workDir, projectID)
+		projectID = verifiedProjID
+		if !isManual && hasFD && repaired && strings.TrimSpace(fd.ProjectID) != projectID && filepath.Clean(workDir) == filepath.Clean(primaryVaultWorkspaceDir(vaultDir)) {
+			fd.ProjectID = projectID
+			fd.UpdatedAt = time.Now().Format(time.RFC3339)
+			_ = saveFrontDeskLease(vaultDir, fd)
+		}
+	}
 	return workDir, projectID
 }
 
@@ -2574,7 +2662,8 @@ func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
 	rawEnv := os.Environ()
 	cleanEnv := make([]string, 0, len(rawEnv)+1)
 	inSidecar := os.Getenv("ANTIGRAVITY_SIDECAR_WEB_PORT") != ""
-	overrideProj := !isManual || inSidecar
+	envProj := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	overrideProj := !isManual || inSidecar || (envProj != projectID)
 
 	for _, kv := range rawEnv {
 		if strings.HasPrefix(kv, "ANTIGRAVITY_CONVERSATION_ID=") ||
@@ -2641,14 +2730,34 @@ func resolveRoutineFallbackModel(vaultDir string) string {
 	return fallbackModel
 }
 
-func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string) (cascadeID string, usedModel string, fallbackToAgentAPI bool, err error) {
+func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string) (cascadeID string, usedModel string, fallbackToAgentAPI bool, fallbackReason string, err error) {
+	_, regAvail := ValidateProjectMatchesWorkspace(vaultDir, projectID, workDir)
+	canFallbackSafely := func(requireVerifiedProj bool) bool {
+		if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
+			return false
+		}
+		if workDir == "" {
+			return true
+		}
+		if requireVerifiedProj || regAvail {
+			return strings.TrimSpace(projectID) != ""
+		}
+		return true
+	}
+
 	creds, ok := discoverLSCredentials(vaultDir)
 	if !ok {
-		return "", "", true, nil
+		if canFallbackSafely(false) {
+			return "", "", true, "Language Server credentials unavailable", nil
+		}
+		return "", "", false, "", fmt.Errorf("spawnTaskViaLS: Language Server credentials unavailable and no verified projectId for workspace %s (refusing unverified agentapi fallback)", workDir)
 	}
 	modelEnum, enumErr := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, modelID)
 	if enumErr != nil {
-		return "", "", true, nil
+		if canFallbackSafely(true) {
+			return "", "", true, fmt.Sprintf("ResolveModelEnum(%q) failed: %v", modelID, enumErr), nil
+		}
+		return "", "", false, "", fmt.Errorf("spawnTaskViaLS: %w (refusing unverified agentapi fallback without projectId for workspace %s)", enumErr, workDir)
 	}
 
 	usedModel = modelID
@@ -2668,19 +2777,19 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 		}
 		if err != nil {
 			if isQuotaExhaustedError(err.Error()) {
-				return "", usedModel, false, err
+				return "", usedModel, false, "", err
 			}
-			if _, lpErr := exec.LookPath("agentapi"); lpErr == nil {
-				return "", "", true, nil
+			if canFallbackSafely(true) {
+				return "", "", true, fmt.Sprintf("StartCascade failed: %v", err), nil
 			}
-			return "", usedModel, false, err
+			return "", usedModel, false, "", err
 		}
 	}
 
 	if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, cascadeID, prompt, 10*time.Second); sendErr != nil {
 		msgCmd := exec.Command("agentapi", "send-message", "--title="+title, cascadeID, prompt)
 		if msgErr := msgCmd.Run(); msgErr != nil {
-			return cascadeID, usedModel, false, fmt.Errorf("StartCascade succeeded (%s) but SendUserCascadeMessage failed: %w", cascadeID, sendErr)
+			return cascadeID, usedModel, false, "", fmt.Errorf("StartCascade succeeded (%s) but SendUserCascadeMessage failed: %w", cascadeID, sendErr)
 		}
 	}
 	if strings.TrimSpace(title) != "" {
@@ -2691,11 +2800,11 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 			Title: strings.TrimSpace(title),
 		}, 3*time.Second)
 	}
-	return cascadeID, usedModel, false, nil
+	return cascadeID, usedModel, false, "", nil
 }
 
 // SpawnTask creates and starts a top-level Antigravity conversation (via LanguageServerService/StartCascade
-// + SendUserCascadeMessage when LS credentials are available, falling back to `agentapi new-conversation`),
+// + SendUserCascadeMessage when LS credentials are available, falling back to `agentapi new-conversation` only when workspace-safe),
 // enforcing the daily spawn budget, auto-downgrading to routine tier if a higher-tier model hits 429,
 // and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
 func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
@@ -2715,11 +2824,12 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	}
 
 	var output string
+	var fallbackNote string
 	if dryRun {
 		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
 	} else {
 		workDir, projectID := resolveSpawnTarget(vaultDir, trigger)
-		lsOut, lsModel, useAgentAPI, lsErr := spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID)
+		lsOut, lsModel, useAgentAPI, fbReason, lsErr := spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID)
 		if !useAgentAPI {
 			if lsModel != "" {
 				modelID = lsModel
@@ -2741,6 +2851,10 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 			}
 			output = lsOut
 		} else {
+			if fbReason != "" {
+				fallbackNote = fbReason
+				fmt.Fprintf(os.Stderr, "[hq spawn] falling back to agentapi (%s)\n", fbReason)
+			}
 			cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
 			configureSpawnCommand(cmd, vaultDir, trigger)
 			outBytes, err := cmd.CombinedOutput()
@@ -2778,12 +2892,16 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 
 	state.SpawnsToday++
 	state.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s [%s])", trigger, skill, modelID)
+	outcome := output
+	if fallbackNote != "" {
+		outcome = fmt.Sprintf("%s [agentapi fallback: %s]", output, fallbackNote)
+	}
 	state.Events = append(state.Events, SpawnEvent{
 		Timestamp: time.Now().Format(time.RFC3339),
 		Trigger:   trigger,
 		Skill:     skill,
 		Model:     modelID,
-		Outcome:   output,
+		Outcome:   outcome,
 	})
 	_ = SaveQuota(vaultDir, state)
 	return output, nil
@@ -2840,6 +2958,8 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 	if !dryRun {
 		_, _ = DispatchOutboxToFrontDesk(vaultDir, now, false)
 	}
+
+	_, _ = ReconcileAutoTasks(vaultDir, now, dryRun)
 
 	if !dryRun && HasPendingSidebarSyncQueue(vaultDir) {
 		_, _ = DrainSidebarSyncQueue(vaultDir, DefaultSidebarBatchTimeout)
@@ -3504,9 +3624,22 @@ func RecordLiveLSSession(vaultDir string) error {
 	appDataEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_APP_DATA_DIR"))
 	geminiDirEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_GEMINI_DIR"))
 	configRelEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONFIG_REL_DIR"))
+	primaryWS := primaryVaultWorkspaceDir(vaultDir)
 	projEnv := ""
 	if isCallerInPrimaryVaultWorkspace(vaultDir) {
 		projEnv = strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	}
+	projRepaired := false
+	if primaryWS != "" {
+		verifiedExisting, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, primaryWS, existing.ProjectID)
+		if existing.ProjectID != verifiedExisting {
+			existing.ProjectID = verifiedExisting
+			projRepaired = true
+		}
+		if projEnv != "" {
+			verifiedEnv, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, primaryWS, projEnv)
+			projEnv = verifiedEnv
+		}
 	}
 
 	// Never persist quarantined sentinel paths or non-existent shim directories.
@@ -3532,7 +3665,7 @@ func RecordLiveLSSession(vaultDir string) error {
 	if rawAddrEnv == "" || csrfEnv == "" {
 		if hasExisting && existing.BaseURL != "" && existing.CSRFToken != "" {
 			updated := existing
-			changed := false
+			changed := projRepaired
 			if agentExeEnv != "" && existing.AgentAPIExe != agentExeEnv {
 				updated.AgentAPIExe = agentExeEnv
 				changed = true

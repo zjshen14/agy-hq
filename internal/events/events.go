@@ -593,12 +593,20 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 		nowStr := now.UTC().Format(time.RFC3339)
 		dirty := false
 		var kept []Event
+		var completedAcked []Event
 
 		// 1. Reap expired leases first.
 		for _, ev := range active {
 			if ev.Status == StatusLeased && ev.LeaseExpiresAt != "" {
 				if exp, pErr := parseEventTime(ev.LeaseExpiresAt); pErr == nil && now.After(exp) {
 					dirty = true
+					if ev.Metadata != nil && ev.Metadata["acked"] == "1" {
+						ev.Status = StatusDone
+						ev.UpdatedAt = nowStr
+						ev.LeaseExpiresAt = ""
+						completedAcked = append(completedAcked, ev)
+						continue
+					}
 					ev.AttemptCount++
 					ev.UpdatedAt = nowStr
 					if ev.AttemptCount >= ev.MaxAttempts {
@@ -713,8 +721,11 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 			dirty = true
 		}
 
-		if len(dropped) > 0 {
-			_ = appendArchiveUnlocked(vaultDir, dropped)
+		if len(completedAcked)+len(dropped) > 0 {
+			toArchive := make([]Event, 0, len(completedAcked)+len(dropped))
+			toArchive = append(toArchive, completedAcked...)
+			toArchive = append(toArchive, dropped...)
+			_ = appendArchiveUnlocked(vaultDir, toArchive)
 		}
 		if dirty {
 			return saveActiveUnlocked(vaultDir, active)
@@ -1172,6 +1183,108 @@ func FinalizeByConversation(vaultDir, convID string, now time.Time) (completed [
 		return saveActiveUnlocked(vaultDir, kept)
 	})
 	return completed, requeued, dropped, err
+}
+
+// AreEventIDsFinishedOrAcked reports whether all eventIDs bound to an `[Auto]` worker (convID)
+// have either left the active event store (`StatusDone` / `StatusDropped`), been requeued or
+// leased to another conversation, expired past `LeaseExpiresAt`, or been explicitly acknowledged
+// (`Metadata["acked"]=="1"`) for at least `ackGrace`. Any still-leased acked IDs ready to finalize
+// are returned in `ackedToComplete`.
+func AreEventIDsFinishedOrAcked(vaultDir string, eventIDs []string, convID string, ackGrace time.Duration, now time.Time) (finished bool, ackedToComplete []string) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	convID = strings.TrimSpace(convID)
+	finished = true
+
+	_ = withEventsLock(vaultDir, func() error {
+		active, err := loadActiveUnlocked(vaultDir)
+		if err != nil {
+			finished = false
+			return err
+		}
+		if len(active) == 0 {
+			return nil
+		}
+		if len(eventIDs) == 0 {
+			if convID == "" {
+				return nil
+			}
+			for _, ev := range active {
+				if ev.Status == StatusLeased && ev.LeaseConvID == convID {
+					if ev.LeaseExpiresAt != "" {
+						if exp, pErr := parseEventTime(ev.LeaseExpiresAt); pErr == nil && now.After(exp) {
+							if ev.Metadata != nil && ev.Metadata["acked"] == "1" {
+								ackedToComplete = append(ackedToComplete, ev.ID)
+							}
+							continue
+						}
+					}
+					if ev.Metadata != nil && ev.Metadata["acked"] == "1" {
+						if ackGrace <= 0 {
+							ackedToComplete = append(ackedToComplete, ev.ID)
+							continue
+						}
+						if upd, uErr := parseEventTime(ev.UpdatedAt); uErr == nil && now.Sub(upd) >= ackGrace {
+							ackedToComplete = append(ackedToComplete, ev.ID)
+							continue
+						}
+					}
+					finished = false
+					ackedToComplete = nil
+					return nil
+				}
+			}
+			return nil
+		}
+
+		byID := make(map[string]Event, len(active))
+		for _, ev := range active {
+			byID[ev.ID] = ev
+		}
+		for _, rawID := range eventIDs {
+			id := strings.TrimSpace(rawID)
+			if id == "" {
+				continue
+			}
+			ev, exists := byID[id]
+			if !exists {
+				// Already completed or dropped into events_archive.jsonl.
+				continue
+			}
+			if ev.Status != StatusLeased {
+				// Requeued (StatusPending) after lease expiry; no longer owned by this worker.
+				continue
+			}
+			if convID != "" && ev.LeaseConvID != "" && ev.LeaseConvID != convID {
+				// Leased to a superseding retry worker conversation.
+				continue
+			}
+			if ev.LeaseExpiresAt != "" {
+				if exp, pErr := parseEventTime(ev.LeaseExpiresAt); pErr == nil && now.After(exp) {
+					if ev.Metadata != nil && ev.Metadata["acked"] == "1" {
+						ackedToComplete = append(ackedToComplete, ev.ID)
+					}
+					continue
+				}
+			}
+			if ev.Metadata != nil && ev.Metadata["acked"] == "1" {
+				if ackGrace <= 0 {
+					ackedToComplete = append(ackedToComplete, ev.ID)
+					continue
+				}
+				if upd, uErr := parseEventTime(ev.UpdatedAt); uErr == nil && now.Sub(upd) >= ackGrace {
+					ackedToComplete = append(ackedToComplete, ev.ID)
+					continue
+				}
+			}
+			finished = false
+			ackedToComplete = nil
+			return nil
+		}
+		return nil
+	})
+	return finished, ackedToComplete
 }
 
 // Retry resets an active leased or archived dropped event back to StatusPending for immediate execution.
