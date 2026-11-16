@@ -365,3 +365,59 @@ func TestSpacesScheduleIdeasAndPIIBadge(t *testing.T) {
 		t.Fatalf("expected Console section order 2 < 3 < Spaces < 4, got idx2=%d idx3=%d idxSpaces=%d idx4=%d\n%s", idx2, idx3, idxSpaces, idx4, md)
 	}
 }
+
+func TestScheduledAutomationsVisibilityAndTriggerControls(t *testing.T) {
+	vaultDir := t.TempDir()
+	trigYAML := `schedules:
+  - id: gmail-inbox-watch
+    cron: "CRON_TZ=America/Los_Angeles */15 7-22 * * *"
+    mode: daemon_gatekeeper
+    skill: inbox-triage
+  - id: morning-brief
+    cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
+    mode: front_desk_cron
+    skill: morning-brief
+`
+	_ = os.WriteFile(filepath.Join(vaultDir, "triggers.yaml"), []byte(trigYAML), 0o600)
+
+	h := NewHandler(vaultDir)
+	reqGet := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/", nil)
+	recGet := httptest.NewRecorder()
+	h.ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("GET / failed: %d", recGet.Code)
+	}
+	csrf := extractTestCSRFToken(t, recGet.Body.String())
+	if !strings.Contains(recGet.Body.String(), "Scheduled Automations") || !strings.Contains(recGet.Body.String(), "gmail-inbox-watch") {
+		t.Fatalf("expected Scheduled Automations section in WebUI HTML")
+	}
+
+	reqPause := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4242/api/triggers/action", strings.NewReader(`{"id":"gmail-inbox-watch","action":"pause","reason":"maintenance"}`))
+	reqPause.Header.Set("Content-Type", "application/json")
+	reqPause.Header.Set("X-HQ-CSRF-Token", csrf)
+	recPause := httptest.NewRecorder()
+	h.ServeHTTP(recPause, reqPause)
+	if recPause.Code != http.StatusOK || !strings.Contains(recPause.Body.String(), `"ok":true`) {
+		t.Fatalf("POST /api/triggers/action pause failed (%d): %s", recPause.Code, recPause.Body.String())
+	}
+
+	reqState := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/api/state", nil)
+	recState := httptest.NewRecorder()
+	h.ServeHTTP(recState, reqState)
+	var st DashboardState
+	if err := json.Unmarshal(recState.Body.Bytes(), &st); err != nil {
+		t.Fatalf("unmarshal /api/state: %v", err)
+	}
+	if len(st.Schedules) != 2 || st.Schedules[0].Enabled || !st.Schedules[1].Enabled {
+		t.Fatalf("expected gmail-inbox-watch paused and morning-brief enabled, got: %+v", st.Schedules)
+	}
+
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole: %v", err)
+	}
+	mdBytes, _ := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	md := string(mdBytes)
+	if !strings.Contains(md, "## ⏰ Scheduled Automations (`2` Configured)") || !strings.Contains(md, "⏸️ **`gmail-inbox-watch`**") {
+		t.Fatalf("expected Scheduled Automations table with paused gmail-inbox-watch in CONSOLE.md, got:\n%s", md)
+	}
+}

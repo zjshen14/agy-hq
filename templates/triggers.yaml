@@ -1,4 +1,7 @@
-# Declarative Proactive Triggers & Inbox Routing Rules
+# Declarative Core OS Harness Schedules & Inbox Routing Rules
+# Note: Keep triggers.yaml strictly for Core Harness OS background daemons
+# and high-frequency 0-token Go/CLI gatekeepers. User-requested watches and
+# reminders should use Antigravity's native `schedule` tool in conversation.
 schedules:
   - id: gmail-inbox-watch
     cron: "CRON_TZ=America/Los_Angeles */15 7-22 * * *"
@@ -17,15 +20,6 @@ schedules:
     model: gemini-4-hydrogen-medium
     delivery: interrupt
     skill: morning-brief
-  - id: edgar-close-watch
-    cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
-    mode: daemon_gatekeeper
-    tier: routine
-    model: gemini-4-hydrogen-medium
-    precheck_cmd: ["hq", "status", "--quiet"]
-    dedup_mode: stdout_sha256
-    delivery: interrupt_on_breach
-    skill: thesis-check
   - id: sleep-consolidate
     cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
     mode: isolated_worker
@@ -33,6 +27,17 @@ schedules:
     model: gemini-4-carbon-medium
     delivery: silent_ledger
     skill: sleep-consolidate
+
+  # Optional example: custom 0-token gatekeeper schedule (disabled / example only)
+  # - id: edgar-close-watch
+  #   cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
+  #   mode: daemon_gatekeeper
+  #   tier: routine
+  #   model: gemini-4-hydrogen-medium
+  #   precheck_cmd: ["hq", "status", "--quiet"]
+  #   dedup_mode: stdout_sha256
+  #   delivery: interrupt_on_breach
+  #   skill: thesis-check
 
 inbox_rules:
   - name: bank-statements

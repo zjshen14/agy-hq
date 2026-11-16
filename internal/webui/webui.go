@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
@@ -31,13 +33,31 @@ import (
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
-// DashboardState aggregates live Vault, approval, worktree, task, journal, quota, observability, spaces, goals, ideas, and doctor state.
+// ScheduleSummaryRow surfaces both hq daemon declarative triggers and active conversation crons in the Console UI.
+type ScheduleSummaryRow struct {
+	ID              string `json:"id"`
+	FQID            string `json:"fqid,omitempty"`
+	Kind            string `json:"kind"` // "daemon" or "conversation_cron"
+	Enabled         bool   `json:"enabled"`
+	Cron            string `json:"cron"`
+	Runner          string `json:"runner"`
+	Skill           string `json:"skill,omitempty"`
+	Summary         string `json:"summary,omitempty"`
+	LastCheckedAt   string `json:"lastCheckedAt,omitempty"`
+	LastTriggeredAt string `json:"lastTriggeredAt,omitempty"`
+	SkipsCount      int    `json:"skipsCount,omitempty"`
+	LastError       string `json:"lastError,omitempty"`
+	LatestConvID    string `json:"latestConvId,omitempty"`
+}
+
+// DashboardState aggregates live Vault, approval, worktree, task, schedule, journal, quota, observability, spaces, goals, ideas, and doctor state.
 type DashboardState struct {
 	VaultDir      string                         `json:"vaultDir"`
 	UpdatedAt     string                         `json:"updatedAt"`
 	Quota         kernel.QuotaState              `json:"quota"`
 	Observability obs.DashboardSummary           `json:"observability"`
 	Pending       []approvals.Proposal           `json:"pending"`
+	Schedules     []ScheduleSummaryRow           `json:"schedules,omitempty"`
 	ActiveSpaces  []ConsoleSpace                 `json:"activeSpaces,omitempty"`
 	Goals         []kernel.Goal                  `json:"goals,omitempty"`
 	OverdueWaits  []kernel.OverdueWaitingSummary `json:"overdueWaits,omitempty"`
@@ -600,6 +620,64 @@ func NewHandler(vaultDir string) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": err == nil, "message": msg})
 	})
 
+	mux.HandleFunc("/api/triggers/action", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isAllowedSameOriginRequest(r) {
+			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
+			return
+		}
+		var id, action, reason, reqCSRF string
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			var body struct {
+				ID        string `json:"id"`
+				Action    string `json:"action"`
+				Reason    string `json:"reason"`
+				CSRFToken string `json:"csrf_token"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id = strings.TrimSpace(body.ID)
+			action = strings.ToLower(strings.TrimSpace(body.Action))
+			reason = strings.TrimSpace(body.Reason)
+			reqCSRF = strings.TrimSpace(body.CSRFToken)
+		} else {
+			_ = r.ParseForm()
+			id = strings.TrimSpace(r.FormValue("id"))
+			action = strings.ToLower(strings.TrimSpace(r.FormValue("action")))
+			reason = strings.TrimSpace(r.FormValue("reason"))
+			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
+		}
+		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
+			reqCSRF = hdr
+		}
+		if !validCSRFToken(csrfToken, reqCSRF) {
+			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
+			return
+		}
+
+		now := time.Now()
+		var err error
+		switch action {
+		case "pause":
+			_, _, err = extension.SetSchedulePaused(context.Background(), vaultDir, id, true, reason, "", now)
+		case "resume":
+			_, _, err = extension.SetSchedulePaused(context.Background(), vaultDir, id, false, reason, "", now)
+		case "fire":
+			_, err = kernel.FireScheduleOnce(vaultDir, id, false, false, now)
+		default:
+			err = fmt.Errorf("unsupported trigger action %q", action)
+		}
+		_ = SyncMarkdownConsole(vaultDir)
+		msg := fmt.Sprintf("Schedule %s: %s", id, action)
+		if err != nil {
+			msg = fmt.Sprintf("Error updating schedule %s: %v", id, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": err == nil, "message": msg})
+	})
+
 	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		_, _ = w.Write([]byte(faviconSVG))
@@ -789,12 +867,14 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 		}
 	}
 	ideas, _ := outbox.List(vaultDir, outbox.TierIdeasFeed, outbox.StatusPending, now)
+	schedules := buildScheduleSummaries(vaultDir, tasks)
 	return DashboardState{
 		VaultDir:      vaultDir,
 		UpdatedAt:     now.Format("15:04:05"),
 		Quota:         quota,
 		Observability: obsSum,
 		Pending:       pending,
+		Schedules:     schedules,
 		ActiveSpaces:  activeSpaces,
 		Goals:         activeGoals,
 		OverdueWaits:  overdueWaits,
@@ -805,6 +885,86 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 		Health:        health,
 		FlashResult:   flashMsg,
 	}
+}
+
+func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask) []ScheduleSummaryRow {
+	var rows []ScheduleSummaryRow
+	cfg, _ := kernel.LoadEffectiveTriggers(vaultDir)
+	cursors := kernel.LoadTriggerCursors(vaultDir)
+	daemonActive := kernel.IsDaemonActiveFast(vaultDir)
+	fd, hasFD := kernel.GetFrontDesk(vaultDir)
+
+	findLatestConv := func(schedID, mode string) string {
+		var bestConv, bestTS string
+		gkPrefix := "auto-gatekeeper-" + schedID + "-"
+		for _, t := range allTasks {
+			if strings.TrimSpace(t.ConversationID) == "" {
+				continue
+			}
+			matched := strings.HasPrefix(t.TaskSlug, gkPrefix)
+			if !matched && schedID == "gmail-inbox-watch" && strings.HasPrefix(t.TaskSlug, "auto-watch-gmail-") {
+				matched = true
+			}
+			if matched && (bestConv == "" || t.LastUpdatedAt > bestTS) {
+				bestConv = t.ConversationID
+				bestTS = t.LastUpdatedAt
+			}
+		}
+		if bestConv == "" && mode == "front_desk_cron" && hasFD {
+			return fd.ConversationID
+		}
+		return bestConv
+	}
+
+	if cfg != nil {
+		for _, s := range cfg.Schedules {
+			cur := cursors[s.ID]
+			mode := s.EffectiveMode()
+			runner := fmt.Sprintf("Front Desk fallback (%s)", mode)
+			if !s.IsEnabled() {
+				runner = "hq daemon (paused)"
+			} else if daemonActive {
+				runner = fmt.Sprintf("hq daemon (%s)", mode)
+			}
+			rows = append(rows, ScheduleSummaryRow{
+				ID:              s.ID,
+				FQID:            s.FQID(),
+				Kind:            "daemon",
+				Enabled:         s.IsEnabled(),
+				Cron:            s.Cron,
+				Runner:          runner,
+				Skill:           s.Skill,
+				LastCheckedAt:   cur.LastCheckedAt,
+				LastTriggeredAt: cur.LastTriggeredAt,
+				SkipsCount:      cur.SkipsCount,
+				LastError:       cur.LastError,
+				LatestConvID:    findLatestConv(s.ID, mode),
+			})
+		}
+	}
+
+	if hasFD {
+		for _, ac := range fd.AdHocCrons {
+			label := ac.TaskID
+			if idx := strings.LastIndex(label, "/"); idx >= 0 {
+				label = label[idx+1:]
+			}
+			if label == "" {
+				label = "ad-hoc-cron"
+			}
+			rows = append(rows, ScheduleSummaryRow{
+				ID:            label,
+				Kind:          "conversation_cron",
+				Enabled:       true,
+				Cron:          ac.Cron,
+				Runner:        "Antigravity schedule ([HQ] Front Desk)",
+				Summary:       ac.Summary,
+				LastCheckedAt: ac.ArmedAt,
+				LatestConvID:  fd.ConversationID,
+			})
+		}
+	}
+	return rows
 }
 
 func loadTodayJournals(vaultDir string) []hooks.JournalEntry {
@@ -1339,6 +1499,45 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 {{end}}
 </div>
 
+<h2>
+  <span>Scheduled Automations (<span id="schedules-count">{{len .Schedules}}</span>)</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Core OS Daemons &amp; Conversation Crons</span>
+</h2>
+<div id="schedules-list">
+{{if .Schedules}}
+  {{range .Schedules}}
+  <div class="card" id="sched-{{.ID}}">
+    <div class="meta-row">
+      <strong>{{if eq .Kind "daemon"}}⚙️ {{.ID}}{{else}}🕒 {{.ID}}{{end}}</strong>
+      <span class="badge {{if .Enabled}}badge-pass{{else}}badge-warn{{end}}">{{if .Enabled}}{{if eq .Kind "daemon"}}daemon{{else}}chat cron{{end}}{{else}}paused{{end}}</span>
+    </div>
+    <div class="muted" style="margin:4px 0">
+      Cron: <code>{{.Cron}}</code> · Runner: <code>{{.Runner}}</code>{{if .Skill}} · Skill: <code>/{{.Skill}}</code>{{end}}{{if .LatestConvID}} · Latest: <a href="conversation://{{.LatestConvID}}">{{.LatestConvID}}</a>{{end}}
+    </div>
+    {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
+    {{if or .LastCheckedAt .LastTriggeredAt .SkipsCount}}
+    <div class="muted" style="font-size:11px">
+      {{if .LastCheckedAt}}Last checked: <code>{{.LastCheckedAt}}</code>{{end}}{{if .LastTriggeredAt}} · Last fired: <code>{{.LastTriggeredAt}}</code>{{end}}{{if .SkipsCount}} · 0-token skips: <code>{{.SkipsCount}}</code>{{end}}
+    </div>
+    {{end}}
+    {{if .LastError}}<div class="muted" style="font-size:11px;color:#fca5a5">Last error: {{.LastError}}</div>{{end}}
+    {{if eq .Kind "daemon"}}
+    <div class="actions">
+      {{if .Enabled}}
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="pause">Pause</button>
+      {{else}}
+      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="resume">Resume</button>
+      {{end}}
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="fire">Run Now</button>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+{{else}}
+  <div class="card muted">No scheduled automations configured.</div>
+{{end}}
+</div>
+
 {{if .ActiveSpaces}}
 <h2>Active Console Spaces ({{len .ActiveSpaces}})</h2>
 <div id="spaces-list">
@@ -1546,6 +1745,14 @@ document.addEventListener('click', function(ev) {
       headers: postHeaders(),
       body: JSON.stringify({ id: id, mode: mode, csrf_token: CSRF_TOKEN })
     }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated space ' + id), !d.ok); location.reload(); });
+  } else if (act === 'trigger-action') {
+    const id = btn.getAttribute('data-id') || '';
+    const op = btn.getAttribute('data-trigger-op') || '';
+    fetch('/api/triggers/action', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, action: op, csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated schedule ' + id), !d.ok); refreshState(); });
   }
 });
 
@@ -1606,6 +1813,52 @@ async function refreshState() {
       tasksList.innerHTML = html;
     } else {
       tasksList.innerHTML = '<div class="card muted">No active tasks on the live board.</div>';
+    }
+
+    // Update schedules
+    const schedList = document.getElementById('schedules-list');
+    const schedCount = document.getElementById('schedules-count');
+    if (schedCount) schedCount.textContent = state.schedules ? state.schedules.length : 0;
+    if (schedList) {
+      if (state.schedules && state.schedules.length > 0) {
+        let shtml = '';
+        for (const s of state.schedules) {
+          const icon = s.kind === 'daemon' ? '⚙️ ' : '🕒 ';
+          const badgeCls = s.enabled ? 'badge-pass' : 'badge-warn';
+          const badgeTxt = s.enabled ? (s.kind === 'daemon' ? 'daemon' : 'chat cron') : 'paused';
+          let meta = 'Cron: <code>' + escapeHTML(s.cron) + '</code> · Runner: <code>' + escapeHTML(s.runner) + '</code>';
+          if (s.skill) meta += ' · Skill: <code>/' + escapeHTML(s.skill) + '</code>';
+          if (s.latestConvId) meta += ' · Latest: <a href="conversation://' + escapeHTML(s.latestConvId) + '">' + escapeHTML(s.latestConvId) + '</a>';
+          let telemetry = '';
+          if (s.lastCheckedAt || s.lastTriggeredAt || s.skipsCount) {
+            const parts = [];
+            if (s.lastCheckedAt) parts.push('Last checked: <code>' + escapeHTML(s.lastCheckedAt) + '</code>');
+            if (s.lastTriggeredAt) parts.push('Last fired: <code>' + escapeHTML(s.lastTriggeredAt) + '</code>');
+            if (s.skipsCount) parts.push('0-token skips: <code>' + escapeHTML(s.skipsCount) + '</code>');
+            telemetry = '<div class="muted" style="font-size:11px">' + parts.join(' · ') + '</div>';
+          }
+          let actions = '';
+          if (s.kind === 'daemon') {
+            actions = '<div class="actions">' +
+              (s.enabled
+                ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="pause">Pause</button>'
+                : '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="resume">Resume</button>') +
+              '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="fire">Run Now</button>' +
+              '</div>';
+          }
+          shtml += '<div class="card" id="sched-' + escapeHTML(s.id) + '">' +
+            '<div class="meta-row"><strong>' + icon + escapeHTML(s.id) + '</strong><span class="badge ' + badgeCls + '">' + badgeTxt + '</span></div>' +
+            '<div class="muted" style="margin:4px 0">' + meta + '</div>' +
+            (s.summary ? '<div class="muted" style="margin:4px 0;color:#cbd5e1">' + escapeHTML(s.summary) + '</div>' : '') +
+            telemetry +
+            (s.lastError ? '<div class="muted" style="font-size:11px;color:#fca5a5">Last error: ' + escapeHTML(s.lastError) + '</div>' : '') +
+            actions +
+            '</div>';
+        }
+        schedList.innerHTML = shtml;
+      } else {
+        schedList.innerHTML = '<div class="card muted">No scheduled automations configured.</div>';
+      }
     }
 
     // Update Quota spawns
@@ -1869,6 +2122,55 @@ func SyncMarkdownConsole(vaultDir string) error {
 		fmt.Fprintf(&b, "## 💡 Proactive Ideas Feed (`%d` Pending)\n", len(state.Ideas))
 		for _, it := range state.Ideas {
 			fmt.Fprintf(&b, "- **`%s`** (`%s`): **%s** — %s *(run `./bin/hq ideas promote %s` or `dismiss %s`)*\n", it.ID, it.SourceSkill, it.Title, it.Summary, it.ID, it.ID)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.Schedules) > 0 {
+		fmt.Fprintf(&b, "## ⏰ Scheduled Automations (`%d` Configured)\n", len(state.Schedules))
+		b.WriteString("| Schedule | Runner | Cron | Latest Activity |\n| :--- | :--- | :--- | :--- |\n")
+		for _, sc := range state.Schedules {
+			stateIcon := "🟢"
+			if !sc.Enabled {
+				stateIcon = "⏸️"
+			} else if sc.Kind == "conversation_cron" {
+				stateIcon = "🕒"
+			}
+			nameCell := fmt.Sprintf("%s **`%s`**", stateIcon, sc.ID)
+			if sc.Summary != "" {
+				sumClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.Summary), " "), "|", "\\|")
+				if runes := []rune(sumClean); len(runes) > 70 {
+					sumClean = string(runes[:70]) + "..."
+				}
+				nameCell += " — " + sumClean
+			}
+			var actParts []string
+			if sc.LastTriggeredAt != "" {
+				actParts = append(actParts, "fired `"+sc.LastTriggeredAt+"`")
+			} else if sc.LastCheckedAt != "" {
+				actParts = append(actParts, "checked `"+sc.LastCheckedAt+"`")
+			}
+			if sc.SkipsCount > 0 {
+				actParts = append(actParts, fmt.Sprintf("`%d` skips", sc.SkipsCount))
+			}
+			if sc.LatestConvID != "" {
+				shortID := sc.LatestConvID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				actParts = append(actParts, fmt.Sprintf("[`%s`](conversation://%s)", shortID, sc.LatestConvID))
+			}
+			if sc.LastError != "" {
+				errClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.LastError), " "), "|", "\\|")
+				actParts = append(actParts, "⚠️ "+errClean)
+			}
+			actCell := "—"
+			if len(actParts) > 0 {
+				actCell = strings.Join(actParts, " · ")
+			}
+			cronClean := strings.ReplaceAll(sc.Cron, "|", "\\|")
+			runnerClean := strings.ReplaceAll(sc.Runner, "|", "\\|")
+			fmt.Fprintf(&b, "| %s | `%s` | `%s` | %s |\n", nameCell, runnerClean, cronClean, actCell)
 		}
 		b.WriteString("\n---\n\n")
 	}

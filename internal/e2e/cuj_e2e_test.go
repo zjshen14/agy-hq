@@ -1234,7 +1234,7 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 		t.Fatalf("hq init failed: %v", err)
 	}
 
-	// 2. Initial doctor check: daemon is inactive, 4 schedules declared
+	// 2. Initial doctor check: daemon is inactive, 3 schedules declared
 	docOut, err := env.run("", "doctor")
 	if err != nil {
 		t.Fatalf("hq doctor failed: %v (%s)", err, docOut)
@@ -1242,7 +1242,7 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	if !strings.Contains(docOut, "[WARN] Scheduled Triggers & Heartbeat") {
 		t.Fatalf("expected WARN Scheduled Triggers & Heartbeat in hq doctor, got:\n%s", docOut)
 	}
-	if !strings.Contains(docOut, "4 schedules declared in triggers.yaml, but background daemon is inactive") {
+	if !strings.Contains(docOut, "3 schedules declared in triggers.yaml, but background daemon is inactive") {
 		t.Fatalf("expected inactive warning in hq doctor, got:\n%s", docOut)
 	}
 
@@ -1254,11 +1254,11 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	if !strings.Contains(statOut, "agy-hq Daemon Status: INACTIVE") {
 		t.Fatalf("expected INACTIVE status, got:\n%s", statOut)
 	}
-	if !strings.Contains(statOut, "Declared Triggers: 4 schedules, 3 inbox rules") {
+	if !strings.Contains(statOut, "Declared Triggers: 3 schedules, 3 inbox rules") {
 		t.Fatalf("expected declared triggers summary, got:\n%s", statOut)
 	}
-	if !strings.Contains(statOut, "gmail-inbox-watch") || !strings.Contains(statOut, "morning-brief") || !strings.Contains(statOut, "edgar-close-watch") || !strings.Contains(statOut, "sleep-consolidate") {
-		t.Fatalf("expected schedules listed in daemon status, got:\n%s", statOut)
+	if !strings.Contains(statOut, "gmail-inbox-watch") || !strings.Contains(statOut, "morning-brief") || !strings.Contains(statOut, "sleep-consolidate") || strings.Contains(statOut, "edgar-close-watch") {
+		t.Fatalf("expected only Core OS schedules listed in daemon status (no active edgar-close-watch), got:\n%s", statOut)
 	}
 
 	// 4. Test daemon install with mock systemd / launchd directory
@@ -1315,7 +1315,7 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 		t.Fatalf("expected daemon to report running after startup")
 	}
 
-	// Verify hq doctor reports PASS with daemon PID and 4 schedules declared
+	// Verify hq doctor reports PASS with daemon PID and 3 schedules declared
 	docRunning, err := env.run("", "doctor")
 	if err != nil {
 		t.Fatalf("hq doctor running failed: %v (%s)", err, docRunning)
@@ -1323,8 +1323,8 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	if !strings.Contains(docRunning, "[PASS] Scheduled Triggers & Heartbeat") {
 		t.Fatalf("expected PASS Scheduled Triggers & Heartbeat, got:\n%s", docRunning)
 	}
-	if !strings.Contains(docRunning, "4 schedules declared") || !strings.Contains(docRunning, "Running (daemon PID") {
-		t.Fatalf("expected Running (daemon PID ..., 4 schedules declared) in doctor, got:\n%s", docRunning)
+	if !strings.Contains(docRunning, "3 schedules declared") || !strings.Contains(docRunning, "Running (daemon PID") {
+		t.Fatalf("expected Running (daemon PID ..., 3 schedules declared) in doctor, got:\n%s", docRunning)
 	}
 
 	// Verify hq daemon status reports RUNNING
@@ -1345,7 +1345,7 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	if err := json.Unmarshal([]byte(statJSON), &jsonInfo); err != nil {
 		t.Fatalf("failed to parse daemon status JSON: %v\n%s", err, statJSON)
 	}
-	if !jsonInfo.Running || jsonInfo.SchedulesCount != 4 || jsonInfo.InboxRulesCount != 3 {
+	if !jsonInfo.Running || jsonInfo.SchedulesCount != 3 || jsonInfo.InboxRulesCount != 3 {
 		t.Fatalf("unexpected daemon status JSON struct: %+v", jsonInfo)
 	}
 
@@ -1403,7 +1403,7 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	}
 	if !strings.Contains(ssOut1, "Step 3 (Arm Proactive Schedules from `local/triggers.yaml`)") ||
 		!strings.Contains(ssOut1, `30 7 * * *`) ||
-		!strings.Contains(ssOut1, `30 13 * * 1-5`) ||
+		!strings.Contains(ssOut1, `*/15 7-22 * * *`) ||
 		!strings.Contains(ssOut1, `30 23 * * *`) ||
 		!strings.Contains(ssOut1, "Sidebar Pin") {
 		t.Fatalf("expected Step 3 with 5-field cron expressions and sidebar pin tip in session-start, got:\n%s", ssOut1)
@@ -1464,7 +1464,6 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	}{
 		{"30 7 * * *", "[Auto] Morning Brief: Run the morning-brief skill and update hq_console.md."},
 		{"*/15 7-22 * * *", "[Auto] Gmail Inbox Watch: Poll Gmail via hq watch precheck."},
-		{"30 13 * * 1-5", "[Auto] EDGAR Close Watch: Check watchlist filings and run `./bin/hq heartbeat`."},
 		{"30 23 * * *", "[Auto] Sleep Consolidate: Run the sleep-consolidate nightly memory workflow."},
 	} {
 		schedCall := fmt.Sprintf(`{"conversationId":%q,"toolCall":{"name":"schedule","args":{"CronExpression":%q,"IsDaemon":true,"Prompt":%q}}}`, deskConv1, s.cron, s.prompt)
@@ -1474,8 +1473,8 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	}
 
 	fdAfterArm, ok := kernel.GetFrontDesk(env.vaultDir)
-	if !ok || !fdAfterArm.ConsolePinned || len(fdAfterArm.ArmedTriggers) != 4 {
-		t.Fatalf("expected ConsolePinned=true and 4 ArmedTriggers, got: %+v", fdAfterArm)
+	if !ok || !fdAfterArm.ConsolePinned || len(fdAfterArm.ArmedTriggers) != 3 {
+		t.Fatalf("expected ConsolePinned=true and 3 ArmedTriggers, got: %+v", fdAfterArm)
 	}
 
 	// Next SessionStart on deskConv1 should NO LONGER show "New [HQ] Front Desk Initialization Required"
@@ -1525,7 +1524,7 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim-desk shift 2 failed: %v (%s)", err, claimOut)
 	}
-	if !strings.Contains(claimOut, "Step 1 (Pin Console Artifact)") || !strings.Contains(claimOut, "Step 2 (Arm 4 Proactive Schedule(s)") || !strings.Contains(claimOut, "Tip: Pin the '[HQ] Front Desk' conversation to your Antigravity sidebar") {
+	if !strings.Contains(claimOut, "Step 1 (Pin Console Artifact)") || !strings.Contains(claimOut, "Step 2 (Arm 3 Proactive Schedule(s)") || !strings.Contains(claimOut, "Tip: Pin the '[HQ] Front Desk' conversation to your Antigravity sidebar") {
 		t.Fatalf("expected Turn-1 checklist and pin tip in claim-desk output, got:\n%s", claimOut)
 	}
 
