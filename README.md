@@ -67,7 +67,7 @@ git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter &
 git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh --global
 ```
 
-Installs `~/.local/bin/hq` on `PATH` and syncs the validated `agy-hq` v0.1.0 plugin bundle into `~/.gemini/config/plugins/agy-hq/` (`hq plugin status` / `hq plugin validate`) so your personal Agent OS, 9 skills, Console sidecar, and private Vault work seamlessly from any folder or repository.
+Installs `~/.local/bin/hq` on `PATH` and syncs the validated `agy-hq` v0.2.0 plugin bundle into `~/.gemini/config/plugins/agy-hq/` (`hq plugin status` / `hq plugin validate`) so your personal Agent OS, 9 skills, Console sidecar, and private Vault work seamlessly from any folder or repository.
 
 **What `bootstrap.sh` sets up automatically:**
 1. Compiles `./bin/hq` locally in `< 2s` from pure Go standard library source (`0` external `go.mod` dependencies, embedded starter `templates/`).

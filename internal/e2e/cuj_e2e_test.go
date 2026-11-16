@@ -24,6 +24,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/taint"
+	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/webui"
 )
@@ -2923,7 +2924,7 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 	sharedPlugin := filepath.Join(fakeHome, ".gemini", "antigravity", "hq", "plugins", "agy-hq")
 	globalPlugin := filepath.Join(fakeHome, ".gemini", "config", "plugins", "agy-hq")
 
-	if projRes["scope"] != "project" || projRes["version"] != "0.1.0" || projRes["vaultDir"] != globalVault {
+	if projRes["scope"] != "project" || projRes["version"] != version.Version || projRes["vaultDir"] != globalVault {
 		t.Fatalf("unexpected project-scoped install result: %+v", projRes)
 	}
 	if _, err := os.Stat(globalPlugin); !os.IsNotExist(err) {
@@ -2948,7 +2949,7 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 	if err := json.Unmarshal([]byte(instOut), &instRes); err != nil {
 		t.Fatalf("unmarshal plugin install JSON: %v (%s)", err, instOut)
 	}
-	if instRes["scope"] != "global" || instRes["version"] != "0.1.0" || instRes["vaultDir"] != globalVault {
+	if instRes["scope"] != "global" || instRes["version"] != version.Version || instRes["vaultDir"] != globalVault {
 		t.Fatalf("unexpected global install result: %+v", instRes)
 	}
 	if _, err := os.Stat(filepath.Join(globalPlugin, "rules", "AGENTS.md")); err != nil {
@@ -2973,7 +2974,7 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq version --json in extRepo failed: %v (%s)", err, verOut)
 	}
-	if !strings.Contains(verOut, `"version": "0.1.0"`) || !strings.Contains(verOut, `"vaultSchemaVersion": 9`) {
+	if !strings.Contains(verOut, fmt.Sprintf(`"version": %q`, version.Version)) || !strings.Contains(verOut, `"vaultSchemaVersion": 9`) {
 		t.Fatalf("unexpected version --json output:\n%s", verOut)
 	}
 

@@ -1,7 +1,7 @@
 {
   "name": "agy-hq",
   "displayName": "agy-hq (Headquarter)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Personal Agent OS for Google Antigravity — 24/7 Front Desk coordinator, zero-token lifecycle hooks, isolated private Vault, and 1-tap approval-bound execution.",
   "logo": "assets/logo.svg",
   "author": {
