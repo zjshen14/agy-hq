@@ -17,6 +17,12 @@ type antigravityProjectConfig struct {
 	ProjectResources struct {
 		Resources []struct {
 			FolderURI string `json:"folderUri"`
+			GitFolder *struct {
+				FolderURI string `json:"folderUri"`
+			} `json:"gitFolder"`
+			WorkspaceFolder *struct {
+				FolderURI string `json:"folderUri"`
+			} `json:"workspaceFolder"`
 		} `json:"resources"`
 	} `json:"projectResources"`
 }
@@ -110,9 +116,20 @@ func loadAntigravityProjects(vaultDir string) ([]loadedProjectEntry, map[string]
 			continue
 		}
 		var folders []string
-		for _, res := range cfg.ProjectResources.Resources {
-			if norm := normalizeWorkspaceFolderPath(res.FolderURI); norm != "" {
+		seenFolder := make(map[string]bool)
+		addFolder := func(rawURI string) {
+			if norm := normalizeWorkspaceFolderPath(rawURI); norm != "" && !seenFolder[norm] {
+				seenFolder[norm] = true
 				folders = append(folders, norm)
+			}
+		}
+		for _, res := range cfg.ProjectResources.Resources {
+			addFolder(res.FolderURI)
+			if res.GitFolder != nil {
+				addFolder(res.GitFolder.FolderURI)
+			}
+			if res.WorkspaceFolder != nil {
+				addFolder(res.WorkspaceFolder.FolderURI)
 			}
 		}
 		byID[id] = folders

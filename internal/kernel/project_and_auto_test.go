@@ -268,3 +268,167 @@ func TestAutoTaskReconciliationWhenStopHookMissed(t *testing.T) {
 		t.Fatalf("expected still-leased auto-s5 status=active, got %q", bySlug["auto-s5"].Status)
 	}
 }
+
+func TestGitBackedProjectRegistryFolderURI(t *testing.T) {
+	wsGitRepo := t.TempDir()
+	wsWorkspaceOnly := t.TempDir()
+	vaultDir := filepath.Join(wsGitRepo, "local")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatalf("mkdir vault: %v", err)
+	}
+
+	cfgDir := t.TempDir()
+	t.Setenv("ANTIGRAVITY_CONFIG_DIR", cfgDir)
+	projDir := filepath.Join(cfgDir, "projects")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+
+	// Git-backed project (`isWorkspaceOnly: false`) nests folderUri under `gitFolder.folderUri`
+	gitBackedJSON := map[string]interface{}{
+		"id":              "proj-git-backed-hq",
+		"name":            "headquarter",
+		"isWorkspaceOnly": false,
+		"projectResources": map[string]interface{}{
+			"resources": []map[string]interface{}{
+				{
+					"gitFolder": map[string]interface{}{
+						"folderUri":     "file://" + filepath.ToSlash(wsGitRepo),
+						"defaultBranch": "main",
+					},
+				},
+			},
+		},
+	}
+	rawGit, _ := json.MarshalIndent(gitBackedJSON, "", "  ")
+	if err := os.WriteFile(filepath.Join(projDir, "proj-git-backed-hq.json"), rawGit, 0o644); err != nil {
+		t.Fatalf("write git-backed project json: %v", err)
+	}
+	writeProjectRegistryFixture(t, cfgDir, "proj-ws-only-other", wsWorkspaceOnly)
+
+	valid, avail := ValidateProjectMatchesWorkspace(vaultDir, "proj-git-backed-hq", wsGitRepo)
+	if !avail || !valid {
+		t.Fatalf("expected Git-backed projectId to validate against gitFolder.folderUri (valid=%v, avail=%v)", valid, avail)
+	}
+	resolved, regAvail, repaired := ResolveVerifiedWorkspaceProjectID(vaultDir, wsGitRepo, "proj-git-backed-hq")
+	if !regAvail || repaired || resolved != "proj-git-backed-hq" {
+		t.Fatalf("expected ResolveVerifiedWorkspaceProjectID to preserve proj-git-backed-hq without repair, got resolved=%q regAvail=%v repaired=%v", resolved, regAvail, repaired)
+	}
+	if fromBlank := ResolveProjectIDForWorkspace(vaultDir, wsGitRepo); fromBlank != "proj-git-backed-hq" {
+		t.Fatalf("expected ResolveProjectIDForWorkspace to return proj-git-backed-hq, got %q", fromBlank)
+	}
+}
+
+func TestDispatchPendingEventsRetryPreservesPriorConvAndEnqueuesSupersededSync(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 15, 21, 0, 0, 0, time.UTC)
+
+	// 1. RegisterTask with empty ConversationID must preserve an existing non-empty ConversationID
+	uInit := "33333333-3333-4333-8333-333333333301"
+	if err := RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "manual-preserve-check",
+		Title:          "[Task:hq] preserve-check",
+		Kind:           "task",
+		ConversationID: uInit,
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("RegisterTask initial: %v", err)
+	}
+	if err := RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:    "manual-preserve-check",
+		LastSummary: "updated summary without convId",
+	}); err != nil {
+		t.Fatalf("RegisterTask partial update: %v", err)
+	}
+	if gotTask, ok := FindTaskByConversationID(vaultDir, uInit); !ok || gotTask.ConversationID != uInit {
+		t.Fatalf("expected RegisterTask with empty ConversationID to preserve %s, got ok=%v task=%+v", uInit, ok, gotTask)
+	}
+
+	// 2. DispatchPendingEvents Attempt 1 spawns uuid1; Attempt 2 fails on quota (must NOT delete uuid1);
+	//    Attempt 3 spawns uuid2 and MUST enqueue superseded_by_retry sidebar sync for uuid1!
+	binDir := t.TempDir()
+	counterFile := filepath.Join(binDir, "count.txt")
+	_ = os.WriteFile(counterFile, []byte("0"), 0o600)
+	uAttempt1 := "44444444-4444-4444-8444-444444444401"
+	uAttempt3 := "44444444-4444-4444-8444-444444444402"
+	fakeAgentAPI := filepath.Join(binDir, "agentapi")
+	agentScript := "#!/bin/sh\n" +
+		"c=$(cat " + counterFile + ")\n" +
+		"if [ \"$c\" = \"0\" ]; then\n" +
+		"  echo 1 > " + counterFile + "\n" +
+		"  echo " + uAttempt1 + "\n" +
+		"else\n" +
+		"  echo " + uAttempt3 + "\n" +
+		"fi\n"
+	if err := os.WriteFile(fakeAgentAPI, []byte(agentScript), 0o755); err != nil {
+		t.Fatalf("write fake agentapi: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
+
+	ev, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:   "gatekeeper",
+		ScopeKey: "retry-scope",
+		Skill:    "inbox-triage",
+		Title:    "[Auto] Retry Test",
+		Prompt:   "Process batch",
+	}, now)
+	if err != nil {
+		t.Fatalf("events.Enqueue: %v", err)
+	}
+	autoSlug := "auto-" + slugify("retry-scope-"+ev.ID)
+
+	// Attempt 1: succeeds with uAttempt1
+	acts1, err := DispatchPendingEvents(vaultDir, now, false)
+	if err != nil || len(acts1) != 1 || !strings.Contains(acts1[0], uAttempt1) {
+		t.Fatalf("Attempt 1 DispatchPendingEvents failed: acts=%v err=%v", acts1, err)
+	}
+
+	// Advance past lease expiry + retry backoff, open quota circuit breaker -> Attempt 2 fails SpawnTask!
+	qOpen := LoadQuota(vaultDir)
+	qOpen.CircuitOpen = true
+	qOpen.CircuitReason = "test quota open"
+	_ = SaveQuota(vaultDir, qOpen)
+
+	tAttempt2 := now.Add(events.DefaultLeaseTTL + time.Minute)
+	// First call reaps expired lease into pending with retry backoff; advance past backoff to dispatch Attempt 2
+	_, _ = DispatchPendingEvents(vaultDir, tAttempt2, false)
+	tAttempt2Ready := tAttempt2.Add(2 * time.Minute)
+	acts2, err := DispatchPendingEvents(vaultDir, tAttempt2Ready, false)
+	if err != nil || len(acts2) != 1 || !strings.Contains(acts2[0], "deferred") {
+		t.Fatalf("expected Attempt 2 to defer on quota circuit open, got acts=%v err=%v", acts2, err)
+	}
+
+	// Verify uAttempt1 was NOT wiped or deleted from tasks.json on failed retry!
+	if preserved, ok := FindTaskByConversationID(vaultDir, uAttempt1); !ok || preserved.TaskSlug != autoSlug {
+		t.Fatalf("expected failed retry NOT to wipe or delete prior conversation %s, got ok=%v task=%+v", uAttempt1, ok, preserved)
+	}
+
+	// Close circuit breaker and advance past quota deferral -> Attempt 3 spawns uAttempt3 and enqueues superseded_by_retry for uAttempt1!
+	qClosed := LoadQuota(vaultDir)
+	qClosed.CircuitOpen = false
+	qClosed.CircuitReason = ""
+	_ = SaveQuota(vaultDir, qClosed)
+
+	tAttempt3 := tAttempt2Ready.Add(2 * time.Minute)
+	acts3, err := DispatchPendingEvents(vaultDir, tAttempt3, false)
+	if err != nil || len(acts3) != 1 || !strings.Contains(acts3[0], uAttempt3) {
+		t.Fatalf("expected Attempt 3 to spawn %s, got acts=%v err=%v", uAttempt3, acts3, err)
+	}
+
+	qItems := LoadSidebarSyncQueue(vaultDir)
+	foundSuperseded := false
+	for _, item := range qItems.Items {
+		if item.ConversationID == uAttempt1 && item.DesiredArchived && item.LastError == "superseded_by_retry" {
+			foundSuperseded = true
+			break
+		}
+	}
+	if !foundSuperseded {
+		t.Fatalf("expected superseded_by_retry sidebar archive item queued for %s, got queue=%+v", uAttempt1, qItems.Items)
+	}
+	if latest, ok := FindTaskByConversationID(vaultDir, uAttempt3); !ok || latest.TaskSlug != autoSlug {
+		t.Fatalf("expected %s bound to %s, got ok=%v task=%+v", autoSlug, uAttempt3, ok, latest)
+	}
+}

@@ -232,19 +232,32 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 			}).ModelID
 		}
 
+		var prevTask ActiveTask
+		hadPrev := false
 		if !dryRun {
-			_ = RegisterTask(vaultDir, ActiveTask{
-				TaskSlug:      autoSlug,
-				Title:         batch.Title,
-				Kind:          "auto",
-				Scope:         batch.ScopeKey,
-				Tier:          inferTierFromModel(effectiveModel),
-				Model:         effectiveModel,
-				EventIDs:      ids,
-				CreatedAt:     nowStr,
-				LastUpdatedAt: nowStr,
-				Status:        "active",
-			})
+			if existingTasks, lErr := ListTasks(vaultDir); lErr == nil {
+				for _, et := range existingTasks {
+					if et.TaskSlug == autoSlug {
+						prevTask = et
+						hadPrev = true
+						break
+					}
+				}
+			}
+			if !hadPrev {
+				_ = RegisterTask(vaultDir, ActiveTask{
+					TaskSlug:      autoSlug,
+					Title:         batch.Title,
+					Kind:          "auto",
+					Scope:         batch.ScopeKey,
+					Tier:          inferTierFromModel(effectiveModel),
+					Model:         effectiveModel,
+					EventIDs:      ids,
+					CreatedAt:     nowStr,
+					LastUpdatedAt: nowStr,
+					Status:        "active",
+				})
+			}
 		}
 
 		spawnPrompt := batch.Prompt
@@ -254,7 +267,7 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 
 		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, effectiveModel, dryRun)
 		if spawnErr != nil {
-			if !dryRun {
+			if !dryRun && !hadPrev {
 				removeTaskBySlug(vaultDir, autoSlug)
 			}
 			newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, spawnErr.Error(), isQuotaDeferralError(spawnErr), now)
@@ -266,23 +279,26 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		if dryRun {
 			_, _ = events.CompleteIDs(vaultDir, ids, now)
 		} else if uuid := ExtractUUID(out); uuid != "" {
-			if existingTasks, lErr := ListTasks(vaultDir); lErr == nil {
-				for _, prev := range existingTasks {
-					if prev.TaskSlug == autoSlug && prev.ConversationID != "" && prev.ConversationID != uuid && !prev.Pinned {
-						_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
-							ConversationID:  prev.ConversationID,
-							TaskSlug:        autoSlug,
-							DesiredArchived: true,
-							NextRetryAt:     now.Add(3 * time.Second).UTC().Format(time.RFC3339),
-							LastError:       "superseded_by_retry",
-						}, now)
-					}
-				}
+			if hadPrev && prevTask.ConversationID != "" && prevTask.ConversationID != uuid && !prevTask.Pinned {
+				_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
+					ConversationID:  prevTask.ConversationID,
+					TaskSlug:        autoSlug,
+					DesiredArchived: true,
+					NextRetryAt:     now.Add(3 * time.Second).UTC().Format(time.RFC3339),
+					LastError:       "superseded_by_retry",
+				}, now)
 			}
 			_ = RegisterTask(vaultDir, ActiveTask{
 				TaskSlug:       autoSlug,
+				Title:          batch.Title,
+				Kind:           "auto",
+				Scope:          batch.ScopeKey,
+				Tier:           inferTierFromModel(effectiveModel),
+				Model:          effectiveModel,
+				EventIDs:       ids,
 				ConversationID: uuid,
 				LastUpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+				Status:         "active",
 			})
 			_ = events.BindBatchConversation(vaultDir, ids, uuid, now, events.DefaultLeaseTTL)
 			if batch.TaintOnSpawn {

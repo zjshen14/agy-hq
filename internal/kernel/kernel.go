@@ -670,6 +670,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.TaskSlug == "" {
 				task.TaskSlug = tasks[i].TaskSlug
 			}
+			if task.ConversationID == "" {
+				task.ConversationID = tasks[i].ConversationID
+			}
 			if task.Title == "" {
 				task.Title = tasks[i].Title
 			}
