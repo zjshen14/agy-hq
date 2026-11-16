@@ -7,7 +7,6 @@ schedules:
     cron: "CRON_TZ=America/Los_Angeles */15 7-22 * * *"
     mode: daemon_gatekeeper
     tier: quick
-    model: gemini-4-hydrogen-low
     precheck_cmd: ["hq", "watch", "precheck", "--connector=gmail", "--json"]
     precheck_timeout_ms: 45000
     dedup_mode: precheck_enqueues
@@ -17,14 +16,12 @@ schedules:
     cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
     mode: front_desk_cron
     tier: routine
-    model: gemini-4-hydrogen-medium
     delivery: interrupt
     skill: morning-brief
   - id: sleep-consolidate
     cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
     mode: isolated_worker
     tier: deep_routine
-    model: gemini-4-carbon-medium
     delivery: silent_ledger
     skill: sleep-consolidate
 
@@ -33,7 +30,6 @@ schedules:
   #   cron: "CRON_TZ=America/Los_Angeles 30 13 * * 1-5"
   #   mode: daemon_gatekeeper
   #   tier: routine
-  #   model: gemini-4-hydrogen-medium
   #   precheck_cmd: ["hq", "status", "--quiet"]
   #   dedup_mode: stdout_sha256
   #   delivery: interrupt_on_breach

@@ -8,7 +8,7 @@ description: >-
 
 # Morning Brief (`/morning-brief`)
 
-> **Model Routing:** Scheduled/background runs default to **Gemini 4 Hydrogen (Medium)** (`gemini-4-hydrogen-medium` / `--tier=routine`) for structured multi-source synthesis.
+> **Model Routing:** Scheduled/background runs resolve via the **`routine` tier** (`--tier=routine` / `hq dispatch resolve --skill=morning-brief`, configured in `local/config.yaml` `routing.tiers`) for structured multi-source synthesis.
 
 Produce a concise, vendor-neutral daily brief across active connectors, structured extensions, goals/SLAs, engineering worktrees, and watchlist updates without leaking untrusted raw bodies into `[HQ] Front Desk`.
 

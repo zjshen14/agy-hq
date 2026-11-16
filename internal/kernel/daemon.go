@@ -730,7 +730,15 @@ func FormatDaemonStatus(info DaemonInfo) string {
 	if len(info.Schedules) > 0 {
 		sb.WriteString("  Schedules:\n")
 		for _, s := range info.Schedules {
-			sb.WriteString(fmt.Sprintf("    - %s (cron: %q, model: %s, skill: %s)\n", s.ID, s.Cron, s.Model, s.Skill))
+			routeLabel := ""
+			if strings.TrimSpace(s.Tier) != "" && strings.TrimSpace(s.Model) != "" {
+				routeLabel = fmt.Sprintf("tier: %s, model: %s", s.Tier, s.Model)
+			} else if strings.TrimSpace(s.Tier) != "" {
+				routeLabel = fmt.Sprintf("tier: %s", s.Tier)
+			} else {
+				routeLabel = fmt.Sprintf("model: %s", s.Model)
+			}
+			sb.WriteString(fmt.Sprintf("    - %s (cron: %q, %s, skill: %s)\n", s.ID, s.Cron, routeLabel, s.Skill))
 		}
 	}
 	if len(info.InboxRules) > 0 {

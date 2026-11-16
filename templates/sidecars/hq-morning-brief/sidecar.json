@@ -2,12 +2,10 @@
   "builtin": "schedule",
   "args": [
     "CRON_TZ=America/Los_Angeles 30 7 * * *",
-    "agentapi",
-    "new-conversation",
-    "--model=gemini-4-hydrogen-medium",
-    "--title=[Auto] Morning Brief",
-    "--",
-    "Activate the morning-brief skill: check ./bin/hq status, today's calendar, local/inbox/, active worktrees, and investment watchlist, then save today's Morning Brief to local/notes/general/brief-YYYY-MM-DD.md."
+    "hq",
+    "triggers",
+    "tick",
+    "core/morning-brief"
   ],
   "restart_policy": "always",
   "display_name": "HQ Morning Brief (07:30)",

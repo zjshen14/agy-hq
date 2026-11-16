@@ -25,7 +25,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/timers"
-	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
@@ -2924,23 +2923,28 @@ func ProcessInbox(vaultDir string, dryRun bool) ([]string, error) {
 }
 
 // RunHeartbeat executes the zero-token Go sidecar pre-check loop (proposal TTL sweep, durable timer evaluation,
-// inbox drop router, Gmail/GChat batch coalescer, daemon gatekeepers, event inbox dispatch, outbox interrupt
+// inbox drop router, schedule-gated daemon gatekeepers/watchers, event inbox dispatch, outbox interrupt
 // delivery, and Waiting-On obligation SLA sweeps).
 // If no actionable deltas are detected, zero LLM tokens are used.
 func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
-	now := time.Now()
+	return RunHeartbeatAt(vaultDir, time.Now(), dryRun)
+}
+
+// RunHeartbeatAt runs RunHeartbeat at an explicit reference timestamp `now` so connector watcher polling
+// strictly respects `triggers.yaml` schedule enabled/paused overrides and cron intervals via EvaluateDaemonGatekeepers.
+func RunHeartbeatAt(vaultDir string, now time.Time, dryRun bool) (string, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
 	_, _ = approvals.ExpireStaleProposals(vaultDir, now)
 	_, _ = timers.EvaluateDue(vaultDir, now)
 
-	inboxActions, err := ProcessInbox(vaultDir, dryRun)
-	if err != nil {
+	if err := EnqueueInboxFiles(vaultDir, now); err != nil {
 		return "", err
 	}
-
-	if !dryRun {
-		if watchSum, wErr := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: now}); wErr == nil && watchSum.EnqueuedTotal > 0 {
-			inboxActions = append(inboxActions, fmt.Sprintf("watcher:enqueued=%d", watchSum.EnqueuedTotal))
-		}
+	inboxActions, err := DispatchPendingEvents(vaultDir, now, dryRun)
+	if err != nil {
+		return "", err
 	}
 
 	if gkActions, _, gkErr := EvaluateDaemonGatekeepers(vaultDir, now, false, dryRun); gkErr == nil && len(gkActions) > 0 {

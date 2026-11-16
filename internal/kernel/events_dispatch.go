@@ -189,8 +189,8 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		if batch.SessionID != "" {
 			out, delivErr := DeliverMessageToSession(vaultDir, batch.SessionID, batch.Title, batch.Prompt, dryRun)
 			if delivErr != nil {
-				if headMetaVal(head, "schedule_mode") == "front_desk_cron" {
-					// Fall back to an isolated [Auto] spawn if direct Front Desk delivery failed.
+				if headMetaVal(head, "schedule_mode") == "front_desk_cron" && headMetaVal(head, "scheduled_tick") != "1" {
+					// Fall back to an isolated [Auto] spawn only for explicit manual fires when direct Front Desk delivery failed.
 					batch.SessionID = ""
 				} else {
 					newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, delivErr.Error(), false, now)
