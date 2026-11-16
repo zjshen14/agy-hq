@@ -2763,13 +2763,13 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 	}
 
 	usedModel = modelID
-	reqBody := buildCascadeRequestBody(modelEnum, "", "", workDir, projectID, true)
+	reqBody := buildCascadeRequestBody(modelEnum, "", "", workDir, projectID)
 	cascadeID, err = startCascade(creds.BaseURL, creds.CSRFToken, reqBody)
 	if err != nil {
 		if isQuotaExhaustedError(err.Error()) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
 			fallbackModel := resolveRoutineFallbackModel(vaultDir)
 			if fbEnum, fbEnumErr := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, fallbackModel); fbEnumErr == nil {
-				fbReqBody := buildCascadeRequestBody(fbEnum, "", "", workDir, projectID, true)
+				fbReqBody := buildCascadeRequestBody(fbEnum, "", "", workDir, projectID)
 				if fbCascadeID, fbErr := startCascade(creds.BaseURL, creds.CSRFToken, fbReqBody); fbErr == nil {
 					cascadeID = fbCascadeID
 					usedModel = fallbackModel + " (fallback)"
@@ -3877,7 +3877,7 @@ func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
 	return lsCredentials{}, false
 }
 
-func buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, projectID string, includeBothProjectAndWorkspace bool) map[string]interface{} {
+func buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, projectID string) map[string]interface{} {
 	reqBody := map[string]interface{}{
 		"baseTrajectoryIdentifier": map[string]interface{}{
 			"lastActiveDoc": true,
@@ -3909,13 +3909,15 @@ func buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, projec
 			"name": "self",
 		}
 	}
+	projectID = strings.TrimSpace(projectID)
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	// StartCascade rejects requests specifying both projectEnvConfig and workspaceUris (HTTP 400 invalid_argument).
 	if projectID != "" {
 		reqBody["projectEnvConfig"] = map[string]interface{}{
 			"projectId":                 projectID,
 			"defaultProjectEnvironment": map[string]interface{}{},
 		}
-	}
-	if workspaceDir != "" && (includeBothProjectAndWorkspace || projectID == "") {
+	} else if workspaceDir != "" {
 		if absDir, absErr := filepath.Abs(workspaceDir); absErr == nil {
 			workspaceDir = absDir
 		}
@@ -4096,7 +4098,7 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		return "", err
 	}
 
-	reqBody := buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")), false)
+	reqBody := buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")))
 	cascadeID, err := startCascade(creds.BaseURL, creds.CSRFToken, reqBody)
 	if err != nil {
 		return "", err

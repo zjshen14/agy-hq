@@ -598,6 +598,16 @@ func TestSpawnTaskLSAttachmentAndHubDiscovery(t *testing.T) {
 		case "/exa.language_server_pb.LanguageServerService/StartCascade":
 			var req map[string]interface{}
 			_ = json.NewDecoder(r.Body).Decode(&req)
+			_, hasProj := req["projectEnvConfig"]
+			_, hasURIs := req["workspaceUris"]
+			if hasProj && hasURIs {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"code":    "invalid_argument",
+					"message": "invalid_argument: cannot specify both workspace URIs and project environment config",
+				})
+				return
+			}
 			gotStartReqs = append(gotStartReqs, req)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"cascadeId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -679,7 +689,8 @@ func TestSpawnTaskLSAttachmentAndHubDiscovery(t *testing.T) {
 		t.Fatalf("expected no projectEnvConfig when fd.ProjectID is empty, got %+v", req1["projectEnvConfig"])
 	}
 
-	// 2. With fd.ProjectID populated: both projectEnvConfig.projectId and workspaceUris must be sent.
+	// 2. With fd.ProjectID populated: projectEnvConfig.projectId must be sent and workspaceUris must be omitted
+	// (StartCascade rejects specifying both with HTTP 400 invalid_argument).
 	fd, _ := GetFrontDesk(vaultDir)
 	fd.ProjectID = "proj-headquarter-uuid"
 	if err := saveFrontDeskLease(vaultDir, fd); err != nil {
@@ -696,9 +707,44 @@ func TestSpawnTaskLSAttachmentAndHubDiscovery(t *testing.T) {
 	if projCfg["projectId"] != "proj-headquarter-uuid" {
 		t.Fatalf("expected projectEnvConfig.projectId=proj-headquarter-uuid, got %+v", req2["projectEnvConfig"])
 	}
-	uris2, _ := req2["workspaceUris"].([]interface{})
-	if len(uris2) != 1 || uris2[0] != expectedURI {
-		t.Fatalf("expected workspaceUris=[%q] even when projectId is set, got %+v", expectedURI, req2["workspaceUris"])
+	if _, hasURIs := req2["workspaceUris"]; hasURIs {
+		t.Fatalf("expected workspaceUris to be omitted when projectId is set, got %+v", req2["workspaceUris"])
+	}
+}
+
+func TestBuildCascadeRequestBodyMutualExclusion(t *testing.T) {
+	wsDir := t.TempDir()
+	expectedURI := "file://" + filepath.ToSlash(wsDir)
+
+	// 1. Both projectID and workspaceDir set -> projectEnvConfig only, no workspaceUris.
+	reqProj := buildCascadeRequestBody("MODEL_X", "", "", wsDir, "proj-123")
+	if _, hasProj := reqProj["projectEnvConfig"]; !hasProj {
+		t.Fatalf("expected projectEnvConfig when projectID is set")
+	}
+	if _, hasURIs := reqProj["workspaceUris"]; hasURIs {
+		t.Fatalf("expected workspaceUris to be omitted when projectID is set, got %+v", reqProj["workspaceUris"])
+	}
+
+	// 2. Empty/whitespace projectID and workspaceDir set -> workspaceUris only, no projectEnvConfig.
+	reqWS := buildCascadeRequestBody("MODEL_X", "parent-1", "[standard] scope: Role", wsDir, "   ")
+	if _, hasProj := reqWS["projectEnvConfig"]; hasProj {
+		t.Fatalf("expected projectEnvConfig to be omitted when projectID is empty, got %+v", reqWS["projectEnvConfig"])
+	}
+	uris, _ := reqWS["workspaceUris"].([]string)
+	if len(uris) != 1 || uris[0] != expectedURI {
+		t.Fatalf("expected workspaceUris=[%q], got %+v", expectedURI, reqWS["workspaceUris"])
+	}
+	if reqWS["parentConversationId"] != "parent-1" {
+		t.Fatalf("expected parentConversationId=parent-1, got %v", reqWS["parentConversationId"])
+	}
+
+	// 3. Both empty -> neither field is set.
+	reqEmpty := buildCascadeRequestBody("MODEL_X", "", "", "", "")
+	if _, hasProj := reqEmpty["projectEnvConfig"]; hasProj {
+		t.Fatalf("expected no projectEnvConfig when both are empty")
+	}
+	if _, hasURIs := reqEmpty["workspaceUris"]; hasURIs {
+		t.Fatalf("expected no workspaceUris when both are empty")
 	}
 }
 
