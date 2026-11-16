@@ -855,4 +855,34 @@ func TestReconcileFrontDeskFiveCronsAndDaemonMigration(t *testing.T) {
 	if len(fdAfterKill.AdHocCrons) != 1 || fdAfterKill.AdHocCrons[0].TaskID != fdConv+"/task-1320" {
 		t.Fatalf("expected ad-hoc task-1320 preserved after killing task-1317, got %+v", fdAfterKill.AdHocCrons)
 	}
+
+	// Simulate pre-restart task-336 superseded by post-restart task-1319, followed by killing task-1319 and removing edgar-close-watch from triggers.yaml:
+	// task-336 must NOT resurrect as an ad-hoc cron.
+	fPre, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	preRestartLine := fmt.Sprintf("{\"type\":\"GENERIC\",\"created_at\":\"2026-11-08T18:33:31Z\",\"content\":\"Tool is running as a background task with task id: %s/task-336\\nTask Description: Cron: 30 13 * * 1-5, Prompt: [Auto] EDGAR Close Watch: Run /thesis-check to monitor new 10-K, 10-Q, 8-K filings and earnings releases against investment watchlists.\"}\n", fdConv)
+	if err := os.WriteFile(transcriptPath, append([]byte(preRestartLine), fPre...), 0o600); err != nil {
+		t.Fatalf("prepend pre-restart line: %v", err)
+	}
+	_ = RecordKilledFrontDeskTask(vaultDir, fdConv, fdConv+"/task-1319")
+	coreOnlyYAML := `schedules:
+  - id: morning-brief
+    cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
+    mode: front_desk_cron
+    skill: morning-brief
+  - id: sleep-consolidate
+    cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
+    mode: isolated_worker
+    skill: sleep-consolidate
+`
+	_ = os.WriteFile(filepath.Join(vaultDir, "triggers.yaml"), []byte(coreOnlyYAML), 0o600)
+	_ = ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath)
+	fdNoGhost, _ := GetFrontDesk(vaultDir)
+	for _, ac := range fdNoGhost.AdHocCrons {
+		if strings.Contains(ac.TaskID, "task-336") || strings.Contains(ac.TaskID, "task-1319") {
+			t.Fatalf("expected killed/superseded EDGAR cron not to resurrect as ad-hoc cron, got %+v", fdNoGhost.AdHocCrons)
+		}
+	}
 }

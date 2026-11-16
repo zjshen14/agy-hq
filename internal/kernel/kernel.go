@@ -2111,33 +2111,42 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 			changed = true
 		}
 	}
-	if len(fd.AdHocCrons) > 0 {
-		kept := fd.AdHocCrons[:0]
-		for _, ac := range fd.AdHocCrons {
-			if ac.TaskID != "" && killedSet[ac.TaskID] {
-				changed = true
-				continue
-			}
-			kept = append(kept, ac)
-		}
-		fd.AdHocCrons = kept
-	}
-
-	activeItems := make([]transcriptCronItem, 0, len(launchedCrons)+len(fallbackCalls))
-	for _, lc := range launchedCrons {
-		if lc.taskID != "" && killedSet[lc.taskID] {
-			continue
-		}
-		activeItems = append(activeItems, lc)
-	}
+	chronological := make([]transcriptCronItem, 0, len(launchedCrons)+len(fallbackCalls))
+	chronological = append(chronological, launchedCrons...)
 	for _, fc := range fallbackCalls {
 		key := normalizeFiveFieldCronExpr(fc.cronExpr) + "\x00" + fc.prompt
 		if launchedKeys[key] {
 			continue
 		}
-		activeItems = append(activeItems, fc)
+		chronological = append(chronological, fc)
 	}
 
+	// Keep only the latest launch per (normalized cron, job title prefix) signature so pre-restart
+	// timers wiped by an Antigravity server restart never resurrect after their post-restart replacement is killed.
+	cronSig := func(cronExpr, prompt string) string {
+		head := SanitizeTaskTitle(prompt, cronExpr)
+		if before, _, hasColon := strings.Cut(head, ":"); hasColon && strings.TrimSpace(before) != "" {
+			head = strings.TrimSpace(before)
+		}
+		return normalizeFiveFieldCronExpr(cronExpr) + "\x00" + strings.ToLower(head)
+	}
+	latestIdxBySig := make(map[string]int, len(chronological))
+	for i, item := range chronological {
+		latestIdxBySig[cronSig(item.cronExpr, item.prompt)] = i
+	}
+	activeItems := make([]transcriptCronItem, 0, len(latestIdxBySig))
+	for i, item := range chronological {
+		if latestIdxBySig[cronSig(item.cronExpr, item.prompt)] != i {
+			continue
+		}
+		if item.taskID != "" && killedSet[item.taskID] {
+			continue
+		}
+		activeItems = append(activeItems, item)
+	}
+
+	var rebuiltAdHoc []AdHocCron
+	rebuiltAdHocSigs := make(map[string]bool)
 	for _, item := range activeItems {
 		armedAt := strings.TrimSpace(item.armedAt)
 		if armedAt == "" {
@@ -2161,15 +2170,32 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 			}
 		} else if item.cronExpr != "" {
 			summary := SanitizeTaskTitle(item.prompt, item.cronExpr)
-			nextAdHoc, adChanged := upsertAdHocCron(fd.AdHocCrons, AdHocCron{
+			rebuiltAdHoc, _ = upsertAdHocCron(rebuiltAdHoc, AdHocCron{
 				TaskID:  item.taskID,
 				Cron:    item.cronExpr,
 				Summary: summary,
 				ArmedAt: armedAt,
 			})
-			if adChanged {
-				fd.AdHocCrons = nextAdHoc
+			rebuiltAdHocSigs[cronSig(item.cronExpr, summary)] = true
+		}
+	}
+	// Preserve any just-armed PreToolUse ad-hoc cron (TaskID == "") not yet written to transcript.jsonl.
+	for _, ac := range fd.AdHocCrons {
+		if ac.TaskID == "" {
+			if !rebuiltAdHocSigs[cronSig(ac.Cron, ac.Summary)] {
+				rebuiltAdHoc, _ = upsertAdHocCron(rebuiltAdHoc, ac)
+			}
+		}
+	}
+	if len(rebuiltAdHoc) != len(fd.AdHocCrons) {
+		fd.AdHocCrons = rebuiltAdHoc
+		changed = true
+	} else {
+		for i := range rebuiltAdHoc {
+			if rebuiltAdHoc[i] != fd.AdHocCrons[i] {
+				fd.AdHocCrons = rebuiltAdHoc
 				changed = true
+				break
 			}
 		}
 	}
