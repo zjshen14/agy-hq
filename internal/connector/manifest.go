@@ -26,7 +26,7 @@ var (
 	reFlagTemplate       = regexp.MustCompile(`^--[a-zA-Z0-9][a-zA-Z0-9_-]*=\{\{(\?|\*)?([a-zA-Z0-9_]+)\}\}$`)
 	rePositionalTemplate = regexp.MustCompile(`^\{\{(\??)([a-z][a-z0-9_]{0,31})\}\}$`)
 	reStrictScalarVal    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+=-]{0,127}$`)
-	reRelaxedQueryText   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/+=, ()'"?!-]{0,255}$`)
+	reRelaxedQueryText   = regexp.MustCompile(`^[A-Za-z0-9\[\](][A-Za-z0-9._:@/+=, ()'"?!#&\[\]-]{0,255}$`)
 )
 
 var forbiddenShellBasenames = map[string]bool{
@@ -454,6 +454,13 @@ func validateParamValue(paramName, val string) error {
 	if paramName == "query" || paramName == "subject" {
 		if !reRelaxedQueryText.MatchString(val) {
 			return fmt.Errorf("parameter %q value %q failed safe query/subject character policy", paramName, val)
+		}
+		return nil
+	}
+	if paramName == "to" || paramName == "cc" {
+		addrs, err := ParseRFC5322Emails(val)
+		if err != nil || len(addrs) == 0 {
+			return fmt.Errorf("parameter %q value %q failed RFC 5322 email validation", paramName, val)
 		}
 		return nil
 	}

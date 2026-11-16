@@ -1,6 +1,7 @@
 package gmail
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -167,7 +168,64 @@ func registryPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "private", "gmail", "accounts.json")
 }
 
-// LoadRegistry reads local/private/gmail/accounts.json.
+func mergeResolvedConnectorAccounts(vaultDir string, reg *AccountRegistry) {
+	rc, err := connector.Resolve(vaultDir, "gmail")
+	if err != nil || len(rc.Instance.Accounts) == 0 {
+		return
+	}
+	if reg.Accounts == nil {
+		reg.Accounts = make(map[string]AccountConfig)
+	}
+	if reg.DefaultAccount == "" && rc.Instance.DefaultAccount != "" {
+		reg.DefaultAccount = rc.Instance.DefaultAccount
+	}
+	cliPath := ""
+	if rc.Manifest.Transport.CLI != nil {
+		cliPath = strings.TrimSpace(rc.Manifest.Transport.CLI.Path)
+	}
+	for alias, acc := range rc.Instance.Accounts {
+		tokFile := ""
+		if acc.TokenRefs.Read != nil {
+			tokFile = strings.TrimSpace(*acc.TokenRefs.Read)
+		}
+		q := strings.TrimSpace(acc.DefaultQuery)
+		if q == "" {
+			q = DefaultPrimaryQuery
+		}
+		if existing, has := reg.Accounts[alias]; !has {
+			reg.Accounts[alias] = AccountConfig{
+				Alias:      alias,
+				Email:      acc.Email,
+				AGYAccount: acc.AgyAccount,
+				TokenFile:  tokFile,
+				CLIPath:    cliPath,
+				Query:      q,
+				Enabled:    acc.IsEnabled(),
+			}
+		} else {
+			if existing.Email == "" && acc.Email != "" {
+				existing.Email = acc.Email
+			}
+			if existing.AGYAccount == "" && acc.AgyAccount != "" {
+				existing.AGYAccount = acc.AgyAccount
+			}
+			if existing.TokenFile == "" && tokFile != "" {
+				existing.TokenFile = tokFile
+			}
+			if existing.CLIPath == "" && cliPath != "" {
+				existing.CLIPath = cliPath
+			}
+			reg.Accounts[alias] = existing
+		}
+	}
+	if reg.DefaultAccount == "" && len(reg.Accounts) == 1 {
+		for k := range reg.Accounts {
+			reg.DefaultAccount = k
+		}
+	}
+}
+
+// LoadRegistry reads local/private/gmail/accounts.json and merges any accounts configured on `connector.Resolve("gmail")`.
 func LoadRegistry(vaultDir string) (AccountRegistry, error) {
 	reg := AccountRegistry{
 		TrustedDomains: append([]string(nil), DefaultTrustedDomains...),
@@ -176,32 +234,7 @@ func LoadRegistry(vaultDir string) (AccountRegistry, error) {
 	data, err := os.ReadFile(registryPath(vaultDir))
 	if err != nil {
 		if os.IsNotExist(err) {
-			if inst, iErr := connector.LoadInstance(vaultDir, "gmail"); iErr == nil && len(inst.Accounts) > 0 {
-				reg.DefaultAccount = inst.DefaultAccount
-				for alias, acc := range inst.Accounts {
-					tokFile := ""
-					if acc.TokenRefs.Read != nil {
-						tokFile = *acc.TokenRefs.Read
-					}
-					cliPath := ""
-					if rc, rErr := connector.Resolve(vaultDir, "gmail"); rErr == nil && rc.Manifest.Transport.CLI != nil {
-						cliPath = strings.TrimSpace(rc.Manifest.Transport.CLI.Path)
-					}
-					q := strings.TrimSpace(acc.DefaultQuery)
-					if q == "" {
-						q = DefaultPrimaryQuery
-					}
-					reg.Accounts[alias] = AccountConfig{
-						Alias:      alias,
-						Email:      acc.Email,
-						AGYAccount: acc.AgyAccount,
-						TokenFile:  tokFile,
-						CLIPath:    cliPath,
-						Query:      q,
-						Enabled:    acc.IsEnabled(),
-					}
-				}
-			}
+			mergeResolvedConnectorAccounts(vaultDir, &reg)
 			return reg, nil
 		}
 		return reg, err
@@ -215,6 +248,7 @@ func LoadRegistry(vaultDir string) (AccountRegistry, error) {
 	if len(reg.TrustedDomains) == 0 {
 		reg.TrustedDomains = append([]string(nil), DefaultTrustedDomains...)
 	}
+	mergeResolvedConnectorAccounts(vaultDir, &reg)
 	return reg, nil
 }
 
@@ -474,6 +508,51 @@ func mockDir(vaultDir string) string {
 	return ""
 }
 
+func allowDesktopScopeForGmail(vaultDir string) bool {
+	return strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != "" || connector.HasActiveDesktopPluginScope(vaultDir)
+}
+
+func formatGmailQueryFailure(cfg AccountConfig, connErr error) error {
+	tokPath := strings.TrimSpace(cfg.TokenFile)
+	msg := ""
+	if tokPath != "" {
+		msg = fmt.Sprintf("unable to query Gmail for account %q (%s): configure OAuth token in %s, configure connector CLI transport, or sign in to the Antigravity Gmail plugin", cfg.Alias, cfg.Email, tokPath)
+	} else {
+		msg = fmt.Sprintf("unable to query Gmail for account %q (%s): configure an OAuth token file (token_refs.read), configure connector CLI transport, or sign in to the Antigravity Gmail plugin", cfg.Alias, cfg.Email)
+	}
+	if connErr != nil {
+		return fmt.Errorf("%s (%v)", msg, connErr)
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+func normalizedItemsToSummaries(items []connector.NormalizedItem, alias string, maxResults int) []MessageSummary {
+	out := make([]MessageSummary, 0, len(items))
+	for _, it := range items {
+		if maxResults > 0 && len(out) >= maxResults {
+			break
+		}
+		thID := strings.TrimSpace(it.ThreadKey)
+		if thID == "" {
+			thID = it.ItemID
+		}
+		snip := strings.TrimSpace(it.Body)
+		if runes := []rune(snip); len(runes) > 240 {
+			snip = string(runes[:240]) + "..."
+		}
+		out = append(out, MessageSummary{
+			ID:       it.ItemID,
+			ThreadID: thID,
+			Account:  alias,
+			From:     it.Sender,
+			Subject:  it.SubjectOrRoom,
+			Date:     it.Timestamp,
+			Snippet:  snip,
+		})
+	}
+	return out
+}
+
 // SearchMessages returns message metadata matching query for the specified account (or default account).
 func SearchMessages(vaultDir, accountAlias, query string, maxResults int) ([]MessageSummary, error) {
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
@@ -492,19 +571,39 @@ func SearchMessages(vaultDir, accountAlias, query string, maxResults int) ([]Mes
 		return searchMockMessages(mDir, cfg.Alias, query, maxResults)
 	}
 
-	// 2. Try read-only OAuth token file (works both in `hq daemon` sidecar and in-session)
-	if cfg.TokenFile != "" {
+	// 2. Route through unified `connector.Resolve("gmail")` (honors companion packs, transport_kind: "cli", jsonmap, protocol/v1, and OAuth)
+	var connErr error
+	isCustomPack := false
+	if rc, rErr := connector.Resolve(vaultDir, "gmail"); rErr == nil && rc.Instance.IsEnabled() {
+		isCustomPack = rc.SourceID != "builtin"
+		resp, execErr := connector.Execute(context.Background(), vaultDir, connector.ProtocolRequest{
+			ProtocolVersion: connector.ProtocolVersionV1,
+			Op:              "poll",
+			Connector:       rc.FQID,
+			Account:         cfg.Alias,
+			MaxItems:        maxResults,
+			Params:          map[string]string{"query": query},
+		}, allowDesktopScopeForGmail(vaultDir))
+		if execErr == nil {
+			return normalizedItemsToSummaries(resp.Items, cfg.Alias, maxResults), nil
+		}
+		connErr = execErr
+		if isCustomPack {
+			return nil, formatGmailQueryFailure(cfg, connErr)
+		}
+	}
+
+	// 3. Legacy fallback: read-only OAuth token file or direct plugin CLI
+	if strings.TrimSpace(cfg.TokenFile) != "" {
 		if msgs, err := searchViaOAuthToken(cfg, query, maxResults); err == nil {
 			return msgs, nil
 		}
 	}
-
-	// 3. Try Antigravity native `gmail` plugin CLI (when running in an active Antigravity session)
 	if msgs, err := searchViaPluginCLI(cfg, query, maxResults); err == nil {
 		return msgs, nil
 	}
 
-	return nil, fmt.Errorf("unable to query Gmail for account %q (%s): configure OAuth token in %s or sign in to the Antigravity Gmail plugin", cfg.Alias, cfg.Email, cfg.TokenFile)
+	return nil, formatGmailQueryFailure(cfg, connErr)
 }
 
 // ReadQuarantinedThread fetches a single thread, marks the calling conversation as tainted,
@@ -529,19 +628,70 @@ func ReadQuarantinedThread(vaultDir, accountAlias, threadID, convID string) (Thr
 	var td ThreadDetail
 	if mDir := mockDir(vaultDir); mDir != "" {
 		td, err = readMockThread(mDir, cfg.Alias, threadID)
-	} else if cfg.TokenFile != "" {
-		td, err = readThreadViaOAuthToken(cfg, threadID)
-		if err != nil {
-			td, err = readThreadViaPluginCLI(cfg, threadID)
-		}
 	} else {
-		td, err = readThreadViaPluginCLI(cfg, threadID)
+		usedConnector := false
+		if rc, rErr := connector.Resolve(vaultDir, "gmail"); rErr == nil && rc.Instance.IsEnabled() {
+			qt, qErr := connector.ReadQuarantined(context.Background(), vaultDir, rc.FQID, cfg.Alias, threadID, allowDesktopScopeForGmail(vaultDir))
+			if qErr == nil {
+				usedConnector = true
+				td = ThreadDetail{
+					ThreadID: qt.ThreadKey,
+					Account:  cfg.Alias,
+					Subject:  qt.SubjectOrRoom,
+				}
+				if td.ThreadID == "" {
+					td.ThreadID = threadID
+				}
+				for _, qm := range qt.Messages {
+					td.Messages = append(td.Messages, MessageDetail{
+						ID:        qm.ItemID,
+						ThreadID:  td.ThreadID,
+						From:      qm.Sender,
+						To:        qm.To,
+						Cc:        qm.Cc,
+						Subject:   qt.SubjectOrRoom,
+						Date:      qm.Timestamp,
+						PlainBody: qm.Body,
+					})
+				}
+				partSet := make(map[string]bool)
+				for _, ap := range qt.AuthenticatedParticipants {
+					ap = strings.ToLower(strings.TrimSpace(ap))
+					if ap != "" && !partSet[ap] {
+						partSet[ap] = true
+						td.Participants = append(td.Participants, ap)
+					}
+				}
+				for _, cp := range collectParticipants(td.Messages) {
+					if !partSet[cp] {
+						partSet[cp] = true
+						td.Participants = append(td.Participants, cp)
+					}
+				}
+				sort.Strings(td.Participants)
+				err = nil
+			} else if rc.SourceID != "builtin" {
+				return ThreadDetail{}, "", qErr
+			}
+		}
+		if !usedConnector {
+			if strings.TrimSpace(cfg.TokenFile) != "" {
+				td, err = readThreadViaOAuthToken(cfg, threadID)
+				if err != nil {
+					td, err = readThreadViaPluginCLI(cfg, threadID)
+				}
+			} else {
+				td, err = readThreadViaPluginCLI(cfg, threadID)
+			}
+		}
 	}
 	if err != nil {
 		return ThreadDetail{}, "", err
 	}
 	td.Account = cfg.Alias
-	td.Participants = collectParticipants(td.Messages)
+	if len(td.Participants) == 0 {
+		td.Participants = collectParticipants(td.Messages)
+	}
 	_ = saveThreadParticipants(vaultDir, cfg.Alias, threadID, td.Participants)
 	return td, FormatQuarantinedThread(td), nil
 }
@@ -642,9 +792,11 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, threadID, to, cc, subj
 		draftID = "draft-" + hex.EncodeToString(b)
 	}
 
-	// If plugin CLI is available and not in mock mode, create/update draft via plugin CLI
+	// Route remote draft creation through `connector.Resolve("gmail")` first, falling back to legacy plugin CLI
 	if mockDir(vaultDir) == "" {
-		if remoteID, cliErr := createDraftViaPluginCLI(cfg, draftID, threadID, to, cc, subject, body); cliErr == nil && remoteID != "" {
+		if remoteID, connDraftErr := createDraftViaConnector(vaultDir, cfg, draftID, threadID, to, cc, subject, body); connDraftErr == nil && remoteID != "" {
+			draftID = remoteID
+		} else if remoteID, cliErr := createDraftViaPluginCLI(cfg, draftID, threadID, to, cc, subject, body); cliErr == nil && remoteID != "" {
 			draftID = remoteID
 		}
 	}
@@ -737,11 +889,120 @@ func VerifyAndSendDraft(vaultDir, accountAlias, draftID, expectedHash string) (s
 		return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s] (hash:%s)", cleanID, spec.From, spec.To, spec.Subject, spec.ContentHash[:12]), nil
 	}
 
+	if connOut, handled, connErr := sendDraftViaConnector(vaultDir, cfg, spec, cleanID); handled {
+		if connErr != nil {
+			return "", connErr
+		}
+		return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s]: %s", cleanID, spec.From, spec.To, spec.Subject, connOut), nil
+	}
+
 	out, err := sendDraftViaPluginCLI(cfg, cleanID)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s]: %s", cleanID, spec.From, spec.To, spec.Subject, out), nil
+}
+
+func canonicalAddressParam(raw string) string {
+	addrs, err := connector.ParseRFC5322Emails(raw)
+	if err == nil && len(addrs) > 0 {
+		return strings.Join(addrs, ",")
+	}
+	return strings.TrimSpace(raw)
+}
+
+func createDraftViaConnector(vaultDir string, cfg AccountConfig, draftID, threadID, to, cc, subject, body string) (string, error) {
+	rc, err := connector.Resolve(vaultDir, "gmail")
+	if err != nil || !rc.Instance.IsEnabled() || rc.Manifest.Transport.CLI == nil {
+		return "", fmt.Errorf("gmail connector CLI not configured")
+	}
+	verb := ""
+	for _, cand := range []string{"create_draft", "draft"} {
+		if _, ok := rc.Manifest.Transport.CLI.Verbs[cand]; ok {
+			verb = cand
+			break
+		}
+	}
+	if verb == "" {
+		return "", fmt.Errorf("gmail connector defines no create_draft verb")
+	}
+	params := map[string]string{
+		"to":      canonicalAddressParam(to),
+		"subject": subject,
+	}
+	if strings.TrimSpace(cc) != "" {
+		params["cc"] = canonicalAddressParam(cc)
+	}
+	if strings.TrimSpace(threadID) != "" {
+		params["thread_key"] = strings.TrimSpace(threadID)
+	}
+	if strings.TrimSpace(draftID) != "" {
+		params["draft_id"] = strings.TrimSpace(draftID)
+	}
+	stdout, execErr := connector.ExecCLIVerb(context.Background(), vaultDir, rc.FQID, cfg.Alias, verb, params, nil, []byte(body), allowDesktopScopeForGmail(vaultDir))
+	if execErr != nil {
+		return "", execErr
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		DraftID string `json:"draft_id"`
+	}
+	if json.Unmarshal(stdout, &resp) == nil {
+		if strings.TrimSpace(resp.ID) != "" {
+			return strings.TrimSpace(resp.ID), nil
+		}
+		if strings.TrimSpace(resp.DraftID) != "" {
+			return strings.TrimSpace(resp.DraftID), nil
+		}
+	}
+	return draftID, nil
+}
+
+func sendDraftViaConnector(vaultDir string, cfg AccountConfig, spec DraftSpec, cleanDraftID string) (string, bool, error) {
+	rc, err := connector.Resolve(vaultDir, "gmail")
+	if err != nil || !rc.Instance.IsEnabled() || rc.Manifest.Transport.CLI == nil {
+		return "", false, nil
+	}
+	allowDesktop := allowDesktopScopeForGmail(vaultDir)
+	if _, hasSendDraft := rc.Manifest.Transport.CLI.Verbs["send_draft"]; hasSendDraft {
+		stdout, execErr := connector.ExecCLIVerb(context.Background(), vaultDir, rc.FQID, cfg.Alias, "send_draft", map[string]string{
+			"draft_id": cleanDraftID,
+		}, nil, nil, allowDesktop)
+		if execErr == nil {
+			s := strings.TrimSpace(string(stdout))
+			if s == "" {
+				s = "delivered via connector cli"
+			}
+			return s, true, nil
+		}
+		if rc.SourceID != "builtin" {
+			return "", true, execErr
+		}
+	}
+	if _, hasSend := rc.Manifest.Transport.CLI.Verbs["send"]; hasSend {
+		params := map[string]string{
+			"to":      canonicalAddressParam(spec.To),
+			"subject": spec.Subject,
+		}
+		if strings.TrimSpace(spec.Cc) != "" {
+			params["cc"] = canonicalAddressParam(spec.Cc)
+		}
+		if strings.TrimSpace(spec.ThreadID) != "" {
+			params["thread_key"] = strings.TrimSpace(spec.ThreadID)
+		}
+		stdout, execErr := connector.ExecCLIVerb(context.Background(), vaultDir, rc.FQID, cfg.Alias, "send", params, nil, []byte(spec.Body), allowDesktop)
+		if execErr == nil {
+			s := strings.TrimSpace(string(stdout))
+			if s == "" {
+				s = "delivered via connector cli"
+			}
+			return s, true, nil
+		}
+		if rc.SourceID != "builtin" {
+			return "", true, execErr
+		}
+	}
+	return "", false, nil
 }
 
 // --- Pure Go Sidecar Pre-Check (`hq gmail precheck` & `hq daemon`) ---

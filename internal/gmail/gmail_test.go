@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zjshen14/agy-hq/internal/extension"
 )
 
 func TestMultiAccountRegistryAndResolution(t *testing.T) {
@@ -158,5 +160,146 @@ func TestQuarantineAttachmentDKIMAllowlist(t *testing.T) {
 	path2, auto2, err := QuarantineAttachment(vaultDir, "2026-1099-DIV.pdf", []byte("%PDF-1.4 untrusted"), "Spoofer <evil@unknown-domain.example>", "mx.google.com; dkim=pass header.i=@unknown-domain.example")
 	if err != nil || auto2 || !strings.Contains(path2, "quarantine") {
 		t.Fatalf("expected untrusted sender attachment to remain in quarantine, got path=%s auto=%v err=%v", path2, auto2, err)
+	}
+}
+
+func TestConnectorCLITransportAndEmptyTokenFileErrorFormatting(t *testing.T) {
+	vaultDir := t.TempDir()
+	t.Setenv("HQ_HOME_DIR", t.TempDir())
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "")
+
+	// Configure Gmail solely via private/connectors/gmail/instance.json with transport_kind: "cli" and NO token_refs
+	instDir := filepath.Join(vaultDir, "private", "connectors", "gmail")
+	if err := os.MkdirAll(instDir, 0o700); err != nil {
+		t.Fatalf("mkdir instDir: %v", err)
+	}
+	instJSON := `{
+  "schema_version": 1,
+  "connector": "gmail",
+  "enabled": true,
+  "default_account": "work",
+  "accounts": {
+    "work": {
+      "email": "work@example.com",
+      "transport_kind": "cli",
+      "default_query": "label:INBOX is:unread"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(instDir, "instance.json"), []byte(instJSON), 0o600); err != nil {
+		t.Fatalf("write instance.json: %v", err)
+	}
+
+	// 1. With no CLI binary on PATH and empty TokenFile, error message must NOT render a blank "in  or" path
+	emptyBinDir := t.TempDir()
+	t.Setenv("PATH", emptyBinDir)
+	_, missingErr := SearchMessages(vaultDir, "", "", 5)
+	if missingErr == nil {
+		t.Fatalf("expected SearchMessages to fail when no CLI binary or OAuth token exists")
+	}
+	if !strings.Contains(missingErr.Error(), "unable to query Gmail for account") || strings.Contains(missingErr.Error(), "configure OAuth token in  ") {
+		t.Fatalf("expected clean account error without empty TokenFile path, got: %v", missingErr)
+	}
+
+	// 2. Configure a trusted custom connector manifest (`vault/gmail`) with a custom standalone CLI binary
+	//    (no OAuth token file and no desktop Antigravity Gmail plugin scope)
+	cliScript := filepath.Join(emptyBinDir, "corp-gmail-cli")
+	scriptBody := `#!/bin/sh
+set -eu
+op="${1:-}"
+if [ "$op" = "custom-search" ]; then
+  printf '%s\n' '[{"id":"cli-msg-1","threadId":"cli-thr-1","snippet":"Ship Q4 launch","payload":{"mimeType":"text/plain","body":{"data":"U2hpcCBRNCBsYXVuY2ggY2hlY2tsaXN0"},"headers":[{"name":"From","value":"Alice <alice@example.com>"},{"name":"To","value":"work@example.com"},{"name":"Subject","value":"[Launch] Q4 Checklist"},{"name":"Date","value":"2026-11-15"},{"name":"Authentication-Results","value":"mx.example.com; dkim=pass header.d=example.com"}]}}]'
+  exit 0
+fi
+if [ "$op" = "custom-thread" ]; then
+  printf '%s\n' '{"id":"cli-thr-1","messages":[{"id":"cli-msg-1","threadId":"cli-thr-1","snippet":"Ship Q4 launch","payload":{"mimeType":"text/plain","body":{"data":"U2hpcCBRNCBsYXVuY2ggY2hlY2tsaXN0"},"headers":[{"name":"From","value":"Alice <alice@example.com>"},{"name":"To","value":"work@example.com"},{"name":"Subject","value":"[Launch] Q4 Checklist"},{"name":"Date","value":"2026-11-15"},{"name":"Authentication-Results","value":"mx.example.com; dkim=pass header.d=example.com"}]}}]}'
+  exit 0
+fi
+if [ "$op" = "custom-draft" ]; then
+  echo '{"id":"remote-cli-draft-99"}'
+  exit 0
+fi
+if [ "$op" = "custom-send-draft" ]; then
+  echo '{"sent":true,"draftId":"remote-cli-draft-99"}'
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(cliScript, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake corp-gmail-cli: %v", err)
+	}
+
+	vaultConnDir := filepath.Join(vaultDir, "connectors", "gmail")
+	if err := os.MkdirAll(vaultConnDir, 0o755); err != nil {
+		t.Fatalf("mkdir vaultConnDir: %v", err)
+	}
+	manifestMap := map[string]interface{}{
+		"schema_version":           1,
+		"id":                       "gmail",
+		"requires_desktop_session": false,
+		"driver":                   map[string]interface{}{"builtin": "gmail"},
+		"transport": map[string]interface{}{
+			"kind": "cli",
+			"cli": map[string]interface{}{
+				"path": cliScript,
+				"verbs": map[string][]string{
+					"search":       {"custom-search", "--max={{?max}}", "--", "{{query}}"},
+					"get_thread":   {"custom-thread", "--", "{{thread_key}}"},
+					"create_draft": {"custom-draft", "--to={{to}}", "--cc={{?cc}}", "--subject={{subject}}", "--thread={{?thread_key}}", "--body-file={{payload_file}}"},
+					"send_draft":   {"custom-send-draft", "--", "{{draft_id}}"},
+				},
+			},
+		},
+		"capabilities": map[string]interface{}{
+			"poll":             map[string]interface{}{"enabled": true},
+			"read_quarantined": map[string]interface{}{"enabled": true},
+		},
+	}
+	manifestRaw, _ := json.MarshalIndent(manifestMap, "", "  ")
+	manifestPath := filepath.Join(vaultConnDir, "connector.json")
+	if err := os.WriteFile(manifestPath, manifestRaw, 0o644); err != nil {
+		t.Fatalf("write connector.json: %v", err)
+	}
+	tb, err := extension.BuildTrustBundle(vaultDir, "vault", manifestPath)
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	tbRaw, _ := json.Marshal(tb)
+	if err := extension.ApplyTrustBundle(vaultDir, tbRaw); err != nil {
+		t.Fatalf("ApplyTrustBundle: %v", err)
+	}
+
+	// SearchMessages (`hq gmail list|search`) routes through connector.Resolve("gmail")
+	msgs, err := SearchMessages(vaultDir, "", "", 5)
+	if err != nil {
+		t.Fatalf("SearchMessages via connector CLI failed: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "cli-msg-1" || msgs[0].Subject != "[Launch] Q4 Checklist" {
+		t.Fatalf("unexpected SearchMessages result: %+v", msgs)
+	}
+
+	// ReadQuarantinedThread (`hq gmail read-quarantined`) routes through connector.ReadQuarantined
+	convID := "conv-cli-quarantine-1"
+	td, formatted, err := ReadQuarantinedThread(vaultDir, "work", "cli-thr-1", convID)
+	if err != nil {
+		t.Fatalf("ReadQuarantinedThread via connector CLI failed: %v", err)
+	}
+	if td.Subject != "[Launch] Q4 Checklist" || !strings.Contains(formatted, "Ship Q4 launch checklist") {
+		t.Fatalf("unexpected ReadQuarantinedThread output: td=%+v formatted=%s", td, formatted)
+	}
+
+	// CreateOrUpdateDraft (`hq gmail draft`) routes through connector.ExecCLIVerb("create_draft")
+	spec, err := CreateOrUpdateDraft(vaultDir, "work", "", "cli-thr-1", "Alice <alice@example.com>", "", "Re: [Launch] Q4 Checklist", "Confirmed, ready to ship!", convID)
+	if err != nil {
+		t.Fatalf("CreateOrUpdateDraft via connector CLI failed: %v", err)
+	}
+	if spec.DraftID != "remote-cli-draft-99" {
+		t.Fatalf("expected remote draft ID remote-cli-draft-99 from connector CLI, got %q", spec.DraftID)
+	}
+
+	// VerifyAndSendDraft (`hq gmail send-draft`) routes through connector.ExecCLIVerb("send_draft")
+	sendOut, err := VerifyAndSendDraft(vaultDir, "work", spec.DraftID, spec.ContentHash[:12])
+	if err != nil || !strings.Contains(sendOut, "remote-cli-draft-99") {
+		t.Fatalf("VerifyAndSendDraft via connector CLI failed: out=%q err=%v", sendOut, err)
 	}
 }

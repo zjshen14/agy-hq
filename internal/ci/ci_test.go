@@ -17,6 +17,38 @@ func resolveRepoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(wd, "..", ".."))
 }
 
+func newHermeticGitRunner(t *testing.T, repoDir string) func(args ...string) {
+	t.Helper()
+	return func(args ...string) {
+		t.Helper()
+		fullArgs := append([]string{
+			"-c", "core.hooksPath=/dev/null",
+			"-c", "commit.gpgsign=false",
+			"-c", "tag.gpgsign=false",
+			"-c", "init.templateDir=",
+		}, args...)
+		cmd := exec.Command("git", fullArgs...)
+		cmd.Dir = repoDir
+		rawEnv := os.Environ()
+		cleanEnv := make([]string, 0, len(rawEnv)+4)
+		for _, kv := range rawEnv {
+			if strings.HasPrefix(kv, "GIT_") {
+				continue
+			}
+			cleanEnv = append(cleanEnv, kv)
+		}
+		cleanEnv = append(cleanEnv,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_TERMINAL_PROMPT=0",
+		)
+		cmd.Env = cleanEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+}
+
 func TestCheckPII_RealRepositoryClean(t *testing.T) {
 	rootDir := resolveRepoRoot(t)
 	violations, err := CheckPII(rootDir, false)
@@ -33,14 +65,7 @@ func TestCheckPII_RealRepositoryClean(t *testing.T) {
 
 func TestCheckPII_AllFiveInvariantsDetected(t *testing.T) {
 	tmpRepo := t.TempDir()
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = tmpRepo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v (%s)", args, err, string(out))
-		}
-	}
+	runGit := newHermeticGitRunner(t, tmpRepo)
 
 	runGit("init", "-b", "main")
 	runGit("config", "user.email", "test@agy-hq.local")
@@ -186,14 +211,7 @@ func TestInstallAndCheckGitHooks(t *testing.T) {
 
 func TestP6ContextualPIIAndLocalDenylist(t *testing.T) {
 	tmpRepo := t.TempDir()
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = tmpRepo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v (%s)", args, err, string(out))
-		}
-	}
+	runGit := newHermeticGitRunner(t, tmpRepo)
 
 	runGit("init", "-b", "main")
 	runGit("config", "user.name", "Test")
@@ -241,14 +259,7 @@ func TestP6ContextualPIIAndLocalDenylist(t *testing.T) {
 
 func TestCheckPIIHistoryAndReplacementEngine(t *testing.T) {
 	tmpRepo := t.TempDir()
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = tmpRepo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v (%s)", args, err, string(out))
-		}
-	}
+	runGit := newHermeticGitRunner(t, tmpRepo)
 
 	runGit("init", "-b", "main")
 	runGit("config", "user.name", "Test")
@@ -334,14 +345,7 @@ func TestWorktreeAncestorPIIDenylistAndSkillURLGuard(t *testing.T) {
 		t.Fatalf("expected idempotent AddPIIDenylistTerms to add 0 terms, got %d (%v)", addedAgain, err)
 	}
 
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = wtDir
-		if out, gErr := cmd.CombinedOutput(); gErr != nil {
-			t.Fatalf("git %v: %v (%s)", args, gErr, string(out))
-		}
-	}
+	runGit := newHermeticGitRunner(t, wtDir)
 	runGit("init", "-b", "main")
 	runGit("config", "user.name", "Test")
 	runGit("config", "user.email", "test@agy-hq.local")
@@ -375,4 +379,30 @@ func TestWorktreeAncestorPIIDenylistAndSkillURLGuard(t *testing.T) {
 	if ok || !strings.Contains(detail, "non-allowlisted external URL host") {
 		t.Fatalf("expected checkGateH1Skills to reject non-allowlisted external URL, got ok=%v detail=%q", ok, detail)
 	}
+}
+
+func TestFixtureCommitsIgnoreGlobalGitHooks(t *testing.T) {
+	globalHooksDir := t.TempDir()
+	hookScript := filepath.Join(globalHooksDir, "pre-commit")
+	if err := os.WriteFile(hookScript, []byte("#!/bin/sh\necho 'rejected by global secret scanner' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write global pre-commit hook: %v", err)
+	}
+	tmplHooksDir := filepath.Join(t.TempDir(), "hooks")
+	if err := os.MkdirAll(tmplHooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir template hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmplHooksDir, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write template pre-commit hook: %v", err)
+	}
+
+	globalCfg := filepath.Join(t.TempDir(), "gitconfig")
+	cfgBody := "[core]\n\thooksPath = " + globalHooksDir + "\n[init]\n\ttemplateDir = " + filepath.Dir(tmplHooksDir) + "\n[commit]\n\tgpgsign = true\n"
+	if err := os.WriteFile(globalCfg, []byte(cfgBody), 0o600); err != nil {
+		t.Fatalf("write global gitconfig: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+	t.Setenv("GIT_TEMPLATE_DIR", filepath.Dir(tmplHooksDir))
+
+	// All synthetic PII/secret fixture commits must still succeed hermetically.
+	TestCheckPII_AllFiveInvariantsDetected(t)
 }

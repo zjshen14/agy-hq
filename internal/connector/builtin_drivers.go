@@ -453,7 +453,7 @@ func resolvePluginCLIHost(vaultDir string) (hostPath string, explicitSource bool
 // EffectiveRequiresDesktopSession returns whether executing account requires an active
 // Antigravity desktop credential scope rather than headless OAuth or a standalone CLI.
 func (rc ResolvedConnector) EffectiveRequiresDesktopSession(vaultDir, account string) bool {
-	if rc.ID == "gmail" {
+	if rc.ID == "gmail" && rc.SourceID == "builtin" {
 		acctName := strings.TrimSpace(account)
 		if acctName == "" {
 			acctName = strings.TrimSpace(rc.Instance.DefaultAccount)
