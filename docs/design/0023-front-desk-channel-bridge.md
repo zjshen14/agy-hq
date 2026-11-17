@@ -24,7 +24,7 @@ As documented in [Research 18](../research/18_channel_bridge_front_desk_audit.md
 ## 2. Design Goals & Non-Goals
 
 ### Goals
-1. **100% Vendor-Neutral Core Contract (`channel_bridges` + `hq-channel-bridge/v1`):** Allow any companion extension pack (`hq-extension.json`) or local Vault bridge (`<vault>/bridges/<id>/bridge.json`) to register a SHA-256-pinned executable speaking a 3-verb JSON-over-stdio protocol (`bind-desk`, `notify`, `status`), verified via [`VerifyTrustedBinary`](../../internal/extension/trust.go#L304).
+1. **100% Vendor-Neutral Core Contract (`channel_bridges` + `hq-channel-bridge/v1`):** Allow any companion extension pack (`hq-extension.json` `components.channel_bridges`) to register a SHA-256-pinned executable speaking a 3-verb JSON-over-stdio protocol (`bind-desk`, `notify`, `status`), verified via [`VerifyTrustedBinary`](../../internal/extension/trust.go#L304).
 2. **Seamless Front Desk Rotation Tunneling (`<= 15s` Convergence):** Detect `front_desk.json` `ConversationID` transitions (`"" -> new_cid`, `old_cid -> new_cid`, `old_cid -> ""` vacation, and external sidecar restart drift) on `hq daemon`'s `fastTicker` (`15s`) and `wakeCh`, invoking `bind-desk` to rebind the pinned `desk_thread` and open `item_threads` in place.
 3. **LLM-Invisible Destination Secrets (`0600`) & Ranked Runtime State (`RankChannels = 65`):** Isolate destination routing/credentials in `<vault>/private/channels/<bridge-id>.json` (`0600`, guarded across all LLM sessions by `PreToolUse` and OS sandboxes) and persist decoupled per-bridge state (`last_desk_cid`, `desk_thread`, LRU `item_threads`, bounded 64-item retry queue) in `<vault>/memory/channels/<bridge-id>.json` (`0600`).
 4. **Unified Policy, Anti-Cue Scrubbing & SHA-256 Audit Trail:** Enforce `InQuietHours`, non-urgent hourly rate caps, UTF-8 rune truncation, `SanitizeAntiCue` + tainted URL defanging, and append-only SHA-256 audit logging (`<vault>/memory/channels/channels.jsonl`) uniformly in Go.
@@ -34,6 +34,7 @@ As documented in [Research 18](../research/18_channel_bridge_front_desk_audit.md
 - **No Compiled-In Third-Party Chat Bot SDKs or Cloud Relays:** `go.mod` remains 100% pure Go stdlib (`ADR-0002` / CI Gate `H4-A`), and Vault data never transits an `agy-hq`-operated server (`ADR-0003`).
 - **No Multi-Sender Inbound Polling via `channel_bridges`:** Multi-party email/chat spaces continue using `connectors` + `hq watch precheck` (`TaintOnSpawn: true`). `hq-channel-bridge/v1` has **no** `poll` verb.
 - **No Plain-Text Chat `hq approve` Shortcut:** Typing `"approve"` in a plain-text chat message never mints an approval capability; cryptographic human-presence verification remains anchored in `ask_question` (`VerifyAskAndMintCap`) and `:4242` Web Console (`ApproveFromTrustedDaemon`).
+- **No Standalone `<vault>/bridges/` Discovery Namespace (`YAGNI`):** Because bidirectional Front Desk bridges pair with a companion sidecar/bot daemon, discovery scopes strictly to `hq-extension.json` companion packs (`<pack>/<id>`); simple 1-way lock-screen webhooks stay on [RFC-0020](./0020-proactive-ambient-synthesis-and-mobile-push.md) `mobile_push`.
 
 ---
 
@@ -147,8 +148,7 @@ type BridgeCapabilitiesSpec struct {
 	NativeAskCards bool `json:"native_ask_cards,omitempty"`
 }
 
-// ChannelBridgeSpec declares a vendor-neutral Front Desk channel bridge in hq-extension.json
-// (or standalone <vault>/bridges/<id>/bridge.json).
+// ChannelBridgeSpec declares a vendor-neutral Front Desk channel bridge in hq-extension.json.
 type ChannelBridgeSpec struct {
 	ID                     string                 `json:"id"`
 	Protocol               string                 `json:"protocol"` // must be "hq-channel-bridge/v1"
@@ -168,7 +168,6 @@ type ChannelBridgeSpec struct {
    - `command` must be non-empty; `command[0]` must **not** be a shell or generic interpreter wrapper (`sh`, `bash`, `zsh`, `dash`, `ksh`, `ssh`, `env`, `xargs`, `python*`, `node`, `perl`, `ruby`), ensuring `VerifyTrustedBinary` hashes the actual compiled bridge executable rather than `/bin/sh`.
    - `env_allow` cannot include any key in `unconditionallyBlockedEnv` (`ANTIGRAVITY_CSRF_TOKEN`, `ANTIGRAVITY_LS_ADDRESS`, `ANTIGRAVITY_AGENTAPI_EXE`, `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_TRAJECTORY_ID`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_SOURCE_METADATA`).
    - `EnablePack` (`pack.go:474`) rejects unqualified `id` collisions across enabled packs unless `<vault>/extensions.json` `winner_overrides[<id>]` names a winner.
-   - Standalone local Vault bridges (`<vault>/bridges/<id>/bridge.json`, using the exact `ChannelBridgeSpec` JSON schema) are also supported under namespace `vault/<id>` when pinned via `hq extension trust vault`.
 2. **SHA-256 Pinning & Execution Cache ([`internal/extension/trust.go`](../../internal/extension/trust.go)):**
    - `BuildTrustBundle` (`trust.go:617`) iterates `manifest.Components.ChannelBridges`, resolves `cb.Command[0]` via `pinBinaryRef`, and records `{raw_ref, resolved_path, sha256}` in `<vault>/private/trust.json` (`Targets["pack:<packID>"].Binaries`), alongside `ManifestSHA256` over `hq-extension.json`.
    - Before every bridge invocation, `internal/channels/` verifies `hq-extension.json` (`LoadActiveTrustedPacks`) and calls `extension.VerifyTrustedBinary(vaultDir, sourceID, cb.Command[0])`, executing the immutable `0500` binary staged in `<vault>/private/exec-cache/<sha256>/<basename>` via [`connector.RunSubprocess`](../../internal/connector/exec.go#L271). Any hash mismatch fails closed for that bridge and emits at most one deduplicated `brief_rollup` re-trust notice.
@@ -423,14 +422,14 @@ Runtime cursor, thread mapping, and retry state live in `<vault>/memory/channels
    - **When `[HQ] Front Desk` is leased (`fd.ConversationID != ""`):** `outbox.DispatchPendingInterrupts` delivers to `fd.ConversationID` as today and returns `delivered []OutboxItem`; `DispatchOutboxToFrontDesk` passes `delivered` to `channels.EnqueueOutboxInterrupts(vaultDir, fd.ConversationID, delivered, now)` followed by `channels.FlushPending(vaultDir, now, dryRun)`. Transient bridge failures retry inside `channels`'s per-bridge queue **without** reverting `OutboxItem.Status` or double-waking `fd.ConversationID`.
    - **When `[HQ] Front Desk` is temporarily vacated (`fd.ConversationID == ""`):** `OutboxItem` remains `StatusPending` for the next Front Desk shift, while `channels.EnqueuePendingInterruptsWhenDeskVacant(vaultDir, now)` peeks eligible non-brief-leased `TierInterrupt` items and delivers them to enabled bridges under `idempotency_key = "outbox:" + it.ID`. When a new Front Desk later claims the lease and `DispatchPendingInterrupts` marks the item `StatusDelivered`, `recent_delivered_keys["outbox:"+it.ID]` prevents any duplicate send to the external channel!
    - **Deterministic `item_key` Selection:** `proposal:<propID>` when `len(it.ProposalIDs) > 0`, else `thread:<connector>:<threadKey>` when present, else `outbox:<it.ID>`.
-2. **Opt-In Layer-1 Task `done` & `blocked` Digests:**
-   - **`task_done` (`policy.deliver_task_done: true`):** Hook [`kernel.CompleteTask`](../../internal/kernel/kernel.go#L857) and Layer-1 `HandleStop` subagent completion ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go#L2085-L2086)) to enqueue `idempotency_key = "task-done:" + slug + ":" + completedAt` (`item_key = "task:" + slug`).
-   - **`task_blocked` (`policy.deliver_task_blocked: true`):** Hook `approvals.CreateWithOptions` (when `prop.ConversationID != "" && prop.ConversationID != fd.ConversationID`) to notify the user that a background task/worker staged `prop-...` and is awaiting human review (`idempotency_key = "task-blocked:" + prop.ID`, `item_key = "proposal:" + prop.ID`).
+2. **Opt-In Layer-1 Task `done` & Default `blocked` Digests:**
+   - **`task_done` (`policy.deliver_task_done: false` default; opt-in `true`):** Hook explicit Layer-1 `kind: "task"` completions in [`kernel.CompleteTask`](../../internal/kernel/kernel.go#L857) under `max_non_urgent_per_hour` (`6/h`), enqueuing `idempotency_key = "task-done:" + slug + ":" + completedAt` (`item_key = "task:" + slug`). Inline subagents (whose takeaways `[HQ] Front Desk` already summarizes directly) and `[Auto]` background runs never emit `task_done`.
+   - **`task_blocked` (`policy.deliver_task_blocked: true` default):** Hook `approvals.CreateWithOptions` (when `prop.ConversationID != "" && prop.ConversationID != fd.ConversationID`) to notify the user that a background task/worker staged `prop-...` and is awaiting human review (`idempotency_key = "task-blocked:" + prop.ID`, `item_key = "proposal:" + prop.ID`).
 
 ### 6.3 CLI & `hq doctor` Surface
 
 Add top-level `hq channel` subcommand (and register `"channel"` in `validHQTopSubcmd` in [`internal/ci/harness.go`](../../internal/ci/harness.go#L291)):
-- `hq channel list [--json]` — Lists discovered `channel_bridges` across packs/Vault with enabled, trust, and redacted health state.
+- `hq channel list [--json]` — Lists discovered `channel_bridges` across companion extension packs with enabled, trust, and redacted health state.
 - `hq channel status [<bridge-fqid>] [--json]` — Invokes `op: "status"`, checks `inbound_tunnel_bound_cid` alignment against `front_desk.json`, and triggers self-healing `bind-desk` on drift.
 - `hq channel test <bridge-fqid>` — Sends a synthetic `kind: "test_ping"` notification to the pre-configured `<vault>/private/channels/<bridge-id>.json` destination (zero recipient flags).
 - `hq channel pause <bridge-fqid> [--reason="..."]` / `hq channel resume <bridge-fqid>` — Toggles `ChannelBridgeOverrides` in `<vault>/extensions.json`.
@@ -461,13 +460,13 @@ An external extension pack (living in its own private or third-party repository)
 
 ---
 
-## 8. Phase 2 Implementation Plan, Verification Matrix & Open Questions
+## 8. Phase 2 Implementation Plan, Verification Matrix & Resolved Decisions
 
-### Phase 2 Implementation Breakdown (After RFC Approval)
+### Phase 2 Implementation Breakdown
 
 1. **`internal/store/store.go` & `internal/extension/{pack,state,trust}.go`:** Add `RankChannels = 65`; add `ChannelBridgeSpec`, `LintPack` validation, `EnablePack` collision check, `ChannelBridgeOverrides` in `VaultState`, and `BuildTrustBundle` binary pinning.
 2. **`internal/channels/` (`protocol.go`, `config.go`, `state.go`, `policy.go`, `dispatcher.go`, `channels_test.go`):** Implement `hq-channel-bridge/v1` client (`connector.RunSubprocess` + `/dev/fd/3`), strict `0600` private config loader, 3-phase `RankChannels` state/retry manager, `InQuietHours` + rate cap + `SanitizeAntiCue` + tainted URL defanging, and `channels.jsonl` SHA-256 audit logger.
-3. **`internal/kernel/{kernel,events_dispatch}.go` & `internal/hooks/hooks.go`:** Switch `saveFrontDeskLease` to `store.WriteAtomic`; wire `SyncAndFlush` into `cmd/hq/main.go` (`fastTicker` & `wakeCh`); hook `DispatchOutboxToFrontDesk` (active + vacated desk fan-out) and opt-in Layer-1 task `done`/`blocked` digests; add `"channels"` to `protectedPrivateSubs`, `reLocalCredentialShell`, and `memory/channels` write-guards.
+3. **`internal/kernel/{kernel,events_dispatch}.go` & `internal/hooks/hooks.go`:** Switch `saveFrontDeskLease` to `store.WriteAtomic`; wire `SyncAndFlush` into `cmd/hq/main.go` (`fastTicker` & `wakeCh`); hook `DispatchOutboxToFrontDesk` (active + vacated desk fan-out), default `task_blocked`, and opt-in Layer-1 `kind: "task"` `task_done` digests; add `"channels"` to `protectedPrivateSubs`, `reLocalCredentialShell`, and `memory/channels` write-guards.
 4. **`cmd/hq/main.go`, `internal/doctor/doctor.go`, `internal/ci/harness.go` & `internal/e2e/cuj_e2e_test.go`:** Add `hq channel <list|status|test|pause|resume|audit|configure>`, `hq doctor` checks, `validHQTopSubcmd["channel"]`, and `TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling`.
 
 ### Verification Matrix (`Unit Tests` + `CUJ-38`)
@@ -480,7 +479,7 @@ An external extension pack (living in its own private or third-party repository)
 | **Credential Guard, Anti-Cue Scrubbing & Audit Hash** | `hooks_test.go` + `channels_test.go` + `CUJ-38` | `PreToolUse` blocks all LLM reads/greps/shell cats on `private/channels/**` and writes on `memory/channels/**`; tainted summaries scrub command cues and defang URLs; `channels.jsonl` contains SHA-256 hashes and zero raw room IDs or bodies. |
 | **Full Pre-Push CI Gate** | `./bin/hq ci pre-push` | 100% pass across `P1`–`P6` PII checks, `H1`–`H4B` harness/markdown contracts, `agy plugin validate --strict`, `go vet ./...`, and full unit + E2E test suites. |
 
-### Open Questions for Review
+### Resolved Design Decisions
 
-1. **Default `deliver_task_done` Policy:** Should `policy.deliver_task_done` default to **`false`** (delivering `TierInterrupt` alerts and `task_blocked` approval nudges out of the box, with `task_done` opt-in per bridge) or **`true`** (capped by `max_non_urgent_per_hour: 6` for Layer-1 tasks)?
-2. **Local Vault Bridge Discovery (`<vault>/bridges/`):** Alongside companion extension packs (`hq-extension.json` `components.channel_bridges`), would you like Phase 2 to support standalone `<vault>/bridges/<id>/bridge.json` manifests (pinned via `hq extension trust vault`) for solo custom bridges without creating a plugin directory?
+1. **Action-Required Default (`deliver_task_done: false`):** Outbound bridge policy defaults to `deliver_interrupts: true`, `deliver_task_blocked: true`, and **`deliver_task_done: false`** so chat notifications remain strictly high-signal and action-required out of the box. When opted in (`"deliver_task_done": true`), `task_done` scopes strictly to explicit Layer-1 `kind: "task"` completions (`hq complete`) under `max_non_urgent_per_hour: 6`, excluding inline subagents and `[Auto]` runs.
+2. **Companion-Pack-Only Discovery (`hq-extension.json`, `YAGNI` on `<vault>/bridges/`):** Phase 2 scopes `channel_bridges` discovery strictly to enabled, trust-verified companion extension packs (`<pack>/hq-extension.json` -> `<pack>/<id>`), avoiding a second `vault/<id>` discovery namespace while stateful bidirectional bridges ship alongside companion sidecars.
