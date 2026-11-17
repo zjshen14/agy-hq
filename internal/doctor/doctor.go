@@ -257,10 +257,14 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 			Detail: fmt.Sprintf("%d tasks tracked; quota circuit open (%s)", len(tasks), quota.CircuitReason),
 		})
 	} else {
+		interNote := ""
+		if quota.InteractiveSpawnsToday > 0 {
+			interNote = fmt.Sprintf(" (+%d interactive)", quota.InteractiveSpawnsToday)
+		}
 		results = append(results, CheckResult{
 			Name:   "Task Board & Quota Integrity",
 			Status: "PASS",
-			Detail: fmt.Sprintf("%d tasks tracked, daily spawns %d/%d", len(tasks), quota.SpawnsToday, quota.MaxDailySpawns),
+			Detail: fmt.Sprintf("%d tasks tracked, daily auto spawns %d/%d%s", len(tasks), quota.EffectiveAutoSpawns(), quota.MaxDailySpawns, interNote),
 		})
 	}
 

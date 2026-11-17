@@ -250,10 +250,11 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 
 		if !dryRun {
 			qState := LoadQuota(vaultDir)
-			if qState.CircuitOpen || (qState.MaxDailySpawns > 0 && qState.SpawnsToday >= qState.MaxDailySpawns) {
+			autoUsed := qState.EffectiveAutoSpawns()
+			if qState.CircuitOpen || (qState.MaxDailySpawns > 0 && autoUsed >= qState.MaxDailySpawns) {
 				reason := qState.CircuitReason
 				if reason == "" {
-					reason = fmt.Sprintf("daily spawn budget exhausted (%d/%d)", qState.SpawnsToday, qState.MaxDailySpawns)
+					reason = fmt.Sprintf("daily spawn budget exhausted (%d/%d)", autoUsed, qState.MaxDailySpawns)
 				}
 				newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, "quota circuit breaker is OPEN: "+reason, true, now)
 				emitDroppedEventAlerts(vaultDir, newlyDropped, now)

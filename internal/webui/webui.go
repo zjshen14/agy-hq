@@ -835,7 +835,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	}
 }
 
-type vaultStateFingerprint [10]int64
+type vaultStateFingerprint [12]int64
 
 func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	var fp vaultStateFingerprint
@@ -848,9 +848,10 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 		fp[idx] = st.ModTime().UnixNano() ^ (st.Size() << 13)
 	}
 	mem := filepath.Join(vaultDir, "memory")
+	today := time.Now().Format("2006-01-02")
 	statAt(0, filepath.Join(mem, "pending"))
 	statAt(1, filepath.Join(mem, "tasks.json"))
-	statAt(2, filepath.Join(mem, "quota.json"))
+	statAt(2, filepath.Join(mem, "quota_state.json"))
 	statAt(3, filepath.Join(mem, "outbox", "items.jsonl"))
 	statAt(4, filepath.Join(mem, "goals.json"))
 	statAt(5, filepath.Join(mem, "front_desk.json"))
@@ -858,6 +859,8 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	statAt(7, filepath.Join(mem, "console_spaces.json"))
 	statAt(8, filepath.Join(vaultDir, "extensions.json"))
 	statAt(9, filepath.Join(vaultDir, "worktrees"))
+	statAt(10, filepath.Join(vaultDir, "config.yaml"))
+	statAt(11, filepath.Join(mem, "journal", today))
 	return fp
 }
 
@@ -940,7 +943,7 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	now := time.Now()
 	sel := kernel.SelectConsoleTasks(layer1Tasks, kernel.CountColdArchivedTasks(vaultDir), now)
 	turns := loadTodayJournals(vaultDir)
-	quota := kernel.LoadQuota(vaultDir)
+	quota := trimQuotaForDashboard(kernel.LoadQuota(vaultDir))
 	obsSum := obs.BuildDashboardSummary(vaultDir, now)
 	health := doctor.RunWithObs(vaultDir, &obsSum)
 	activeSpaces, _ := ActiveSpaces(vaultDir, now)
@@ -1090,8 +1093,62 @@ func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask) []Sch
 	return rows
 }
 
+const (
+	maxDashboardJournalEntries = 25
+	maxDashboardQuotaEvents    = 15
+)
+
+func truncateRunes(s string, maxRunes int) string {
+	if runes := []rune(s); len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
+	}
+	return s
+}
+
+func trimQuotaForDashboard(q kernel.QuotaState) kernel.QuotaState {
+	if len(q.Events) == 0 {
+		return q
+	}
+	start := 0
+	if len(q.Events) > maxDashboardQuotaEvents {
+		start = len(q.Events) - maxDashboardQuotaEvents
+	}
+	trimmed := make([]kernel.SpawnEvent, 0, len(q.Events)-start)
+	for _, ev := range q.Events[start:] {
+		ev.Outcome = truncateRunes(ev.Outcome, 240)
+		trimmed = append(trimmed, ev)
+	}
+	q.Events = trimmed
+	return q
+}
+
+type todayJournalCacheEntry struct {
+	dateDir    string
+	dirModNano int64
+	entries    []hooks.JournalEntry
+}
+
+var (
+	todayJournalMu    sync.Mutex
+	todayJournalCache = make(map[string]todayJournalCacheEntry)
+)
+
 func loadTodayJournals(vaultDir string) []hooks.JournalEntry {
+	cleanVault := filepath.Clean(vaultDir)
 	dateDir := filepath.Join(vaultDir, "memory", "journal", time.Now().Format("2006-01-02"))
+	st, err := os.Stat(dateDir)
+	if err != nil {
+		return nil
+	}
+	dirMod := st.ModTime().UnixNano()
+	todayJournalMu.Lock()
+	if cached, ok := todayJournalCache[cleanVault]; ok && cached.dateDir == dateDir && cached.dirModNano == dirMod {
+		cp := append([]hooks.JournalEntry(nil), cached.entries...)
+		todayJournalMu.Unlock()
+		return cp
+	}
+	todayJournalMu.Unlock()
+
 	entries, err := os.ReadDir(dateDir)
 	if err != nil {
 		return nil
@@ -1107,12 +1164,27 @@ func loadTodayJournals(vaultDir string) []hooks.JournalEntry {
 		}
 		var j hooks.JournalEntry
 		if json.Unmarshal(data, &j) == nil {
+			j.UserPrompt = truncateRunes(strings.Join(strings.Fields(j.UserPrompt), " "), 240)
+			j.ResponseSummary = truncateRunes(strings.Join(strings.Fields(j.ResponseSummary), " "), 240)
+			j.TranscriptPath = ""
+			j.ToolsUsed = nil
 			out = append(out, j)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Timestamp > out[j].Timestamp
 	})
+	if len(out) > maxDashboardJournalEntries {
+		out = out[:maxDashboardJournalEntries]
+	}
+
+	todayJournalMu.Lock()
+	todayJournalCache[cleanVault] = todayJournalCacheEntry{
+		dateDir:    dateDir,
+		dirModNano: dirMod,
+		entries:    append([]hooks.JournalEntry(nil), out...),
+	}
+	todayJournalMu.Unlock()
 	return out
 }
 
@@ -1519,7 +1591,7 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 <h2>Proactive Gatekeeper & Daily Quota</h2>
 <div class="card" id="quota-card">
   <div class="meta-row">
-    <div><strong>Background Flash Spawns Today:</strong> <span id="quota-spawns">{{.Quota.SpawnsToday}}</span> / {{.Quota.MaxDailySpawns}}</div>
+    <div><strong>Background Auto Spawns Today:</strong> <span id="quota-spawns">{{.Quota.EffectiveAutoSpawns}}</span> / <span id="quota-max-spawns">{{.Quota.MaxDailySpawns}}</span>{{if gt .Quota.InteractiveSpawnsToday 0}} <span class="muted" id="quota-interactive">(+{{.Quota.InteractiveSpawnsToday}} interactive)</span>{{else}}<span class="muted" id="quota-interactive"></span>{{end}}</div>
     <div>
       {{if .Quota.CircuitOpen}}
         <span class="badge badge-warn">CIRCUIT OPEN ({{.Quota.CircuitReason}})</span>
@@ -1529,7 +1601,7 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     </div>
   </div>
   <div class="progress-bar">
-    <div class="progress-fill" style="width: {{if gt .Quota.MaxDailySpawns 0}}{{printf "%.1f" (mulf (divf .Quota.SpawnsToday .Quota.MaxDailySpawns) 100.0)}}{{else}}0{{end}}%;"></div>
+    <div class="progress-fill" style="width: {{if gt .Quota.MaxDailySpawns 0}}{{printf "%.1f" (pctClamp (mulf (divf .Quota.EffectiveAutoSpawns .Quota.MaxDailySpawns) 100.0))}}{{else}}0{{end}}%;"></div>
   </div>
   <div class="muted" style="margin-top:6px">Last Heartbeat: {{if .Quota.LastStatus}}{{.Quota.LastStatus}}{{else}}Not run yet today{{end}}</div>
 </div>
@@ -1999,7 +2071,16 @@ async function refreshState() {
     // Update Quota spawns
     if (state.quota) {
       const qSpan = document.getElementById('quota-spawns');
-      if (qSpan) qSpan.textContent = state.quota.spawnsToday;
+      const autoUsed = (state.quota.autoSpawnsToday || state.quota.interactiveSpawnsToday)
+        ? (state.quota.autoSpawnsToday || 0)
+        : (state.quota.spawnsToday || 0);
+      if (qSpan) qSpan.textContent = autoUsed;
+      const qMax = document.getElementById('quota-max-spawns');
+      if (qMax && state.quota.maxDailySpawns) qMax.textContent = state.quota.maxDailySpawns;
+      const qInter = document.getElementById('quota-interactive');
+      if (qInter) {
+        qInter.textContent = state.quota.interactiveSpawnsToday > 0 ? ' (+' + state.quota.interactiveSpawnsToday + ' interactive)' : '';
+      }
     }
   } catch (err) {
     console.warn('background state refresh failed:', err);
@@ -2139,7 +2220,11 @@ func SyncMarkdownConsole(vaultDir string) error {
 	if state.Quota.GatekeeperSavesToday > 0 {
 		gatekeeperNote = fmt.Sprintf(" · 0-Token Gatekeeper Skips: `%d`", state.Quota.GatekeeperSavesToday)
 	}
-	fmt.Fprintf(&b, "- **Background Flash Spawns Today:** `%d / %d` (`%s`%s)\n", state.Quota.SpawnsToday, state.Quota.MaxDailySpawns, circuitBadge, gatekeeperNote)
+	interNote := ""
+	if state.Quota.InteractiveSpawnsToday > 0 {
+		interNote = fmt.Sprintf(" · Interactive: `+%d`", state.Quota.InteractiveSpawnsToday)
+	}
+	fmt.Fprintf(&b, "- **Background Auto Spawns Today:** `%d / %d` (`%s`%s%s)\n", state.Quota.EffectiveAutoSpawns(), state.Quota.MaxDailySpawns, circuitBadge, interNote, gatekeeperNote)
 	fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
 		obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
 		obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),

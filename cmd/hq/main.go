@@ -3248,9 +3248,16 @@ func runObsCLI(vaultDir string, args []string) {
 		setWarnCtx := fs.Int64("set-warn-context", 0, "Set Front Desk context warning threshold (default 120000)")
 		setNudgeCtx := fs.Int64("set-nudge-context", 0, "Set Front Desk SessionStart /compact nudge threshold (default 160000)")
 		setCritCtx := fs.Int64("set-crit-context", 0, "Set Front Desk critical context threshold (default 180000)")
-		resetCircuit := fs.Bool("reset-circuit", false, "Clear daily token budget circuit breaker for kind:auto triggers")
+		setMaxDailySpawns := fs.Int("set-max-daily-spawns", 0, "Set daily automated background spawn cap in config.yaml and quota state (e.g. 30)")
+		maxDailySpawnsAlias := fs.Int("max-daily-spawns", 0, "Alias for --set-max-daily-spawns")
+		resetCircuit := fs.Bool("reset-circuit", false, "Clear daily token/spawn budget circuit breaker for kind:auto triggers")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
+
+		targetMaxSpawns := *setMaxDailySpawns
+		if targetMaxSpawns <= 0 && *maxDailySpawnsAlias > 0 {
+			targetMaxSpawns = *maxDailySpawnsAlias
+		}
 
 		cfg := obs.LoadBudgetConfig(vaultDir)
 		updated := false
@@ -3281,14 +3288,22 @@ func runObsCLI(vaultDir string, args []string) {
 			}
 			obs.SyncDailyBudgetCircuitBreaker(vaultDir, now)
 		}
+		if targetMaxSpawns > 0 {
+			if _, err := kernel.SetVaultMaxDailySpawns(vaultDir, targetMaxSpawns); err != nil {
+				fmt.Fprintf(os.Stderr, "hq obs budget --set-max-daily-spawns failed: %v\n", err)
+				os.Exit(1)
+			}
+		}
 		if *resetCircuit {
 			if err := obs.ResetBudgetCircuitBreaker(vaultDir); err != nil {
 				fmt.Fprintf(os.Stderr, "hq obs budget --reset-circuit failed: %v\n", err)
 				os.Exit(1)
 			}
-		} else if !updated {
+		} else if !updated && targetMaxSpawns <= 0 {
 			obs.SyncDailyBudgetCircuitBreaker(vaultDir, now)
 		}
+		qState := kernel.LoadQuota(vaultDir)
+		cfg.MaxDailySpawns = qState.MaxDailySpawns
 		_ = webui.SyncMarkdownConsole(vaultDir)
 
 		if *asJSON {
@@ -3297,9 +3312,15 @@ func runObsCLI(vaultDir string, args []string) {
 			_ = enc.Encode(cfg)
 			return
 		}
-		fmt.Printf("HQ Token Budget & Context Guard Configuration (local/memory/obs/budget.json)\n")
+		circuitLabel := "OK"
+		if qState.CircuitOpen {
+			circuitLabel = "OPEN (" + qState.CircuitReason + ")"
+		}
+		fmt.Printf("HQ Token Budget & Context Guard Configuration (local/memory/obs/budget.json + config.yaml)\n")
 		fmt.Printf("  Daily Uncached Budget:      %s tokens\n", obs.FormatTokensCompact(cfg.DailyUncachedBudget))
 		fmt.Printf("  Daily Deep Uncached Budget: %s tokens\n", obs.FormatTokensCompact(cfg.DailyDeepUncachedBudget))
+		fmt.Printf("  Daily Auto Spawn Budget:    %d / %d auto spawns today (+%d interactive, circuit=%s)\n",
+			qState.EffectiveAutoSpawns(), qState.MaxDailySpawns, qState.InteractiveSpawnsToday, circuitLabel)
 		fmt.Printf("  Front Desk Context Guards:  WARN=%s | NUDGE=%s | CRITICAL=%s\n",
 			obs.FormatTokensCompact(cfg.WarnContextTokens),
 			obs.FormatTokensCompact(cfg.NudgeContextTokens),

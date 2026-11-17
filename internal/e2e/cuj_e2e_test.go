@@ -1021,19 +1021,19 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 		t.Fatalf("expected invoke_subagent to be allowed, got: %s", out)
 	}
 
-	// Verify quota_state.json (and dated file) incremented SpawnsToday
+	// Verify quota_state.json (and dated file) incremented SpawnsToday & InteractiveSpawnsToday without consuming AutoSpawnsToday
 	q := kernel.LoadQuota(env.vaultDir)
-	if q.SpawnsToday != 1 {
-		t.Fatalf("expected SpawnsToday == 1, got %d", q.SpawnsToday)
+	if q.SpawnsToday != 1 || q.InteractiveSpawnsToday != 1 || q.AutoSpawnsToday != 0 {
+		t.Fatalf("expected SpawnsToday==1, InteractiveSpawnsToday==1, AutoSpawnsToday==0; got %+v", q)
 	}
-	// Verify hq_console.md in Front Desk artifact dir reflects "1 / 15"
+	// Verify hq_console.md in Front Desk artifact dir reflects "0 / 15" auto spawns and "+1" interactive
 	consoleBytes, err := os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
 	if err != nil {
 		t.Fatalf("read hq_console.md: %v", err)
 	}
 	consoleStr := string(consoleBytes)
-	if !strings.Contains(consoleStr, "1 / 15") {
-		t.Fatalf("expected '1 / 15' spawns in hq_console.md, got:\n%s", consoleStr)
+	if !strings.Contains(consoleStr, "0 / 15") || !strings.Contains(consoleStr, "Interactive: `+1`") {
+		t.Fatalf("expected '0 / 15' auto spawns and 'Interactive: `+1`' in hq_console.md, got:\n%s", consoleStr)
 	}
 
 	// 3. Subagent starts up in its own conversation (conv-sub-123) and runs session-start

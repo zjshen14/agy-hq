@@ -1008,3 +1008,82 @@ func TestSubagentPopCallerGuardsAndNestedTaskPoisonRecovery(t *testing.T) {
 		t.Fatalf("expected CleanNestedTasks to preserve genuine nested child ID")
 	}
 }
+
+func TestVaultQuotaConfigMaxDailySpawnsAndInteractiveExemption(t *testing.T) {
+	vaultDir := t.TempDir()
+	fdConv := "dddddddd-1111-2222-3333-444444444444"
+	_ = SetFrontDesk(vaultDir, fdConv, filepath.Join(vaultDir, "art-fd"))
+
+	// Seed legacy persisted quota_state.json with MaxDailySpawns=15, then write config.yaml with max_daily_spawns: 2.
+	_ = SaveQuota(vaultDir, QuotaState{
+		Date:           time.Now().Format("2006-01-02"),
+		MaxDailySpawns: 15,
+	})
+	cfgYAML := "# Vault config\nquota:\n  max_parallel_runs: 4\n  max_daily_spawns: 2 # custom cap\n  background_model: flash\n"
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	q0 := LoadQuota(vaultDir)
+	if q0.MaxDailySpawns != 2 {
+		t.Fatalf("expected LoadQuota to honor config.yaml max_daily_spawns=2 over persisted 15, got %d", q0.MaxDailySpawns)
+	}
+
+	// 1. Interactive Front Desk subagents and manual `hq spawn` increment InteractiveSpawnsToday + SpawnsToday,
+	//    and MUST NOT consume or trip the automated MaxDailySpawns=2 budget!
+	if err := RecordSubagentSpawn(vaultDir, "[quick] repo: Lookup Helper", "flash_lite", "Check version"); err != nil {
+		t.Fatalf("RecordSubagentSpawn: %v", err)
+	}
+	if _, err := SpawnSubagent(vaultDir, fdConv, "[standard] repo: Unit Test Runner", "Run tests", "flash", vaultDir, true); err != nil {
+		t.Fatalf("SpawnSubagent dryRun: %v", err)
+	}
+	if _, err := SpawnTask(vaultDir, "manual-spawn:design-rfc", "swe-pulse", "[Task:core] Design RFC", "Draft RFC", "gemini-4-carbon-high", true); err != nil {
+		t.Fatalf("manual SpawnTask dryRun: %v", err)
+	}
+
+	qInter := LoadQuota(vaultDir)
+	if qInter.InteractiveSpawnsToday != 3 || qInter.AutoSpawnsToday != 0 || qInter.SpawnsToday != 3 || qInter.EffectiveAutoSpawns() != 0 {
+		t.Fatalf("unexpected interactive/auto quota split: %+v", qInter)
+	}
+	if qInter.CircuitOpen {
+		t.Fatalf("expected interactive spawns NOT to trip CircuitOpen, got %+v", qInter)
+	}
+
+	// 2. Two automated background spawns succeed (reaching 2/2); the 3rd automated spawn trips CircuitOpen!
+	for i := 1; i <= 2; i++ {
+		if _, err := SpawnTask(vaultDir, "watch:gmail:work", "inbox-triage", "[Auto] Triage", "Triage batch", "gemini-4-hydrogen-medium", true); err != nil {
+			t.Fatalf("auto SpawnTask #%d failed unexpectedly: %v", i, err)
+		}
+	}
+	if _, err := SpawnTask(vaultDir, "watch:gmail:work", "inbox-triage", "[Auto] Triage", "Triage batch 3", "gemini-4-hydrogen-medium", true); err == nil {
+		t.Fatalf("expected 3rd automated SpawnTask to be blocked at MaxDailySpawns=2")
+	}
+	qTripped := LoadQuota(vaultDir)
+	if !qTripped.CircuitOpen || qTripped.AutoSpawnsToday != 2 || qTripped.InteractiveSpawnsToday != 3 || qTripped.SpawnsToday != 5 {
+		t.Fatalf("expected CircuitOpen=true with Auto=2, Interactive=3, Total=5; got %+v", qTripped)
+	}
+
+	// 3. Even while automated CircuitOpen is tripped, interactive manual-spawn and Front Desk hq subagent STILL work!
+	if _, err := SpawnTask(vaultDir, "manual-spawn:hotfix", "swe-pulse", "[Task:core] Hotfix", "Fix bug", "gemini-4-hydrogen-high", true); err != nil {
+		t.Fatalf("expected manual-spawn to succeed even when background CircuitOpen is true, got: %v", err)
+	}
+	if _, err := SpawnSubagent(vaultDir, fdConv, "[quick] core: Verifier", "Verify fix", "flash_lite", vaultDir, true); err != nil {
+		t.Fatalf("expected Front Desk SpawnSubagent to succeed even when background CircuitOpen is true, got: %v", err)
+	}
+
+	// 4. Raising max_daily_spawns via SetVaultMaxDailySpawns updates config.yaml in-place AND auto-clears CircuitOpen!
+	qRaised, err := SetVaultMaxDailySpawns(vaultDir, 25)
+	if err != nil {
+		t.Fatalf("SetVaultMaxDailySpawns: %v", err)
+	}
+	if qRaised.MaxDailySpawns != 25 || qRaised.CircuitOpen {
+		t.Fatalf("expected MaxDailySpawns=25 and CircuitOpen=false after raising cap, got %+v", qRaised)
+	}
+	updatedCfg, err := os.ReadFile(filepath.Join(vaultDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read updated config.yaml: %v", err)
+	}
+	if !strings.Contains(string(updatedCfg), "max_daily_spawns: 25") || !strings.Contains(string(updatedCfg), "max_parallel_runs: 4") {
+		t.Fatalf("expected in-place config.yaml update preserving sibling keys, got:\n%s", string(updatedCfg))
+	}
+}

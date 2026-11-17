@@ -22,6 +22,7 @@ type BudgetConfig struct {
 	MaxTurnSteps            int   `json:"maxTurnSteps"`
 	MaxTurnUncachedTokens   int64 `json:"maxTurnUncachedTokens"`
 	MaxTurnOutputTokens     int64 `json:"maxTurnOutputTokens"`
+	MaxDailySpawns          int   `json:"maxDailySpawns,omitempty"`
 }
 
 // DefaultBudgetConfig returns the RFC-0012 default budget and context guard configuration.
