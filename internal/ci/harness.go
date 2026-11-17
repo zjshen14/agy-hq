@@ -338,6 +338,66 @@ func isAllowedSkillURLHost(rawHost string) bool {
 	return false
 }
 
+func shortGitSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+// checkGitTagVersionAlignment enforces that:
+//  1. If HEAD carries a release tag `vX.Y.Z` (and no uncommitted staged changes are changing the version),
+//     `internal/version.Version` must match `X.Y.Z`.
+//  2. `internal/version.Version` must never remain equal to an already-released git tag `v<Version>` once
+//     HEAD has advanced past that tag (or when new post-tag changes are staged on top of that tag).
+func checkGitTagVersionAlignment(rootDir, currentVer string) error {
+	currentVer = strings.TrimSpace(currentVer)
+	if currentVer == "" {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, ".git")); err != nil {
+		return nil
+	}
+	headOut, hErr := gitOutput(rootDir, "rev-parse", "--verify", "HEAD")
+	if hErr != nil {
+		return nil
+	}
+	headSHA := strings.TrimSpace(headOut)
+	if headSHA == "" {
+		return nil
+	}
+
+	stagedOut, sErr := gitOutput(rootDir, "diff", "--cached", "--name-only", "--diff-filter=ACMRD")
+	hasStagedChanges := sErr == nil && strings.TrimSpace(stagedOut) != ""
+
+	if tagOut, tErr := gitOutput(rootDir, "rev-parse", "-q", "--verify", "refs/tags/v"+currentVer+"^{commit}"); tErr == nil {
+		tagSHA := strings.TrimSpace(tagOut)
+		if tagSHA != "" && tagSHA != headSHA {
+			return fmt.Errorf("internal/version.Version %q matches already-released git tag v%s (%s) while HEAD is at %s; bump internal/version/version.go and .agents/plugins/agy-hq/plugin.json (e.g. to next -dev or release SemVer)",
+				currentVer, currentVer, shortGitSHA(tagSHA), shortGitSHA(headSHA))
+		}
+		if tagSHA != "" && tagSHA == headSHA && hasStagedChanges {
+			return fmt.Errorf("HEAD is at release tag v%s and new changes are staged without bumping internal/version.Version %q; bump internal/version/version.go and .agents/plugins/agy-hq/plugin.json before committing after a release tag",
+				currentVer, currentVer)
+		}
+	}
+
+	if !hasStagedChanges {
+		if ptsOut, pErr := gitOutput(rootDir, "tag", "--points-at", "HEAD"); pErr == nil {
+			for _, line := range strings.Split(ptsOut, "\n") {
+				t := strings.TrimSpace(line)
+				if strings.HasPrefix(t, "v") && len(t) > 1 && t[1] >= '0' && t[1] <= '9' {
+					if strings.TrimPrefix(t, "v") != currentVer {
+						return fmt.Errorf("HEAD carries release tag %q which does not match internal/version.Version %q", t, currentVer)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func checkGateH2CGlobalPluginBundle(rootDir string, runAgyCLI bool) (bool, string) {
 	pluginDir := filepath.Join(rootDir, ".agents", "plugins", "agy-hq")
 	if err := plugin.ValidateBundle(pluginDir, true); err != nil {
@@ -360,6 +420,9 @@ func checkGateH2CGlobalPluginBundle(rootDir string, runAgyCLI bool) (bool, strin
 		if tagVer != version.Version {
 			return false, fmt.Sprintf("git release tag %q does not match internal/version.Version %q", ref, version.Version)
 		}
+	}
+	if err := checkGitTagVersionAlignment(rootDir, version.Version); err != nil {
+		return false, err.Error()
 	}
 
 	agyDetail := "agy CLI skipped"

@@ -406,3 +406,54 @@ func TestFixtureCommitsIgnoreGlobalGitHooks(t *testing.T) {
 	// All synthetic PII/secret fixture commits must still succeed hermetically.
 	TestCheckPII_AllFiveInvariantsDetected(t)
 }
+
+func TestGateH2CPostTagVersionGuard(t *testing.T) {
+	tmpRepo := t.TempDir()
+	runGit := newHermeticGitRunner(t, tmpRepo)
+	runGit("init", "-b", "main")
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@agy-hq.local")
+
+	_ = os.WriteFile(filepath.Join(tmpRepo, "README.md"), []byte("init\n"), 0o644)
+	runGit("add", "README.md")
+	runGit("commit", "-m", "initial release")
+
+	// 1. Before any release tag exists -> passes
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.2.0"); err != nil {
+		t.Fatalf("expected untagged repo to pass checkGitTagVersionAlignment, got: %v", err)
+	}
+
+	// 2. Tagging HEAD as v0.2.0 while Version == "0.2.0" -> passes
+	runGit("tag", "v0.2.0")
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.2.0"); err != nil {
+		t.Fatalf("expected clean v0.2.0 tag at HEAD to pass, got: %v", err)
+	}
+
+	// 3. Mismatched version on tagged HEAD -> fails
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.1.9"); err == nil || !strings.Contains(err.Error(), "HEAD carries release tag") {
+		t.Fatalf("expected mismatched tag on HEAD to fail, got: %v", err)
+	}
+
+	// 4. Staging new post-tag changes while Version is still frozen at "0.2.0" -> fails during pre-commit
+	_ = os.WriteFile(filepath.Join(tmpRepo, "README.md"), []byte("post-tag edit\n"), 0o644)
+	runGit("add", "README.md")
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.2.0"); err == nil || !strings.Contains(err.Error(), "new changes are staged without bumping") {
+		t.Fatalf("expected staged post-tag changes with unbumped 0.2.0 to fail, got: %v", err)
+	}
+	// Staging with bumped "0.2.1-dev" -> passes during pre-commit even while HEAD still carries v0.2.0!
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.2.1-dev"); err != nil {
+		t.Fatalf("expected staged post-tag bump to 0.2.1-dev to pass, got: %v", err)
+	}
+
+	// 5. Once post-tag commit lands, frozen "0.2.0" MUST fail while "0.2.1-dev" and "0.3.0" pass!
+	runGit("commit", "-m", "post-tag feature")
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.2.0"); err == nil || !strings.Contains(err.Error(), "matches already-released git tag v0.2.0") {
+		t.Fatalf("expected post-tag commit with unbumped 0.2.0 to fail, got: %v", err)
+	}
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.2.1-dev"); err != nil {
+		t.Fatalf("expected post-tag 0.2.1-dev to pass, got: %v", err)
+	}
+	if err := checkGitTagVersionAlignment(tmpRepo, "0.3.0"); err != nil {
+		t.Fatalf("expected next release candidate 0.3.0 before tagging to pass, got: %v", err)
+	}
+}
