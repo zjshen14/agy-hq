@@ -107,6 +107,11 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, lastUserInput, transcriptPat
 				if tk := strings.TrimSpace(ev.Metadata["thread_key"]); tk != "" {
 					itemKeys = append(itemKeys, tk)
 				}
+				for _, cid := range strings.Split(ev.Metadata["coalesced_item_ids"], ",") {
+					if cid = strings.TrimSpace(cid); cid != "" {
+						itemKeys = append(itemKeys, cid)
+					}
+				}
 				if connector == "" {
 					connector = strings.TrimSpace(ev.Metadata["connector"])
 				}

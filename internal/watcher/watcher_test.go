@@ -547,3 +547,206 @@ echo '{"items":[{"id":"msg-act-1","thread":"th-act-1","from":"noreply@example.co
 		t.Fatalf("expected deadline_or_action_cue=true in triage prompt, got %+v", evs)
 	}
 }
+
+func TestMultiThreadReadAndCoalescedBacklogPrune(t *testing.T) {
+	vaultDir := t.TempDir()
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "backlog-cli")
+	script := `#!/bin/sh
+if [ "$1" = "read" ]; then
+  th=""
+  for arg in "$@"; do
+    case "$arg" in
+      --thread=*) th="${arg#--thread=}" ;;
+    esac
+  done
+  echo "{\"items\":[{\"id\":\"head-$th\",\"thread\":\"$th\",\"from\":\"alice@example.com\",\"subject\":\"Subject for $th\"}]}"
+  exit 0
+fi
+echo '{"items":[
+  {"id":"item-auto-1","thread":"th-auto-bulk","from":"alerts@example.com","subject":"Automated digest 1","auto":true,"sched":false},
+  {"id":"item-auto-2","thread":"th-auto-bulk","from":"alerts@example.com","subject":"Automated digest 2","auto":true,"sched":false},
+  {"id":"item-auto-3","thread":"th-auto-bulk","from":"alerts@example.com","subject":"Automated digest 3","auto":true,"sched":false},
+  {"id":"item-h1-a","thread":"th-human-1","from":"alice@example.com","subject":"Follow up 1","auto":false,"sched":false},
+  {"id":"item-h1-b","thread":"th-human-1","from":"alice@example.com","subject":"Follow up 2","auto":false,"sched":false},
+  {"id":"item-h1-c","thread":"th-human-1","from":"alice@example.com","subject":"Reschedule sync","auto":false,"sched":true},
+  {"id":"item-h2-a","thread":"th-human-2","from":"bob@example.com","subject":"Design review","auto":false,"sched":false}
+],"next_cursor":"cur_backlog_1"}'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write backlog-cli: %v", err)
+	}
+	connDir := filepath.Join(vaultDir, "connectors", "team-mail")
+	_ = os.MkdirAll(connDir, 0o755)
+	manifest := map[string]interface{}{
+		"schema_version": 1,
+		"id":             "team-mail",
+		"driver":         map[string]interface{}{"builtin": "jsonmap"},
+		"transport": map[string]interface{}{
+			"kind": "cli",
+			"cli": map[string]interface{}{
+				"path": scriptPath,
+				"verbs": map[string]interface{}{
+					"poll":             []string{"list", "--cursor={{?cursor}}"},
+					"read_quarantined": []string{"read", "--thread={{thread_key}}"},
+				},
+				"output": map[string]interface{}{
+					"poll": map[string]interface{}{
+						"format": "json",
+						"jsonmap": map[string]interface{}{
+							"items_pointer":       "/items",
+							"next_cursor_pointer": "/next_cursor",
+							"item_id":             "/id",
+							"thread_key":          "/thread",
+							"sender":              "/from",
+							"subject_or_room":     "/subject",
+							"is_automated":        "/auto",
+							"has_schedule":        "/sched",
+						},
+					},
+					"read_quarantined": map[string]interface{}{
+						"format": "json",
+						"jsonmap": map[string]interface{}{
+							"items_pointer":   "/items",
+							"item_id":         "/id",
+							"thread_key":      "/thread",
+							"sender":          "/from",
+							"subject_or_room": "/subject",
+							"body":            "/subject",
+						},
+					},
+				},
+			},
+		},
+		"capabilities": map[string]interface{}{
+			"poll":             map[string]interface{}{"enabled": true, "max_pages": 2, "page_size": 25},
+			"read_quarantined": map[string]interface{}{"enabled": true},
+		},
+	}
+	rawM, _ := json.MarshalIndent(manifest, "", "  ")
+	_ = os.WriteFile(filepath.Join(connDir, "connector.json"), rawM, 0o644)
+	bundle, err := extension.BuildTrustBundle(vaultDir, "vault", "")
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	bBytes, _ := json.Marshal(bundle)
+	_ = extension.ApplyTrustBundle(vaultDir, bBytes)
+
+	now := time.Date(2026, 11, 17, 1, 0, 0, 0, time.UTC)
+	makePending := func(itemID, threadKey, tier, promptExtra string) events.Event {
+		return events.Event{
+			Source:       "connector:team-mail",
+			DedupKey:     "watch:team-mail:default:" + itemID,
+			ScopeKey:     "watch:team-mail:default",
+			Skill:        "inbox-triage",
+			Model:        "model-" + tier,
+			Title:        "[Auto] Channel Triage (team-mail:default · " + itemID + ")",
+			Prompt:       "Process " + itemID + promptExtra,
+			TaintOnSpawn: true,
+			Metadata: map[string]string{
+				"requires_ack": "1",
+				"connector":    "team-mail",
+				"account":      "default",
+				"item_id":      itemID,
+				"item_key":     itemID,
+				"thread_key":   threadKey,
+				"tier":         tier,
+			},
+		}
+	}
+	_, _, err = events.EnqueueBatch(vaultDir, []events.Event{
+		makePending("item-auto-1", "th-auto-bulk", "quick", ""),
+		makePending("item-auto-2", "th-auto-bulk", "quick", ""),
+		makePending("item-auto-3", "th-auto-bulk", "quick", ""),
+		makePending("item-h1-a", "th-human-1", "quick", ""),
+		makePending("item-h1-b", "th-human-1", "quick", ""),
+		makePending("item-h1-c", "th-human-1", "routine", " [Precheck Urgency Signals: schedule_or_invite=true]"),
+		makePending("item-h2-a", "th-human-2", "quick", ""),
+	}, now)
+	if err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	// 1. Dry-run preview must compute exact counts without mutating events or outbox.
+	dryRep, err := watcher.PruneBacklog(context.Background(), vaultDir, watcher.PruneBacklogOptions{
+		ConnectorFilter: "team-mail",
+		Reclassify:      true,
+		DedupThreads:    true,
+		DryRun:          true,
+		Now:             now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("PruneBacklog(dryRun): %v", err)
+	}
+	if dryRep.EvaluatedPending != 7 || dryRep.AutomatedPruned != 3 || dryRep.DuplicatesCoalesced != 2 || dryRep.RemainingPending != 2 || dryRep.RollupsEmitted != 1 {
+		t.Fatalf("unexpected dry-run report: %+v", dryRep)
+	}
+	if remDry, _ := events.List(vaultDir, "pending", false, 0); len(remDry) != 7 {
+		t.Fatalf("dry-run must not mutate pending events, got %d", len(remDry))
+	}
+
+	// 2. Live prune routes automated items to 1 deduplicated brief_rollup card and collapses duplicate thread events.
+	liveRep, err := watcher.PruneBacklog(context.Background(), vaultDir, watcher.PruneBacklogOptions{
+		ConnectorFilter: "team-mail",
+		Reclassify:      true,
+		DedupThreads:    true,
+		DryRun:          false,
+		Now:             now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("PruneBacklog(live): %v", err)
+	}
+	if liveRep.AutomatedPruned != 3 || liveRep.DuplicatesCoalesced != 2 || liveRep.RemainingPending != 2 || liveRep.RollupsEmitted != 1 {
+		t.Fatalf("unexpected live prune report: %+v", liveRep)
+	}
+	obAfter, _ := outbox.LoadAll(vaultDir)
+	if len(obAfter) != 1 || obAfter[0].ThreadKey != "th-auto-bulk" {
+		t.Fatalf("expected 1 deduplicated brief_rollup for th-auto-bulk, got %+v", obAfter)
+	}
+	remLive, _ := events.List(vaultDir, "pending", false, 0)
+	if len(remLive) != 2 {
+		t.Fatalf("expected 2 remaining pending events, got %d", len(remLive))
+	}
+	if remLive[0].Metadata["coalesced_item_ids"] != "item-h1-a,item-h1-b,item-h1-c" || remLive[0].Metadata["tier"] != "routine" || !strings.Contains(remLive[0].Prompt, "[Precheck Urgency Signals:") {
+		t.Fatalf("expected representative thread event to preserve coalesced IDs + routine tier + urgency signals, got %+v", remLive[0])
+	}
+
+	// 3. Lease remaining 2 threads and read BOTH in a single ReadItems call (including duplicate item IDs on th-human-1).
+	batches, _, err := events.LeaseNextBatches(vaultDir, now.Add(3*time.Minute), events.DefaultLeaseTTL)
+	if err != nil || len(batches) != 1 || len(batches[0].Events) != 2 {
+		t.Fatalf("LeaseNextBatches after prune: batches=%d err=%v", len(batches), err)
+	}
+	convID := "00000000-0000-0000-0000-000000000999"
+	if _, _, err := watcher.ReadItems(context.Background(), vaultDir, "team-mail", "default", []string{"th-human-1", "th-unleased"}, batches[0].SpawnToken, convID); err == nil || !strings.Contains(err.Error(), "scope violation") {
+		t.Fatalf("expected scope violation when multi-thread ReadItems includes unleased thread, got %v", err)
+	}
+	fenced, threads, err := watcher.ReadItems(context.Background(), vaultDir, "team-mail", "default", []string{"item-h1-a,item-h1-c", "th-human-2"}, "", convID)
+	if err != nil {
+		t.Fatalf("ReadItems(valid batch): %v", err)
+	}
+	if len(threads) != 2 || threads[0].ThreadKey != "th-human-1" || threads[1].ThreadKey != "th-human-2" {
+		t.Fatalf("expected 2 deduplicated threads [th-human-1, th-human-2], got %+v", threads)
+	}
+	if strings.Count(fenced, "<<<HQ_UNTRUSTED_NONCE_") != 2 {
+		t.Fatalf("expected 2 independent nonce fences, got:\n%s", fenced)
+	}
+	if _, isTainted := taint.Check(vaultDir, convID); !isTainted {
+		t.Fatalf("expected conversation %s to be marked tainted by ReadItems", convID)
+	}
+
+	// 4. Acking by coalesced child item ID (or --all) marks the event acked and records all 3 coalesced item IDs in AckedItemIDs.
+	ackedN, err := watcher.Ack(context.Background(), vaultDir, []string{"item-h1-c", "th-human-2"}, convID, now.Add(4*time.Minute))
+	if err != nil || ackedN != 2 {
+		t.Fatalf("expected Ack to match coalesced child item-h1-c + th-human-2 (2 events), got n=%d err=%v", ackedN, err)
+	}
+	st, err := watcher.LoadState(context.Background(), vaultDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	ackedList := strings.Join(st.Accounts["team-mail:default"].AckedItemIDs, ",")
+	for _, wantID := range []string{"item-auto-1", "item-auto-2", "item-auto-3", "item-h1-a", "item-h1-b", "item-h1-c", "item-h2-a"} {
+		if !strings.Contains(ackedList, wantID) {
+			t.Fatalf("expected %q in AckedItemIDs, got %q", wantID, ackedList)
+		}
+	}
+}

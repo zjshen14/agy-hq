@@ -31,10 +31,11 @@ const (
 )
 
 const (
-	DefaultMaxAttempts = 5
-	DefaultLeaseTTL    = 15 * time.Minute
-	DedupArchiveWindow = 7 * 24 * time.Hour
-	MaxBatchEvents     = 8
+	DefaultMaxAttempts      = 5
+	DefaultLeaseTTL         = 15 * time.Minute
+	DedupArchiveWindow      = 7 * 24 * time.Hour
+	MaxBatchEvents          = 8
+	MaxCoalescedWatchEvents = 40
 )
 
 // Event models a single trigger or continuation row in local/memory/events.json.
@@ -637,11 +638,22 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 			}
 		}
 
+		watcherThreadKey := func(ev Event) string {
+			if ev.Metadata == nil {
+				return ""
+			}
+			if !strings.HasPrefix(ev.Source, "connector:") && ev.Metadata["requires_ack"] != "1" {
+				return ""
+			}
+			return strings.TrimSpace(ev.Metadata["thread_key"])
+		}
+
 		// 3. Group ready pending events by ScopeKey (and matching SessionID of the head event in that scope).
 		type groupAcc struct {
-			scopeKey  string
-			sessionID string
-			indices   []int
+			scopeKey      string
+			sessionID     string
+			indices       []int
+			uniqueThreads map[string]bool
 		}
 		var groupOrder []string
 		groups := make(map[string]*groupAcc)
@@ -658,17 +670,34 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 					continue
 				}
 			}
+			tk := watcherThreadKey(ev)
 			g, exists := groups[ev.ScopeKey]
 			if !exists {
+				ut := make(map[string]bool)
+				if tk != "" {
+					ut[tk] = true
+				}
 				g = &groupAcc{
-					scopeKey:  ev.ScopeKey,
-					sessionID: ev.SessionID,
-					indices:   []int{i},
+					scopeKey:      ev.ScopeKey,
+					sessionID:     ev.SessionID,
+					indices:       []int{i},
+					uniqueThreads: ut,
 				}
 				groups[ev.ScopeKey] = g
 				groupOrder = append(groupOrder, ev.ScopeKey)
-			} else if g.sessionID == ev.SessionID && len(g.indices) < MaxBatchEvents {
-				g.indices = append(g.indices, i)
+			} else if g.sessionID == ev.SessionID {
+				if tk != "" && len(g.uniqueThreads) > 0 {
+					if g.uniqueThreads[tk] {
+						if len(g.indices) < MaxCoalescedWatchEvents {
+							g.indices = append(g.indices, i)
+						}
+					} else if len(g.uniqueThreads) < MaxBatchEvents && len(g.indices) < MaxCoalescedWatchEvents {
+						g.uniqueThreads[tk] = true
+						g.indices = append(g.indices, i)
+					}
+				} else if len(g.indices) < MaxBatchEvents {
+					g.indices = append(g.indices, i)
+				}
 			}
 		}
 
@@ -755,6 +784,82 @@ func formatBatchPrompt(evs []Event) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("[Batched Events (%d) for Scope %q — Address all items in one consolidated run]\n\n", len(evs), evs[0].ScopeKey))
+
+	type threadGroup struct {
+		threadKey string
+		itemIDs   []string
+		seenItem  map[string]bool
+		eventIDs  []string
+		rep       Event
+	}
+	conn := ""
+	acct := ""
+	allWatcher := true
+	var threadOrder []string
+	byThread := make(map[string]*threadGroup)
+	for _, ev := range evs {
+		if ev.Metadata == nil || strings.TrimSpace(ev.Metadata["thread_key"]) == "" || strings.TrimSpace(ev.Metadata["connector"]) == "" {
+			allWatcher = false
+			break
+		}
+		evConn := strings.TrimSpace(ev.Metadata["connector"])
+		evAcct := strings.TrimSpace(ev.Metadata["account"])
+		if conn == "" {
+			conn = evConn
+			acct = evAcct
+		} else if conn != evConn || acct != evAcct {
+			allWatcher = false
+			break
+		}
+		tk := strings.TrimSpace(ev.Metadata["thread_key"])
+		tg, ok := byThread[tk]
+		if !ok {
+			tg = &threadGroup{
+				threadKey: tk,
+				seenItem:  make(map[string]bool),
+				rep:       ev,
+			}
+			byThread[tk] = tg
+			threadOrder = append(threadOrder, tk)
+		} else if strings.Contains(ev.Prompt, "[Precheck Urgency Signals:") && !strings.Contains(tg.rep.Prompt, "[Precheck Urgency Signals:") {
+			tg.rep = ev
+		}
+		tg.eventIDs = append(tg.eventIDs, ev.ID)
+		addItem := func(raw string) {
+			raw = strings.TrimSpace(raw)
+			if raw != "" && !tg.seenItem[raw] {
+				tg.seenItem[raw] = true
+				tg.itemIDs = append(tg.itemIDs, raw)
+			}
+		}
+		addItem(ev.Metadata["item_key"])
+		addItem(ev.Metadata["item_id"])
+		for _, cid := range strings.Split(ev.Metadata["coalesced_item_ids"], ",") {
+			addItem(cid)
+		}
+	}
+
+	if allWatcher && len(threadOrder) > 0 {
+		acctFlag := ""
+		if acct != "" {
+			acctFlag = " --account=" + acct
+		}
+		sb.WriteString("Quarantined strict-argv mode: invoke single canonical `hq` commands ONLY — never use shell `for` loops, `;`, `&&`, `||`, or pipes.\n")
+		sb.WriteString(fmt.Sprintf("- Read all %d unique thread(s) in one canonical call: `hq watch read --connector=%s%s --thread=%s`\n",
+			len(threadOrder), conn, acctFlag, strings.Join(threadOrder, ",")))
+		sb.WriteString("- Emit `hq outbox add` (and optional `hq offer stage`) once per noteworthy thread.\n")
+		sb.WriteString("- Acknowledge completion before ending the turn via `hq watch ack --all` (or incrementally via `hq watch ack --item=...`).\n\n")
+
+		if len(threadOrder) < len(evs) {
+			for i, tk := range threadOrder {
+				tg := byThread[tk]
+				sb.WriteString(fmt.Sprintf("### Thread %d/%d (`thread=%s` · items: `%s` · events: `%s` · source: `%s`)\n%s\n\n",
+					i+1, len(threadOrder), tk, strings.Join(tg.itemIDs, ","), strings.Join(tg.eventIDs, ","), tg.rep.Source, tg.rep.Prompt))
+			}
+			return strings.TrimSpace(sb.String())
+		}
+	}
+
 	for i, ev := range evs {
 		sb.WriteString(fmt.Sprintf("### Event %d/%d (`%s` · source: `%s` · %s)\n%s\n\n", i+1, len(evs), ev.ID, ev.Source, ev.Title, ev.Prompt))
 	}
@@ -911,13 +1016,20 @@ func AckWatcherEvents(vaultDir, convID string, itemKeys []string, now time.Time)
 				continue
 			}
 			if len(keySet) > 0 {
-				ik := ""
-				tk := ""
-				if active[i].Metadata != nil {
-					ik = active[i].Metadata["item_key"]
-					tk = active[i].Metadata["thread_key"]
+				matchedKey := keySet[active[i].ID]
+				if !matchedKey && active[i].Metadata != nil {
+					if keySet[active[i].Metadata["item_key"]] || keySet[active[i].Metadata["item_id"]] || keySet[active[i].Metadata["thread_key"]] {
+						matchedKey = true
+					} else {
+						for _, cid := range strings.Split(active[i].Metadata["coalesced_item_ids"], ",") {
+							if keySet[strings.TrimSpace(cid)] {
+								matchedKey = true
+								break
+							}
+						}
+					}
 				}
-				if !keySet[ik] && !keySet[tk] && !keySet[active[i].ID] {
+				if !matchedKey {
 					continue
 				}
 			}
@@ -1594,4 +1706,179 @@ func ClearDroppedWatcherEvents(vaultDir, connFilter, acctFilter string) (int, er
 		return nil
 	})
 	return removed, err
+}
+
+// ListPendingWatcherEvents returns a snapshot of StatusPending `connector:*` events matching optional filters.
+func ListPendingWatcherEvents(vaultDir, connFilter, acctFilter string) ([]Event, error) {
+	connFilter = strings.TrimSpace(connFilter)
+	acctFilter = strings.TrimSpace(acctFilter)
+	var out []Event
+	err := withEventsLock(vaultDir, func() error {
+		active, err := loadActiveUnlocked(vaultDir)
+		if err != nil {
+			return err
+		}
+		for _, ev := range active {
+			if ev.Status == StatusPending && watcherEventMatchesFilter(ev, connFilter, acctFilter) {
+				out = append(out, ev)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// WatcherBacklogPruneResult summarizes 0-token backlog pruning and thread coalescing in events.json.
+type WatcherBacklogPruneResult struct {
+	EvaluatedPending    int                 `json:"evaluated_pending"`
+	AutomatedPruned     int                 `json:"automated_pruned"`
+	DuplicatesCoalesced int                 `json:"duplicates_coalesced"`
+	RemainingPending    int                 `json:"remaining_pending"`
+	AutoAckedByAccount  map[string][]string `json:"auto_acked_by_account,omitempty"`
+}
+
+// ApplyWatcherBacklogPrune atomically completes newly-classified automated pending watcher events
+// and optionally collapses duplicate pending events sharing `(ScopeKey, connector, account, thread_key)`
+// into a single representative pending event carrying `Metadata["coalesced_item_ids"]`.
+func ApplyWatcherBacklogPrune(vaultDir, connFilter, acctFilter string, autoRollupEventIDs map[string]bool, dedupThreads, dryRun bool, now time.Time) (WatcherBacklogPruneResult, error) {
+	connFilter = strings.TrimSpace(connFilter)
+	acctFilter = strings.TrimSpace(acctFilter)
+	if now.IsZero() {
+		now = time.Now()
+	}
+	res := WatcherBacklogPruneResult{
+		AutoAckedByAccount: make(map[string][]string),
+	}
+	err := withEventsLock(vaultDir, func() error {
+		active, err := loadActiveUnlocked(vaultDir)
+		if err != nil || len(active) == 0 {
+			return err
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		var kept []Event
+		var archivedDone []Event
+		repIdxByThread := make(map[string]int)
+
+		collectItemIDs := func(ev Event) []string {
+			var ids []string
+			seen := make(map[string]bool)
+			add := func(raw string) {
+				raw = strings.TrimSpace(raw)
+				if raw != "" && !seen[raw] {
+					seen[raw] = true
+					ids = append(ids, raw)
+				}
+			}
+			if ev.Metadata != nil {
+				add(ev.Metadata["item_key"])
+				add(ev.Metadata["item_id"])
+				for _, cid := range strings.Split(ev.Metadata["coalesced_item_ids"], ",") {
+					add(cid)
+				}
+			}
+			return ids
+		}
+
+		resolveConnAcct := func(ev Event) (string, string) {
+			rest := strings.TrimPrefix(ev.Source, "connector:")
+			cPart, aPart, hasColon := strings.Cut(rest, ":")
+			evConn := strings.TrimSpace(cPart)
+			evAcct := "default"
+			if hasColon && strings.TrimSpace(aPart) != "" {
+				evAcct = strings.TrimSpace(aPart)
+			}
+			if ev.Metadata != nil {
+				if c := strings.TrimSpace(ev.Metadata["connector"]); c != "" {
+					evConn = c
+				}
+				if a := strings.TrimSpace(ev.Metadata["account"]); a != "" {
+					evAcct = a
+				}
+			}
+			return evConn, evAcct
+		}
+
+		for _, ev := range active {
+			if ev.Status != StatusPending || !watcherEventMatchesFilter(ev, connFilter, acctFilter) {
+				kept = append(kept, ev)
+				continue
+			}
+			res.EvaluatedPending++
+			evConn, evAcct := resolveConnAcct(ev)
+
+			if autoRollupEventIDs[ev.ID] {
+				res.AutomatedPruned++
+				acctKey := evConn + ":" + evAcct
+				res.AutoAckedByAccount[acctKey] = append(res.AutoAckedByAccount[acctKey], collectItemIDs(ev)...)
+				ev.Status = StatusDone
+				ev.UpdatedAt = nowStr
+				ev.LastError = "pruned via 0-token automated backlog rollup"
+				archivedDone = append(archivedDone, ev)
+				continue
+			}
+
+			tk := ""
+			if ev.Metadata != nil {
+				tk = strings.TrimSpace(ev.Metadata["thread_key"])
+			}
+			if dedupThreads && tk != "" {
+				groupKey := ev.ScopeKey + "\x00" + evConn + "\x00" + evAcct + "\x00" + tk
+				if repIdx, exists := repIdxByThread[groupKey]; exists {
+					res.DuplicatesCoalesced++
+					rep := kept[repIdx]
+					if rep.Metadata == nil {
+						rep.Metadata = make(map[string]string)
+					}
+					mergedIDs := collectItemIDs(rep)
+					seenMerged := make(map[string]bool, len(mergedIDs))
+					for _, id := range mergedIDs {
+						seenMerged[id] = true
+					}
+					for _, id := range collectItemIDs(ev) {
+						if !seenMerged[id] {
+							seenMerged[id] = true
+							mergedIDs = append(mergedIDs, id)
+						}
+					}
+					if len(mergedIDs) > 0 {
+						rep.Metadata["coalesced_item_ids"] = strings.Join(mergedIDs, ",")
+					}
+					if ev.Metadata != nil && ev.Metadata["tier"] == "routine" && rep.Metadata["tier"] != "routine" {
+						rep.Metadata["tier"] = "routine"
+						if ev.Model != "" {
+							rep.Model = ev.Model
+						}
+					}
+					if strings.Contains(ev.Prompt, "[Precheck Urgency Signals:") && !strings.Contains(rep.Prompt, "[Precheck Urgency Signals:") {
+						rep.Prompt = ev.Prompt
+					}
+					if ev.AttemptCount < rep.AttemptCount {
+						rep.AttemptCount = ev.AttemptCount
+						rep.AvailableAt = ev.AvailableAt
+					}
+					rep.UpdatedAt = nowStr
+					kept[repIdx] = rep
+
+					ev.Status = StatusDone
+					ev.UpdatedAt = nowStr
+					ev.LastError = "coalesced into representative thread event " + rep.ID
+					archivedDone = append(archivedDone, ev)
+					continue
+				}
+				repIdxByThread[groupKey] = len(kept)
+			}
+
+			res.RemainingPending++
+			kept = append(kept, ev)
+		}
+
+		if dryRun || len(archivedDone) == 0 {
+			return nil
+		}
+		if err := appendArchiveUnlocked(vaultDir, archivedDone); err != nil {
+			return err
+		}
+		return saveActiveUnlocked(vaultDir, kept)
+	})
+	return res, err
 }

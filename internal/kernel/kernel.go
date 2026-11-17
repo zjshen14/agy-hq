@@ -3644,8 +3644,12 @@ func RecordLiveLSSession(vaultDir string) error {
 			projRepaired = true
 		}
 		if projEnv != "" {
-			verifiedEnv, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, primaryWS, projEnv)
-			projEnv = verifiedEnv
+			if projEnv == existing.ProjectID {
+				projEnv = verifiedExisting
+			} else {
+				verifiedEnv, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, primaryWS, projEnv)
+				projEnv = verifiedEnv
+			}
 		}
 	}
 

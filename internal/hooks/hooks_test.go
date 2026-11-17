@@ -16,6 +16,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -1122,5 +1123,96 @@ func TestTwoTierRSI_SessionStartGeneralOverlayAndPreToolUseGuards(t *testing.T) 
 		if !strings.Contains(out.String(), `"decision":"allow"`) {
 			t.Fatalf("expected Front Desk Rule C to exempt SKILL.md & memory/rsi/rules/*.md read #%d (%s), got: %s", i, p, out.String())
 		}
+	}
+}
+
+func TestQuarantinedUpdateFocusAllowedAndStrictArgvGuidance(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 17, 3, 0, 0, 0, time.UTC)
+
+	if _, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:       "connector:gmail",
+		DedupKey:     "watch:gmail:work:item-main",
+		ScopeKey:     "watch:gmail:work",
+		Skill:        "inbox-triage",
+		Title:        "[Auto] Channel Triage",
+		Prompt:       "Triage",
+		TaintOnSpawn: true,
+		Metadata: map[string]string{
+			"requires_ack":       "1",
+			"connector":          "gmail",
+			"account":            "work",
+			"item_id":            "item-main",
+			"item_key":           "item-main",
+			"thread_key":         "thread-main",
+			"coalesced_item_ids": "item-main,item-sub-1,item-sub-2",
+		},
+	}, now); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batches, _, err := events.LeaseNextBatches(vaultDir, now, events.DefaultLeaseTTL)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("LeaseNextBatches: %v", err)
+	}
+	convID := "00000000-0000-0000-0000-000000000777"
+	spawnPrompt := "Batch instructions [hq-spawn:" + batches[0].SpawnToken + "]"
+
+	// 1. Turn-1 update_focus in a TaintOnSpawn session binds the batch, marks taint, and ALLOWS update_focus!
+	focusReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convID,
+		"lastUserInput":  spawnPrompt,
+		"toolCall": map[string]interface{}{
+			"name": "update_focus",
+			"args": map[string]interface{}{"focus": "Reading inbox-triage skill and triaging threads"},
+		},
+	})
+	var out bytes.Buffer
+	if err := HandlePreToolUse(bytes.NewReader(focusReq), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse(update_focus): %v", err)
+	}
+	if !strings.Contains(out.String(), `"decision":"allow"`) {
+		t.Fatalf("expected update_focus to be allowed in tainted session, got: %s", out.String())
+	}
+
+	// Verify coalesced_item_ids were bound into taint.Record.ItemKeys
+	rec, isTainted := taint.Check(vaultDir, convID)
+	if !isTainted {
+		t.Fatalf("expected session %s to be marked tainted on TaintOnSpawn bind", convID)
+	}
+	joinedKeys := strings.Join(rec.ItemKeys, ",")
+	if !strings.Contains(joinedKeys, "item-sub-1") || !strings.Contains(joinedKeys, "item-sub-2") {
+		t.Fatalf("expected coalesced_item_ids in taint ItemKeys, got %v", rec.ItemKeys)
+	}
+
+	// 2. Shell loop with ';' is denied with explicit canonical multi-thread hq watch read guidance
+	loopReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convID,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "for t in t1 t2; do hq watch read --connector=gmail --thread=$t; done"},
+		},
+	})
+	out.Reset()
+	if err := HandlePreToolUse(bytes.NewReader(loopReq), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse(loop): %v", err)
+	}
+	if !strings.Contains(out.String(), `"decision":"deny"`) || !strings.Contains(out.String(), "--thread=t1,t2") {
+		t.Fatalf("expected shell-loop denial to include canonical --thread=t1,t2 guidance, got: %s", out.String())
+	}
+
+	// 3. Canonical comma-separated multi-thread hq watch read is allowed and env-scrubbed
+	multiReadReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convID,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "hq watch read --connector=gmail --account=work --thread=thread-main,thread-2"},
+		},
+	})
+	out.Reset()
+	if err := HandlePreToolUse(bytes.NewReader(multiReadReq), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse(multiRead): %v", err)
+	}
+	if !strings.Contains(out.String(), `"decision":"allow"`) || !strings.Contains(out.String(), "ANTIGRAVITY_CSRF_TOKEN") {
+		t.Fatalf("expected multi-thread hq watch read to be allowed and env-scrubbed, got: %s", out.String())
 	}
 }

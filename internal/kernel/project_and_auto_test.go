@@ -432,3 +432,36 @@ func TestDispatchPendingEventsRetryPreservesPriorConvAndEnqueuesSupersededSync(t
 		t.Fatalf("expected %s bound to %s, got ok=%v task=%+v", autoSlug, uAttempt3, ok, latest)
 	}
 }
+
+func TestProjectRegistryFastPathAndCacheInvalidation(t *testing.T) {
+	wsRoot := t.TempDir()
+	wsSecond := t.TempDir()
+	vaultDir := filepath.Join(wsRoot, "local")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatalf("mkdir vault: %v", err)
+	}
+	cfgDir := t.TempDir()
+	t.Setenv("ANTIGRAVITY_CONFIG_DIR", cfgDir)
+	writeProjectRegistryFixture(t, cfgDir, "proj-fast-1", wsRoot)
+
+	// 1. O(1) direct candidate lookup (`<dir>/<projectID>.json`) succeeds for both primary workspace and managed worktree.
+	valid, regAvail := ValidateProjectMatchesWorkspace(vaultDir, "proj-fast-1", wsRoot)
+	if !valid || !regAvail {
+		t.Fatalf("expected O(1) ValidateProjectMatchesWorkspace=true, got valid=%v avail=%v", valid, regAvail)
+	}
+	wtDir := filepath.Join(vaultDir, "worktrees", "repo-feature")
+	_ = os.MkdirAll(wtDir, 0o755)
+	gotProj, regAvail2, repaired := ResolveVerifiedWorkspaceProjectID(vaultDir, wtDir, "proj-fast-1")
+	if gotProj != "proj-fast-1" || !regAvail2 || repaired {
+		t.Fatalf("expected managed worktree O(1) match for proj-fast-1, got proj=%q avail=%v repaired=%v", gotProj, regAvail2, repaired)
+	}
+
+	// 2. Cold scan populates in-process snapshot cache; adding a new project file invalidates fingerprint immediately.
+	if emptyProj := ResolveProjectIDForWorkspace(vaultDir, wsSecond); emptyProj != "" {
+		t.Fatalf("expected empty projectId before registering wsSecond, got %q", emptyProj)
+	}
+	writeProjectRegistryFixture(t, cfgDir, "proj-second-2", wsSecond)
+	if resolvedSecond := ResolveProjectIDForWorkspace(vaultDir, wsSecond); resolvedSecond != "proj-second-2" {
+		t.Fatalf("expected cache invalidation on new project file to return proj-second-2, got %q", resolvedSecond)
+	}
+}

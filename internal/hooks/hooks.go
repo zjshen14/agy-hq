@@ -942,6 +942,20 @@ func isSafePathUnderBase(vaultDir, rawBaseDir, rawTargetPath string) (string, bo
 // HandlePreToolUse gates outbound/irreversible commands and enforces approval-bound execution,
 // as well as Front Desk non-blocking policy (blocking repo/worktree edits, test runs, and capping lookups at 3).
 func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
+	_, err := HandlePreToolUseWithSync(r, w, vaultDir)
+	return err
+}
+
+// HandlePreToolUseWithSync executes HandlePreToolUse and reports whether Front Desk console/taskboard/quota
+// state was mutated during the hook (so `hq hook pre-tool` only refreshes CONSOLE.md on rare state mutations
+// rather than every read/command/edit tool call).
+func HandlePreToolUseWithSync(r io.Reader, w io.Writer, vaultDir string) (bool, error) {
+	mutatedConsole := false
+	err := handlePreToolUse(r, w, vaultDir, &mutatedConsole)
+	return mutatedConsole, err
+}
+
+func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole *bool) error {
 	var payload ToolCallPayload
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
 		return json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1228,6 +1242,9 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	// Enforce Strict Deny-by-Default Quarantined Worker Profile on sessions that have ingested untrusted external channel content (RFC-0017b §3)
 	if taintReason, tainted := taint.IsTainted(vaultDir, payload.ConversationID); tainted {
 		switch payload.ToolCall.Name {
+		case "update_focus":
+			_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
+			return err
 		case "read_file":
 			pathArg, _ := payload.ToolCall.Args["Path"].(string)
 			if !isAllowedTaintedReadPath(vaultDir, payload, pathArg) {
@@ -1244,7 +1261,7 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			if aErr != nil {
 				return json.NewEncoder(w).Encode(map[string]interface{}{
 					"decision": "deny",
-					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): %v", taintReason, aErr),
+					"reason":   fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): %v. Invoke single canonical 'hq ...' commands directly without shell loops, ';', '&&', or pipes (use comma-separated --thread=t1,t2 on 'hq watch read' and --all or --item=i1,i2 on 'hq watch ack').", taintReason, aErr),
 				})
 			}
 			if vErr := validateTaintedHQArgv(argv); vErr != nil {
@@ -1418,6 +1435,9 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 		if isFrontDesk {
 			_ = kernel.RecordSubagentSpawn(vaultDir, role, model, prompt)
 			_, _ = kernel.QueuePendingSubagentWithParent(vaultDir, payload.ConversationID, role, model, prompt)
+			if mutatedConsole != nil {
+				*mutatedConsole = true
+			}
 		} else {
 			// Descendant subagent spawned by a subagent or secondary task conversation:
 			// do NOT increment daily spawn quota and do NOT queue as a Layer-1 task.
@@ -1441,8 +1461,14 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 				convIDs = strIDs
 			}
 			_ = kernel.CancelTasks(vaultDir, convIDs, "Terminated by Front Desk")
+			if mutatedConsole != nil {
+				*mutatedConsole = true
+			}
 		} else if action == "kill_all" {
 			_ = kernel.CancelAllSubagentTasks(vaultDir, "Terminated by Front Desk")
+			if mutatedConsole != nil {
+				*mutatedConsole = true
+			}
 		}
 		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
 		return err
@@ -1451,7 +1477,9 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 	if payload.ToolCall.Name == "schedule" {
 		cronExpr, _ := payload.ToolCall.Args["CronExpression"].(string)
 		prompt, _ := payload.ToolCall.Args["Prompt"].(string)
-		_, _ = kernel.RecordArmedTrigger(vaultDir, payload.ConversationID, cronExpr, prompt)
+		if armedID, _ := kernel.RecordArmedTrigger(vaultDir, payload.ConversationID, cronExpr, prompt); armedID != "" && mutatedConsole != nil {
+			*mutatedConsole = true
+		}
 		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))
 		return err
 	}
@@ -1463,6 +1491,9 @@ func HandlePreToolUse(r io.Reader, w io.Writer, vaultDir string) error {
 			taskID = strings.Trim(strings.TrimSpace(taskID), "\"")
 			if taskID != "" {
 				_ = kernel.RecordKilledFrontDeskTask(vaultDir, payload.ConversationID, taskID)
+				if mutatedConsole != nil {
+					*mutatedConsole = true
+				}
 			}
 		}
 		_, err := w.Write([]byte(`{"decision":"allow"}` + "\n"))

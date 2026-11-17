@@ -138,6 +138,11 @@ func batchItemKeys(evs []events.Event) []string {
 			if tk := strings.TrimSpace(ev.Metadata["thread_key"]); tk != "" {
 				keys = append(keys, tk)
 			}
+			for _, cid := range strings.Split(ev.Metadata["coalesced_item_ids"], ",") {
+				if cid = strings.TrimSpace(cid); cid != "" {
+					keys = append(keys, cid)
+				}
+			}
 		}
 	}
 	return keys

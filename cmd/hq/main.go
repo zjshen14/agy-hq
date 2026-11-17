@@ -50,8 +50,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "hq: resolve vault: %v\n", err)
 		os.Exit(1)
 	}
-	kernel.BackfillFrontDeskProjectID(vaultDir)
-	_ = kernel.RecordLiveLSSession(vaultDir)
+	isPreToolHook := os.Args[1] == "hook" && len(os.Args) >= 3 && (os.Args[2] == "pre-tool" || os.Args[2] == "pre-tool-use")
+	if !isPreToolHook {
+		kernel.BackfillFrontDeskProjectID(vaultDir)
+	}
+	if os.Args[1] != "hook" {
+		_ = kernel.RecordLiveLSSession(vaultDir)
+	}
 
 	switch os.Args[1] {
 	case "version", "--version", "-v":
@@ -361,11 +366,14 @@ func main() {
 			}
 			_ = webui.SyncMarkdownConsole(vaultDir)
 		case "pre-tool", "pre-tool-use":
-			if err := hooks.HandlePreToolUse(os.Stdin, os.Stdout, vaultDir); err != nil {
+			needsSync, err := hooks.HandlePreToolUseWithSync(os.Stdin, os.Stdout, vaultDir)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
 				os.Exit(1)
 			}
-			_ = webui.SyncMarkdownConsole(vaultDir)
+			if needsSync {
+				_ = webui.SyncMarkdownConsole(vaultDir)
+			}
 		case "stop":
 			if err := hooks.HandleStop(os.Stdin, os.Stdout, vaultDir); err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook stop: %v\n", err)

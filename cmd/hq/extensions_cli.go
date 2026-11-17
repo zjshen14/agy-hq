@@ -534,24 +534,30 @@ func runWatchCLI(vaultDir string, args []string) {
 		fmt.Printf("Watcher precheck: enqueued=%d, briefRollups=%d\n", sum.EnqueuedTotal, sum.RollupTotal)
 
 	case "read":
+		var threadFlags repeatFlag
+		var itemFlags repeatFlag
 		fs := flag.NewFlagSet("watch read", flag.ExitOnError)
 		connFlag := fs.String("connector", "", "Connector ID")
 		acctFlag := fs.String("account", "", "Optional account alias")
-		threadFlag := fs.String("thread", "", "Thread or item key")
-		itemFlag := fs.String("item", "", "Alias for --thread")
+		fs.Var(&threadFlags, "thread", "Thread or item key(s) (repeatable or comma-separated)")
+		fs.Var(&itemFlags, "item", "Alias for --thread (repeatable or comma-separated)")
 		spawnTok := fs.String("spawn-token", "", "Optional single-use [hq-spawn:<token>]")
 		convFlag := fs.String("conv", "", "Test-only conversation ID")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
-		key := strings.TrimSpace(*threadFlag)
-		if key == "" {
-			key = strings.TrimSpace(*itemFlag)
+		var keys []string
+		for _, raw := range append([]string(threadFlags), itemFlags...) {
+			for _, part := range strings.Split(raw, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					keys = append(keys, trimmed)
+				}
+			}
 		}
-		if strings.TrimSpace(*connFlag) == "" || key == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq watch read --connector=<id> [--account=<acct>] --thread=<threadOrItemKey> [--spawn-token=...]")
+		if strings.TrimSpace(*connFlag) == "" || len(keys) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq watch read --connector=<id> [--account=<acct>] --thread=<t1>[,<t2>...] [--spawn-token=...]")
 			os.Exit(1)
 		}
-		fenced, qt, err := watcher.ReadItem(context.Background(), vaultDir, *connFlag, *acctFlag, key, *spawnTok, *convFlag)
+		fenced, threads, err := watcher.ReadItems(context.Background(), vaultDir, *connFlag, *acctFlag, keys, *spawnTok, *convFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq watch read failed: %v\n", err)
 			os.Exit(1)
@@ -559,10 +565,14 @@ func runWatchCLI(vaultDir string, args []string) {
 		if *asJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
-				"fenced": fenced,
-				"thread": qt,
-			})
+			payload := map[string]interface{}{
+				"fenced":  fenced,
+				"threads": threads,
+			}
+			if len(threads) > 0 {
+				payload["thread"] = threads[0]
+			}
+			_ = enc.Encode(payload)
 			return
 		}
 		fmt.Print(fenced)
@@ -610,6 +620,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		pos, fl := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("watch ack", flag.ExitOnError)
 		fs.Var(&items, "item", "Item or thread ID(s) to acknowledge (repeatable or comma-separated)")
+		fs.Var(&items, "thread", "Alias for --item (thread ID(s) to acknowledge)")
 		ackAll := fs.Bool("all", false, "Acknowledge all leased watcher events bound to the caller conversation")
 		convFlag := fs.String("conv", "", "Test-only conversation ID")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -637,6 +648,48 @@ func runWatchCLI(vaultDir string, args []string) {
 		}
 		fmt.Printf("Acknowledged %d watcher event(s)\n", n)
 
+	case "prune-backlog":
+		denyIfCallerTainted(vaultDir, "watch prune-backlog")
+		fs := flag.NewFlagSet("watch prune-backlog", flag.ExitOnError)
+		connFlag := fs.String("connector", "", "Optional connector ID filter")
+		acctFlag := fs.String("account", "", "Optional account alias filter")
+		reclassify := fs.Bool("reclassify", true, "Re-poll unread items and route non-urgent automated alerts to 0-token brief_rollup")
+		dedupThreads := fs.Bool("dedup-threads", true, "Collapse duplicate pending events sharing the same thread_key into 1 event per thread")
+		dryRun := fs.Bool("dry-run", false, "Preview backlog pruning without mutating events or outbox")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		rep, err := watcher.PruneBacklog(context.Background(), vaultDir, watcher.PruneBacklogOptions{
+			ConnectorFilter:   *connFlag,
+			AccountFilter:     *acctFlag,
+			Reclassify:        *reclassify,
+			DedupThreads:      *dedupThreads,
+			AllowDesktopScope: connector.HasActiveDesktopPluginScope(vaultDir),
+			DryRun:            *dryRun,
+			Now:               time.Now(),
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq watch prune-backlog failed: %v\n", err)
+			os.Exit(1)
+		}
+		if !*dryRun && (rep.AutomatedPruned > 0 || rep.DuplicatesCoalesced > 0) {
+			_ = webui.SyncMarkdownConsole(vaultDir)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+		prefix := "Pruned watcher backlog"
+		if *dryRun {
+			prefix = "[DRY-RUN] Would prune watcher backlog"
+		}
+		fmt.Printf("%s: evaluated=%d, automatedRollups=%d (cards=%d), threadDuplicatesCoalesced=%d, remainingPending=%d\n",
+			prefix, rep.EvaluatedPending, rep.AutomatedPruned, rep.RollupsEmitted, rep.DuplicatesCoalesced, rep.RemainingPending)
+		for _, w := range rep.Warnings {
+			fmt.Fprintf(os.Stderr, "  warning: %s\n", w)
+		}
+
 	case "reset-poisoned":
 		denyIfCallerTainted(vaultDir, "watch reset-poisoned")
 		fs := flag.NewFlagSet("watch reset-poisoned", flag.ExitOnError)
@@ -661,7 +714,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		fmt.Printf("Cleared %d poisoned watcher item(s) and %d dropped archive event(s).\n", clearedItems, clearedEvents)
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown watch subcommand %q (expected status, precheck, read, query, ack, reset-poisoned)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown watch subcommand %q (expected status, precheck, read, query, ack, prune-backlog, reset-poisoned)\n", sub)
 		os.Exit(1)
 	}
 }

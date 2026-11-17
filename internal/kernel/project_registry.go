@@ -1,12 +1,16 @@
 package kernel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 )
@@ -77,6 +81,68 @@ type loadedProjectEntry struct {
 	isWorkspaceOnly bool
 }
 
+type cachedProjectsSnapshot struct {
+	dir         string
+	fingerprint string
+	list        []loadedProjectEntry
+	byID        map[string][]string
+}
+
+var (
+	projectsCacheMu sync.Mutex
+	projectsCache   cachedProjectsSnapshot
+)
+
+func parseProjectFolders(cfg antigravityProjectConfig) []string {
+	var folders []string
+	seenFolder := make(map[string]bool)
+	addFolder := func(rawURI string) {
+		if norm := normalizeWorkspaceFolderPath(rawURI); norm != "" && !seenFolder[norm] {
+			seenFolder[norm] = true
+			folders = append(folders, norm)
+		}
+	}
+	for _, res := range cfg.ProjectResources.Resources {
+		addFolder(res.FolderURI)
+		if res.GitFolder != nil {
+			addFolder(res.GitFolder.FolderURI)
+		}
+		if res.WorkspaceFolder != nil {
+			addFolder(res.WorkspaceFolder.FolderURI)
+		}
+	}
+	return folders
+}
+
+// loadSingleAntigravityProject performs an O(1) lookup of `<dir>/<projectID>.json` without scanning
+// sibling project files (which may point to slow network/FUSE mounts).
+func loadSingleAntigravityProject(dir, projectID string) (loadedProjectEntry, bool) {
+	projectID = strings.TrimSpace(projectID)
+	if dir == "" || projectID == "" || projectID == "." || projectID == ".." || strings.ContainsAny(projectID, `/\`) {
+		return loadedProjectEntry{}, false
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, projectID+".json"))
+	if err != nil {
+		return loadedProjectEntry{}, false
+	}
+	var cfg antigravityProjectConfig
+	if json.Unmarshal(raw, &cfg) != nil {
+		return loadedProjectEntry{}, false
+	}
+	id := strings.TrimSpace(cfg.ID)
+	if id == "" {
+		id = projectID
+	}
+	if id != projectID {
+		return loadedProjectEntry{}, false
+	}
+	return loadedProjectEntry{
+		id:              id,
+		folders:         parseProjectFolders(cfg),
+		isWorkspaceOnly: cfg.IsWorkspaceOnly,
+	}, true
+}
+
 func loadAntigravityProjects(vaultDir string) ([]loadedProjectEntry, map[string][]string, bool) {
 	dir := resolveProjectsRegistryDir(vaultDir)
 	if dir == "" {
@@ -87,6 +153,7 @@ func loadAntigravityProjects(vaultDir string) ([]loadedProjectEntry, map[string]
 		return nil, nil, false
 	}
 	var names []string
+	hasher := sha256.New()
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
 			names = append(names, e.Name())
@@ -96,6 +163,29 @@ func loadAntigravityProjects(vaultDir string) ([]loadedProjectEntry, map[string]
 		return nil, nil, false
 	}
 	sort.Strings(names)
+	infoByName := make(map[string]os.DirEntry, len(entries))
+	for _, e := range entries {
+		infoByName[e.Name()] = e
+	}
+	for _, name := range names {
+		if de, ok := infoByName[name]; ok {
+			if fi, iErr := de.Info(); iErr == nil {
+				_, _ = fmt.Fprintf(hasher, "%s:%d:%d\n", name, fi.Size(), fi.ModTime().UnixNano())
+				continue
+			}
+		}
+		_, _ = fmt.Fprintf(hasher, "%s\n", name)
+	}
+	fp := hex.EncodeToString(hasher.Sum(nil))
+
+	projectsCacheMu.Lock()
+	if projectsCache.dir == dir && projectsCache.fingerprint == fp && len(projectsCache.list) > 0 {
+		cachedList := projectsCache.list
+		cachedByID := projectsCache.byID
+		projectsCacheMu.Unlock()
+		return cachedList, cachedByID, true
+	}
+	projectsCacheMu.Unlock()
 
 	byID := make(map[string][]string, len(names))
 	var list []loadedProjectEntry
@@ -115,23 +205,7 @@ func loadAntigravityProjects(vaultDir string) ([]loadedProjectEntry, map[string]
 		if id == "" {
 			continue
 		}
-		var folders []string
-		seenFolder := make(map[string]bool)
-		addFolder := func(rawURI string) {
-			if norm := normalizeWorkspaceFolderPath(rawURI); norm != "" && !seenFolder[norm] {
-				seenFolder[norm] = true
-				folders = append(folders, norm)
-			}
-		}
-		for _, res := range cfg.ProjectResources.Resources {
-			addFolder(res.FolderURI)
-			if res.GitFolder != nil {
-				addFolder(res.GitFolder.FolderURI)
-			}
-			if res.WorkspaceFolder != nil {
-				addFolder(res.WorkspaceFolder.FolderURI)
-			}
-		}
+		folders := parseProjectFolders(cfg)
 		byID[id] = folders
 		list = append(list, loadedProjectEntry{
 			id:              id,
@@ -142,6 +216,16 @@ func loadAntigravityProjects(vaultDir string) ([]loadedProjectEntry, map[string]
 	if len(list) == 0 {
 		return nil, nil, false
 	}
+
+	projectsCacheMu.Lock()
+	projectsCache = cachedProjectsSnapshot{
+		dir:         dir,
+		fingerprint: fp,
+		list:        list,
+		byID:        byID,
+	}
+	projectsCacheMu.Unlock()
+
 	return list, byID, true
 }
 
@@ -171,6 +255,15 @@ func matchProjectIDForFolder(list []loadedProjectEntry, normWorkspace string) st
 func ValidateProjectMatchesWorkspace(vaultDir, projectID, workspaceDir string) (valid bool, registryAvailable bool) {
 	projectID = strings.TrimSpace(projectID)
 	normWS := normalizeWorkspaceFolderPath(workspaceDir)
+	if dir := resolveProjectsRegistryDir(vaultDir); dir != "" && projectID != "" && normWS != "" {
+		if entry, ok := loadSingleAntigravityProject(dir, projectID); ok {
+			for _, f := range entry.folders {
+				if f == normWS {
+					return true, true
+				}
+			}
+		}
+	}
 	_, byID, avail := loadAntigravityProjects(vaultDir)
 	if !avail {
 		return projectID != "", false
@@ -216,6 +309,24 @@ func ResolveProjectIDForWorkspace(vaultDir, workspaceDir string) string {
 func ResolveVerifiedWorkspaceProjectID(vaultDir, workspaceDir, candidateProjectID string) (projectID string, registryAvailable bool, repaired bool) {
 	cand := strings.TrimSpace(candidateProjectID)
 	normWS := normalizeWorkspaceFolderPath(workspaceDir)
+	if dir := resolveProjectsRegistryDir(vaultDir); dir != "" && cand != "" && normWS != "" {
+		if entry, ok := loadSingleAntigravityProject(dir, cand); ok {
+			for _, f := range entry.folders {
+				if f == normWS {
+					return cand, true, false
+				}
+			}
+			if IsManagedWorktreeDir(vaultDir, workspaceDir) {
+				if primary := normalizeWorkspaceFolderPath(primaryVaultWorkspaceDir(vaultDir)); primary != "" {
+					for _, f := range entry.folders {
+						if f == primary {
+							return cand, true, false
+						}
+					}
+				}
+			}
+		}
+	}
 	list, byID, avail := loadAntigravityProjects(vaultDir)
 	if !avail || normWS == "" {
 		return cand, false, false

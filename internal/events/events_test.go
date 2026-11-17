@@ -132,3 +132,69 @@ func TestDaemonTokenConstantTimeValidation(t *testing.T) {
 		t.Fatalf("expected invalid token to fail")
 	}
 }
+
+func TestLeaseNextBatchesThreadCoalescingAndQuarantinePrompt(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 17, 2, 0, 0, 0, time.UTC)
+
+	// Enqueue 12 watcher events across 9 unique threads:
+	// - thread-1 has 4 sibling events (including one placed after thread-9!)
+	// - threads 2..9 have 1 event each.
+	// LeaseNextBatches must cap at MaxBatchEvents (8) unique threads while coalescing ALL 4 events on thread-1
+	// into batch 1 (total 11 events in batch 1, leaving thread-9 for batch 2).
+	var batchInput []Event
+	makeWatchEv := func(itemID, threadKey string) Event {
+		return Event{
+			Source:       "connector:gmail",
+			DedupKey:     "watch:gmail:work:" + itemID,
+			ScopeKey:     "watch:gmail:work",
+			Skill:        "inbox-triage",
+			Title:        "[Auto] Channel Triage (gmail:work · " + itemID + ")",
+			Prompt:       "Triage " + itemID + " on thread=" + threadKey,
+			TaintOnSpawn: true,
+			Metadata: map[string]string{
+				"requires_ack": "1",
+				"connector":    "gmail",
+				"account":      "work",
+				"item_id":      itemID,
+				"item_key":     itemID,
+				"thread_key":   threadKey,
+			},
+		}
+	}
+	batchInput = append(batchInput,
+		makeWatchEv("item-1a", "thread-1"),
+		makeWatchEv("item-1b", "thread-1"),
+		makeWatchEv("item-2", "thread-2"),
+		makeWatchEv("item-3", "thread-3"),
+		makeWatchEv("item-4", "thread-4"),
+		makeWatchEv("item-5", "thread-5"),
+		makeWatchEv("item-6", "thread-6"),
+		makeWatchEv("item-7", "thread-7"),
+		makeWatchEv("item-8", "thread-8"),
+		makeWatchEv("item-9", "thread-9"),
+		makeWatchEv("item-1c", "thread-1"),
+		makeWatchEv("item-1d", "thread-1"),
+	)
+	if _, _, err := EnqueueBatch(vaultDir, batchInput, now); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	batches, _, err := LeaseNextBatches(vaultDir, now.Add(time.Second), 5*time.Minute)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("expected 1 leased batch, got %d (%v)", len(batches), err)
+	}
+	if len(batches[0].Events) != 11 {
+		t.Fatalf("expected 11 coalesced events across 8 unique threads in batch 1, got %d", len(batches[0].Events))
+	}
+	prompt := batches[0].Prompt
+	if !strings.Contains(prompt, "hq watch read --connector=gmail --account=work --thread=thread-1,thread-2,thread-3,thread-4,thread-5,thread-6,thread-7,thread-8") {
+		t.Fatalf("expected single multi-thread hq watch read command in batch prompt, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "### Thread 1/8 (`thread=thread-1` · items: `item-1a,item-1b,item-1c,item-1d`") {
+		t.Fatalf("expected coalesced Thread 1/8 section listing all 4 item IDs, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "thread-9") {
+		t.Fatalf("thread-9 (9th unique thread) must remain pending for next batch, got:\n%s", prompt)
+	}
+}

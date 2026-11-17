@@ -479,9 +479,20 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 			return false, fmt.Sprintf("Quarantined session failed to deny %v (%v)", tc["name"], tc["args"])
 		}
 	}
+	focusOut, _ := runHook(map[string]interface{}{
+		"conversationId": "conv-tainted",
+		"toolCall": map[string]interface{}{
+			"name": "update_focus",
+			"args": map[string]interface{}{"focus": "Triaging quarantined threads"},
+		},
+	})
+	if !strings.Contains(focusOut, `"decision":"allow"`) {
+		return false, fmt.Sprintf("Quarantined session failed to allow harmless update_focus UI status tool (got %s)", strings.TrimSpace(focusOut))
+	}
 	for _, safeTaintedCmd := range []string{
 		`./bin/hq offer stage --connector=gmail --account=primary --action=create_draft --thread=t1 --body="OK"`,
 		`hq outbox add --tier=brief_rollup --title="Summary" --summary="Safe digest"`,
+		`hq watch read --connector=gmail --account=primary --thread=t1,t2`,
 		`hq watch ack --item=gmail:thread:t1`,
 	} {
 		taintedAllowOut, _ := runHook(map[string]interface{}{
