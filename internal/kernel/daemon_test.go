@@ -226,3 +226,45 @@ func TestInstallAndUninstallDaemon_Mock(t *testing.T) {
 		t.Fatalf("expected service file %s to be removed after uninstall", expectedPath)
 	}
 }
+
+func TestParseSystemdSupervisorProps(t *testing.T) {
+	// 1. Healthy managed daemon: ActiveState=active, SubState=running, MainPID matches daemon.json PID, NRestarts=0.
+	active, sub, mainPID, restarts, split, warn := ParseSystemdSupervisorProps(
+		"ActiveState=active\nSubState=running\nMainPID=100\nNRestarts=0\n",
+		100,
+	)
+	if active != "active" || sub != "running" || mainPID != 100 || restarts != 0 || split || warn != "" {
+		t.Fatalf("expected healthy supervisor props without warning, got active=%q sub=%q pid=%d restarts=%d split=%v warn=%q",
+			active, sub, mainPID, restarts, split, warn)
+	}
+
+	// 2. Crash-loop / split-brain: unmanaged daemon PID holds port while systemd is in activating/auto-restart with NRestarts=4589.
+	active2, sub2, mainPID2, restarts2, split2, warn2 := ParseSystemdSupervisorProps(
+		"ActiveState=activating\nSubState=auto-restart\nMainPID=200\nNRestarts=4589\n",
+		2668340,
+	)
+	if active2 != "activating" || sub2 != "auto-restart" || mainPID2 != 200 || restarts2 != 4589 || !split2 {
+		t.Fatalf("expected split-brain crash-loop detection, got active=%q sub=%q pid=%d restarts=%d split=%v",
+			active2, sub2, mainPID2, restarts2, split2)
+	}
+	if !strings.Contains(warn2, "split-brain") || !strings.Contains(warn2, "restart counter=4589") {
+		t.Fatalf("expected split-brain and restart counter warning, got %q", warn2)
+	}
+
+	// 3. FormatDaemonStatus surfaces DEGRADED and WARNING line when SupervisorWarning is set.
+	formatted := FormatDaemonStatus(DaemonInfo{
+		Running:            true,
+		PID:                2668340,
+		Addr:               "127.0.0.1:4242",
+		ServiceInstalled:   true,
+		ServiceActiveState: active2,
+		ServiceSubState:    sub2,
+		ServiceMainPID:     mainPID2,
+		ServiceRestarts:    restarts2,
+		SplitBrain:         split2,
+		SupervisorWarning:  warn2,
+	})
+	if !strings.Contains(formatted, "DEGRADED") || !strings.Contains(formatted, "WARNING:") || !strings.Contains(formatted, "NRestarts=4589") {
+		t.Fatalf("expected FormatDaemonStatus to surface DEGRADED and NRestarts, got:\n%s", formatted)
+	}
+}

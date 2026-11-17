@@ -1189,6 +1189,74 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 	return wrap.Messages, wrap.NextPageToken, false, nil
 }
 
+func classifyGmailAutomationAndUrgency(rm rawMailMsg, lowerSender, lowerSubj, body string) (isBulkAutomated, hasSecurity, hasSchedule bool) {
+	hasBulkLabel := false
+	for _, lbl := range rm.LabelIDs {
+		switch strings.ToUpper(strings.TrimSpace(lbl)) {
+		case "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS":
+			hasBulkLabel = true
+		}
+	}
+	hasBulkHeader := false
+	hasListHeader := false
+	for _, h := range rm.Payload.Headers {
+		k := strings.ToLower(strings.TrimSpace(h.Name))
+		v := strings.ToLower(strings.TrimSpace(h.Value))
+		switch k {
+		case "precedence":
+			if v == "bulk" || v == "list" || v == "junk" {
+				hasBulkHeader = true
+			}
+		case "list-id", "list-unsubscribe":
+			if v != "" {
+				hasListHeader = true
+			}
+		}
+	}
+	isKnownNewsletterHost := strings.Contains(lowerSender, "@substack.com") ||
+		strings.Contains(lowerSender, "beehiiv.com") ||
+		strings.Contains(lowerSender, "mailchimp") ||
+		strings.Contains(lowerSender, "redditmail.com")
+
+	hasSecurity = strings.Contains(lowerSubj, "security alert") ||
+		strings.Contains(lowerSubj, "verification code") ||
+		strings.Contains(lowerSubj, "unusual sign-in") ||
+		strings.Contains(lowerSubj, "fraud alert") ||
+		strings.Contains(lowerSubj, "delivery status notification") ||
+		strings.Contains(lowerSubj, "undeliverable") ||
+		strings.Contains(lowerSubj, "address not found") ||
+		strings.Contains(lowerSender, "mailer-daemon@")
+
+	lowerBody := strings.ToLower(body)
+	hasSchedule = strings.Contains(lowerSubj, "invitation:") ||
+		strings.Contains(lowerSubj, "updated invitation:") ||
+		strings.Contains(lowerSubj, "canceled event:") ||
+		strings.Contains(lowerSubj, "cancelled event:") ||
+		strings.Contains(lowerSubj, "reschedule") ||
+		strings.Contains(lowerSubj, "schedule change") ||
+		strings.Contains(lowerSubj, "early dismissal") ||
+		strings.Contains(lowerSubj, "rain check") ||
+		strings.Contains(lowerSubj, "gate change") ||
+		strings.Contains(lowerBody, "calendar.google.com/calendar")
+
+	hasTransactionalUrgency := hasSecurity || hasSchedule ||
+		strings.Contains(lowerSubj, "action required") ||
+		strings.Contains(lowerSubj, "action needed") ||
+		strings.Contains(lowerSubj, "closing soon") ||
+		strings.Contains(lowerSubj, "expiring") ||
+		strings.Contains(lowerSubj, "deadline") ||
+		strings.Contains(lowerSubj, "past due") ||
+		strings.Contains(lowerSubj, "payment due") ||
+		strings.Contains(lowerSubj, "overdue") ||
+		strings.Contains(lowerSubj, "indication of interest") ||
+		strings.Contains(lowerSubj, "allocation")
+
+	// Option A + B: Only mark pure bulk/newsletter/promotional mail as IsAutomated (skipping transactional
+	// no-reply portals like schools, banks, brokerages, airlines, or any message with deadline/action cues).
+	isBulkAutomated = (hasBulkLabel || hasBulkHeader || hasListHeader || isKnownNewsletterHost) && !hasTransactionalUrgency
+	return isBulkAutomated, hasSecurity, hasSchedule
+}
+
 func computeAuthenticatedEmailParticipants(ownerEmail string, msgs []rawMailMsg, isMock bool) []string {
 	ownerEmail = strings.ToLower(strings.TrimSpace(ownerEmail))
 	authSet := make(map[string]bool)
@@ -1265,9 +1333,7 @@ func evalBuiltinGmail(ctx context.Context, vaultDir string, rc ResolvedConnector
 			}
 			lowerSubj := strings.ToLower(subj)
 			lowerSender := strings.ToLower(senderAddr)
-			isAuto := strings.Contains(lowerSender, "noreply") || strings.Contains(lowerSender, "no-reply") || strings.Contains(lowerSender, "notifications@")
-			hasSec := strings.Contains(lowerSubj, "security alert") || strings.Contains(lowerSubj, "verification code")
-			hasSched := strings.Contains(lowerSubj, "invitation:") || strings.Contains(lowerSubj, "reschedule") || strings.Contains(strings.ToLower(body), "calendar")
+			isAuto, hasSec, hasSched := classifyGmailAutomationAndUrgency(rm, lowerSender, lowerSubj, body)
 			isDirect := ownerEmail == "" || strings.Contains(strings.ToLower(to), ownerEmail)
 			items = append(items, NormalizedItem{
 				ItemID:                    id,

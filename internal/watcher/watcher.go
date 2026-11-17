@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,17 +49,18 @@ var (
 
 // AccountWatchState persists poll cursor, monotonic acked/poison sets, and health state per (connector, account).
 type AccountWatchState struct {
-	Connector            string   `json:"connector"`
-	Account              string   `json:"account"`
-	PollCursor           string   `json:"poll_cursor,omitempty"`
-	AckedItemIDs         []string `json:"acked_item_ids,omitempty"`
-	PoisonedItems        []string `json:"poisoned_items,omitempty"`
-	ConsecutiveTransient int      `json:"consecutive_transient,omitempty"`
-	AuthNoticeActive     bool     `json:"auth_notice_active,omitempty"`
-	PausedConfigHash     string   `json:"paused_config_hash,omitempty"`
-	LastStatus           string   `json:"last_status,omitempty"`
-	LastError            string   `json:"last_error,omitempty"`
-	LastPolledAt         string   `json:"last_polled_at,omitempty"`
+	Connector               string   `json:"connector"`
+	Account                 string   `json:"account"`
+	PollCursor              string   `json:"poll_cursor,omitempty"`
+	AckedItemIDs            []string `json:"acked_item_ids,omitempty"`
+	PoisonedItems           []string `json:"poisoned_items,omitempty"`
+	ConsecutiveTransient    int      `json:"consecutive_transient,omitempty"`
+	ConsecutiveDesktopPause int      `json:"consecutive_desktop_pause,omitempty"`
+	AuthNoticeActive        bool     `json:"auth_notice_active,omitempty"`
+	PausedConfigHash        string   `json:"paused_config_hash,omitempty"`
+	LastStatus              string   `json:"last_status,omitempty"`
+	LastError               string   `json:"last_error,omitempty"`
+	LastPolledAt            string   `json:"last_polled_at,omitempty"`
 }
 
 // State persists `<vault>/memory/watcher/state.json` under `store.RankWatcher`.
@@ -296,6 +299,83 @@ func loadWaitingAndGoalSignals(ctx context.Context, vaultDir string) (waitingThr
 	}
 	sort.Strings(goalTokens)
 	return waitingThreads, goalTokens
+}
+
+func hasActionableSubjectSignal(item connector.NormalizedItem) bool {
+	lowerSubj := strings.ToLower(item.SubjectOrRoom)
+	for _, cue := range []string{
+		"action required",
+		"action needed",
+		"closing soon",
+		"expiring",
+		"deadline",
+		"past due",
+		"payment due",
+		"overdue",
+		"reschedule",
+		"canceled",
+		"cancelled",
+		"schedule change",
+		"early dismissal",
+		"rain check",
+		"gate change",
+		"indication of interest",
+		"allocation",
+		"delivery status notification",
+		"undeliverable",
+		"address not found",
+	} {
+		if strings.Contains(lowerSubj, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDesktopLSReachable(vaultDir string) bool {
+	if strings.TrimSpace(vaultDir) == "" {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(vaultDir, "private", "runtime", "ls_session.json"))
+	if err != nil {
+		return false
+	}
+	var sess struct {
+		Address   string `json:"address"`
+		BaseURL   string `json:"baseUrl"`
+		CSRFToken string `json:"csrfToken"`
+	}
+	if json.Unmarshal(raw, &sess) != nil || strings.TrimSpace(sess.CSRFToken) == "" {
+		return false
+	}
+	target := strings.TrimSpace(sess.BaseURL)
+	if target == "" {
+		target = strings.TrimSpace(sess.Address)
+	}
+	if target == "" {
+		return false
+	}
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		target = "http://" + target
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	hostPort := u.Host
+	if _, _, splitErr := net.SplitHostPort(hostPort); splitErr != nil {
+		if strings.EqualFold(u.Scheme, "https") {
+			hostPort = net.JoinHostPort(hostPort, "443")
+		} else {
+			hostPort = net.JoinHostPort(hostPort, "80")
+		}
+	}
+	conn, dialErr := net.DialTimeout("tcp", hostPort, 250*time.Millisecond)
+	if dialErr != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func matchesActiveGoal(item connector.NormalizedItem, goalTokens []string) bool {
@@ -606,20 +686,23 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 
 	var eventsBatch []events.Event
 	var pendingOutbox []outbox.OutboxItem
+	desktopLSOpen := isDesktopLSReachable(vaultDir)
 	type stateMutation struct {
-		key              string
-		connID           string
-		acct             string
-		newCursor        string
-		autoAcked        []string
-		resetErrors      bool
-		errCode          string
-		errMsg           string
-		cfgHash          string
-		desktopIdlePause bool
-		emitAuthNotice   bool
-		emitTransNotice  bool
-		emitPermNotice   bool
+		key                string
+		connID             string
+		acct               string
+		newCursor          string
+		autoAcked          []string
+		resetErrors        bool
+		errCode            string
+		errMsg             string
+		cfgHash            string
+		desktopIdlePause   bool
+		desktopOpenStalled bool
+		emitAuthNotice     bool
+		emitTransNotice    bool
+		emitPermNotice     bool
+		emitDesktopStall   bool
 	}
 	var mutations []stateMutation
 	var summary PrecheckSummary
@@ -648,17 +731,25 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 			}
 			desktopIdle := out.target.rc.EffectiveRequiresDesktopSession(vaultDir, out.target.acct) && strings.Contains(strings.ToLower(msg), "no active desktop conversation")
 			mut := stateMutation{
-				key:              aKey,
-				connID:           connID,
-				acct:             acct,
-				errCode:          code,
-				errMsg:           msg,
-				cfgHash:          out.cfgHash,
-				desktopIdlePause: desktopIdle,
+				key:                aKey,
+				connID:             connID,
+				acct:               acct,
+				errCode:            code,
+				errMsg:             msg,
+				cfgHash:            out.cfgHash,
+				desktopIdlePause:   desktopIdle,
+				desktopOpenStalled: desktopIdle && desktopLSOpen,
 			}
 			statusLabel := "error:" + code
 			if desktopIdle {
-				statusLabel = "paused (no active desktop conversation)"
+				if desktopLSOpen {
+					statusLabel = "paused (desktop open, credential scope unavailable)"
+					if prevAcct.ConsecutiveDesktopPause+1 == 2 {
+						mut.emitDesktopStall = true
+					}
+				} else {
+					statusLabel = "paused (no active desktop conversation)"
+				}
 			} else {
 				switch code {
 				case "auth_expired":
@@ -711,8 +802,9 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 			isWaiting := waitingSet[threadKey] || waitingSet[connID+":"+threadKey]
 			isPriority := matchesPriorityRules(item, priorityPatterns)
 			isGoalMatch := matchesActiveGoal(item, goalTokens)
+			isActionCue := hasActionableSubjectSignal(item)
 
-			if item.IsAutomated && !item.HasSecurityOverride && !item.HasSchedule && !isWaiting && !isPriority && !isGoalMatch {
+			if item.IsAutomated && !item.HasSecurityOverride && !item.HasSchedule && !isWaiting && !isPriority && !isGoalMatch && !isActionCue {
 				rollups++
 				autoAcked = append(autoAcked, itemID)
 				subj := SanitizeBoundedSubject(item.SubjectOrRoom, 100)
@@ -740,6 +832,9 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 			}
 			if isGoalMatch {
 				signalFlags = append(signalFlags, "active_goal_match=true")
+			}
+			if isActionCue {
+				signalFlags = append(signalFlags, "deadline_or_action_cue=true")
 			}
 			if item.HasSchedule {
 				signalFlags = append(signalFlags, "schedule_or_invite=true")
@@ -863,6 +958,14 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 				Title:       fmt.Sprintf("Connector %s (%s) paused on configuration error", mut.connID, mut.acct),
 				Summary:     fmt.Sprintf("Connector %s:%s paused until manifest/instance is updated: %s", mut.connID, mut.acct, mut.errMsg),
 			}, now)
+		} else if mut.emitDesktopStall {
+			_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
+				SourceSkill: "inbox-triage",
+				Scope:       fmt.Sprintf("watch:%s:%s", mut.connID, mut.acct),
+				Tier:        outbox.TierBriefRollup,
+				Title:       fmt.Sprintf("Watcher stalled while Desktop open: %s (%s)", mut.connID, mut.acct),
+				Summary:     fmt.Sprintf("Connector %s:%s could not hydrate desktop credential scope across 2 consecutive polls while Antigravity LS was reachable. Run `hq watch status` or `hq doctor`.", mut.connID, mut.acct),
+			}, now)
 		}
 	}
 
@@ -884,12 +987,19 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 				}
 				cur.AckedItemIDs = appendBoundedUnique(cur.AckedItemIDs, mut.autoAcked, MaxAckedHistory)
 				cur.ConsecutiveTransient = 0
+				cur.ConsecutiveDesktopPause = 0
 				cur.AuthNoticeActive = false
 				cur.PausedConfigHash = ""
 				cur.LastStatus = "ok"
 				cur.LastError = ""
 			} else if mut.desktopIdlePause {
-				cur.LastStatus = "paused (no active desktop conversation)"
+				if mut.desktopOpenStalled {
+					cur.ConsecutiveDesktopPause++
+					cur.LastStatus = "paused (desktop open, credential scope unavailable)"
+				} else {
+					cur.ConsecutiveDesktopPause = 0
+					cur.LastStatus = "paused (no active desktop conversation)"
+				}
 				cur.LastError = mut.errMsg
 			} else {
 				cur.LastError = mut.errMsg
@@ -1276,13 +1386,14 @@ func ResetPoisoned(ctx context.Context, vaultDir, connFilter, acctFilter string)
 			if acctFilter != "" && aID != acctFilter {
 				continue
 			}
-			if len(cur.PoisonedItems) > 0 || cur.ConsecutiveTransient > 0 || cur.PausedConfigHash != "" || strings.HasPrefix(cur.LastStatus, "error:") {
+			if len(cur.PoisonedItems) > 0 || cur.ConsecutiveTransient > 0 || cur.ConsecutiveDesktopPause > 0 || cur.PausedConfigHash != "" || strings.HasPrefix(cur.LastStatus, "error:") || strings.HasPrefix(cur.LastStatus, "paused") {
 				clearedItems += len(cur.PoisonedItems)
 				cur.PoisonedItems = nil
 				cur.ConsecutiveTransient = 0
+				cur.ConsecutiveDesktopPause = 0
 				cur.LastError = ""
 				cur.PausedConfigHash = ""
-				if strings.HasPrefix(cur.LastStatus, "error:") {
+				if strings.HasPrefix(cur.LastStatus, "error:") || strings.HasPrefix(cur.LastStatus, "paused") {
 					cur.LastStatus = ""
 				}
 				st.Accounts[aKey] = cur
@@ -1299,4 +1410,133 @@ func ResetPoisoned(ctx context.Context, vaultDir, connFilter, acctFilter string)
 	}
 	clearedEvents, err = events.ClearDroppedWatcherEvents(vaultDir, connFilter, acctFilter)
 	return clearedItems, clearedEvents, err
+}
+
+// AccountStatusSummary reports live watcher cursor, ack/poison counts, and health diagnostics per connector account.
+type AccountStatusSummary struct {
+	Connector               string `json:"connector"`
+	Account                 string `json:"account"`
+	RequiresDesktop         bool   `json:"requires_desktop,omitempty"`
+	PollCursor              string `json:"poll_cursor,omitempty"`
+	LastStatus              string `json:"last_status"`
+	LastError               string `json:"last_error,omitempty"`
+	LastPolledAt            string `json:"last_polled_at,omitempty"`
+	AckedCount              int    `json:"acked_count"`
+	PoisonedCount           int    `json:"poisoned_count"`
+	ConsecutiveTransient    int    `json:"consecutive_transient,omitempty"`
+	ConsecutiveDesktopPause int    `json:"consecutive_desktop_pause,omitempty"`
+	Healthy                 bool   `json:"healthy"`
+	Warning                 string `json:"warning,omitempty"`
+}
+
+// StatusReport summarizes overall channel watcher health for `hq watch status`, `hq doctor`, and Console UI.
+type StatusReport struct {
+	DesktopLSReachable bool                   `json:"desktop_ls_reachable"`
+	DesktopScopeReady  bool                   `json:"desktop_scope_ready"`
+	Accounts           []AccountStatusSummary `json:"accounts"`
+	HasWarnings        bool                   `json:"has_warnings"`
+}
+
+// InspectStatus builds a non-mutating diagnostic snapshot across configured pollable connectors and persisted watcher state.
+func InspectStatus(ctx context.Context, vaultDir, connFilter, acctFilter string, now time.Time) (StatusReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	connFilter = strings.TrimPrefix(strings.TrimSpace(connFilter), "core/")
+	acctFilter = strings.TrimSpace(acctFilter)
+
+	rep := StatusReport{
+		DesktopLSReachable: isDesktopLSReachable(vaultDir),
+		DesktopScopeReady:  connector.HasActiveDesktopPluginScope(vaultDir),
+	}
+
+	st, err := LoadState(ctx, vaultDir)
+	if err != nil {
+		return rep, err
+	}
+	conns, _ := connector.ListConnectors(vaultDir)
+
+	type targetMeta struct {
+		requiresDesktop bool
+	}
+	knownTargets := make(map[string]targetMeta)
+	for _, rc := range conns {
+		if rc.Manifest.Capabilities.Poll == nil || !rc.Manifest.Capabilities.Poll.Enabled || !rc.Instance.IsEnabled() {
+			continue
+		}
+		for _, acct := range resolveAccountsToPoll(vaultDir, rc, "") {
+			knownTargets[accountKey(rc.ID, acct)] = targetMeta{
+				requiresDesktop: rc.EffectiveRequiresDesktopSession(vaultDir, acct),
+			}
+		}
+	}
+	for aKey := range st.Accounts {
+		if _, exists := knownTargets[aKey]; !exists {
+			knownTargets[aKey] = targetMeta{}
+		}
+	}
+
+	var keys []string
+	for k := range knownTargets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, aKey := range keys {
+		cur := st.Accounts[aKey]
+		cID, aID, _ := strings.Cut(aKey, ":")
+		if cur.Connector != "" {
+			cID = cur.Connector
+		}
+		if cur.Account != "" {
+			aID = cur.Account
+		}
+		if connFilter != "" && cID != connFilter {
+			continue
+		}
+		if acctFilter != "" && aID != acctFilter {
+			continue
+		}
+		meta := knownTargets[aKey]
+		status := strings.TrimSpace(cur.LastStatus)
+		if status == "" {
+			status = "never_polled"
+		}
+		var warns []string
+		if len(cur.PoisonedItems) > 0 {
+			warns = append(warns, fmt.Sprintf("%d dead-lettered poisoned item(s); run 'hq watch reset-poisoned --connector=%s'", len(cur.PoisonedItems), cID))
+		}
+		if strings.HasPrefix(status, "error:") {
+			warns = append(warns, fmt.Sprintf("%s (%s)", status, cur.LastError))
+		} else if strings.HasPrefix(status, "paused") {
+			if cur.PausedConfigHash != "" {
+				warns = append(warns, fmt.Sprintf("%s (%s)", status, cur.LastError))
+			} else if rep.DesktopLSReachable && (meta.requiresDesktop || strings.Contains(status, "desktop")) {
+				warns = append(warns, fmt.Sprintf("paused while Antigravity Desktop LS is reachable (%s)", status))
+			}
+		}
+		warningStr := strings.Join(warns, "; ")
+		if warningStr != "" {
+			rep.HasWarnings = true
+		}
+		rep.Accounts = append(rep.Accounts, AccountStatusSummary{
+			Connector:               cID,
+			Account:                 aID,
+			RequiresDesktop:         meta.requiresDesktop,
+			PollCursor:              cur.PollCursor,
+			LastStatus:              status,
+			LastError:               cur.LastError,
+			LastPolledAt:            cur.LastPolledAt,
+			AckedCount:              len(cur.AckedItemIDs),
+			PoisonedCount:           len(cur.PoisonedItems),
+			ConsecutiveTransient:    cur.ConsecutiveTransient,
+			ConsecutiveDesktopPause: cur.ConsecutiveDesktopPause,
+			Healthy:                 warningStr == "",
+			Warning:                 warningStr,
+		})
+	}
+	return rep, nil
 }

@@ -453,6 +453,46 @@ func runWatchCLI(vaultDir string, args []string) {
 	}
 
 	switch sub {
+	case "status":
+		fs := flag.NewFlagSet("watch status", flag.ExitOnError)
+		connFlag := fs.String("connector", "", "Optional connector ID filter")
+		acctFlag := fs.String("account", "", "Optional account alias filter")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(rest)
+		rep, err := watcher.InspectStatus(context.Background(), vaultDir, *connFlag, *acctFlag, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq watch status failed: %v\n", err)
+			os.Exit(1)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+			return
+		}
+		fmt.Printf("Channel Watcher Status (desktopLSReachable=%v, desktopScopeReady=%v):\n", rep.DesktopLSReachable, rep.DesktopScopeReady)
+		if len(rep.Accounts) == 0 {
+			fmt.Println("  No pollable connector accounts configured.")
+			return
+		}
+		for _, a := range rep.Accounts {
+			badge := "OK"
+			if !a.Healthy {
+				badge = "WARN"
+			} else if strings.HasPrefix(a.LastStatus, "paused") {
+				badge = "PAUSED"
+			}
+			polled := a.LastPolledAt
+			if polled == "" {
+				polled = "never"
+			}
+			fmt.Printf("  [%s] %s:%s — status=%s · lastPolled=%s · acked=%d · poisoned=%d\n",
+				badge, a.Connector, a.Account, a.LastStatus, polled, a.AckedCount, a.PoisonedCount)
+			if a.Warning != "" {
+				fmt.Printf("         warning: %s\n", a.Warning)
+			}
+		}
+
 	case "precheck":
 		denyIfCallerTainted(vaultDir, "watch precheck")
 		fs := flag.NewFlagSet("watch precheck", flag.ExitOnError)
@@ -621,7 +661,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		fmt.Printf("Cleared %d poisoned watcher item(s) and %d dropped archive event(s).\n", clearedItems, clearedEvents)
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown watch subcommand %q (expected precheck, read, query, ack, reset-poisoned)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown watch subcommand %q (expected status, precheck, read, query, ack, reset-poisoned)\n", sub)
 		os.Exit(1)
 	}
 }

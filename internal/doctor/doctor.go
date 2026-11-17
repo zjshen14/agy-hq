@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
 	"github.com/zjshen14/agy-hq/internal/vault"
+	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
 // CheckResult represents a single diagnostic check in `hq doctor`.
@@ -202,11 +204,21 @@ func Run(vaultDir string) []CheckResult {
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && len(fd.AdHocCrons) > 0 {
 		adHocNote = fmt.Sprintf(", %d ad-hoc conversation cron(s) in Front Desk", len(fd.AdHocCrons))
 	}
-	if dInfo.Running {
+	if dInfo.SupervisorWarning != "" {
+		results = append(results, CheckResult{
+			Name:   "Scheduled Triggers & Heartbeat",
+			Status: "WARN",
+			Detail: fmt.Sprintf("Supervisor degraded (%s); run 'hq daemon install && systemctl --user restart agy-hq.service'", dInfo.SupervisorWarning),
+		})
+	} else if dInfo.Running {
+		supNote := ""
+		if dInfo.ServiceInstalled && dInfo.ServiceActiveState != "" {
+			supNote = fmt.Sprintf(", supervisor=%s/%s, restarts=%d", dInfo.ServiceActiveState, dInfo.ServiceSubState, dInfo.ServiceRestarts)
+		}
 		results = append(results, CheckResult{
 			Name:   "Scheduled Triggers & Heartbeat",
 			Status: "PASS",
-			Detail: fmt.Sprintf("Running (daemon PID %d, %d schedules declared, %d/%d active in daemon%s)", dInfo.PID, dInfo.SchedulesCount, len(armed), totalTriggers, adHocNote),
+			Detail: fmt.Sprintf("Running (daemon PID %d%s, %d schedules declared, %d/%d active in daemon%s)", dInfo.PID, supNote, dInfo.SchedulesCount, len(armed), totalTriggers, adHocNote),
 		})
 	} else {
 		results = append(results, CheckResult{
@@ -520,6 +532,31 @@ func Run(vaultDir string) []CheckResult {
 			Status: dItem.Status,
 			Detail: dItem.Detail,
 		})
+	}
+
+	// 17. Check Channel Watcher Health (`hq watch status`)
+	if wRep, wErr := watcher.InspectStatus(context.Background(), vaultDir, "", "", time.Now()); wErr == nil && len(wRep.Accounts) > 0 {
+		var acctSummaries []string
+		var warnDetails []string
+		for _, a := range wRep.Accounts {
+			acctSummaries = append(acctSummaries, fmt.Sprintf("%s:%s=%s (acked=%d, poisoned=%d)", a.Connector, a.Account, a.LastStatus, a.AckedCount, a.PoisonedCount))
+			if a.Warning != "" {
+				warnDetails = append(warnDetails, fmt.Sprintf("%s:%s: %s", a.Connector, a.Account, a.Warning))
+			}
+		}
+		if len(warnDetails) > 0 {
+			results = append(results, CheckResult{
+				Name:   "Channel Watcher Health",
+				Status: "WARN",
+				Detail: strings.Join(warnDetails, " · ") + " (inspect via 'hq watch status')",
+			})
+		} else {
+			results = append(results, CheckResult{
+				Name:   "Channel Watcher Health",
+				Status: "PASS",
+				Detail: strings.Join(acctSummaries, " · "),
+			})
+		}
 	}
 
 	return results

@@ -508,3 +508,50 @@ func TestLoadReachableDesktopPluginEnvAndSanitizedExtra(t *testing.T) {
 		t.Fatalf("expected sentinel pluginShimDir in ls_session.json to be rejected")
 	}
 }
+
+func TestClassifyGmailAutomationAndUrgency(t *testing.T) {
+	makeHeaderPart := func(kv ...string) rawMIMEPart {
+		var p rawMIMEPart
+		for i := 0; i+1 < len(kv); i += 2 {
+			p.Headers = append(p.Headers, struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			}{Name: kv[i], Value: kv[i+1]})
+		}
+		return p
+	}
+
+	// 1. Pure newsletter with List-Unsubscribe + substack host -> isBulkAutomated=true
+	subMsg := rawMailMsg{
+		Payload: makeHeaderPart("List-Unsubscribe", "<https://example.com/unsubscribe>"),
+	}
+	auto1, sec1, sched1 := classifyGmailAutomationAndUrgency(subMsg, "news@"+"substack.com", "weekly engineering digest", "Read online")
+	if !auto1 || sec1 || sched1 {
+		t.Fatalf("expected pure Substack newsletter to be bulk automated, got auto=%v sec=%v sched=%v", auto1, sec1, sched1)
+	}
+
+	// 2. Transactional no-reply portal without bulk headers (e.g., school schedule notice) -> isBulkAutomated=false, hasSchedule=true
+	schoolMsg := rawMailMsg{}
+	auto2, sec2, sched2 := classifyGmailAutomationAndUrgency(schoolMsg, "no-reply@example.org", "early dismissal tomorrow at 1pm", "Please pick up students early.")
+	if auto2 || sec2 || !sched2 {
+		t.Fatalf("expected school no-reply notice NOT to be bulk-swallowed and to flag schedule, got auto=%v sec=%v sched=%v", auto2, sec2, sched2)
+	}
+
+	// 3. Brokerage/IPO deadline carrying List-Unsubscribe -> deadline override keeps isBulkAutomated=false!
+	ipoMsg := rawMailMsg{
+		Payload: makeHeaderPart("List-Unsubscribe", "<https://example.com/unsub>", "Precedence", "bulk"),
+	}
+	auto3, _, _ := classifyGmailAutomationAndUrgency(ipoMsg, "no-reply@example.com", "indication of interest closing soon", "Confirm allocation before tonight.")
+	if auto3 {
+		t.Fatalf("expected deadline/IOI cue to override bulk headers so item is triaged")
+	}
+
+	// 4. Delivery bounce from mailer-daemon -> isBulkAutomated=false, hasSecurity=true
+	bounceMsg := rawMailMsg{
+		Payload: makeHeaderPart("Precedence", "bulk"),
+	}
+	auto4, sec4, _ := classifyGmailAutomationAndUrgency(bounceMsg, "mailer-daemon@example.com", "delivery status notification (failure)", "Address not found")
+	if auto4 || !sec4 {
+		t.Fatalf("expected bounce notification to set hasSecurity=true and isBulkAutomated=false, got auto=%v sec=%v", auto4, sec4)
+	}
+}

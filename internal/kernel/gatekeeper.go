@@ -29,6 +29,7 @@ type TriggerCursor struct {
 	LastCronSlot      string `json:"lastCronSlot,omitempty"`
 	LastTriggeredAt   string `json:"lastTriggeredAt,omitempty"`
 	LastStdoutSHA256  string `json:"lastStdoutSha256,omitempty"`
+	LastStatus        string `json:"lastStatus,omitempty"`
 	SkipsCount        int    `json:"skipsCount"`
 	ConsecutiveErrors int    `json:"consecutiveErrors,omitempty"`
 	LastError         string `json:"lastError,omitempty"`
@@ -401,6 +402,8 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 		id            string
 		slotKey       string
 		errMsg        string
+		statusNote    string
+		pausedNoSkip  bool
 		skipped       bool
 		spawned       bool
 		nextStdoutSHA string
@@ -541,20 +544,45 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 			switch dedup {
 			case "precheck_enqueues":
 				// Precheck command (e.g. `hq watch precheck --json`) already enqueued connector:* events directly;
-				// never spawn a duplicate gatekeeper event. Still advance trigger cursor so cron slot isn't re-polled.
+				// never spawn a duplicate gatekeeper event. Still advance trigger cursor so cron slot isn't re-polled,
+				// while distinguishing paused/errored connector polls from genuine 0-token idle skips.
 				var preSum struct {
 					EnqueuedTotal int `json:"enqueued_total"`
+					Results       []struct {
+						Connector string `json:"connector"`
+						Account   string `json:"account"`
+						Status    string `json:"status"`
+					} `json:"results"`
 				}
 				if trimmedOut != "" {
 					_ = json.Unmarshal([]byte(trimmedOut), &preSum)
+				}
+				nonOKStatus := ""
+				anyOK := false
+				for _, r := range preSum.Results {
+					if r.Status == "ok" {
+						anyOK = true
+					} else if nonOKStatus == "" && strings.TrimSpace(r.Status) != "" {
+						nonOKStatus = fmt.Sprintf("%s:%s %s", r.Connector, r.Account, r.Status)
+					}
 				}
 				if preSum.EnqueuedTotal > 0 {
 					actions = append(actions, fmt.Sprintf("precheck_enqueued:%s=%d", s.ID, preSum.EnqueuedTotal))
 					mutations = append(mutations, cursorMutation{
 						id:            s.ID,
 						slotKey:       slotKey,
+						statusNote:    "ok",
 						spawned:       true,
 						nextStdoutSHA: shaHex,
+					})
+					continue
+				}
+				if len(preSum.Results) > 0 && !anyOK && nonOKStatus != "" {
+					mutations = append(mutations, cursorMutation{
+						id:           s.ID,
+						slotKey:      slotKey,
+						statusNote:   nonOKStatus,
+						pausedNoSkip: true,
 					})
 					continue
 				}
@@ -675,11 +703,16 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 					cur.ConsecutiveErrors = 0
 					cur.LastError = ""
 					cur.LastErrorAt = ""
-					if m.skipped {
+					if m.pausedNoSkip {
 						cur.LastCronSlot = m.slotKey
+						cur.LastStatus = m.statusNote
+					} else if m.skipped {
+						cur.LastCronSlot = m.slotKey
+						cur.LastStatus = "ok"
 						cur.SkipsCount++
 					} else if m.spawned {
 						cur.LastCronSlot = m.slotKey
+						cur.LastStatus = "ok"
 						cur.LastStdoutSHA256 = m.nextStdoutSHA
 						cur.LastTriggeredAt = now.UTC().Format(time.RFC3339)
 					}

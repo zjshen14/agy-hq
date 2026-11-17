@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/extension"
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 )
 
 // ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml (and optional extension packs).
@@ -153,6 +155,13 @@ type DaemonInfo struct {
 	StartedAt               string             `json:"startedAt,omitempty"`
 	UptimeSeconds           int64              `json:"uptimeSeconds,omitempty"`
 	UptimeStr               string             `json:"uptime,omitempty"`
+	ServiceInstalled        bool               `json:"serviceInstalled,omitempty"`
+	ServiceActiveState      string             `json:"serviceActiveState,omitempty"`
+	ServiceSubState         string             `json:"serviceSubState,omitempty"`
+	ServiceMainPID          int                `json:"serviceMainPid,omitempty"`
+	ServiceRestarts         int                `json:"serviceRestarts,omitempty"`
+	SplitBrain              bool               `json:"splitBrain,omitempty"`
+	SupervisorWarning       string             `json:"supervisorWarning,omitempty"`
 	SchedulesCount          int                `json:"schedulesCount"`
 	EffectiveSchedulesCount int                `json:"effectiveSchedulesCount"`
 	InboxRulesCount         int                `json:"inboxRulesCount"`
@@ -656,7 +665,77 @@ func IsDaemonActiveFast(vaultDir string) bool {
 	return isProcessAlive(st.PID)
 }
 
-// GetDaemonInfo returns the status, running state, PID, uptime, and declared triggers.
+// ParseSystemdSupervisorProps evaluates `systemctl --user show agy-hq.service` key=value output
+// against the active daemon.json PID to surface crash-loops (`NRestarts`), `failed`/`auto-restart`
+// states, and split-brain daemon ownership (`MainPID != runningPID`).
+func ParseSystemdSupervisorProps(raw string, runningPID int) (activeState, subState string, mainPID, nRestarts int, splitBrain bool, warning string) {
+	for _, line := range strings.Split(raw, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch k {
+		case "ActiveState":
+			activeState = v
+		case "SubState":
+			subState = v
+		case "MainPID":
+			mainPID, _ = strconv.Atoi(v)
+		case "NRestarts":
+			nRestarts, _ = strconv.Atoi(v)
+		}
+	}
+	var warns []string
+	if runningPID > 0 && mainPID > 0 && mainPID != runningPID {
+		splitBrain = true
+		warns = append(warns, fmt.Sprintf("split-brain daemon PID %d != systemd MainPID %d", runningPID, mainPID))
+	} else if runningPID > 0 && (activeState == "activating" || activeState == "failed" || subState == "auto-restart") {
+		splitBrain = true
+		warns = append(warns, fmt.Sprintf("unmanaged daemon PID %d holding port while agy-hq.service is %s (%s)", runningPID, activeState, subState))
+	} else if activeState == "failed" || subState == "auto-restart" {
+		warns = append(warns, fmt.Sprintf("agy-hq.service is %s (%s)", activeState, subState))
+	}
+	if nRestarts >= 3 {
+		warns = append(warns, fmt.Sprintf("agy-hq.service restart counter=%d", nRestarts))
+	}
+	return activeState, subState, mainPID, nRestarts, splitBrain, strings.Join(warns, "; ")
+}
+
+func populateSupervisorStatus(vaultDir string, info *DaemonInfo) {
+	if info == nil || os.Getenv("HQ_SKIP_SYSTEMCTL") == "1" {
+		return
+	}
+	if hostpaths.IsTempPath(vaultDir) && os.Getenv("HQ_TEST_SUPERVISOR_CHECK") != "1" {
+		return
+	}
+	switch runtime.GOOS {
+	case "linux":
+		unitPath := filepath.Join(getSystemdUserDir(), "agy-hq.service")
+		if _, err := os.Stat(unitPath); err != nil {
+			return
+		}
+		info.ServiceInstalled = true
+		if !commandExists("systemctl") {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "agy-hq.service", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "NRestarts").Output()
+		if err != nil {
+			return
+		}
+		info.ServiceActiveState, info.ServiceSubState, info.ServiceMainPID, info.ServiceRestarts, info.SplitBrain, info.SupervisorWarning =
+			ParseSystemdSupervisorProps(string(out), info.PID)
+	case "darwin":
+		plistPath := filepath.Join(getLaunchdAgentsDir(), "com.antigravity.agy-hq.plist")
+		if _, err := os.Stat(plistPath); err == nil {
+			info.ServiceInstalled = true
+		}
+	}
+}
+
+// GetDaemonInfo returns the status, running state, PID, uptime, OS supervisor health, and declared triggers.
 func GetDaemonInfo(vaultDir string) DaemonInfo {
 	triggers, _ := LoadTriggers(vaultDir)
 	effTriggers, _ := LoadEffectiveTriggers(vaultDir)
@@ -692,6 +771,7 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 					info.UptimeSeconds = int64(dur.Seconds())
 					info.UptimeStr = formatDuration(dur)
 				}
+				populateSupervisorStatus(vaultDir, &info)
 				return info
 			}
 			// Process is dead, clean up stale file
@@ -711,6 +791,7 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 		if pid > 0 {
 			info.PID = pid
 		}
+		populateSupervisorStatus(vaultDir, &info)
 		return info
 	}
 	if defaultAddr != "127.0.0.1:4747" && checkHTTPHealth("127.0.0.1:4747", vaultDir) {
@@ -720,9 +801,11 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 		if pid > 0 {
 			info.PID = pid
 		}
+		populateSupervisorStatus(vaultDir, &info)
 		return info
 	}
 
+	populateSupervisorStatus(vaultDir, &info)
 	return info
 }
 
@@ -730,7 +813,11 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 func FormatDaemonStatus(info DaemonInfo) string {
 	var sb strings.Builder
 	if info.Running {
-		sb.WriteString("agy-hq Daemon Status: RUNNING\n")
+		if info.SupervisorWarning != "" {
+			sb.WriteString("agy-hq Daemon Status: DEGRADED (supervisor warning)\n")
+		} else {
+			sb.WriteString("agy-hq Daemon Status: RUNNING\n")
+		}
 		if info.PID > 0 {
 			sb.WriteString(fmt.Sprintf("PID:               %d\n", info.PID))
 		}
@@ -742,6 +829,17 @@ func FormatDaemonStatus(info DaemonInfo) string {
 		}
 	} else {
 		sb.WriteString("agy-hq Daemon Status: INACTIVE (stopped)\n")
+	}
+	if info.ServiceInstalled {
+		if info.ServiceActiveState != "" {
+			sb.WriteString(fmt.Sprintf("OS Supervisor:     %s (%s, MainPID=%d, NRestarts=%d)\n",
+				info.ServiceActiveState, info.ServiceSubState, info.ServiceMainPID, info.ServiceRestarts))
+		} else {
+			sb.WriteString("OS Supervisor:     installed\n")
+		}
+	}
+	if info.SupervisorWarning != "" {
+		sb.WriteString(fmt.Sprintf("WARNING:           %s\n", info.SupervisorWarning))
 	}
 
 	sb.WriteString(fmt.Sprintf("Declared Triggers: %d schedules, %d inbox rules\n", info.SchedulesCount, info.InboxRulesCount))

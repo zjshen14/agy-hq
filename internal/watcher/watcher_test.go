@@ -3,6 +3,8 @@ package watcher_test
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -419,8 +421,129 @@ func TestAckByThreadKeyAndBatchAll(t *testing.T) {
 	if err != nil || acked != 2 {
 		t.Fatalf("expected watcher.Ack by thread_key to ack 2 items, got acked=%d err=%v", acked, err)
 	}
-	completed, requeued, dropped, err := events.FinalizeByConversation(vaultDir, convID, now.Add(time.Second))
-	if err != nil || len(completed) != 2 || len(requeued) != 0 || len(dropped) != 0 {
-		t.Fatalf("expected 2 completed / 0 requeued / 0 dropped, got comp=%d req=%d drop=%d err=%v", len(completed), len(requeued), len(dropped), err)
+	completed, req2, dropped2, err := events.FinalizeByConversation(vaultDir, convID, now.Add(time.Second))
+	if err != nil || len(completed) != 2 || len(req2) != 0 || len(dropped2) != 0 {
+		t.Fatalf("expected 2 completed / 0 requeued / 0 dropped, got comp=%d req=%d drop=%d err=%v", len(completed), len(req2), len(dropped2), err)
+	}
+}
+
+func TestWatcherDesktopStallDetectionAndStatusInspect(t *testing.T) {
+	vaultDir := t.TempDir()
+	setupMockVaultConnector(t, vaultDir, "desktop-mail", true)
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "")
+
+	// Spin up a reachable mock Desktop LS server WITHOUT credentialScope in ls_session.json
+	// to simulate Antigravity Desktop being open while plugin credential scope is unavailable.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rtDir := filepath.Join(vaultDir, "private", "runtime")
+	if err := os.MkdirAll(rtDir, 0o700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rtDir, "ls_session.json"), []byte(`{"baseUrl":"`+srv.URL+`","csrfToken":"test-csrf-token"}`), 0o600); err != nil {
+		t.Fatalf("write ls_session.json: %v", err)
+	}
+
+	t0 := time.Date(2026, 11, 16, 20, 0, 0, 0, time.UTC)
+	pre1, err := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: t0})
+	if err != nil {
+		t.Fatalf("RunPrecheck #1: %v", err)
+	}
+	if len(pre1.Results) != 1 || pre1.Results[0].Status != "paused (desktop open, credential scope unavailable)" {
+		t.Fatalf("expected paused (desktop open, credential scope unavailable), got %+v", pre1.Results)
+	}
+	// First stall poll records warning in InspectStatus, no outbox alert yet (< 2 consecutive stalls).
+	ob1, _ := outbox.LoadAll(vaultDir)
+	if len(ob1) != 0 {
+		t.Fatalf("expected 0 outbox alerts on 1st stalled poll, got %d", len(ob1))
+	}
+
+	// Second consecutive stalled poll while Desktop LS is open emits 1 brief_rollup diagnostic alert.
+	pre2, err := watcher.RunPrecheck(context.Background(), vaultDir, watcher.PrecheckOptions{Now: t0.Add(15 * time.Minute)})
+	if err != nil {
+		t.Fatalf("RunPrecheck #2: %v", err)
+	}
+	if len(pre2.Results) != 1 || pre2.Results[0].Status != "paused (desktop open, credential scope unavailable)" {
+		t.Fatalf("unexpected RunPrecheck #2 status: %+v", pre2.Results)
+	}
+	ob2, _ := outbox.LoadAll(vaultDir)
+	if len(ob2) != 1 || !strings.Contains(ob2[0].Title, "Watcher stalled while Desktop open") {
+		t.Fatalf("expected 1 Watcher stalled while Desktop open outbox alert on 2nd poll, got %+v", ob2)
+	}
+
+	rep, err := watcher.InspectStatus(context.Background(), vaultDir, "", "", t0.Add(16*time.Minute))
+	if err != nil {
+		t.Fatalf("InspectStatus: %v", err)
+	}
+	if !rep.DesktopLSReachable || !rep.HasWarnings || len(rep.Accounts) != 1 || rep.Accounts[0].ConsecutiveDesktopPause != 2 {
+		t.Fatalf("expected InspectStatus to report desktop stall warning and ConsecutiveDesktopPause=2, got %+v", rep)
+	}
+
+	// Verify Option B in watcher: an item marked auto=true with "Action required:" subject is NOT swallowed into RollupTotal!
+	vaultDir2 := t.TempDir()
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "action-cli")
+	script := `#!/bin/sh
+echo '{"items":[{"id":"msg-act-1","thread":"th-act-1","from":"noreply@example.com","subject":"Action required: verify tax form","auto":true,"sched":false}],"next_cursor":"cur_1"}'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write action-cli: %v", err)
+	}
+	connDir := filepath.Join(vaultDir2, "connectors", "portal-mail")
+	_ = os.MkdirAll(connDir, 0o755)
+	manifest := map[string]interface{}{
+		"schema_version": 1,
+		"id":             "portal-mail",
+		"driver":         map[string]interface{}{"builtin": "jsonmap"},
+		"transport": map[string]interface{}{
+			"kind": "cli",
+			"cli": map[string]interface{}{
+				"path": scriptPath,
+				"verbs": map[string]interface{}{
+					"poll": []string{"list", "--cursor={{?cursor}}"},
+				},
+				"output": map[string]interface{}{
+					"poll": map[string]interface{}{
+						"format": "json",
+						"jsonmap": map[string]interface{}{
+							"items_pointer":       "/items",
+							"next_cursor_pointer": "/next_cursor",
+							"item_id":             "/id",
+							"thread_key":          "/thread",
+							"sender":              "/from",
+							"subject_or_room":     "/subject",
+							"is_automated":        "/auto",
+							"has_schedule":        "/sched",
+						},
+					},
+				},
+			},
+		},
+		"capabilities": map[string]interface{}{
+			"poll": map[string]interface{}{"enabled": true, "max_pages": 1, "page_size": 10},
+		},
+	}
+	rawM, _ := json.MarshalIndent(manifest, "", "  ")
+	_ = os.WriteFile(filepath.Join(connDir, "connector.json"), rawM, 0o644)
+	bundle, err := extension.BuildTrustBundle(vaultDir2, "vault", "")
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	bBytes, _ := json.Marshal(bundle)
+	_ = extension.ApplyTrustBundle(vaultDir2, bBytes)
+
+	preAct, err := watcher.RunPrecheck(context.Background(), vaultDir2, watcher.PrecheckOptions{Now: t0})
+	if err != nil {
+		t.Fatalf("RunPrecheck(portal-mail): %v", err)
+	}
+	if preAct.EnqueuedTotal != 1 || preAct.RollupTotal != 0 {
+		t.Fatalf("expected Action required automated item to enqueue for triage (Enqueued=1, Rollup=0), got %+v", preAct)
+	}
+	evs, _ := events.List(vaultDir2, "pending", false, 0)
+	if len(evs) != 1 || !strings.Contains(evs[0].Prompt, "deadline_or_action_cue=true") {
+		t.Fatalf("expected deadline_or_action_cue=true in triage prompt, got %+v", evs)
 	}
 }

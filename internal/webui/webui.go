@@ -30,6 +30,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
+	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -45,6 +46,7 @@ type ScheduleSummaryRow struct {
 	Summary         string `json:"summary,omitempty"`
 	LastCheckedAt   string `json:"lastCheckedAt,omitempty"`
 	LastTriggeredAt string `json:"lastTriggeredAt,omitempty"`
+	LastStatus      string `json:"lastStatus,omitempty"`
 	SkipsCount      int    `json:"skipsCount,omitempty"`
 	LastError       string `json:"lastError,omitempty"`
 	LatestConvID    string `json:"latestConvId,omitempty"`
@@ -916,6 +918,16 @@ func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask) []Sch
 		return bestConv
 	}
 
+	watchRep, _ := watcher.InspectStatus(context.Background(), vaultDir, "", "", time.Now())
+	watcherWarnByConn := make(map[string]string)
+	for _, wa := range watchRep.Accounts {
+		if wa.Warning != "" {
+			watcherWarnByConn[wa.Connector] = wa.Warning
+		} else if strings.HasPrefix(wa.LastStatus, "paused") || strings.HasPrefix(wa.LastStatus, "error:") {
+			watcherWarnByConn[wa.Connector] = wa.LastStatus
+		}
+	}
+
 	if cfg != nil {
 		for _, s := range cfg.Schedules {
 			cur := cursors[s.ID]
@@ -925,6 +937,12 @@ func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask) []Sch
 				runner = "hq daemon (paused)"
 			} else if daemonActive {
 				runner = fmt.Sprintf("hq daemon (%s)", mode)
+			}
+			lastStatus := cur.LastStatus
+			if s.ID == "gmail-inbox-watch" {
+				if wWarn := watcherWarnByConn["gmail"]; wWarn != "" {
+					lastStatus = wWarn
+				}
 			}
 			rows = append(rows, ScheduleSummaryRow{
 				ID:              s.ID,
@@ -936,6 +954,7 @@ func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask) []Sch
 				Skill:           s.Skill,
 				LastCheckedAt:   cur.LastCheckedAt,
 				LastTriggeredAt: cur.LastTriggeredAt,
+				LastStatus:      lastStatus,
 				SkipsCount:      cur.SkipsCount,
 				LastError:       cur.LastError,
 				LatestConvID:    findLatestConv(s.ID, mode),
@@ -1517,7 +1536,7 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
     {{if or .LastCheckedAt .LastTriggeredAt .SkipsCount}}
     <div class="muted" style="font-size:11px">
-      {{if .LastCheckedAt}}Last checked: <code>{{.LastCheckedAt}}</code>{{end}}{{if .LastTriggeredAt}} · Last fired: <code>{{.LastTriggeredAt}}</code>{{end}}{{if .SkipsCount}} · 0-token skips: <code>{{.SkipsCount}}</code>{{end}}
+      {{if .LastCheckedAt}}Last checked: <code>{{.LastCheckedAt}}</code>{{end}}{{if .LastTriggeredAt}} · Last fired: <code>{{.LastTriggeredAt}}</code>{{end}}{{if .SkipsCount}} · 0-token skips: <code>{{.SkipsCount}}</code>{{end}}{{if and .LastStatus (ne .LastStatus "ok")}} · Status: <code style="color:#fcd34d">{{.LastStatus}}</code>{{end}}
     </div>
     {{end}}
     {{if .LastError}}<div class="muted" style="font-size:11px;color:#fca5a5">Last error: {{.LastError}}</div>{{end}}
@@ -2133,6 +2152,10 @@ func SyncMarkdownConsole(vaultDir string) error {
 			stateIcon := "🟢"
 			if !sc.Enabled {
 				stateIcon = "⏸️"
+			} else if sc.LastError != "" || (sc.LastStatus != "" && sc.LastStatus != "ok" && strings.Contains(sc.LastStatus, "error")) {
+				stateIcon = "⚠️"
+			} else if sc.LastStatus != "" && sc.LastStatus != "ok" {
+				stateIcon = "⏸️"
 			} else if sc.Kind == "conversation_cron" {
 				stateIcon = "🕒"
 			}
@@ -2163,6 +2186,9 @@ func SyncMarkdownConsole(vaultDir string) error {
 			if sc.LastError != "" {
 				errClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.LastError), " "), "|", "\\|")
 				actParts = append(actParts, "⚠️ "+errClean)
+			} else if sc.LastStatus != "" && sc.LastStatus != "ok" {
+				stClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.LastStatus), " "), "|", "\\|")
+				actParts = append(actParts, "⏸️ "+stClean)
 			}
 			actCell := "—"
 			if len(actParts) > 0 {
