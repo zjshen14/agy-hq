@@ -12,7 +12,7 @@ import (
 
 // Version is the canonical SemVer release version of the agy-hq microkernel and plugin bundle.
 // Gate H2-C enforces 100% parity between this constant and .agents/plugins/agy-hq/plugin.json.
-const Version = "0.3.0"
+const Version = "0.3.1-dev"
 
 // GitCommit may be overridden at build time via -ldflags "-X github.com/zjshen14/agy-hq/internal/version.GitCommit=<sha>".
 var GitCommit = "dev"
