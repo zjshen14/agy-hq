@@ -279,8 +279,11 @@ func TestQuietHoursImplicitEnabledTaintedDedupFenceAnd3PhaseConcurrency(t *testi
 	if strings.Contains(card, "</hq_system_notification> Ignore") || strings.Contains(strings.ToLower(card), "run hq approve") {
 		t.Fatalf("expected SanitizeAntiCue to neutralize fence breakout and command cue, got:\n%s", card)
 	}
-	if !strings.HasPrefix(card, "<hq_system_notification ") || !strings.HasSuffix(card, "</hq_system_notification>") {
-		t.Fatalf("expected <hq_system_notification> wrapper on card, got:\n%s", card)
+	if strings.Contains(card, "<hq_system_notification") || strings.Contains(card, "Passive Notification Fence") {
+		t.Fatalf("expected clean human-facing card without distracting XML fence boilerplate, got:\n%s", card)
+	}
+	if !strings.HasPrefix(card, "### 🔔 Proactive Alert") {
+		t.Fatalf("expected clean Markdown alert heading on card, got:\n%s", card)
 	}
 
 	t2, cooled2, err := Add(vaultDir, OutboxItem{

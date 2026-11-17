@@ -19,7 +19,7 @@ However, comparing `agy-hq`'s current per-connector pipeline against Meta Muse's
    - A calendar meeting starts in 20 minutes with `alice@example.com`, while an open `WaitingOn` thread or unread message from `alice@example.com` sits unreviewed.
    - An outbound draft or staged `prop-...` approval (`ExpiresAt` in `< 2h`) sits unsent ahead of an external cutoff.
    - An active Goal in `<vault>/memory/goals.json` reaches `T-24h` before `targetDate` with incomplete milestones (`0/3` checked off).
-3. **Desktop-Bound Interrupts When Away from Desk:** `DispatchOutboxToFrontDesk` ([`internal/kernel/events_dispatch.go`](../../internal/kernel/events_dispatch.go)) injects `<hq_system_notification>` cards into `[HQ] Front Desk`, which works well when Antigravity Desktop or Remote Control is open, but provides no optional out-of-band push ping (e.g., `ntfy`, Pushover, or Apple Shortcuts webhook) to wake the user's phone lock screen when a genuinely urgent `interrupt` or expiring approval lands.
+3. **Desktop-Bound Interrupts When Away from Desk:** `DispatchOutboxToFrontDesk` ([`internal/kernel/events_dispatch.go`](../../internal/kernel/events_dispatch.go)) injects `🔔 Proactive Alert` cards into `[HQ] Front Desk`, which works well when Antigravity Desktop or Remote Control is open, but provides no optional out-of-band push ping (e.g., `ntfy`, Pushover, or Apple Shortcuts webhook) to wake the user's phone lock screen when a genuinely urgent `interrupt` or expiring approval lands.
 
 ---
 
@@ -56,7 +56,7 @@ flowchart LR
   PULSE -->|"1+ deduplicated triggers"| EV["Durable Event Inbox\n(Scope: pulse:ambient)"]
   EV --> WK["Isolated Routine Worker\n(gemini-4-hydrogen-medium)"]
   WK --> OB["hq outbox add --tier=interrupt\n(+ optional hq offer stage)"]
-  OB --> FD["[HQ] Front Desk\n(<hq_system_notification>)"]
+  OB --> FD["[HQ] Front Desk\n(Proactive Alert Card)"]
   OB -.->|"Opt-in zero-body ping"| PUSH["Mobile Push Webhook\n(ntfy / Pushover / Shortcuts)"]
 ```
 
