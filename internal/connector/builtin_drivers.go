@@ -306,8 +306,9 @@ func isLSHostPortReachable(rawAddr, baseURL string) bool {
 }
 
 // LoadReachableDesktopPluginEnv loads persisted desktop plugin-CLI runtime coordinates from
-// `<vault>/private/runtime/ls_session.json` when the recorded Language Server is currently TCP-reachable
-// and its `pluginShimDir` is an existing directory distinct from the quarantine sentinel.
+// `<vault>/private/runtime/ls_session.json` when the recorded Language Server is currently TCP-reachable,
+// `pluginShimDir` is not the quarantine sentinel, and either a live `pluginShimDir` directory or an
+// executable `agentApiExe` (`language_server plugin-cli`) is available on disk.
 func LoadReachableDesktopPluginEnv(vaultDir string) (map[string]string, bool) {
 	if strings.TrimSpace(vaultDir) == "" {
 		return nil, false
@@ -325,16 +326,23 @@ func LoadReachableDesktopPluginEnv(vaultDir string) (map[string]string, bool) {
 	}
 	scope := strings.TrimSpace(sess.CredentialScope)
 	shimDir := strings.TrimSpace(sess.PluginShimDir)
-	if scope == "" || shimDir == "" || shimDir == "/nonexistent-hq-sentinel" {
+	if scope == "" || shimDir == "/nonexistent-hq-sentinel" {
 		return nil, false
 	}
-	info, stErr := os.Stat(shimDir)
-	if stErr != nil || !info.IsDir() {
+	shimAlive := false
+	if shimDir != "" {
+		if info, stErr := os.Stat(shimDir); stErr == nil && info.IsDir() {
+			shimAlive = true
+		}
+	}
+	if !shimAlive && !isExecutableRegularFile(strings.TrimSpace(sess.AgentAPIExe)) {
 		return nil, false
 	}
 	env := map[string]string{
 		"ANTIGRAVITY_CREDENTIAL_SCOPE": scope,
-		"ANTIGRAVITY_PLUGIN_SHIM_DIR":  shimDir,
+	}
+	if shimAlive {
+		env["ANTIGRAVITY_PLUGIN_SHIM_DIR"] = shimDir
 	}
 	if v := strings.TrimSpace(sess.AppDataDir); v != "" {
 		env["ANTIGRAVITY_APP_DATA_DIR"] = v

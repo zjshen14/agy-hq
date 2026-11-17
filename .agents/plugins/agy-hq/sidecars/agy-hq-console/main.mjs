@@ -52,6 +52,7 @@ function sanitizedDaemonEnv() {
   delete env.ANTIGRAVITY_SOURCE_METADATA;
   delete env.ANTIGRAVITY_SIDECAR_WEB_PORT;
   delete env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+  delete env.HQ_MANAGED_DAEMON;
   delete env.PORT;
   return env;
 }
@@ -129,6 +130,42 @@ if (!preloadJS) {
 })();`;
 }
 
+let lastStartAttemptMs = 0;
+
+function tryStartManagedService() {
+  if (process.env.HQ_SKIP_SERVICE_MANAGER === '1') {
+    return false;
+  }
+  try {
+    if (process.platform === 'linux') {
+      const unitPath = join(homeDir, '.config', 'systemd', 'user', 'agy-hq.service');
+      if (existsSync(unitPath) && isExecutable('/usr/bin/systemctl')) {
+        const p = spawn('/usr/bin/systemctl', ['--user', 'start', 'agy-hq.service'], {
+          env: sanitizedDaemonEnv(),
+          detached: true,
+          stdio: 'ignore',
+        });
+        p.unref();
+        console.log('[sidecar] requested systemctl --user start agy-hq.service');
+        return true;
+      }
+    } else if (process.platform === 'darwin') {
+      const plistPath = join(homeDir, 'Library', 'LaunchAgents', 'com.antigravity.agy-hq.plist');
+      if (existsSync(plistPath) && isExecutable('/bin/launchctl')) {
+        const p = spawn('/bin/launchctl', ['start', 'com.antigravity.agy-hq'], {
+          env: sanitizedDaemonEnv(),
+          detached: true,
+          stdio: 'ignore',
+        });
+        p.unref();
+        console.log('[sidecar] requested launchctl start com.antigravity.agy-hq');
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
 // Auto-start HQ daemon if not responding
 function ensureDaemon() {
   const req = http.request({
@@ -141,6 +178,14 @@ function ensureDaemon() {
     // Daemon is alive
   });
   req.on('error', () => {
+    const now = Date.now();
+    if (now - lastStartAttemptMs < 8000) {
+      return;
+    }
+    lastStartAttemptMs = now;
+    if (tryStartManagedService()) {
+      return;
+    }
     const { bin, cwd } = resolveHQBin();
     if (isExecutable(bin)) {
       try {

@@ -3650,6 +3650,9 @@ func RecordLiveLSSession(vaultDir string) error {
 	}
 
 	// Never persist quarantined sentinel paths or non-existent shim directories.
+	// Note: Antigravity's /tmp/agy-plugin-cli-<id> directory is created per run_command and cleaned up
+	// upon command exit, whereas hooks receive ANTIGRAVITY_CREDENTIAL_SCOPE without ANTIGRAVITY_PLUGIN_SHIM_DIR;
+	// keep scopeEnv intact unless explicitly quarantined by /nonexistent-hq-sentinel.
 	if shimDirEnv == "/nonexistent-hq-sentinel" {
 		shimDirEnv = ""
 		scopeEnv = ""
@@ -3658,8 +3661,10 @@ func RecordLiveLSSession(vaultDir string) error {
 			shimDirEnv = ""
 		}
 	}
-	if shimDirEnv == "" {
-		scopeEnv = ""
+	if shimDirEnv == "" && existing.PluginShimDir != "" && existing.PluginShimDir != "/nonexistent-hq-sentinel" {
+		if st, err := os.Stat(existing.PluginShimDir); err != nil || !st.IsDir() {
+			existing.PluginShimDir = ""
+		}
 	}
 
 	pick := func(cur, prev string) string {

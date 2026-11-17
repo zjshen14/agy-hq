@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -170,6 +171,35 @@ func SanitizedSubprocessEnv(base, envAllow []string, extra map[string]string, al
 				filtered = append(filtered, part)
 			}
 			setKV("PATH", strings.Join(filtered, string(os.PathListSeparator)))
+		}
+	}
+
+	if desktopAllowed {
+		appDataDir := strings.TrimSpace(envMap["ANTIGRAVITY_APP_DATA_DIR"])
+		if appDataDir == "" {
+			if h := strings.TrimSpace(envMap["HOME"]); h != "" {
+				appDataDir = filepath.Join(h, ".gemini", "antigravity")
+			}
+		}
+		if appDataDir != "" {
+			appBin := filepath.Clean(filepath.Join(appDataDir, "bin"))
+			if st, err := os.Stat(appBin); err == nil && st.IsDir() {
+				curPath := envMap["PATH"]
+				hasAppBin := false
+				for _, p := range strings.Split(curPath, string(os.PathListSeparator)) {
+					if filepath.Clean(strings.TrimSpace(p)) == appBin {
+						hasAppBin = true
+						break
+					}
+				}
+				if !hasAppBin {
+					if curPath == "" {
+						setKV("PATH", appBin)
+					} else {
+						setKV("PATH", appBin+string(os.PathListSeparator)+curPath)
+					}
+				}
+			}
 		}
 	}
 

@@ -201,8 +201,40 @@ func configFingerprint(rc connector.ResolvedConnector, acct string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func loadWaitingThreadSet(ctx context.Context, vaultDir string) map[string]bool {
-	out := make(map[string]bool)
+var goalKeywordStopwords = map[string]bool{
+	"about": true, "ahead": true, "allocation": true, "access": true, "capital": true,
+	"chat": true, "check": true, "close": true, "decision": true, "extension": true,
+	"follow": true, "from": true, "goal": true, "into": true, "intro": true,
+	"lease": true, "mapping": true, "model": true, "next": true, "open": true,
+	"participation": true, "plan": true, "preservation": true, "project": true,
+	"return": true, "review": true, "scenario": true, "status": true, "task": true,
+	"that": true, "this": true, "track": true, "update": true, "watch": true, "with": true,
+}
+
+func tokenizeGoalPhrase(s string) []string {
+	var out []string
+	var cur strings.Builder
+	flush := func() {
+		tok := cur.String()
+		cur.Reset()
+		if len(tok) >= 4 && !goalKeywordStopwords[tok] {
+			out = append(out, tok)
+		}
+	}
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+func loadWaitingAndGoalSignals(ctx context.Context, vaultDir string) (waitingThreads map[string]bool, goalTokens []string) {
+	waitingThreads = make(map[string]bool)
+	tokenSet := make(map[string]bool)
 	goalsPath := filepath.Join(vaultDir, "memory", "goals.json")
 	goalsLock := filepath.Join(vaultDir, "memory", ".goals.lock")
 	_ = store.With(ctx, store.RankGoals, goalsLock, func(_ context.Context) error {
@@ -211,6 +243,8 @@ func loadWaitingThreadSet(ctx context.Context, vaultDir string) map[string]bool 
 			return nil
 		}
 		var goals []struct {
+			ID        string `json:"id"`
+			Title     string `json:"title"`
 			Status    string `json:"status"`
 			WaitingOn []struct {
 				Status        string `json:"status"`
@@ -219,6 +253,7 @@ func loadWaitingThreadSet(ctx context.Context, vaultDir string) map[string]bool 
 				Account       string `json:"account"`
 				ThreadKey     string `json:"threadKey"`
 				ThreadOrSpace string `json:"threadOrSpace"`
+				Counterparty  string `json:"counterparty"`
 			} `json:"waitingOn"`
 		}
 		if json.Unmarshal(raw, &goals) != nil {
@@ -228,9 +263,15 @@ func loadWaitingThreadSet(ctx context.Context, vaultDir string) map[string]bool 
 			if g.Status != "" && g.Status != "active" {
 				continue
 			}
+			for _, tok := range tokenizeGoalPhrase(g.ID + " " + g.Title) {
+				tokenSet[tok] = true
+			}
 			for _, w := range g.WaitingOn {
 				if w.Status == "replied" {
 					continue
+				}
+				for _, tok := range tokenizeGoalPhrase(w.Counterparty) {
+					tokenSet[tok] = true
 				}
 				conn := strings.TrimSpace(w.Connector)
 				if conn == "" {
@@ -241,16 +282,36 @@ func loadWaitingThreadSet(ctx context.Context, vaultDir string) map[string]bool 
 					tk = strings.TrimSpace(w.ThreadOrSpace)
 				}
 				if tk != "" {
-					out[tk] = true
+					waitingThreads[tk] = true
 					if conn != "" {
-						out[conn+":"+tk] = true
+						waitingThreads[conn+":"+tk] = true
 					}
 				}
 			}
 		}
 		return nil
 	})
-	return out
+	for tok := range tokenSet {
+		goalTokens = append(goalTokens, tok)
+	}
+	sort.Strings(goalTokens)
+	return waitingThreads, goalTokens
+}
+
+func matchesActiveGoal(item connector.NormalizedItem, goalTokens []string) bool {
+	if len(goalTokens) == 0 {
+		return false
+	}
+	itemWords := make(map[string]bool)
+	for _, tok := range tokenizeGoalPhrase(item.Sender + " " + item.SubjectOrRoom) {
+		itemWords[tok] = true
+	}
+	for _, gt := range goalTokens {
+		if itemWords[gt] {
+			return true
+		}
+	}
+	return false
 }
 
 func loadPriorityPatterns(vaultDir string) []string {
@@ -539,8 +600,8 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 
 	outcomes := connector.RunPool(ctx, connector.DefaultMaxWorkers, tasks)
 
-	// 3. Load WaitingOn thread keys (RankGoals = 50) & priority patterns outside RankWatcher
-	waitingSet := loadWaitingThreadSet(ctx, vaultDir)
+	// 3. Load WaitingOn thread keys + active Goal tokens (RankGoals = 50) & priority patterns outside RankWatcher
+	waitingSet, goalTokens := loadWaitingAndGoalSignals(ctx, vaultDir)
 	priorityPatterns := loadPriorityPatterns(vaultDir)
 
 	var eventsBatch []events.Event
@@ -649,8 +710,9 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 
 			isWaiting := waitingSet[threadKey] || waitingSet[connID+":"+threadKey]
 			isPriority := matchesPriorityRules(item, priorityPatterns)
+			isGoalMatch := matchesActiveGoal(item, goalTokens)
 
-			if item.IsAutomated && !item.HasSecurityOverride && !item.HasSchedule && !isWaiting && !isPriority {
+			if item.IsAutomated && !item.HasSecurityOverride && !item.HasSchedule && !isWaiting && !isPriority && !isGoalMatch {
 				rollups++
 				autoAcked = append(autoAcked, itemID)
 				subj := SanitizeBoundedSubject(item.SubjectOrRoom, 100)
@@ -672,20 +734,41 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 			}
 
 			itemTier := "quick"
-			if isWaiting || item.HasSchedule || item.HasSecurityOverride || isPriority {
+			var signalFlags []string
+			if isWaiting {
+				signalFlags = append(signalFlags, "waiting_on_reply=true")
+			}
+			if isGoalMatch {
+				signalFlags = append(signalFlags, "active_goal_match=true")
+			}
+			if item.HasSchedule {
+				signalFlags = append(signalFlags, "schedule_or_invite=true")
+			}
+			if isPriority {
+				signalFlags = append(signalFlags, "priority_rule=true")
+			}
+			if item.HasSecurityOverride {
+				signalFlags = append(signalFlags, "security_alert=true")
+			}
+			if len(signalFlags) > 0 {
 				itemTier = "routine"
 			}
 			dedupSum := sha256.Sum256([]byte(connID + "\x00" + acct + "\x00" + itemID))
 			dedupKey := fmt.Sprintf("watch:%s:%s:%s", connID, acct, hex.EncodeToString(dedupSum[:12]))
 
+			signalHint := ""
+			if len(signalFlags) > 0 {
+				signalHint = fmt.Sprintf(" [Precheck Urgency Signals: %s — use `--tier=interrupt` if actionable or time-sensitive.]", strings.Join(signalFlags, ", "))
+			}
+
 			// Opaque IDs ONLY in Title & Prompt — zero Sender/Subject/Body text
 			title := fmt.Sprintf("[Auto] Channel Triage (%s:%s · %s)", connID, acct, itemID)
 			prompt := fmt.Sprintf(
-				"Activate the inbox-triage skill to process quarantined channel item %s on connector=%s account=%s thread=%s. "+
+				"Activate the inbox-triage skill to process quarantined channel item %s on connector=%s account=%s thread=%s.%s "+
 					"Read content strictly via `hq watch read --connector=%s --account=%s --thread=%s`, "+
-					"stage any outbound reply via `hq offer stage`, record findings via `hq outbox add`, "+
-					"and acknowledge completion via `hq watch ack --item=%s`.",
-				itemID, connID, acct, threadKey,
+					"stage any outbound reply via `hq offer stage`, record findings via `hq outbox add` (`--tier=interrupt` for actionable replies, active-goal deadlines, schedule changes, or urgent family/school/ops alerts), "+
+					"and acknowledge completion via `hq watch ack --item=%s` (or `hq watch ack --all` once all items in the batch are processed).",
+				itemID, connID, acct, threadKey, signalHint,
 				connID, acct, threadKey,
 				itemID,
 			)
@@ -1045,13 +1128,14 @@ func Ack(ctx context.Context, vaultDir string, itemIDs []string, flagConv string
 		c := strings.TrimSpace(ev.Metadata["connector"])
 		a := strings.TrimSpace(ev.Metadata["account"])
 		ik := strings.TrimSpace(ev.Metadata["item_key"])
+		tk := strings.TrimSpace(ev.Metadata["thread_key"])
 		if c == "" || ik == "" {
 			continue
 		}
 		if a == "" {
 			a = "default"
 		}
-		if len(wantSet) == 0 || wantSet[ik] || wantSet[ev.ID] {
+		if len(wantSet) == 0 || wantSet[ik] || (tk != "" && wantSet[tk]) || wantSet[ev.ID] {
 			perAcctItems[accountKey(c, a)] = append(perAcctItems[accountKey(c, a)], ik)
 		}
 	}

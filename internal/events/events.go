@@ -34,7 +34,7 @@ const (
 	DefaultMaxAttempts = 5
 	DefaultLeaseTTL    = 15 * time.Minute
 	DedupArchiveWindow = 7 * 24 * time.Hour
-	MaxBatchEvents     = 25
+	MaxBatchEvents     = 8
 )
 
 // Event models a single trigger or continuation row in local/memory/events.json.
@@ -912,10 +912,12 @@ func AckWatcherEvents(vaultDir, convID string, itemKeys []string, now time.Time)
 			}
 			if len(keySet) > 0 {
 				ik := ""
+				tk := ""
 				if active[i].Metadata != nil {
 					ik = active[i].Metadata["item_key"]
+					tk = active[i].Metadata["thread_key"]
 				}
-				if !keySet[ik] && !keySet[active[i].ID] {
+				if !keySet[ik] && !keySet[tk] && !keySet[active[i].ID] {
 					continue
 				}
 			}

@@ -569,15 +569,18 @@ func runWatchCLI(vaultDir string, args []string) {
 		var items repeatFlag
 		pos, fl := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("watch ack", flag.ExitOnError)
-		fs.Var(&items, "item", "Item ID(s) to acknowledge (repeatable or comma-separated)")
+		fs.Var(&items, "item", "Item or thread ID(s) to acknowledge (repeatable or comma-separated)")
+		ackAll := fs.Bool("all", false, "Acknowledge all leased watcher events bound to the caller conversation")
 		convFlag := fs.String("conv", "", "Test-only conversation ID")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(fl)
 		var allIDs []string
-		for _, raw := range append([]string(items), pos...) {
-			for _, part := range strings.Split(raw, ",") {
-				if trimmed := strings.TrimSpace(part); trimmed != "" {
-					allIDs = append(allIDs, trimmed)
+		if !*ackAll {
+			for _, raw := range append([]string(items), pos...) {
+				for _, part := range strings.Split(raw, ",") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" {
+						allIDs = append(allIDs, trimmed)
+					}
 				}
 			}
 		}

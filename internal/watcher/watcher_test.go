@@ -364,3 +364,63 @@ func TestResetPoisonedClearsDroppedEventsForReenqueue(t *testing.T) {
 		t.Fatalf("expected re-enqueue after ResetPoisoned to succeed, err=%v deduped=%v id=%q", err, afterDeduped, evAfter.ID)
 	}
 }
+
+func TestAckByThreadKeyAndBatchAll(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 16, 18, 0, 0, 0, time.UTC)
+
+	_, _, err := events.EnqueueBatch(vaultDir, []events.Event{
+		{
+			Source:   "connector:gmail",
+			DedupKey: "watch:gmail:primary:item-a",
+			ScopeKey: "watch:gmail:primary",
+			Title:    "[Auto] Channel Triage (gmail:primary · item-a)",
+			Prompt:   "Triage item-a",
+			Metadata: map[string]string{
+				"requires_ack": "1",
+				"connector":    "gmail",
+				"account":      "primary",
+				"item_id":      "item-a",
+				"item_key":     "item-a",
+				"thread_key":   "thread-shared-1",
+			},
+		},
+		{
+			Source:   "connector:gmail",
+			DedupKey: "watch:gmail:primary:item-b",
+			ScopeKey: "watch:gmail:primary",
+			Title:    "[Auto] Channel Triage (gmail:primary · item-b)",
+			Prompt:   "Triage item-b",
+			Metadata: map[string]string{
+				"requires_ack": "1",
+				"connector":    "gmail",
+				"account":      "primary",
+				"item_id":      "item-b",
+				"item_key":     "item-b",
+				"thread_key":   "thread-shared-1",
+			},
+		},
+	}, now)
+	if err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	batches, _, err := events.LeaseNextBatches(vaultDir, now, events.DefaultLeaseTTL)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("LeaseNextBatches: len=%d err=%v", len(batches), err)
+	}
+	convID := "00000000-0000-0000-0000-000000000901"
+	if err := events.BindBatchConversation(vaultDir, batches[0].EventIDs(), convID, now, events.DefaultLeaseTTL); err != nil {
+		t.Fatalf("BindBatchConversation: %v", err)
+	}
+
+	// Passing the shared thread_key acknowledges BOTH items in that thread!
+	acked, err := watcher.Ack(context.Background(), vaultDir, []string{"thread-shared-1"}, convID, now)
+	if err != nil || acked != 2 {
+		t.Fatalf("expected watcher.Ack by thread_key to ack 2 items, got acked=%d err=%v", acked, err)
+	}
+	completed, requeued, dropped, err := events.FinalizeByConversation(vaultDir, convID, now.Add(time.Second))
+	if err != nil || len(completed) != 2 || len(requeued) != 0 || len(dropped) != 0 {
+		t.Fatalf("expected 2 completed / 0 requeued / 0 dropped, got comp=%d req=%d drop=%d err=%v", len(completed), len(requeued), len(dropped), err)
+	}
+}

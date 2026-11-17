@@ -314,6 +314,34 @@ func TestLSSessionPersistenceHydrationAndPrecheckEnqueues(t *testing.T) {
 		t.Fatalf("expected configureSpawnCommand to inject persisted LS/project env, got %+v", envMap)
 	}
 
+	// Simulate Antigravity cleaning up the per-run_command ephemeral /tmp/agy-plugin-cli-* dir
+	// while an executable language_server (agentApiExe) and reachable LS remain alive:
+	// desktop plugin scope hydration must STILL succeed!
+	fakeHostExe := filepath.Join(t.TempDir(), "language_server")
+	if err := os.WriteFile(fakeHostExe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fakeHostExe: %v", err)
+	}
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", rawAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-token-live")
+	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", fakeHostExe)
+	t.Setenv("ANTIGRAVITY_PLUGIN_SHIM_DIR", "") // hook invocation without shim dir
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "scope-hook-persisted")
+	_ = os.RemoveAll(shimDir)
+	if err := RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession(post-shim-cleanup): %v", err)
+	}
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
+	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", "")
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "")
+	hydratedNoShim, okNoShim := connector.LoadReachableDesktopPluginEnv(vaultDir)
+	if !okNoShim || hydratedNoShim["ANTIGRAVITY_CREDENTIAL_SCOPE"] != "scope-hook-persisted" {
+		t.Fatalf("expected LoadReachableDesktopPluginEnv to succeed after ephemeral shim cleanup when agentApiExe is executable, ok=%v hydrated=%+v", okNoShim, hydratedNoShim)
+	}
+	if _, hasDeadShim := hydratedNoShim["ANTIGRAVITY_PLUGIN_SHIM_DIR"]; hasDeadShim {
+		t.Fatalf("expected dead shimDir not to be injected into hydrated env: %+v", hydratedNoShim)
+	}
+
 	// Verify ScheduleTrigger.EffectiveDedupMode accepts precheck_enqueues cleanly.
 	if got := (ScheduleTrigger{ID: "gmail-inbox-watch", DedupMode: "precheck_enqueues"}).EffectiveDedupMode(); got != "precheck_enqueues" {
 		t.Fatalf("expected EffectiveDedupMode()=precheck_enqueues, got %q", got)

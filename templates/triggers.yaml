@@ -10,7 +10,7 @@ schedules:
     precheck_cmd: ["hq", "watch", "precheck", "--connector=gmail", "--json"]
     precheck_timeout_ms: 45000
     dedup_mode: precheck_enqueues
-    delivery: brief_rollup
+    delivery: interrupt_on_breach
     skill: inbox-triage
   - id: morning-brief
     cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"

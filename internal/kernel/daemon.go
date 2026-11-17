@@ -583,12 +583,30 @@ func formatDuration(d time.Duration) string {
 }
 
 // RecordDaemonStart registers the running daemon in local/memory/daemon.json.
+// When launched by the managed OS service unit (HQ_MANAGED_DAEMON=1),
+// it gracefully terminates any unmanaged sidecar-spawned hq daemon occupying the lease so the
+// system service never enters a 5s crash-restart loop.
 func RecordDaemonStart(vaultDir, addr string) error {
 	p := daemonStatePath(vaultDir)
 	if data, err := os.ReadFile(p); err == nil {
 		var existing daemonState
 		if json.Unmarshal(data, &existing) == nil && existing.PID > 0 && isProcessAlive(existing.PID) && existing.PID != os.Getpid() {
-			return fmt.Errorf("daemon already running with PID %d", existing.PID)
+			managedSupervisor := strings.TrimSpace(os.Getenv("HQ_MANAGED_DAEMON")) == "1"
+			if managedSupervisor && isDaemonProcess(existing.PID) {
+				if proc, fErr := os.FindProcess(existing.PID); fErr == nil {
+					_ = proc.Signal(syscall.SIGTERM)
+					deadline := time.Now().Add(3 * time.Second)
+					for time.Now().Before(deadline) {
+						if !isProcessAlive(existing.PID) {
+							break
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+			}
+			if isProcessAlive(existing.PID) {
+				return fmt.Errorf("daemon already running with PID %d", existing.PID)
+			}
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
@@ -779,13 +797,39 @@ func commandExists(bin string) bool {
 	return err == nil
 }
 
+func sanitizeServiceEnvPath(home string) string {
+	defaultPath := fmt.Sprintf("/opt/homebrew/bin:/usr/local/go/bin:%s/.gemini/antigravity/bin:%s/.local/go/bin:%s/.local/bin:/usr/local/bin:/usr/bin:/bin", home, home, home)
+	raw := strings.TrimSpace(os.Getenv("PATH"))
+	if raw == "" {
+		return defaultPath
+	}
+	seen := make(map[string]bool)
+	var kept []string
+	addPart := func(part string) {
+		p := strings.TrimRight(strings.TrimSpace(part), `/\`)
+		if p == "" || seen[p] || strings.Contains(p, "/agy-plugin-cli-") || strings.Contains(p, `\agy-plugin-cli-`) {
+			return
+		}
+		seen[p] = true
+		kept = append(kept, p)
+	}
+	if home != "" {
+		addPart(filepath.Join(home, ".gemini", "antigravity", "bin"))
+		addPart(filepath.Join(home, ".local", "bin"))
+	}
+	for _, part := range strings.Split(raw, string(os.PathListSeparator)) {
+		addPart(part)
+	}
+	if len(kept) == 0 {
+		return defaultPath
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
+}
+
 // GenerateSystemdService creates valid systemd unit configuration for agy-hq daemon.
 func GenerateSystemdService(binPath, rootDir, vaultDir string) string {
 	home, _ := os.UserHomeDir()
-	envPath := fmt.Sprintf("/opt/homebrew/bin:/usr/local/go/bin:%s/.local/go/bin:%s/.local/bin:/usr/local/bin:/usr/bin:/bin", home, home)
-	if p := os.Getenv("PATH"); p != "" {
-		envPath = p
-	}
+	envPath := sanitizeServiceEnvPath(home)
 
 	return fmt.Sprintf(`[Unit]
 Description=agy-hq Headquarter Daemon & Console
@@ -796,8 +840,9 @@ After=network.target
 Type=simple
 WorkingDirectory=%s
 ExecStart=%s daemon
-Restart=always
+Restart=on-failure
 RestartSec=5
+Environment=HQ_MANAGED_DAEMON=1
 Environment=HQ_ROOT_DIR=%s
 Environment=HQ_VAULT_DIR=%s
 Environment=PATH=%s
@@ -810,10 +855,7 @@ WantedBy=default.target
 // GenerateLaunchdPlist creates valid launchd plist configuration for agy-hq daemon on macOS.
 func GenerateLaunchdPlist(binPath, rootDir, vaultDir string) string {
 	home, _ := os.UserHomeDir()
-	envPath := fmt.Sprintf("/opt/homebrew/bin:/usr/local/go/bin:%s/.local/go/bin:%s/.local/bin:/usr/local/bin:/usr/bin:/bin", home, home)
-	if p := os.Getenv("PATH"); p != "" {
-		envPath = p
-	}
+	envPath := sanitizeServiceEnvPath(home)
 	logPath := filepath.Join(vaultDir, "memory", "daemon.log")
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -835,6 +877,8 @@ func GenerateLaunchdPlist(binPath, rootDir, vaultDir string) string {
     <true/>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>HQ_MANAGED_DAEMON</key>
+        <string>1</string>
         <key>PATH</key>
         <string>%s</string>
         <key>HQ_ROOT_DIR</key>
