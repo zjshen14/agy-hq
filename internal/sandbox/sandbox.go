@@ -190,16 +190,16 @@ func SanitizedEnv(vaultDir string, extra ...string) []string {
 			out = append(out, kv)
 		}
 	}
-	if strings.TrimSpace(vaultDir) != "" {
-		hasVault := false
-		for _, kv := range out {
+	if trimmedVault := strings.TrimSpace(vaultDir); trimmedVault != "" {
+		replaced := false
+		for i, kv := range out {
 			if strings.HasPrefix(kv, "HQ_VAULT_DIR=") {
-				hasVault = true
-				break
+				out[i] = "HQ_VAULT_DIR=" + trimmedVault
+				replaced = true
 			}
 		}
-		if !hasVault {
-			out = append(out, "HQ_VAULT_DIR="+vaultDir)
+		if !replaced {
+			out = append(out, "HQ_VAULT_DIR="+trimmedVault)
 		}
 	}
 	out = append(out, extra...)

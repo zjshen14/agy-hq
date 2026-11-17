@@ -21,6 +21,7 @@ func TestSanitizedEnvAndSandboxProfileGeneration(t *testing.T) {
 
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "do-not-leak-csrf")
 	t.Setenv("OPENAI_API_KEY", "sk-do-not-leak")
+	t.Setenv("HQ_VAULT_DIR", "/stale/parent/vault")
 	env := SanitizedEnv(vaultDir)
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "ANTIGRAVITY_CSRF_TOKEN=") || strings.Contains(joined, "OPENAI_API_KEY=") {
