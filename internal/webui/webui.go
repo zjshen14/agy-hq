@@ -350,20 +350,25 @@ func NewHandler(vaultDir string) http.Handler {
 		}
 
 		var id, reason, reqCSRF string
+		resumeOnReject := false
 		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 			var body struct {
 				ID        string `json:"id"`
 				Reason    string `json:"reason"`
+				Resume    bool   `json:"resume"`
 				CSRFToken string `json:"csrf_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			id = strings.TrimSpace(body.ID)
 			reason = strings.TrimSpace(body.Reason)
+			resumeOnReject = body.Resume
 			reqCSRF = strings.TrimSpace(body.CSRFToken)
 		} else {
 			_ = r.ParseForm()
 			id = strings.TrimSpace(r.FormValue("id"))
 			reason = strings.TrimSpace(r.FormValue("reason"))
+			rv := strings.ToLower(strings.TrimSpace(r.FormValue("resume")))
+			resumeOnReject = (rv == "1" || rv == "true" || rv == "yes")
 			reqCSRF = strings.TrimSpace(r.FormValue("csrf_token"))
 		}
 		if hdr := strings.TrimSpace(r.Header.Get("X-HQ-CSRF-Token")); hdr != "" {
@@ -377,7 +382,10 @@ func NewHandler(vaultDir string) http.Handler {
 			reason = "Rejected via HQ Console"
 		}
 
-		err := approvals.RejectProposal(vaultDir, id, reason)
+		err := approvals.RejectProposalWithOptions(vaultDir, id, approvals.RejectOptions{
+			Reason:         reason,
+			SuppressResume: !resumeOnReject,
+		})
 		_ = SyncMarkdownConsole(vaultDir)
 
 		msg := fmt.Sprintf("Rejected %s", id)
@@ -1916,6 +1924,8 @@ func RecordArtifactDir(vaultDir, artifactDir string) {
 // `<artifactDirectoryPath>/hq_console.md` from live Vault state in 0 LLM tokens.
 func SyncMarkdownConsole(vaultDir string) error {
 	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
+	_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", time.Now())
+	_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
 	state := loadState(vaultDir, "")
 	var b strings.Builder
 

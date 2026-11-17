@@ -1,6 +1,6 @@
 # RFC-0021: Customizable Outbound Approval Policy, Native Coexistence & Lifecycle Hardening
 
-- **Status:** Proposed (Phase 1 — Awaiting User Review)
+- **Status:** Implemented
 - **Created:** 2026-11-16
 - **Companion Research:** [Research 16: Empirical Audit of Outbound Approval UX Friction, Native Antigravity Coexistence & Customizable Policy Design](../research/16_approval_ux_and_customizable_policy_audit.md)
 - **Extends / Updates:** [RFC-0003](./0003-approval-bound-execution.md), [RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md), [RFC-0017d](./0017d-enterprise-extensibility-and-portability.md), [RFC-0018](./0018-always-on-agent-runtime-hardening.md)
@@ -240,32 +240,32 @@ Replace whole-payload `strings.Contains(rawStr, prop.ID)` matching and blanket `
 
 ---
 
-## 6. Phase 2 Implementation & Verification Plan
+## 6. Phase 2 Implementation & Verification Matrix
 
-### Proposed Phase 2 Code & Config Changes (Not Yet Started)
+### Phase 2 Code & Config Changes
 
-1. **`internal/approvals/policy.go` (new) & `internal/approvals/policy_test.go` (new):**
-   - `PolicyConfig`, `Rule`, `Mode` (`always|third_party_only|auto_only|never`), `LoadPolicy`, `EvaluateCommand`, `ResolveRepoTarget` (`github_pr`, `git_remote`), `ValidateDeterministicCommand` (no-op rejection), and `FormatActivePolicySummary`.
+1. **[`internal/approvals/policy.go`](../../internal/approvals/policy.go), [`internal/approvals/reconcile.go`](../../internal/approvals/reconcile.go) & [`internal/approvals/policy_test.go`](../../internal/approvals/policy_test.go):**
+   - `PolicyConfig`, `Rule`, `Mode` (`always|third_party_only|auto_only|never`), `LoadPolicy`, `EvaluateCommand`, `ResolveRepoTarget` (`github_pr`, `git_remote`), `ValidateDeterministicCommand` (no-op rejection), `FormatActivePolicySummary`, `SupersedeByConvAndType`, `ReconcileAskRejections`, and `ReconcileLocalGitProposals`.
 2. **[`internal/extension/pack.go`](../../internal/extension/pack.go):**
-   - Parse `approval_rules` and optional `owned_repos` inside `PackComponents` and expose to `LoadPolicy`.
+   - Parse `approval_rules` and optional `owned_repos` inside `PackComponents`, enforce monotonic security lattice in `LintPack`, and wire `RegisteredExtensionApprovalRulesProvider` to `LoadPolicy`.
 3. **[`templates/config.yaml`](../../templates/config.yaml):**
    - Seed documented `approvals:` defaults (`owned_repos`, `ask_ttl: "24h"`, `proposal_ttl: "24h"`, `reject_noop_commands: true`, default `rules:`).
 4. **[`internal/approvals/presence.go`](../../internal/approvals/presence.go) & [`internal/approvals/approvals.go`](../../internal/approvals/approvals.go):**
-   - Configurable `24h` `DefaultAskTTL` + ask refresh; two-phase idempotent `VerifyAskAndMintCap` -> `ConsumeCap` commit cleanup (Issue `#28`); `(ConversationID, ActionType)` auto-supersede + `KeepPrior`; `SuppressResume` (`--dismiss` / `--no-resume`); `reconciled_external` status handling.
+   - Configurable `24h` `DefaultAskTTL` + ask refresh; two-phase idempotent `VerifyAskAndMintCap` -> `ApproveFromCLI` commit cleanup (Issue `#28`); `(ConversationID, ActionType)` auto-supersede + `KeepPrior`; `SuppressResume` (`--dismiss` / `--no-resume`); `reconciled_external` status handling.
 5. **[`internal/hooks/hooks.go`](../../internal/hooks/hooks.go), [`internal/hooks/quarantine.go`](../../internal/hooks/quarantine.go) & [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json):**
-   - Route `PreToolUse` through `LoadPolicy` / `EvaluateCommand`; block `approvals:` self-tamper in `[Auto]`/`tainted`; bump hook timeout `5s -> 15s`; inject `SessionStart` `Active Outbound Policy`; rewrite `ask_question` injection surgically per question; run 0-token `Reject (<id>)` & `<2ms` local git ref reconcilers in `Stop`.
-6. **[`cmd/hq/main.go`](../../cmd/hq/main.go), [`internal/webui/webui.go`](../../internal/webui/webui.go) & [`.agents/plugins/agy-hq/rules/AGENTS.md`](../../.agents/plugins/agy-hq/rules/AGENTS.md):**
+   - Route `PreToolUse` through `LoadPolicy` / `EvaluateCommand`; block `approvals:` self-tamper in `[Auto]`/`tainted` and validate interactive `config.yaml` edits; bump hook timeout `5s -> 15s`; inject `SessionStart` `Active Outbound Approval Policy`; rewrite `ask_question` injection surgically per question; run 0-token `Reject (<id>)` & `<20ms` offline local git ref reconcilers in `Stop`.
+6. **[`cmd/hq/main.go`](../../cmd/hq/main.go), [`internal/doctor/doctor.go`](../../internal/doctor/doctor.go), [`internal/webui/webui.go`](../../internal/webui/webui.go) & [`.agents/plugins/agy-hq/rules/AGENTS.md`](../../.agents/plugins/agy-hq/rules/AGENTS.md):**
    - Enforce `ValidateDeterministicCommand` in `hq propose`; add `--keep-prior` (`propose`), `--dismiss`/`--no-resume` (`reject`), policy validation in `hq doctor` & `hq migrate`; wire `SyncMarkdownConsole` 0-token reconciliation & `/api/reject` default `SuppressResume`; update `AGENTS.md` §4 prose.
 
-### Verification Matrix (`Unit Tests` + `CUJ-32`)
+### Verification Matrix (`Unit Tests` + `CUJ-36`)
 
 | Scenario | Test / Suite | Assertions |
 | :--- | :--- | :--- |
-| **Uniform Policy & Zero-Go-Change Custom Category** | `policy_test.go` + `CUJ-32` | Adding `cloud_infra` (`terraform apply`, `mode: always`) in `<vault>/config.yaml` blocks direct execution in `PreToolUse` and surfaces in `SessionStart` `Active Outbound Policy` without recompiling `hq`. |
-| **Extension Pack Merge Precedence** | `policy_test.go` + `CUJ-32` | Companion `hq-extension.json` `approval_rules` loads automatically; matching rule `id` in `<vault>/config.yaml` cleanly overrides pack defaults. |
-| **`third_party_only` vs `owned_repos` Resolver** | `policy_test.go` + `CUJ-32` | `gh pr merge` on `bob/upstream-repo` gates in interactive sessions; `gh pr merge` & `git push` on `alice/demo-repo` (matching `owned_repos: ["alice/*"]`) pass interactively, yet still gate fail-closed in `[Auto]` and `tainted` sessions. Unparseable remotes fail-closed to gated. |
-| **No-Op Placeholder Rejection (`F2`)** | `cmd/hq` + `CUJ-32` | `hq propose --cmd="echo 'Approved'"`, `printf`, `true`, `:` return error directing to `ask_question` or `hq outbox add`; `--draft` & `--rsi-id` continue passing cleanly. |
-| **24h `AskTTL` & Issue `#28` Two-Phase Cap** | `presence_test.go` + `CUJ-32` | Simulated tap verified at `+45m` (inside `24h` `ask_ttl`) succeeds; simulated interrupted `VerifyAskAndMintCap` before `ConsumeCap` preserves `askPath` so immediate retry succeeds cleanly; post-commit replay fails closed with `.used-*`. `hooks.json` asserts `timeout == 15`. |
-| **Surgical Multi-Question `ask_question`** | `hooks_test.go` + `CUJ-32` | Two-question payload (`Q0`: custom confirm w/ `prop-*` + extra option `"Defer to Friday"`; `Q1`: unrelated question) injects canonical `Approve`/`Reject` into `Q0` while preserving `"Defer to Friday"` and leaving `Q1` byte-identical. |
-| **Deduping, `--dismiss` & 0-Token Reconcilers** | `approvals_test.go` + `CUJ-32` | Second `hq propose` in same `(ConversationID, ActionType)` marks first `superseded` (`--keep-prior` retains both); `hq reject --dismiss --reason="cleanup"` emits 0 events; `Stop` reconciles unanswered `Reject (<id>)` tap and locally-verified git tag push within `<2ms` offline budget (`reconciled_external`). |
+| **Uniform Policy & Zero-Go-Change Custom Category** | `policy_test.go` + `CUJ-36` | Adding `cloud_infra` (`terraform apply`, `mode: always`) in `<vault>/config.yaml` blocks direct execution in `PreToolUse` and surfaces in `SessionStart` `Active Outbound Approval Policy` without recompiling `hq`. |
+| **Extension Pack Merge Precedence** | `policy_test.go` | Companion `hq-extension.json` `approval_rules` loads automatically; matching rule `id` in `<vault>/config.yaml` cleanly overrides pack defaults; rogue pack weakening `messaging` is rejected by `LintPack`. |
+| **`third_party_only` vs `owned_repos` Resolver** | `policy_test.go` + `CUJ-36` | `gh pr merge` on `bob/upstream-repo` gates in interactive sessions; `gh pr merge` & `git push` on `alice/demo-repo` (matching `owned_repos: ["alice/*"]`) pass interactively, yet still gate fail-closed in `[Auto]` and `tainted` sessions. Unparseable remotes fail-closed to gated. |
+| **No-Op Placeholder Rejection (`F2`)** | `policy_test.go` + `CUJ-36` | `hq propose --cmd="echo 'Approved'"`, `printf`, `true`, `:` return error directing to `ask_question` or `hq outbox add`; `--draft` & `--rsi-id` continue passing cleanly. |
+| **24h `AskTTL` & Issue `#28` Two-Phase Cap** | `policy_test.go` + `CUJ-36` | Simulated tap verified at `+55m` (inside `24h` `ask_ttl`) succeeds; simulated interrupted `VerifyAskAndMintCap` before `ApproveFromCLI` preserves `askPath` so retry after cap expiry succeeds cleanly; post-commit replay fails closed with `.used-*`. `hooks.json` asserts `timeout == 15`. |
+| **Surgical Multi-Question `ask_question`** | `hooks_test.go` + `CUJ-36` | Two-question payload (`Q0`: custom confirm w/ `prop-*` + extra option; `Q1`: unrelated question) injects canonical `Approve`/`Reject` into `Q0` while preserving custom option and leaving `Q1` byte-identical. |
+| **Deduping, `--dismiss` & 0-Token Reconcilers** | `policy_test.go` + `CUJ-36` | Second `hq propose` in same `(ConversationID, ActionType)` marks first `superseded` (`--keep-prior` retains both); `hq reject --dismiss --reason="cleanup"` emits 0 events; `Stop` reconciles unanswered `Reject (<id>)` tap and locally-verified git tag push offline (`reconciled_external`). |
 | **Full Local CI Gates** | `./bin/hq ci pre-commit && ./bin/hq ci pre-push` | 100% pass across `P1`–`P6` PII checks, `H1`–`H4B`, `agy plugin validate --strict`, `go vet ./...`, and full Go test + CUJ E2E suite. |

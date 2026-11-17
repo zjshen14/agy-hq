@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	DefaultAskTTL          = 30 * time.Minute
+	DefaultAskTTL          = 24 * time.Hour
 	DefaultCapTTL          = 60 * time.Second
 	maxTranscriptTailBytes = 2 * 1024 * 1024 // 2 MiB bounded tail scan
 	nonceAlphabet          = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -233,6 +233,7 @@ func RecordAsk(vaultDir, propID, convID, transcriptPath string, now time.Time) (
 	if err != nil {
 		return AskRecord{}, err
 	}
+	askTTL := loadPolicyAskTTL(vaultDir)
 	rec := AskRecord{
 		ProposalID: propID,
 		FullSHA256: strings.ToLower(strings.TrimSpace(prop.SHA256)),
@@ -240,7 +241,7 @@ func RecordAsk(vaultDir, propID, convID, transcriptPath string, now time.Time) (
 		NonceCode:  nonce,
 		AskStepMin: highestTranscriptStepIndex(transcriptPath),
 		CreatedAt:  now.UTC().Format(time.RFC3339),
-		ExpiresAt:  now.Add(DefaultAskTTL).UTC().Format(time.RFC3339),
+		ExpiresAt:  now.Add(askTTL).UTC().Format(time.RFC3339),
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
@@ -354,17 +355,23 @@ func VerifyAskAndMintCap(vaultDir, propID, shaPrefix, convID, transcriptPath str
 	}
 
 	usedMarker := filepath.Join(approvalAsksDir(vaultDir), ".used-"+sha256HexString(convID+":"+strconv.Itoa(matchedStepIdx)+":"+propID))
-	uf, uErr := store.OpenCreateExclNoFollow(usedMarker, 0o600)
-	if uErr != nil {
+	if _, uErr := os.Lstat(usedMarker); uErr == nil {
 		return "", "", fmt.Errorf("human-presence proof replay rejected for %s (step %d already consumed)", propID, matchedStepIdx)
 	}
-	_, _ = uf.WriteString(now.UTC().Format(time.RFC3339) + "\n")
-	_ = uf.Sync()
-	_ = uf.Close()
 
-	// Consume the ask record so each ask_question challenge can mint at most one capability token.
-	_ = os.Remove(askPath)
+	capPath := filepath.Join(approvalCapsDir(vaultDir), propID+".json")
+	if rawExistingCap, rErr := os.ReadFile(capPath); rErr == nil {
+		var existingCap CapRecord
+		if json.Unmarshal(rawExistingCap, &existingCap) == nil {
+			if cExp, cErr := time.Parse(time.RFC3339, existingCap.ExpiresAt); cErr == nil && !now.After(cExp) {
+				return "", "", fmt.Errorf("human-presence proof replay rejected for %s (active capability already minted for step %d)", propID, existingCap.StepIndex)
+			}
+		}
+		_ = os.Remove(capPath)
+	}
 
+	// Two-phase commit (RFC-0021 / Issue #28): keep askPath intact and defer `.used-*` stamping until
+	// ApproveFromCLI consumes the minted capability so hook timeouts or pre-flight errors never brick the ask.
 	var capBytes [32]byte
 	if _, err := rand.Read(capBytes[:]); err != nil {
 		return "", "", err
@@ -384,8 +391,6 @@ func VerifyAskAndMintCap(vaultDir, propID, shaPrefix, convID, transcriptPath str
 	if err != nil {
 		return "", "", err
 	}
-	capPath := filepath.Join(approvalCapsDir(vaultDir), propID+".json")
-	_ = os.Remove(capPath)
 	cf, cErr := store.OpenCreateExclNoFollow(capPath, 0o600)
 	if cErr != nil {
 		return "", "", fmt.Errorf("mint approval capability for %s: %w", propID, cErr)
@@ -461,5 +466,22 @@ func ApproveFromCLI(vaultDir, id, shaPrefix, rawCap string) (string, error) {
 	if !strings.HasPrefix(strings.ToLower(capRec.FullSHA256), normPrefix) {
 		return "", fmt.Errorf("approval capability sha256 mismatch for %s", id)
 	}
+
+	// Verify the pending proposal file exists before committing one-shot replay marker.
+	pendingPath := filepath.Join(vaultDir, "memory", "pending", id+".json")
+	if _, pErr := os.Stat(pendingPath); pErr != nil {
+		return "", fmt.Errorf("read proposal %s: %w", id, pErr)
+	}
+
+	usedMarker := filepath.Join(approvalAsksDir(vaultDir), ".used-"+sha256HexString(capRec.ConvID+":"+strconv.Itoa(capRec.StepIndex)+":"+id))
+	uf, uErr := store.OpenCreateExclNoFollow(usedMarker, 0o600)
+	if uErr != nil {
+		return "", fmt.Errorf("human-presence proof replay rejected for %s (step %d already consumed)", id, capRec.StepIndex)
+	}
+	_, _ = uf.WriteString(now.UTC().Format(time.RFC3339) + "\n")
+	_ = uf.Sync()
+	_ = uf.Close()
+	_ = os.Remove(filepath.Join(approvalAsksDir(vaultDir), id+".json"))
+
 	return ApproveProposal(vaultDir, id, capRec.FullSHA256)
 }

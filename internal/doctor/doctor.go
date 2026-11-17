@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/events"
@@ -558,6 +559,14 @@ func Run(vaultDir string) []CheckResult {
 			})
 		}
 	}
+
+	// 18. Check Outbound Approval Policy (RFC-0021)
+	polStatus, polDetail := approvals.DoctorCheck(vaultDir)
+	results = append(results, CheckResult{
+		Name:   "Outbound Approval Policy",
+		Status: polStatus,
+		Detail: polDetail,
+	})
 
 	return results
 }

@@ -41,12 +41,14 @@
 
 ## 4. Approval-Bound Outbound Execution (`hq propose` + `ask_question`)
 
-- **Hard Outbound Gate:** Never directly execute irreversible external actions (sending live emails via `hq gmail send` / `gws`, posting to external chat channels, merging third-party PRs via `gh pr merge`, publishing releases/deployments, or financial transactions). Always stage via `hq propose`:
+- **Data-Driven Outbound Gate (`<vault>/config.yaml` `approvals.rules`):** Honor the `Active Outbound Approval Policy` injected at `SessionStart`. By default in interactive sessions, gate high-blast-radius deterministic CLI/connector actions (`messaging`, `release_publish`, third-party `pr_merge` outside `owned_repos`, `rsi_apply`, and any user-configured `always` categories) via `hq propose`:
   ```sh
-  hq propose --type=<category> --summary="<description>" --cmd='<exact command>'
+  hq propose --type=<category> --summary="<description>" --cmd='<exact deterministic command>'
   ```
+  Single-player reversible operations on owned repositories (`git push`, `git tag`, owned-repo `gh issue`/`gh pr` under `auto_only` / `owned_repos`) run natively in interactive sessions unless overridden in `<vault>/config.yaml`, while `[Auto]` and `tainted` sessions gate all external mutations fail-closed.
+- **No Dummy `echo` Proposals & Native Browser Coexistence:** `hq propose` requires a real deterministic CLI command executed by Go in 0 LLM tokens (`echo`/`printf`/`true`/`:` placeholders are rejected). For interactive browser/GUI actions with no deterministic CLI, render a markdown blockquote preview and call Antigravity's native `ask_question` directly; for unattended `[Auto]` runs, escalate via `hq outbox add --tier=interrupt`.
 - **1-Step Google Chat Outbound Staging (`hq gchat propose` / `login`):** When asked to send a Google Chat message to a space, person, email, or handle, run `hq gchat propose --to="<Space, Name, Email, or Handle>" --body="<Message>"` inline in **1 tool call** (never spawn a subagent to search PeopleKit or draft a Chat message) and immediately call `ask_question`. For login, run `hq gchat login` (or `hq gchat login --remote`) inline.
-- **Mandatory Payload Preview & 1-Tap Mobile Approval:** Always render the full outbound message body or command payload as a markdown blockquote in the conversation turn **before or with** `ask_question`, and include the recipient + clear payload preview alongside `<id>` and `sha256` prefix in `ask_question` options (never rely on `localhost` URLs). Execute `hq approve <id> --sha256=<prefix>` or `hq reject <id>` based on user selection.
+- **Mandatory Payload Preview & 1-Tap Mobile Approval:** Always render the full outbound message body or command payload as a markdown blockquote in the conversation turn **before or with** `ask_question`, and reference `<id>` in the confirmation question so `PreToolUse` injects verified `Approve`/`Reject` options (`24h` `ask_ttl`, preserving sibling questions and custom steering options; never rely on `localhost` URLs). Execute `hq approve <id> --sha256=<prefix>` or `hq reject <id>` (pass `--dismiss` when cleaning up stale items without waking the conversation) based on user selection.
 
 ## 5. Proactive Primitives & Scheduling Ownership (`hq daemon` vs. Native `schedule`)
 

@@ -409,6 +409,7 @@ func main() {
 		resumeOnDecide := fs.Bool("resume-on-decide", false, "Wake the originating conversation upon human approve or reject")
 		continuation := fs.String("continuation", "", "Optional continuation instruction injected when resuming")
 		originSkill := fs.String("skill", "", "Optional originating skill slug for signal-to-noise attribution")
+		keepPrior := fs.Bool("keep-prior", false, "Retain older pending proposals of the same type in this conversation")
 		_ = fs.Parse(proposeFlagArgs)
 		if *convID == "" {
 			*convID = vault.ResolveConversationID()
@@ -514,8 +515,17 @@ func main() {
 			}
 		}
 		if (*cmdStr == "" && len(cmdArgv) == 0) || *summary == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" [--resume-on-decide] [--continuation=\"...\"] --cmd=\"...\" (or -- <argv...> / --draft=<draftId>)")
+			fmt.Fprintln(os.Stderr, "usage: hq propose --type=<type> --summary=\"...\" [--keep-prior] [--resume-on-decide] [--continuation=\"...\"] --cmd=\"...\" (or -- <argv...> / --draft=<draftId>)")
 			os.Exit(1)
+		}
+		if *draftID == "" && *rsiID == "" {
+			pol, _, _ := approvals.LoadPolicy(vaultDir)
+			if pol.RejectNoopCommands {
+				if vErr := approvals.ValidateDeterministicCommand(*cmdStr, cmdArgv); vErr != nil {
+					fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", vErr)
+					os.Exit(1)
+				}
+			}
 		}
 		if strings.TrimSpace(*ttlStr) != "" {
 			if d, tErr := time.ParseDuration(strings.TrimSpace(*ttlStr)); tErr == nil {
@@ -526,16 +536,18 @@ func main() {
 			}
 		}
 		prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
-			ActionType:       *actionType,
-			Summary:          *summary,
-			Command:          *cmdStr,
-			CommandArgv:      cmdArgv,
-			WorkDir:          *workDir,
-			ConversationID:   *convID,
-			ResumeOnDecide:   *resumeOnDecide,
-			ContinuationNote: *continuation,
-			OriginSkill:      *originSkill,
-			Metadata:         meta,
+			ActionType:        *actionType,
+			Summary:           *summary,
+			Command:           *cmdStr,
+			CommandArgv:       cmdArgv,
+			WorkDir:           *workDir,
+			ConversationID:    *convID,
+			SupersedeConvType: *draftID == "" && *rsiID == "" && !*keepPrior,
+			KeepPrior:         *keepPrior,
+			ResumeOnDecide:    *resumeOnDecide,
+			ContinuationNote:  *continuation,
+			OriginSkill:       *originSkill,
+			Metadata:          meta,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq propose failed: %v\n", err)
@@ -547,6 +559,7 @@ func main() {
 			fmt.Printf("  ⚠️ Contextual PII Warning: %s\n", strings.Join(prop.RiskFlags, ", "))
 		}
 		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Next: Present a markdown blockquote preview + ask_question referencing %s (or approve in :4242 Web Console).\n", prop.ID)
 
 	case "approve":
 		denyIfCallerTainted(vaultDir, "approve")
@@ -573,14 +586,38 @@ func main() {
 	case "reject":
 		denyIfCallerTainted(vaultDir, "reject")
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: hq reject <proposal-id> [--reason=\"...\"]")
+			fmt.Fprintln(os.Stderr, "usage: hq reject <proposal-id> [--reason=\"...\"] [--dismiss|--no-resume]")
 			os.Exit(1)
 		}
-		id := os.Args[2]
+		var id string
+		var rejectFlagArgs []string
+		for i := 2; i < len(os.Args); i++ {
+			arg := os.Args[i]
+			if strings.HasPrefix(arg, "-") {
+				rejectFlagArgs = append(rejectFlagArgs, arg)
+				if (arg == "--reason" || arg == "-reason") && i+1 < len(os.Args) {
+					i++
+					rejectFlagArgs = append(rejectFlagArgs, os.Args[i])
+				}
+			} else if id == "" {
+				id = arg
+			} else {
+				rejectFlagArgs = append(rejectFlagArgs, arg)
+			}
+		}
+		if id == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq reject <proposal-id> [--reason=\"...\"] [--dismiss|--no-resume]")
+			os.Exit(1)
+		}
 		fs := flag.NewFlagSet("reject", flag.ExitOnError)
 		reason := fs.String("reason", "Rejected by user", "Reason for rejection")
-		_ = fs.Parse(os.Args[3:])
-		if err := approvals.Reject(vaultDir, id, *reason); err != nil {
+		dismiss := fs.Bool("dismiss", false, "Suppress LLM resumption event even when a custom --reason is provided")
+		noResume := fs.Bool("no-resume", false, "Alias for --dismiss: suppress LLM resumption event")
+		_ = fs.Parse(rejectFlagArgs)
+		if err := approvals.RejectProposalWithOptions(vaultDir, id, approvals.RejectOptions{
+			Reason:         *reason,
+			SuppressResume: *dismiss || *noResume,
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "hq reject error: %v\n", err)
 			os.Exit(1)
 		}

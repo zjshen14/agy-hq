@@ -78,23 +78,25 @@ type Proposal struct {
 
 // CreateOptions configures structured argv, deferred session resumption, idempotency, and skill attribution.
 type CreateOptions struct {
-	ActionType       string
-	Summary          string
-	Command          string
-	CommandArgv      []string
-	WorkDir          string
-	ConversationID   string
-	IdempotencyKey   string
-	TargetConnector  string
-	TargetAccount    string
-	TargetThreadKey  string
-	PayloadSHA256    string
-	PayloadBytes     []byte
-	SupersedePrior   bool
-	ResumeOnDecide   bool
-	ContinuationNote string
-	OriginSkill      string
-	Metadata         map[string]string
+	ActionType        string
+	Summary           string
+	Command           string
+	CommandArgv       []string
+	WorkDir           string
+	ConversationID    string
+	IdempotencyKey    string
+	TargetConnector   string
+	TargetAccount     string
+	TargetThreadKey   string
+	PayloadSHA256     string
+	PayloadBytes      []byte
+	SupersedePrior    bool
+	SupersedeConvType bool
+	KeepPrior         bool
+	ResumeOnDecide    bool
+	ContinuationNote  string
+	OriginSkill       string
+	Metadata          map[string]string
 }
 
 // IsExpired returns true if ExpiresAt is set and strictly in the past relative to now.
@@ -337,7 +339,8 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		reservedIdem = true
 	}
 
-	expiresAt := now.Add(DefaultProposalTTL).UTC().Format(time.RFC3339)
+	propTTL := loadPolicyProposalTTL(vaultDir)
+	expiresAt := now.Add(propTTL).UTC().Format(time.RFC3339)
 	if opts.Metadata != nil && strings.TrimSpace(opts.Metadata["expiresAt"]) != "" {
 		expiresAt = strings.TrimSpace(opts.Metadata["expiresAt"])
 	}
@@ -345,9 +348,10 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 	if cmdDisplay == "" && len(opts.CommandArgv) > 0 {
 		cmdDisplay = strings.Join(opts.CommandArgv, " ")
 	}
+	metaCopy := enrichGitBaselineMetadata(strings.TrimSpace(opts.WorkDir), cmdDisplay, opts.Metadata)
 	originSkill := strings.TrimSpace(opts.OriginSkill)
-	if originSkill == "" && opts.Metadata != nil {
-		originSkill = strings.TrimSpace(opts.Metadata["originSkill"])
+	if originSkill == "" && metaCopy != nil {
+		originSkill = strings.TrimSpace(metaCopy["originSkill"])
 	}
 
 	payloadSHA := strings.ToLower(strings.TrimSpace(opts.PayloadSHA256))
@@ -411,7 +415,7 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		ResumeOnDecide:   opts.ResumeOnDecide,
 		ContinuationNote: strings.TrimSpace(opts.ContinuationNote),
 		OriginSkill:      originSkill,
-		Metadata:         opts.Metadata,
+		Metadata:         metaCopy,
 	}
 	prop.SHA256 = ComputeProposalHashV2(prop)
 
@@ -445,8 +449,13 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 		}
 		return Proposal{}, err
 	}
-	if opts.SupersedePrior && prop.TargetThreadKey != "" {
-		_, _ = SupersedeByThread(vaultDir, prop.TargetConnector, prop.TargetAccount, prop.TargetThreadKey, prop.ID, now)
+	if !opts.KeepPrior {
+		if opts.SupersedePrior && prop.TargetThreadKey != "" {
+			_, _ = SupersedeByThread(vaultDir, prop.TargetConnector, prop.TargetAccount, prop.TargetThreadKey, prop.ID, now)
+		}
+		if opts.SupersedeConvType && prop.ConversationID != "" && prop.ActionType != "" {
+			_, _ = SupersedeByConvAndType(vaultDir, prop.ConversationID, prop.ActionType, prop.ID, now)
+		}
 	}
 	return prop, nil
 }
@@ -832,6 +841,12 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	return output, execErr
 }
 
+// RejectOptions configures rejection reason and optional suppression of LLM resumption events (`--dismiss` / `--no-resume`).
+type RejectOptions struct {
+	Reason         string
+	SuppressResume bool
+}
+
 // Reject removes the proposal from pending/ and logs the rejection to interventions.jsonl.
 func Reject(vaultDir, id, reason string) error {
 	return RejectProposal(vaultDir, id, reason)
@@ -840,6 +855,12 @@ func Reject(vaultDir, id, reason string) error {
 // RejectProposal removes the proposal from pending/, logs the rejection to interventions.jsonl,
 // and enqueues a steering resumption event to prop.ConversationID when the user provides feedback or ResumeOnDecide is set.
 func RejectProposal(vaultDir, id, reason string) error {
+	return RejectProposalWithOptions(vaultDir, id, RejectOptions{Reason: reason})
+}
+
+// RejectProposalWithOptions removes the proposal from pending/, logs the rejection to interventions.jsonl,
+// and optionally suppresses LLM resumption (`SuppressResume: true` for `--dismiss` / `--no-resume` / UI dismiss).
+func RejectProposalWithOptions(vaultDir, id string, opts RejectOptions) error {
 	id = strings.TrimSpace(id)
 	if err := ValidateProposalID(id); err != nil {
 		return err
@@ -860,6 +881,10 @@ func RejectProposal(vaultDir, id, reason string) error {
 	removePayloadArtifact(vaultDir, prop.ID)
 	CleanupApprovalArtifacts(vaultDir, prop.ID)
 
+	reason := opts.Reason
+	if strings.TrimSpace(reason) == "" {
+		reason = DefaultRejectReason
+	}
 	rec := InterventionRecord{
 		Timestamp: now.Format(time.RFC3339),
 		Decision:  "rejected",
@@ -868,10 +893,12 @@ func RejectProposal(vaultDir, id, reason string) error {
 	}
 	appendIntervention(vaultDir, rec)
 
-	trimmedReason := strings.TrimSpace(reason)
-	hasCustomSteering := trimmedReason != "" && !strings.EqualFold(trimmedReason, DefaultRejectReason)
-	if strings.TrimSpace(prop.ConversationID) != "" && (prop.ResumeOnDecide || hasCustomSteering) {
-		enqueueApprovalDecisionEvent(vaultDir, prop, "rejected", trimmedReason, nil, now)
+	if !opts.SuppressResume {
+		trimmedReason := strings.TrimSpace(reason)
+		hasCustomSteering := trimmedReason != "" && !strings.EqualFold(trimmedReason, DefaultRejectReason)
+		if strings.TrimSpace(prop.ConversationID) != "" && (prop.ResumeOnDecide || hasCustomSteering) {
+			enqueueApprovalDecisionEvent(vaultDir, prop, "rejected", trimmedReason, nil, now)
+		}
 	}
 	return nil
 }

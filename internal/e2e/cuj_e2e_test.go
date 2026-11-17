@@ -2819,7 +2819,7 @@ func TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge(t *testi
 	ssnSample := "123-" + "45-" + "6789"
 	propPIIOut, err := env.run("", "propose", "--type=external_action", "--conv=conv-untainted-worker",
 		"--summary=Send address crimson-home-address and tax ID "+ssnSample+" to vendor",
-		"--cmd=echo sending-external")
+		"--cmd=gh release create v0.0.1-pii-check")
 	if err != nil || !strings.Contains(propPIIOut, "Contextual PII Warning") || !strings.Contains(propPIIOut, "denylist_pii_match") || !strings.Contains(propPIIOut, "ssn_pattern") {
 		t.Fatalf("expected hq propose to flag denylist_pii_match and ssn_pattern, got err=%v out=\n%s", err, propPIIOut)
 	}
@@ -2836,7 +2836,7 @@ func TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge(t *testi
 	_, _ = env.run("", "reject", piiProp.ID)
 
 	// 3. Stage a proposal with a short TTL (`--ttl=1500ms`), let it expire, and confirm `hq approve` deterministically rejects it!
-	if out, err := env.run("", "propose", "--type=external_action", "--ttl=1500ms", "--summary=Ephemeral quote reply", "--cmd=echo stale-send"); err != nil {
+	if out, err := env.run("", "propose", "--type=external_action", "--ttl=1500ms", "--summary=Ephemeral quote reply", "--cmd=gh release create v0.0.2-stale"); err != nil {
 		t.Fatalf("propose --ttl=1500ms failed: %v (%s)", err, out)
 	}
 	pendingTTL, _ := approvals.List(env.vaultDir)
@@ -3716,7 +3716,7 @@ func TestCUJ28_DeferredApprovalResumptionArgvScrubAndProgressCheckpoints(t *test
 		"--type=external_action",
 		"--summary=Publish production release",
 		"--resume-on-decide",
-		"--cmd=echo prod",
+		"--cmd=gh release create v1.0.0",
 	)
 	if err != nil {
 		t.Fatalf("second hq propose failed: %v (%s)", err, prop2Out)
@@ -5149,4 +5149,317 @@ func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
 
 	// Clean up isolated git worktree cleanly before TempDir teardown
 	_ = runGit("worktree", "remove", "--force", wtDir)
+}
+
+// CUJ-36: Customizable Outbound Approval Policy, Native Coexistence & Lifecycle Hardening (RFC-0021 / Issue #28)
+func TestCUJ36_CustomizableApprovalPolicyAndUXHardening(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	// 1. Verify .agents/plugins/agy-hq/hooks.json raises PreToolUse timeout to 15s (Issue #28)
+	hooksRaw, err := os.ReadFile(filepath.Join(env.rootDir, ".agents", "plugins", "agy-hq", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read hooks.json: %v", err)
+	}
+	var hooksDoc struct {
+		HQKernel struct {
+			PreToolUse []struct {
+				Hooks []struct {
+					Timeout int `json:"timeout"`
+				} `json:"hooks"`
+			} `json:"PreToolUse"`
+		} `json:"hq-kernel"`
+	}
+	if err := json.Unmarshal(hooksRaw, &hooksDoc); err != nil || len(hooksDoc.HQKernel.PreToolUse) == 0 || len(hooksDoc.HQKernel.PreToolUse[0].Hooks) == 0 {
+		t.Fatalf("parse hooks.json PreToolUse: %v", err)
+	}
+	if got := hooksDoc.HQKernel.PreToolUse[0].Hooks[0].Timeout; got != 15 {
+		t.Fatalf("expected PreToolUse timeout == 15 in hooks.json, got %d", got)
+	}
+
+	// 2. Verify `hq migrate` additively appends `approvals:` to an older config.yaml and `hq doctor` reports PASS
+	cfgPath := filepath.Join(env.vaultDir, "config.yaml")
+	_ = os.WriteFile(cfgPath, []byte("vault_version: 1\n"), 0o600)
+	if migOut, err := env.run("", "migrate"); err != nil {
+		t.Fatalf("hq migrate failed: %v (%s)", err, migOut)
+	}
+	migratedCfg, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(migratedCfg), "\napprovals:\n") {
+		t.Fatalf("expected hq migrate to append approvals: block, got:\n%s", string(migratedCfg))
+	}
+	docOut, err := env.run("", "doctor")
+	if err != nil || !strings.Contains(docOut, "Outbound Approval Policy") {
+		t.Fatalf("expected hq doctor to report Outbound Approval Policy, err=%v out=\n%s", err, docOut)
+	}
+
+	// 3. Customize `<vault>/config.yaml` with `owned_repos: ["alice/*"]` and custom `cloud_infra` (`mode: always`) with 0 Go changes
+	customPolicy := `vault_version: 1
+approvals:
+  owned_repos:
+    - "alice/*"
+  ask_ttl: "24h"
+  proposal_ttl: "24h"
+  reject_noop_commands: true
+  rules:
+    - id: cloud_infra
+      description: "Production Terraform/Pulumi mutations"
+      mode: always
+      commands:
+        - '\b(?:terraform|pulumi)\s+apply\b'
+`
+	if err := os.WriteFile(cfgPath, []byte(customPolicy), 0o600); err != nil {
+		t.Fatalf("write custom config.yaml: %v", err)
+	}
+
+	// SessionStart injects Active Outbound Approval Policy reflecting `cloud_infra` and `alice/*`
+	ssOut, err := env.run(`{"conversationId":"conv-cuj36"}`, "hook", "session-start")
+	if err != nil || !strings.Contains(ssOut, "Active Outbound Approval Policy") || !strings.Contains(ssOut, "`cloud_infra`") || !strings.Contains(ssOut, "alice/*") {
+		t.Fatalf("expected SessionStart to inject Active Outbound Approval Policy with cloud_infra & alice/*, err=%v out=%s", err, ssOut)
+	}
+
+	runPreTool := func(convID, cmdLine string) string {
+		in, _ := json.Marshal(map[string]interface{}{
+			"conversationId": convID,
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": cmdLine},
+			},
+		})
+		out, _ := env.run(string(in), "hook", "pre-tool")
+		return out
+	}
+
+	// Interactive session: custom `cloud_infra` and third-party PR merge are DENIED; owned-repo PR merge & git push are ALLOWED
+	if out := runPreTool("conv-cuj36", "terraform apply -auto-approve"); !strings.Contains(out, `"decision":"deny"`) || !strings.Contains(out, "cloud_infra") {
+		t.Fatalf("expected custom cloud_infra rule to deny terraform apply, got: %s", out)
+	}
+	if out := runPreTool("conv-cuj36", "gh pr merge 15 --squash -R bob/external-repo"); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected third-party gh pr merge to be denied, got: %s", out)
+	}
+	if out := runPreTool("conv-cuj36", "gh pr merge 15 --squash -R alice/owned-repo"); !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected owned-repo gh pr merge to be allowed in interactive session, got: %s", out)
+	}
+	if out := runPreTool("conv-cuj36", "git push origin main"); !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected git push to be allowed in interactive session under auto_only, got: %s", out)
+	}
+
+	// Register an [Auto] worker and verify BOTH owned-repo PR merge and git push still gate fail-closed in [Auto]!
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "auto-pulse-36",
+		Title:          "[Auto] SWE Pulse",
+		Kind:           "auto",
+		ConversationID: "conv-auto-36",
+		Status:         "active",
+	})
+	if out := runPreTool("conv-auto-36", "gh pr merge 15 --squash -R alice/owned-repo"); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected [Auto] session to block owned-repo gh pr merge fail-closed, got: %s", out)
+	}
+	if out := runPreTool("conv-auto-36", "git push origin main"); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected [Auto] session to block git push fail-closed, got: %s", out)
+	}
+
+	// 4. Dummy `echo` placeholder proposals are rejected by both PreToolUse AND `hq propose` CLI (F2)
+	if out := runPreTool("conv-cuj36", `hq propose --type=social_post --summary="Post browser update" --cmd="echo 'Approved'"`); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected PreToolUse to reject dummy echo hq propose, got: %s", out)
+	}
+	if noopCLIOut, noopErr := env.run("", "propose", "--type=social_post", "--summary=Post browser update", "--cmd=echo 'Approved'"); noopErr == nil {
+		t.Fatalf("expected hq propose CLI to reject dummy echo placeholder, got: %s", noopCLIOut)
+	}
+
+	// 5. Auto-supersede per (ConversationID, ActionType), `--keep-prior` opt-out, and `--dismiss` 0-token reject (F5)
+	markerOutFile := filepath.Join(t.TempDir(), "cuj36-approved.txt")
+	if out, err := env.run("", "propose", "--type=cloud_infra", "--conv=conv-cuj36", "--summary=Apply infra v1", "--cmd=echo 'V1' > "+markerOutFile); err != nil || !strings.Contains(out, "Next: Present a markdown blockquote preview") {
+		t.Fatalf("propose v1 failed or missing pairing hint: err=%v out=%s", err, out)
+	}
+	if _, err := env.run("", "propose", "--type=cloud_infra", "--conv=conv-cuj36", "--summary=Apply infra v2", "--cmd=echo 'V2_OK' > "+markerOutFile); err != nil {
+		t.Fatalf("propose v2 failed: %v", err)
+	}
+	pendingAfterSupersede, _ := approvals.List(env.vaultDir)
+	if len(pendingAfterSupersede) != 1 || pendingAfterSupersede[0].Summary != "Apply infra v2" {
+		t.Fatalf("expected v1 superseded leaving only v2, got %+v", pendingAfterSupersede)
+	}
+	propV2 := pendingAfterSupersede[0]
+
+	if _, err := env.run("", "propose", "--type=cloud_infra", "--conv=conv-cuj36", "--keep-prior", "--summary=Apply companion DNS", "--cmd=echo 'DNS' > "+markerOutFile); err != nil {
+		t.Fatalf("propose --keep-prior failed: %v", err)
+	}
+	pendingWithKeep, _ := approvals.List(env.vaultDir)
+	if len(pendingWithKeep) != 2 {
+		t.Fatalf("expected --keep-prior to retain 2 pending proposals, got %d", len(pendingWithKeep))
+	}
+	var propDNS approvals.Proposal
+	for _, p := range pendingWithKeep {
+		if p.ID != propV2.ID {
+			propDNS = p
+		}
+	}
+
+	// Reject `propDNS` with `--dismiss` + custom reason -> 0 resumption events enqueued!
+	if rejOut, err := env.run("", "reject", propDNS.ID, "--dismiss", "--reason=Handled manually via DNS console"); err != nil {
+		t.Fatalf("hq reject --dismiss failed: %v (%s)", err, rejOut)
+	}
+	if evs, _ := events.List(env.vaultDir, "pending", false, 0); len(evs) != 0 {
+		t.Fatalf("expected 0 resumption events after hq reject --dismiss, got %+v", evs)
+	}
+
+	// 6. Surgical multi-question `ask_question` + human-presence `hq approve` execution (F3/F4/F6)
+	capEnv := []string{"HQ_FORCE_CAP_CHECK=1"}
+	tPath := filepath.Join(t.TempDir(), "cuj36-transcript.jsonl")
+	_ = os.WriteFile(tPath, []byte(`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"ship infra"}`+"\n"), 0o600)
+
+	multiAskPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-cuj36",
+		"transcriptPath": tPath,
+		"toolCall": map[string]interface{}{
+			"name": "ask_question",
+			"args": map[string]interface{}{
+				"questions": []map[string]interface{}{
+					{
+						"question": "Confirm infra apply " + propV2.ID + "?",
+						"options":  []string{"Approve", "Reject", "Run dry-run plan again"},
+					},
+					{
+						"question": "Notify #ops after apply?",
+						"options":  []string{"Yes", "No"},
+					},
+				},
+			},
+		},
+	})
+	multiAskOut, err := env.runWithEnv(string(multiAskPayload), capEnv, "hook", "pre-tool")
+	if err != nil {
+		t.Fatalf("multi-question ask_question hook failed: %v (%s)", err, multiAskOut)
+	}
+	var askDecoded struct {
+		Overwrite struct {
+			Questions []struct {
+				Question string   `json:"question"`
+				Options  []string `json:"options"`
+			} `json:"questions"`
+		} `json:"overwrite"`
+	}
+	if err := json.Unmarshal([]byte(multiAskOut), &askDecoded); err != nil || len(askDecoded.Overwrite.Questions) != 2 {
+		t.Fatalf("expected 2 questions preserved, got err=%v raw=%s", err, multiAskOut)
+	}
+	if len(askDecoded.Overwrite.Questions[0].Options) != 3 || askDecoded.Overwrite.Questions[0].Options[2] != "Run dry-run plan again" {
+		t.Fatalf("expected custom option preserved in Q0, got %+v", askDecoded.Overwrite.Questions[0].Options)
+	}
+	if askDecoded.Overwrite.Questions[1].Question != "Notify #ops after apply?" {
+		t.Fatalf("expected Q1 untouched, got %+v", askDecoded.Overwrite.Questions[1])
+	}
+
+	approveChoice := askDecoded.Overwrite.Questions[0].Options[0]
+	f, _ := os.OpenFile(tPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = f.WriteString(fmt.Sprintf(`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":%q}`+"\n", "Selected: "+approveChoice))
+	_ = f.Close()
+
+	appPreIn, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-cuj36",
+		"transcriptPath": tPath,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": fmt.Sprintf("hq approve %s --sha256=%s", propV2.ID, propV2.SHA256[:12])},
+		},
+	})
+	appPreOut, err := env.runWithEnv(string(appPreIn), capEnv, "hook", "pre-tool")
+	if err != nil || !strings.Contains(appPreOut, "--cap=") {
+		t.Fatalf("expected PreToolUse to mint --cap=, err=%v out=%s", err, appPreOut)
+	}
+	var appOverwrite struct {
+		Overwrite map[string]string `json:"overwrite"`
+	}
+	_ = json.Unmarshal([]byte(appPreOut), &appOverwrite)
+	rewrittenCmd := appOverwrite.Overwrite["CommandLine"]
+	capIdx := strings.Index(rewrittenCmd, "--cap=")
+	capTok := strings.Trim(strings.TrimSpace(rewrittenCmd[capIdx+len("--cap="):]), `'"`)
+
+	if appOut, err := env.runWithEnv("", capEnv, "approve", propV2.ID, "--sha256="+propV2.SHA256[:12], "--cap="+capTok); err != nil {
+		t.Fatalf("hq approve failed: %v (%s)", err, appOut)
+	}
+	gotMarker, _ := os.ReadFile(markerOutFile)
+	if strings.TrimSpace(string(gotMarker)) != "V2_OK" {
+		t.Fatalf("expected V2_OK written by approved command, got %q", string(gotMarker))
+	}
+
+	// 7. Stop Hook 0-token reconciliation of unanswered `Reject (<id>)` tap & offline local git tag push
+	propRejTap, err := approvals.CreateWithOptions(env.vaultDir, approvals.CreateOptions{
+		ActionType:     "release_publish",
+		Summary:        "Draft v9.9.9",
+		Command:        "gh release create v9.9.9",
+		ConversationID: "conv-cuj36-stop",
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions propRejTap: %v", err)
+	}
+	tStopPath := filepath.Join(t.TempDir(), "stop-transcript.jsonl")
+	_ = os.WriteFile(tStopPath, []byte(`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"release?"}`+"\n"), 0o600)
+	if _, err := approvals.RecordAsk(env.vaultDir, propRejTap.ID, "conv-cuj36-stop", tStopPath, time.Now()); err != nil {
+		t.Fatalf("RecordAsk propRejTap: %v", err)
+	}
+	fsStop, _ := os.OpenFile(tStopPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = fsStop.WriteString(fmt.Sprintf(`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":%q}`+"\n", "Selected: Reject ("+propRejTap.ID+")"))
+	_ = fsStop.Close()
+
+	// Also stage a local git tag proposal and push the tag externally before `hq hook stop`
+	bareGit := filepath.Join(t.TempDir(), "cuj36-remote.git")
+	workGit := filepath.Join(t.TempDir(), "cuj36-work")
+	for _, gArgs := range [][]string{
+		{"init", "--bare", "-b", "main", bareGit},
+		{"clone", bareGit, workGit},
+		{"-C", workGit, "config", "user.name", "Alice"},
+		{"-C", workGit, "config", "user.email", "alice@example.com"},
+	} {
+		cmd := exec.Command("git", gArgs...)
+		if out, gErr := cmd.CombinedOutput(); gErr != nil {
+			t.Fatalf("git %v: %v (%s)", gArgs, gErr, string(out))
+		}
+	}
+	_ = os.WriteFile(filepath.Join(workGit, "app.txt"), []byte("1\n"), 0o644)
+	for _, gArgs := range [][]string{
+		{"-C", workGit, "add", "."},
+		{"-C", workGit, "commit", "-m", "init"},
+		{"-C", workGit, "push", "-u", "origin", "main"},
+	} {
+		if out, gErr := exec.Command("git", gArgs...).CombinedOutput(); gErr != nil {
+			t.Fatalf("git %v: %v (%s)", gArgs, gErr, string(out))
+		}
+	}
+	if _, err := approvals.CreateWithOptions(env.vaultDir, approvals.CreateOptions{
+		ActionType:     "release_publish",
+		Summary:        "Tag v0.9.0",
+		Command:        "git tag v0.9.0 && git push origin v0.9.0",
+		WorkDir:        workGit,
+		ConversationID: "conv-cuj36-git",
+	}); err != nil {
+		t.Fatalf("CreateWithOptions git tag: %v", err)
+	}
+	for _, gArgs := range [][]string{
+		{"-C", workGit, "tag", "v0.9.0"},
+		{"-C", workGit, "push", "origin", "v0.9.0"},
+	} {
+		if out, gErr := exec.Command("git", gArgs...).CombinedOutput(); gErr != nil {
+			t.Fatalf("git %v: %v (%s)", gArgs, gErr, string(out))
+		}
+	}
+
+	stopIn, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-cuj36-stop",
+		"transcriptPath": tStopPath,
+		"executionNum":   1,
+	})
+	if stopOut, err := env.run(string(stopIn), "hook", "stop"); err != nil || !strings.Contains(stopOut, `"decision":"stop"`) {
+		t.Fatalf("hq hook stop failed: %v (%s)", err, stopOut)
+	}
+	if finalPending, _ := approvals.List(env.vaultDir); len(finalPending) != 0 {
+		t.Fatalf("expected 0 pending proposals after Stop hook reconciliation, got %+v", finalPending)
+	}
+	if _, err := env.run("", "console", "--sync"); err != nil {
+		t.Fatalf("hq console --sync: %v", err)
+	}
+	consoleMD, _ := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
+	if !strings.Contains(string(consoleMD), "Pending Approvals (`0` items)") {
+		t.Fatalf("expected CONSOLE.md to show 0 pending items after reconciliation, got:\n%s", string(consoleMD))
+	}
 }

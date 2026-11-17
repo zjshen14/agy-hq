@@ -14,7 +14,7 @@
           {
             "type": "command",
             "command": "export PATH=\"$HOME/.local/bin:$PATH\"; P=\"${PLUGIN_ROOT:-.}\"; R=\"$P/../../..\"; [ -f \"$R/cmd/hq/main.go\" ] && [ -x \"$R/bin/hq\" ] && exec \"$R/bin/hq\" hook pre-tool; [ -x \"$P/bin/hq\" ] && exec \"$P/bin/hq\" hook pre-tool; command -v hq >/dev/null 2>&1 && exec hq hook pre-tool; printf '{\"decision\":\"deny\",\"reason\":\"hq hook binary unavailable (fail-closed)\"}\\n'",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       }

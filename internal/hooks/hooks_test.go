@@ -1216,3 +1216,126 @@ func TestQuarantinedUpdateFocusAllowedAndStrictArgvGuidance(t *testing.T) {
 		t.Fatalf("expected multi-thread hq watch read to be allowed and env-scrubbed, got: %s", out.String())
 	}
 }
+
+func TestRFC0021SurgicalAskQuestionNoopGuardAndPolicyTamperProtection(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+		ActionType:     "release_publish",
+		Summary:        "Publish release v2.0.0",
+		Command:        "gh release create v2.0.0",
+		ConversationID: "conv-rfc21",
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions: %v", err)
+	}
+
+	// 1. Surgical multi-question ask_question preserves sibling questions AND custom secondary steering options
+	var out bytes.Buffer
+	askPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-rfc21",
+		"toolCall": map[string]interface{}{
+			"name": "ask_question",
+			"args": map[string]interface{}{
+				"questions": []map[string]interface{}{
+					{
+						"question": "Publish release (" + prop.ID + ")?",
+						"options": []string{
+							"Approve",
+							"Reject",
+							"Defer until Monday freeze lifts",
+						},
+					},
+					{
+						"question":        "Which release channels should receive changelog notes?",
+						"is_multi_select": true,
+						"options":         []string{"#announcements", "#engineering"},
+					},
+				},
+			},
+		},
+	})
+	if err := HandlePreToolUse(bytes.NewReader(askPayload), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse surgical ask_question: %v", err)
+	}
+	var resp struct {
+		Decision  string `json:"decision"`
+		Overwrite struct {
+			Questions []struct {
+				Question      string   `json:"question"`
+				IsMultiSelect bool     `json:"is_multi_select"`
+				Options       []string `json:"options"`
+			} `json:"questions"`
+		} `json:"overwrite"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode ask_question hook output: %v (%s)", err, out.String())
+	}
+	if resp.Decision != "allow" || len(resp.Overwrite.Questions) != 2 {
+		t.Fatalf("expected 2 questions preserved in surgical overwrite, got %+v", resp)
+	}
+	q0 := resp.Overwrite.Questions[0]
+	if len(q0.Options) != 3 || !strings.Contains(q0.Options[0], "code:") || q0.Options[1] != "Reject ("+prop.ID+")" || q0.Options[2] != "Defer until Monday freeze lifts" {
+		t.Fatalf("unexpected Q0 options (expected canonical Approve/Reject + preserved custom option): %+v", q0.Options)
+	}
+	q1 := resp.Overwrite.Questions[1]
+	if q1.Question != "Which release channels should receive changelog notes?" || !q1.IsMultiSelect || len(q1.Options) != 2 || q1.Options[0] != "#announcements" {
+		t.Fatalf("expected Q1 to remain completely untouched, got %+v", q1)
+	}
+
+	// 2. PreToolUse denies dummy no-op `hq propose --cmd="echo ..."` placeholders (F2)
+	out.Reset()
+	noopPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-rfc21",
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{
+				"CommandLine": `hq propose --type=social_post --summary="Post browser announcement" --cmd="echo 'Approved'"`,
+			},
+		},
+	})
+	_ = HandlePreToolUse(bytes.NewReader(noopPayload), &out, vaultDir)
+	if !strings.Contains(out.String(), `"decision":"deny"`) || !strings.Contains(out.String(), "no-op placeholder") {
+		t.Fatalf("expected PreToolUse to deny dummy echo hq propose, got: %s", out.String())
+	}
+
+	// 3. Self-tamper guard: [Auto] session cannot modify config.yaml; interactive session cannot write invalid regex
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "auto-worker-21",
+		Title:          "[Auto] Nightly Worker",
+		Kind:           "auto",
+		ConversationID: "conv-auto-21",
+		Status:         "active",
+	})
+	out.Reset()
+	autoTamper, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-auto-21",
+		"toolCall": map[string]interface{}{
+			"name": "write_file",
+			"args": map[string]interface{}{
+				"Path":    filepath.Join(vaultDir, "config.yaml"),
+				"Content": "approvals:\n  rules:\n    - id: messaging\n      mode: never\n",
+			},
+		},
+	})
+	_ = HandlePreToolUse(bytes.NewReader(autoTamper), &out, vaultDir)
+	if !strings.Contains(out.String(), `"decision":"deny"`) {
+		t.Fatalf("expected [Auto] session write_file on config.yaml to be denied, got: %s", out.String())
+	}
+
+	out.Reset()
+	invalidInteractiveCfg, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-rfc21",
+		"toolCall": map[string]interface{}{
+			"name": "write_file",
+			"args": map[string]interface{}{
+				"Path":    filepath.Join(vaultDir, "config.yaml"),
+				"Content": "approvals:\n  rules:\n    - id: bad_rule\n      mode: always\n      commands:\n        - '[unclosed-regex'\n",
+			},
+		},
+	})
+	_ = HandlePreToolUse(bytes.NewReader(invalidInteractiveCfg), &out, vaultDir)
+	if !strings.Contains(out.String(), `"decision":"deny"`) {
+		t.Fatalf("expected invalid regex in config.yaml write_file to be denied by PreToolUse validator, got: %s", out.String())
+	}
+}

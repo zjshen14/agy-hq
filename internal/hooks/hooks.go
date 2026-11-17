@@ -522,6 +522,13 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	}
 
 	if !leanAuto {
+		_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", time.Now())
+		_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
+		if !isTaintedStart {
+			if pol, _, pErr := approvals.LoadPolicy(vaultDir); pErr == nil {
+				zone2Sections = append(zone2Sections, approvals.FormatActivePolicySummary(pol))
+			}
+		}
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
 			var lines []string
 			for _, p := range pending {
@@ -735,6 +742,257 @@ func classifyUnattendedAutoCommand(checkLine string) (bool, string) {
 		return true, "mutating_external_http"
 	}
 	return false, ""
+}
+
+func extractProposeCmdForValidation(cmdLine string) (hasCmd bool, cmdVal string, argv []string) {
+	if strings.Contains(cmdLine, "--draft") || strings.Contains(cmdLine, "--rsi-id") {
+		return false, "", nil
+	}
+	if m := reCmdFlagValue.FindString(cmdLine); m != "" {
+		raw := strings.TrimPrefix(m, "--cmd=")
+		if len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'' {
+			raw = raw[1 : len(raw)-1]
+		} else if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+			raw = strings.ReplaceAll(strings.ReplaceAll(raw[1:len(raw)-1], `\"`, `"`), `\\`, `\`)
+		}
+		return true, raw, nil
+	}
+	if idx := strings.Index(cmdLine, " -- "); idx >= 0 {
+		rest := strings.TrimSpace(cmdLine[idx+4:])
+		if rest != "" {
+			return true, "", strings.Fields(rest)
+		}
+	}
+	return false, "", nil
+}
+
+func stripProposeInnerCommand(cmdLine string) string {
+	stripped := reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)
+	if idx := strings.Index(stripped, " -- "); idx >= 0 {
+		prefix := stripped[:idx]
+		if !strings.ContainsAny(prefix, ";&|") {
+			stripped = prefix
+		}
+	}
+	return stripped
+}
+
+func isStandardOrSpoofedApprovalOption(opt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(opt))
+	if lower == "" || lower == "keep pending" {
+		return true
+	}
+	for _, pref := range []string{
+		"approve", "(recommended) approve", "✅ approve",
+		"reject", "❌ reject",
+	} {
+		if lower == pref || strings.HasPrefix(lower, pref+" ") || strings.HasPrefix(lower, pref+"(") || strings.HasPrefix(lower, pref+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func buildCanonicalProposalQuestion(vaultDir string, prop approvals.Proposal, convID, transcriptPath string, origOpts []string) map[string]interface{} {
+	hasPIIWarning := len(prop.RiskFlags) > 0
+	meta := prop.Metadata
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	hashShort := meta["contentHash"]
+	if hashShort == "" {
+		hashShort = meta["diffSha256"]
+	}
+	bodyPreview := meta["bodyPreview"]
+	fromVal := meta["from"]
+	toVal := meta["to"]
+	subjVal := meta["subject"]
+	spaceName := meta["spaceName"]
+	spaceID := meta["spaceId"]
+	if prop.ActionType == "gchat_send" && meta["draftId"] != "" {
+		if spec, dErr := gchat.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
+			bodyPreview = spec.Body
+			hashShort = spec.ContentHash
+			if spec.From != "" {
+				fromVal = spec.From
+			}
+			if spec.SpaceName != "" {
+				spaceName = spec.SpaceName
+			}
+			if spec.SpaceID != "" {
+				spaceID = spec.SpaceID
+			}
+		}
+	} else if prop.ActionType == "gmail_send" && meta["draftId"] != "" {
+		if spec, dErr := gmail.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
+			bodyPreview = spec.Body
+			hashShort = spec.ContentHash
+			if spec.From != "" {
+				fromVal = spec.From
+			}
+			if spec.To != "" {
+				toVal = spec.To
+			}
+			if spec.Subject != "" {
+				subjVal = spec.Subject
+			}
+		}
+	}
+	if len(hashShort) > 12 {
+		hashShort = hashShort[:12]
+	}
+	shaShort := prop.SHA256
+	if len(shaShort) > 12 {
+		shaShort = shaShort[:12]
+	}
+	var canonicalQ string
+	if prop.ActionType == "gchat_send" {
+		threadLabel := meta["threadId"]
+		if threadLabel == "" {
+			threadLabel = "(new message)"
+		}
+		canonicalQ = fmt.Sprintf(
+			"Approve sending Google Chat Message %s?\n• Account: %s (%s)\n• Space: %s [%s]\n• Thread: %s\n• Message: %s\n• Draft Hash: %s",
+			meta["draftId"],
+			meta["account"],
+			fromVal,
+			spaceName,
+			spaceID,
+			threadLabel,
+			bodyPreview,
+			hashShort,
+		)
+	} else if prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch" || prop.ActionType == "rsi_overlay" {
+		canonicalQ = fmt.Sprintf(
+			"Approve RSI Self-Improvement Patch %s (%s)?\n• Hypothesis: %s (%s)\n• Fault Layer: %s\n• Target Files: %s\n• Verification Scorecard: %s\n• Diff SHA-256: %s\n• Diff Preview:\n%s",
+			prop.ID,
+			meta["ringLabel"],
+			meta["rsiId"],
+			meta["title"],
+			meta["faultLayer"],
+			meta["targetFiles"],
+			meta["gateSummary"],
+			hashShort,
+			meta["canonicalDiffPreview"],
+		)
+	} else if prop.ActionType == "gmail_send" {
+		canonicalQ = fmt.Sprintf(
+			"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
+			meta["draftId"],
+			fromVal,
+			toVal,
+			subjVal,
+			bodyPreview,
+			hashShort,
+		)
+	} else {
+		canonicalQ = fmt.Sprintf(
+			"Approve outbound action %s (%s)?\n• Summary: %s\n• Command: %s",
+			prop.ID,
+			prop.ActionType,
+			prop.Summary,
+			prop.Command,
+		)
+	}
+	if hasPIIWarning {
+		canonicalQ = fmt.Sprintf("⚠️ [PII WARNING: %s]\n%s", strings.Join(prop.RiskFlags, ", "), canonicalQ)
+	}
+	approveOpt := fmt.Sprintf("(Recommended) Approve (%s · sha256:%s)", prop.ID, shaShort)
+	if askRec, aErr := approvals.RecordAsk(vaultDir, prop.ID, convID, transcriptPath, time.Now()); aErr == nil && askRec.NonceCode != "" {
+		approveOpt = fmt.Sprintf("(Recommended) Approve (%s · sha256:%s · code:%s)", prop.ID, shaShort, askRec.NonceCode)
+	}
+
+	opts := []string{
+		approveOpt,
+		fmt.Sprintf("Reject (%s)", prop.ID),
+	}
+	var customOpts []string
+	seenCustom := make(map[string]bool)
+	for _, rawOpt := range origOpts {
+		clean := strings.TrimSpace(rawOpt)
+		if isStandardOrSpoofedApprovalOption(clean) || strings.Contains(strings.ToLower(clean), "code:") || strings.Contains(clean, prop.ID) {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if !seenCustom[key] {
+			seenCustom[key] = true
+			customOpts = append(customOpts, clean)
+		}
+	}
+	if len(customOpts) > 0 {
+		opts = append(opts, customOpts...)
+	} else {
+		opts = append(opts, "Keep pending")
+	}
+
+	return map[string]interface{}{
+		"question":        canonicalQ,
+		"is_multi_select": false,
+		"options":         opts,
+	}
+}
+
+func rewriteAskQuestionsSurgical(vaultDir string, args map[string]interface{}, pending []approvals.Proposal, convID, transcriptPath string) (map[string]interface{}, bool) {
+	rawList, ok := args["questions"].([]interface{})
+	if !ok || len(rawList) == 0 {
+		return nil, false
+	}
+	updatedList := make([]interface{}, len(rawList))
+	modifiedAny := false
+
+	for i, item := range rawList {
+		qMap, isMap := item.(map[string]interface{})
+		if !isMap {
+			updatedList[i] = item
+			continue
+		}
+		qText, _ := qMap["question"].(string)
+		var origOpts []string
+		if rawOpts, hasOpts := qMap["options"].([]interface{}); hasOpts {
+			for _, o := range rawOpts {
+				if s, okS := o.(string); okS {
+					origOpts = append(origOpts, s)
+				}
+			}
+		} else if strOpts, hasStrOpts := qMap["options"].([]string); hasStrOpts {
+			origOpts = append(origOpts, strOpts...)
+		}
+
+		var matchedProp *approvals.Proposal
+		for idx := range pending {
+			pid := pending[idx].ID
+			if strings.Contains(qText, pid) {
+				matchedProp = &pending[idx]
+				break
+			}
+			for _, o := range origOpts {
+				if strings.Contains(o, pid) {
+					matchedProp = &pending[idx]
+					break
+				}
+			}
+			if matchedProp != nil {
+				break
+			}
+		}
+
+		if matchedProp != nil {
+			updatedList[i] = buildCanonicalProposalQuestion(vaultDir, *matchedProp, convID, transcriptPath, origOpts)
+			modifiedAny = true
+		} else {
+			updatedList[i] = qMap
+		}
+	}
+
+	if !modifiedAny {
+		return nil, false
+	}
+	overwriteArgs := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		overwriteArgs[k] = v
+	}
+	overwriteArgs["questions"] = updatedList
+	return overwriteArgs, true
 }
 
 func compactionNudgeMarkerPath(vaultDir, convID string) string {
@@ -1121,6 +1379,24 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 				"reason":   "Blocked by agy-hq outbound quote-safety policy: double-quoted --body/--message containing '$' risks silent bash variable expansion (e.g. \"$382.34\" -> \"82.34\"). Use --body-stdin with single-quoted heredoc instead: `cat <<'EOF' | ./bin/hq gchat propose --to=\"...\" --body-stdin`.",
 			})
 		}
+		isAuto := isAutoConversation(vaultDir, payload.ConversationID)
+		if isAuto && (strings.Contains(cmdLine, "config.yaml") || strings.Contains(cmdLine, "hq-extension.json")) {
+			if strings.ContainsAny(cmdLine, ">") ||
+				strings.Contains(cmdLine, "sed ") ||
+				strings.Contains(cmdLine, "tee ") ||
+				strings.Contains(cmdLine, "cp ") ||
+				strings.Contains(cmdLine, "mv ") ||
+				strings.Contains(cmdLine, "rm ") ||
+				strings.Contains(cmdLine, "python") ||
+				strings.Contains(cmdLine, "perl") {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   "Blocked by agy-hq policy self-tamper guard: autonomous [Auto] sessions cannot modify config.yaml or hq-extension.json.",
+				})
+			}
+		}
+
+		pol, _, _ := approvals.LoadPolicy(vaultDir)
 		checkLine := cmdLine
 		if reHQPropose.MatchString(cmdLine) {
 			if reDoubleQuotedCmdSubst.MatchString(cmdLine) {
@@ -1129,30 +1405,45 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 					"reason":   "Blocked by agy-hq approval policy: command substitution ($(...) or backticks) inside double-quoted `hq propose --cmd=\"...\"` executes immediately before approval. Use single quotes (`--cmd='...'`) or literal strings.",
 				})
 			}
-			checkLine = reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)
-		}
-		for _, re := range outboundCommandPatterns {
-			if re.MatchString(checkLine) {
-				resp := map[string]interface{}{
-					"decision": "deny",
-					"reason": fmt.Sprintf(
-						"Blocked by agy-hq approval policy: irreversible outbound command %q must not be executed directly. Stage it using `./bin/hq propose --type=external_action --summary=\"...\" --cmd=%q` and ask the user via `ask_question`.",
-						cmdLine, cmdLine,
-					),
+			if pol.RejectNoopCommands {
+				if hasCmd, cmdVal, argvVal := extractProposeCmdForValidation(cmdLine); hasCmd {
+					if vErr := approvals.ValidateDeterministicCommand(cmdVal, argvVal); vErr != nil {
+						return json.NewEncoder(w).Encode(map[string]interface{}{
+							"decision": "deny",
+							"reason":   fmt.Sprintf("Blocked by agy-hq approval policy: %v", vErr),
+						})
+					}
 				}
-				return json.NewEncoder(w).Encode(resp)
 			}
+			checkLine = stripProposeInnerCommand(cmdLine)
 		}
-		if isAutoConversation(vaultDir, payload.ConversationID) {
-			if grayHit, grayCategory := classifyUnattendedAutoCommand(checkLine); grayHit {
-				return json.NewEncoder(w).Encode(map[string]interface{}{
-					"decision": "deny",
-					"reason": fmt.Sprintf(
-						"Blocked by agy-hq Unattended [Auto] Gray-Zone policy (%s): autonomous background runs may not execute external mutating command %q directly. Stage it via `./bin/hq propose --type=external_action --summary=\"...\" --cmd=%q` for human review.",
-						grayCategory, cmdLine, cmdLine,
-					),
-				})
+
+		workDir := ""
+		if len(payload.WorkspacePaths) > 0 {
+			workDir = payload.WorkspacePaths[0]
+		}
+		if eval := approvals.EvaluateCommand(pol, checkLine, isAuto, workDir); eval.Gated {
+			var reason string
+			if isAuto {
+				reason = fmt.Sprintf(
+					"Blocked by agy-hq Unattended [Auto] policy (%s): autonomous background runs may not execute external mutating command %q directly. Stage it via `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` for human review.",
+					eval.RuleID, cmdLine, eval.RuleID, cmdLine,
+				)
+			} else if eval.Mode == approvals.ModeThirdPartyOnly {
+				reason = fmt.Sprintf(
+					"Blocked by agy-hq approval policy (%s, target=%q not in approvals.owned_repos): outbound command %q must not be executed directly. Stage it using `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` and ask the user via `ask_question` (or configure `approvals.owned_repos` in `config.yaml`).",
+					eval.RuleID, eval.TargetRepo, cmdLine, eval.RuleID, cmdLine,
+				)
+			} else {
+				reason = fmt.Sprintf(
+					"Blocked by agy-hq approval policy (%s): irreversible outbound command %q must not be executed directly. Stage it using `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` and ask the user via `ask_question`.",
+					eval.RuleID, cmdLine, eval.RuleID, cmdLine,
+				)
 			}
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   reason,
+			})
 		}
 	}
 
@@ -1222,6 +1513,46 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 					})
 				}
 			}
+
+			canonCfgPath := filepath.Join(canonVault, "config.yaml")
+			if canonPath == canonCfgPath || filepath.Base(canonPath) == "hq-extension.json" {
+				if isAutoConversation(vaultDir, payload.ConversationID) {
+					return json.NewEncoder(w).Encode(map[string]interface{}{
+						"decision": "deny",
+						"reason":   "Blocked by agy-hq policy self-tamper guard: autonomous [Auto] sessions cannot modify config.yaml or hq-extension.json.",
+					})
+				}
+				if canonPath == canonCfgPath {
+					simContent := ""
+					hasSim := false
+					if payload.ToolCall.Name == "write_file" {
+						c, _ := payload.ToolCall.Args["Content"].(string)
+						appFlag, _ := payload.ToolCall.Args["Append"].(bool)
+						if appFlag {
+							old, _ := os.ReadFile(canonCfgPath)
+							simContent = string(old) + c
+						} else {
+							simContent = c
+						}
+						hasSim = true
+					} else if payload.ToolCall.Name == "edit_file" {
+						target, _ := payload.ToolCall.Args["Target"].(string)
+						repl, _ := payload.ToolCall.Args["Replacement"].(string)
+						if old, rErr := os.ReadFile(canonCfgPath); rErr == nil && target != "" {
+							simContent = strings.ReplaceAll(string(old), target, repl)
+							hasSim = true
+						}
+					}
+					if hasSim {
+						if _, vErr := approvals.ValidateConfigYAML(simContent); vErr != nil {
+							return json.NewEncoder(w).Encode(map[string]interface{}{
+								"decision": "deny",
+								"reason":   fmt.Sprintf("Blocked by agy-hq approval policy validator: invalid approvals configuration in config.yaml: %v", vErr),
+							})
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -1282,7 +1613,7 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		}
 	}
 
-	// Canonical Proposal Preview + Human-Presence Challenge Nonce overwrite on ask_question for ALL pending proposals
+	// Surgical Per-Question Proposal Preview + Human-Presence Challenge Nonce overwrite on ask_question (RFC-0021 §4.3D)
 	if payload.ToolCall.Name == "ask_question" {
 		if isAutoConversation(vaultDir, payload.ConversationID) {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1291,135 +1622,11 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 			})
 		}
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
-			rawArgs, _ := json.Marshal(payload.ToolCall.Args)
-			rawStr := string(rawArgs)
-			for _, prop := range pending {
-				if strings.Contains(rawStr, prop.ID) {
-					hasPIIWarning := len(prop.RiskFlags) > 0
-					meta := prop.Metadata
-					if meta == nil {
-						meta = map[string]string{}
-					}
-					hashShort := meta["contentHash"]
-					if hashShort == "" {
-						hashShort = meta["diffSha256"]
-					}
-					bodyPreview := meta["bodyPreview"]
-					fromVal := meta["from"]
-					toVal := meta["to"]
-					subjVal := meta["subject"]
-					spaceName := meta["spaceName"]
-					spaceID := meta["spaceId"]
-					if prop.ActionType == "gchat_send" && meta["draftId"] != "" {
-						if spec, dErr := gchat.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
-							bodyPreview = spec.Body
-							hashShort = spec.ContentHash
-							if spec.From != "" {
-								fromVal = spec.From
-							}
-							if spec.SpaceName != "" {
-								spaceName = spec.SpaceName
-							}
-							if spec.SpaceID != "" {
-								spaceID = spec.SpaceID
-							}
-						}
-					} else if prop.ActionType == "gmail_send" && meta["draftId"] != "" {
-						if spec, dErr := gmail.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
-							bodyPreview = spec.Body
-							hashShort = spec.ContentHash
-							if spec.From != "" {
-								fromVal = spec.From
-							}
-							if spec.To != "" {
-								toVal = spec.To
-							}
-							if spec.Subject != "" {
-								subjVal = spec.Subject
-							}
-						}
-					}
-					if len(hashShort) > 12 {
-						hashShort = hashShort[:12]
-					}
-					shaShort := prop.SHA256
-					if len(shaShort) > 12 {
-						shaShort = shaShort[:12]
-					}
-					var canonicalQ string
-					if prop.ActionType == "gchat_send" {
-						threadLabel := meta["threadId"]
-						if threadLabel == "" {
-							threadLabel = "(new message)"
-						}
-						canonicalQ = fmt.Sprintf(
-							"Approve sending Google Chat Message %s?\n• Account: %s (%s)\n• Space: %s [%s]\n• Thread: %s\n• Message: %s\n• Draft Hash: %s",
-							meta["draftId"],
-							meta["account"],
-							fromVal,
-							spaceName,
-							spaceID,
-							threadLabel,
-							bodyPreview,
-							hashShort,
-						)
-					} else if prop.ActionType == "rsi_patch" || prop.ActionType == "rsi_skill_patch" || prop.ActionType == "rsi_overlay" {
-						canonicalQ = fmt.Sprintf(
-							"Approve RSI Self-Improvement Patch %s (%s)?\n• Hypothesis: %s (%s)\n• Fault Layer: %s\n• Target Files: %s\n• Verification Scorecard: %s\n• Diff SHA-256: %s\n• Diff Preview:\n%s",
-							prop.ID,
-							meta["ringLabel"],
-							meta["rsiId"],
-							meta["title"],
-							meta["faultLayer"],
-							meta["targetFiles"],
-							meta["gateSummary"],
-							hashShort,
-							meta["canonicalDiffPreview"],
-						)
-					} else if prop.ActionType == "gmail_send" {
-						canonicalQ = fmt.Sprintf(
-							"Approve sending Gmail Draft %s?\n• From: %s\n• To: %s\n• Subject: %s\n• Body: %s\n• Draft Hash: %s",
-							meta["draftId"],
-							fromVal,
-							toVal,
-							subjVal,
-							bodyPreview,
-							hashShort,
-						)
-					} else {
-						canonicalQ = fmt.Sprintf(
-							"Approve outbound action %s (%s)?\n• Summary: %s\n• Command: %s",
-							prop.ID,
-							prop.ActionType,
-							prop.Summary,
-							prop.Command,
-						)
-					}
-					if hasPIIWarning {
-						canonicalQ = fmt.Sprintf("⚠️ [PII WARNING: %s]\n%s", strings.Join(prop.RiskFlags, ", "), canonicalQ)
-					}
-					approveOpt := fmt.Sprintf("(Recommended) Approve (%s · sha256:%s)", prop.ID, shaShort)
-					if askRec, aErr := approvals.RecordAsk(vaultDir, prop.ID, payload.ConversationID, payload.TranscriptPath, time.Now()); aErr == nil && askRec.NonceCode != "" {
-						approveOpt = fmt.Sprintf("(Recommended) Approve (%s · sha256:%s · code:%s)", prop.ID, shaShort, askRec.NonceCode)
-					}
-					overwriteArgs := map[string]interface{}{
-						"questions": []map[string]interface{}{
-							{
-								"question":        canonicalQ,
-								"is_multi_select": false,
-								"options": []string{
-									approveOpt,
-									fmt.Sprintf("Reject (%s)", prop.ID),
-									"Keep pending",
-								},
-							},
-						},
-					}
-					return json.NewEncoder(w).Encode(map[string]interface{}{
-						"decision":  "allow",
-						"overwrite": overwriteArgs,
-					})
-				}
+			if overwriteArgs, ok := rewriteAskQuestionsSurgical(vaultDir, payload.ToolCall.Args, pending, payload.ConversationID, payload.TranscriptPath); ok {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision":  "allow",
+					"overwrite": overwriteArgs,
+				})
 			}
 		}
 	}
@@ -1935,6 +2142,8 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				_ = os.Remove(compactionNudgeMarkerPath(vaultDir, payload.ConversationID))
 			}
 			_, _ = kernel.CompleteConversationEvents(vaultDir, payload.ConversationID, time.Now())
+			_, _ = approvals.ReconcileAskRejections(vaultDir, payload.ConversationID, payload.TranscriptPath, time.Now())
+			_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
 
 			if payload.TranscriptPath != "" {
 				_, _ = obs.ReconcileSubagentAttribution(vaultDir)

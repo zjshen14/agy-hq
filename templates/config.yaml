@@ -68,3 +68,53 @@ spaces:
 
 console:
   listen_addr: "127.0.0.1:4242"
+
+approvals:
+  # Owned GitHub/Git Forge repository globs (e.g. ["alice/*", "alice-org/*"]) used by third_party_only rules.
+  owned_repos: []
+  ask_ttl: "24h"
+  proposal_ttl: "24h"
+  reject_noop_commands: true
+  # Modes: always | third_party_only | auto_only | never
+  # Add custom categories (e.g. cloud_infra, payments) below with zero Go changes or rebuilds.
+  rules:
+    - id: messaging
+      description: "Outbound email, chat, and direct external messaging"
+      mode: always
+      commands:
+        - '\bgws\s+(gmail|chat)\s+(send|create|post|patch|update|delete)\b'
+        - '(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:["'']?(?:\S+/)?language_server["'']?\s+plugin-cli\s+)?["'']?(?:\S+/)?gmail(?:-[0-9]+)?["'']?\s+[^;&|\n]*\b(?:mutate\s+(?:send-message|send-draft|send-with-attachment|send|reply|forward)|send-message|send-draft)\b'
+        - '\bhq\s+gmail\s+(?:send|reply|forward|send-draft)\b'
+        - '\bhq\s+gchat\s+(?:send|reply|forward|send-draft)\b'
+        - '\bchat\.googleapis\.com/v1/spaces/[^\s]*messages\b'
+    - id: release_publish
+      description: "Public releases, package registries, and production deployments"
+      mode: always
+      commands:
+        - '\b(?:gh\s+release\s+create|npm\s+publish|pnpm\s+publish|yarn\s+publish|cargo\s+publish|twine\s+upload|gem\s+push|docker\s+push|helm\s+push|vercel\s+(?:--prod|deploy\s+--prod)|fly\s+deploy|netlify\s+deploy\s+--prod)\b'
+    - id: pr_merge
+      description: "Pull request merges (third-party always gated; owned repos auto-only)"
+      mode: third_party_only
+      target_resolver: github_pr
+      commands:
+        - '\bgh\s+pr\s+merge\b'
+    - id: forge_git
+      description: "Git pushes/tags and owned-repo issue/PR management"
+      mode: auto_only
+      target_resolver: git_remote
+      commands:
+        - '\bgit\s+push\b'
+        - '\bgh\s+(?:(?:pr|issue)\s+(?:create|close|reopen|comment|edit|ready|review)|repo\s+(?:delete|rename)|api\b[^\n]*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)|(?:\s|^)-[fF]\s|--field\b|--raw-field\b))'
+        - '\b(?:terraform\s+(?:apply|destroy)|kubectl\s+(?:apply|delete|patch))\b'
+    - id: rsi_apply
+      description: "Ring-0 self-modification, trust pins, & local console approval API"
+      mode: always
+      commands:
+        - '\bhq\s+(?:rsi\s+apply|connector\s+apply-offer|extension\s+apply-trust)\b'
+        - '(?:https?://[^\s"'']*|127\.0\.0\.1:\d+|localhost:\d+)/api/(?:approve|reject)\b'
+    # Example custom category (uncomment to activate):
+    # - id: cloud_infra
+    #   description: "Production infrastructure state changes"
+    #   mode: always
+    #   commands:
+    #     - '\b(?:terraform|tofu|pulumi)\s+(?:apply|destroy)\b'

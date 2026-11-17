@@ -13,8 +13,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 )
+
+func init() {
+	approvals.RegisteredExtensionApprovalRulesProvider = func(vaultDir string) []approvals.ExtensionPackRules {
+		packs := LoadActiveTrustedPacks(vaultDir)
+		if len(packs) == 0 {
+			return nil
+		}
+		out := make([]approvals.ExtensionPackRules, 0, len(packs))
+		for _, dp := range packs {
+			if len(dp.Manifest.Components.ApprovalRules) == 0 && len(dp.Manifest.Components.OwnedRepos) == 0 {
+				continue
+			}
+			out = append(out, approvals.ExtensionPackRules{
+				PackID:     dp.ID,
+				OwnedRepos: dp.Manifest.Components.OwnedRepos,
+				Rules:      dp.Manifest.Components.ApprovalRules,
+			})
+		}
+		return out
+	}
+}
 
 const (
 	PackSchemaVersion     = 1
@@ -103,6 +125,8 @@ type PackComponents struct {
 	FrontDeskOverlays []OverlaySpec                `json:"front_desk_overlays,omitempty"`
 	RoutingDefaults   *PackRoutingDefaults         `json:"routing_defaults,omitempty"`
 	ConnectorDefaults map[string]string            `json:"connector_defaults,omitempty"`
+	ApprovalRules     []approvals.Rule             `json:"approval_rules,omitempty"`
+	OwnedRepos        []string                     `json:"owned_repos,omitempty"`
 }
 
 // PackManifest represents <plugin>/hq-extension.json.
@@ -285,6 +309,23 @@ func LintPack(packDir string) ([]string, error) {
 			if strings.Contains(lower, forbidden) {
 				return nil, fmt.Errorf("front_desk_overlay %s contains forbidden safety-bypass phrase %q", ov.Path, forbidden)
 			}
+		}
+	}
+
+	// 5. Validate approval_rules schema, regex compilation, and monotonic security lattice
+	seenApprovalRuleIDs := make(map[string]bool)
+	for _, ar := range m.Components.ApprovalRules {
+		rid := strings.TrimSpace(ar.ID)
+		if seenApprovalRuleIDs[rid] {
+			return nil, fmt.Errorf("duplicate approval_rules id %q in hq-extension.json", rid)
+		}
+		seenApprovalRuleIDs[rid] = true
+		isBuiltinOverride := approvals.CoreNonDisableablePackRules[rid] || rid == "pr_merge" || rid == "forge_git"
+		if err := approvals.ValidateRule(ar, isBuiltinOverride); err != nil {
+			return nil, fmt.Errorf("approval_rules: %w", err)
+		}
+		if approvals.CoreNonDisableablePackRules[rid] && strings.ToLower(strings.TrimSpace(ar.Mode)) != approvals.ModeAlways {
+			return nil, fmt.Errorf("approval_rules %q sets mode=%q (companion packs cannot weaken core always-gated rules; configure Vault config.yaml instead)", rid, ar.Mode)
 		}
 	}
 
