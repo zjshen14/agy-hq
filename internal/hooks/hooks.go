@@ -247,14 +247,17 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				matchedTask = t
 				hasMatchedTask = true
 			} else {
-				if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
+				if linked, okLink := kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName); okLink {
+					matchedTask = linked
+					hasMatchedTask = true
+				} else if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
 					// Known nested descendant subagent: do NOT register into tasks.json!
 					isSubagent = true
-				} else if nestedSub, isNested := kernel.PopPendingNestedSubagent(vaultDir, 60*time.Minute); isNested {
+				} else if nestedSub, isNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 3*time.Minute); isNested {
 					_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
 					// Nested descendant subagent: do NOT register into tasks.json!
 					isSubagent = true
-				} else if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
+				} else if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 3*time.Minute); found {
 					isSubagent = true
 					modelName := sub.Model
 					if modelName == "" {
@@ -276,9 +279,6 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 					_ = kernel.RegisterTask(vaultDir, t)
 					matchedTask = t
-					hasMatchedTask = true
-				} else if linked, okLink := kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName); okLink {
-					matchedTask = linked
 					hasMatchedTask = true
 				}
 			}
@@ -930,6 +930,40 @@ func buildCanonicalProposalQuestion(vaultDir string, prop approvals.Proposal, co
 		"is_multi_select": false,
 		"options":         opts,
 	}
+}
+
+func askQuestionsReferenceProposal(args map[string]interface{}, pending []approvals.Proposal) string {
+	rawList, ok := args["questions"].([]interface{})
+	if !ok || len(rawList) == 0 || len(pending) == 0 {
+		return ""
+	}
+	for _, item := range rawList {
+		qMap, isMap := item.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+		qText, _ := qMap["question"].(string)
+		for idx := range pending {
+			pid := pending[idx].ID
+			if strings.Contains(qText, pid) {
+				return pid
+			}
+			if rawOpts, hasOpts := qMap["options"].([]interface{}); hasOpts {
+				for _, o := range rawOpts {
+					if s, okS := o.(string); okS && strings.Contains(s, pid) {
+						return pid
+					}
+				}
+			} else if strOpts, hasStrOpts := qMap["options"].([]string); hasStrOpts {
+				for _, s := range strOpts {
+					if strings.Contains(s, pid) {
+						return pid
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func rewriteAskQuestionsSurgical(vaultDir string, args map[string]interface{}, pending []approvals.Proposal, convID, transcriptPath string) (map[string]interface{}, bool) {
@@ -1622,6 +1656,14 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 			})
 		}
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
+			if matchedID := askQuestionsReferenceProposal(payload.ToolCall.Args, pending); matchedID != "" {
+				if _, isTaintedCaller := taint.Check(vaultDir, payload.ConversationID); isTaintedCaller || kernel.IsSubagentConversation(vaultDir, payload.ConversationID) {
+					return json.NewEncoder(w).Encode(map[string]interface{}{
+						"decision": "deny",
+						"reason":   fmt.Sprintf("Blocked by agy-hq Human-Presence Approval policy: subagents and quarantined sessions cannot bind or execute 1-tap approval challenges directly for %s. Report %s back to your parent Task Conversation or `[HQ] Front Desk` so the user can approve it there (or approve in the :4242 Console).", matchedID, matchedID),
+					})
+				}
+			}
 			if overwriteArgs, ok := rewriteAskQuestionsSurgical(vaultDir, payload.ToolCall.Args, pending, payload.ConversationID, payload.TranscriptPath); ok {
 				return json.NewEncoder(w).Encode(map[string]interface{}{
 					"decision":  "allow",
@@ -1993,7 +2035,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				} else {
 					isNested := kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID)
 					if !alreadyTracked && !isNested {
-						if nestedSub, foundNested := kernel.PopPendingNestedSubagent(vaultDir, 60*time.Minute); foundNested {
+						if nestedSub, foundNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 60*time.Minute); foundNested {
 							_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
 							isNested = true
 						}
@@ -2001,7 +2043,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 
 					if !alreadyTracked && !isNested {
 						// Subagent fallback: match against pending queue if not yet registered
-						if sub, found := kernel.PopPendingSubagent(vaultDir, 60*time.Minute); found {
+						if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 60*time.Minute); found {
 							modelName := sub.Model
 							if modelName == "" {
 								modelName = payload.ModelName

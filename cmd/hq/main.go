@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -1717,6 +1718,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq daemon security error: refusing to bind HTTP console to non-loopback address %q (use 127.0.0.1:<port> or pass --allow-remote)\n", *addr)
 			os.Exit(1)
 		}
+		if strings.TrimSpace(os.Getenv("GOMEMLIMIT")) == "" {
+			debug.SetMemoryLimit(512 << 20)
+		}
 
 		if err := kernel.RecordDaemonStart(vaultDir, *addr); err != nil {
 			fmt.Fprintf(os.Stderr, "hq daemon error: %v\n", err)
@@ -1753,7 +1757,7 @@ func main() {
 						fmt.Fprintf(os.Stderr, "hq daemon wake dispatch error: %v\n", dErr)
 					}
 					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-					if len(acts) > 0 || outDelivered > 0 {
+					if kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-fastTicker.C:
@@ -1771,14 +1775,14 @@ func main() {
 							syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
 						}
 					}
-					if len(fired) > 0 || len(acts) > 0 || outDelivered > 0 || syncedSidebar > 0 {
+					if len(fired) > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || syncedSidebar > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-cronTicker.C:
 					now := time.Now()
 					gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
 					acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-					if len(gkActs) > 0 || len(acts) > 0 {
+					if len(gkActs) > 0 || kernel.HasMaterialDispatchActions(acts) {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-hbTicker.C:
@@ -1789,14 +1793,23 @@ func main() {
 		}()
 
 		handler := webui.NewHandler(vaultDir)
+		newBoundedHTTPServer := func(listen string) *http.Server {
+			return &http.Server{
+				Addr:              listen,
+				Handler:           handler,
+				ReadHeaderTimeout: 5 * time.Second,
+				WriteTimeout:      30 * time.Second,
+				IdleTimeout:       60 * time.Second,
+			}
+		}
 		if *addr != "127.0.0.1:4242" && !strings.HasSuffix(*addr, ":4242") {
 			go func() {
-				_ = http.ListenAndServe("127.0.0.1:4242", handler)
+				_ = newBoundedHTTPServer("127.0.0.1:4242").ListenAndServe()
 			}()
 		}
 
 		fmt.Printf("Starting agy-hq Console & Daemon on http://%s (Vault: %s)\n", *addr, vaultDir)
-		if err := http.ListenAndServe(*addr, handler); err != nil {
+		if err := newBoundedHTTPServer(*addr).ListenAndServe(); err != nil {
 			fmt.Fprintf(os.Stderr, "hq daemon server error: %v\n", err)
 			os.Exit(1)
 		}

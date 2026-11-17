@@ -932,3 +932,79 @@ func TestReconcileFrontDeskFiveCronsAndDaemonMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestSubagentPopCallerGuardsAndNestedTaskPoisonRecovery(t *testing.T) {
+	vaultDir := t.TempDir()
+	parentID := "11111111-1111-1111-1111-111111111111"
+	otherTaskID := "22222222-2222-2222-2222-222222222222"
+	realChildID := "33333333-3333-3333-3333-333333333333"
+
+	if _, err := QueuePendingNestedSubagent(vaultDir, parentID, "[quick] repo: Research Helper", "flash_lite", "Inspect module imports and return findings"); err != nil {
+		t.Fatalf("QueuePendingNestedSubagent: %v", err)
+	}
+
+	// 1. Self-pop by the parent conversation itself (e.g., on Stop hook) MUST be rejected!
+	if _, ok := PopPendingNestedSubagentForCaller(vaultDir, parentID, "", 60*time.Minute); ok {
+		t.Fatalf("expected PopPendingNestedSubagentForCaller to reject self-pop when callerConvID == parentConvID")
+	}
+
+	// 2. Unrelated conversation with a mismatched prompt MUST NOT hijack the pending nested subagent!
+	if _, ok := PopPendingNestedSubagentForCaller(vaultDir, otherTaskID, "Dedicated sidebar task conversation for roadmap RFC", 60*time.Minute); ok {
+		t.Fatalf("expected PopPendingNestedSubagentForCaller to reject mismatched prompt")
+	}
+
+	// 3. Genuine child conversation with matching prompt pops cleanly.
+	popped, ok := PopPendingNestedSubagentForCaller(vaultDir, realChildID, "Inspect module imports and return findings", 60*time.Minute)
+	if !ok || popped.ParentConversationID != parentID {
+		t.Fatalf("expected genuine child to pop pending nested subagent, got ok=%v item=%+v", ok, popped)
+	}
+
+	// 4. RecordNestedConversation rejects self-parenting, and RegisterTask(Kind="task") + CleanNestedTasks scrub poisoned task IDs.
+	_ = RecordNestedConversation(vaultDir, parentID, parentID)
+	if IsNestedSubagentConversation(vaultDir, parentID) {
+		t.Fatalf("expected self-parented RecordNestedConversation to be ignored")
+	}
+
+	// Simulate legacy poisoned nested_conversations.json containing an explicit top-level task ID and a self-parented record.
+	rawPoison := `[
+  {"conversationId":"` + otherTaskID + `","parentConversationId":"` + parentID + `","createdAt":"2026-11-17T00:00:00Z"},
+  {"conversationId":"` + parentID + `","parentConversationId":"` + parentID + `","createdAt":"2026-11-17T00:00:01Z"},
+  {"conversationId":"` + realChildID + `","parentConversationId":"` + parentID + `","createdAt":"2026-11-17T00:00:02Z"}
+]`
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+	_ = os.WriteFile(nestedConversationsFilePath(vaultDir), []byte(rawPoison), 0o644)
+
+	if err := RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "roadmap-rfc",
+		Title:          "[Task:core] Roadmap RFC",
+		Kind:           "task",
+		ConversationID: otherTaskID,
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("RegisterTask: %v", err)
+	}
+	if IsNestedSubagentConversation(vaultDir, otherTaskID) {
+		t.Fatalf("expected RegisterTask(Kind=task) to scrub poisoned nested_conversations.json entry")
+	}
+	if IsSubagentConversation(vaultDir, otherTaskID) {
+		t.Fatalf("expected IsSubagentConversation=false for explicit Kind=task conversation")
+	}
+	if !IsSubagentConversation(vaultDir, realChildID) {
+		t.Fatalf("expected IsSubagentConversation=true for genuine nested child conversation")
+	}
+
+	// Re-inject poison and verify CleanNestedTasks scrubs explicit Kind="task" and self-parented IDs while keeping genuine child.
+	_ = os.WriteFile(nestedConversationsFilePath(vaultDir), []byte(rawPoison), 0o644)
+	if IsSubagentConversation(vaultDir, otherTaskID) {
+		t.Fatalf("expected IsSubagentConversation=false for explicit Kind=task even before CleanNestedTasks runs")
+	}
+	if _, err := CleanNestedTasks(vaultDir); err != nil {
+		t.Fatalf("CleanNestedTasks: %v", err)
+	}
+	if IsNestedSubagentConversation(vaultDir, otherTaskID) || IsNestedSubagentConversation(vaultDir, parentID) {
+		t.Fatalf("expected CleanNestedTasks to scrub poisoned task and self-parented IDs")
+	}
+	if !IsNestedSubagentConversation(vaultDir, realChildID) {
+		t.Fatalf("expected CleanNestedTasks to preserve genuine nested child ID")
+	}
+}

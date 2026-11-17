@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/extension"
 )
 
 func TestManifestAndInstanceStrictValidation(t *testing.T) {
@@ -553,5 +555,152 @@ func TestClassifyGmailAutomationAndUrgency(t *testing.T) {
 	auto4, sec4, _ := classifyGmailAutomationAndUrgency(bounceMsg, "mailer-daemon@example.com", "delivery status notification (failure)", "Address not found")
 	if auto4 || !sec4 {
 		t.Fatalf("expected bounce notification to set hasSecurity=true and isBulkAutomated=false, got auto=%v sec=%v", auto4, sec4)
+	}
+}
+
+func TestGCalendarReadQuarantinedMockAndEventsFallbackWithWindowCache(t *testing.T) {
+	// 1. Mock mode ReadQuarantined on embedded gcalendar manifest
+	mockVault := t.TempDir()
+	mockDir := filepath.Join(mockVault, "memory", "gcalendar")
+	if err := os.MkdirAll(mockDir, 0o700); err != nil {
+		t.Fatalf("mkdir mockDir: %v", err)
+	}
+	if err := SaveInstance(context.Background(), mockVault, InstanceConfig{
+		SchemaVersion:  ConnectorSchemaVersion,
+		Connector:      "gcalendar",
+		DefaultAccount: "work",
+		Accounts: map[string]AccountInstance{
+			"work": {Email: "user@acme.com", TransportKind: "cli"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveInstance(mockVault): %v", err)
+	}
+	mockPayload := `{"events":[
+		{"item_id":"evt-mock-1","thread_key":"evt-mock-1","subject_or_room":"Architecture Sync","timestamp":"2026-11-17T16:00:00Z","sender":"lead@acme.com","body":"Discuss API roadmap"},
+		{"item_id":"evt-mock-2","thread_key":"evt-mock-2","subject_or_room":"1:1 Check-in","timestamp":"2026-11-17T17:00:00Z","sender":"mgr@acme.com","body":"Weekly sync"}
+	]}`
+	if err := os.WriteFile(filepath.Join(mockDir, "mock.json"), []byte(mockPayload), 0o600); err != nil {
+		t.Fatalf("write mock.json: %v", err)
+	}
+	qtMock, err := ReadQuarantined(context.Background(), mockVault, "gcalendar", "work", "evt-mock-2", false)
+	if err != nil {
+		t.Fatalf("ReadQuarantined(mock): %v", err)
+	}
+	if qtMock.ThreadKey != "evt-mock-2" || qtMock.SubjectOrRoom != "1:1 Check-in" || len(qtMock.Messages) != 1 || !strings.Contains(qtMock.Messages[0].Body, "Weekly sync") {
+		t.Fatalf("unexpected mock ReadQuarantined output: %+v", qtMock)
+	}
+
+	// 2. CLI mode where connector declares ONLY "events" verb (no single-item read_quarantined/get verb)
+	//    Verify fallback window fetch, synthesized event summary when body is empty, and 15s window cache deduplication!
+	cliVault := t.TempDir()
+	countFile := filepath.Join(t.TempDir(), "invocations.txt")
+	fakeCalBin := filepath.Join(t.TempDir(), "fake-cal-cli")
+	script := "#!/bin/sh\necho x >> \"" + countFile + "\"\ncat <<'EOF'\n" +
+		`[{"id":"evt-cli-a","title":"Design Review","start":"2026-11-17T18:00:00Z","htmlLink":"https://calendar.example.com/e/a"},{"id":"evt-cli-b","title":"Sprint Retro","start":"2026-11-17T19:00:00Z","htmlLink":"https://calendar.example.com/e/b"}]` +
+		"\nEOF\n"
+	if err := os.WriteFile(fakeCalBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fakeCalBin: %v", err)
+	}
+
+	ovrDir := filepath.Join(cliVault, "connectors", "gcalendar")
+	if err := os.MkdirAll(ovrDir, 0o755); err != nil {
+		t.Fatalf("mkdir ovrDir: %v", err)
+	}
+	customManifest := `{
+  "schema_version": 1,
+  "id": "gcalendar",
+  "capabilities": {
+    "brief": {"enabled": true, "quarantined": true},
+    "read_quarantined": {"enabled": true}
+  },
+  "driver": {
+    "builtin": "gcalendar"
+  },
+  "transport": {
+    "kind": "cli",
+    "cli": {
+      "path": "` + fakeCalBin + `",
+      "verbs": {
+        "events": ["events", "--start={{start}}", "--end={{end}}"]
+      },
+      "output": {
+        "events": {
+          "jsonmap": {
+            "item_id": "/id",
+            "thread_key": "/id",
+            "subject_or_room": "/title",
+            "timestamp": "/start",
+            "permalink": "/htmlLink"
+          }
+        }
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(ovrDir, "connector.json"), []byte(customManifest), 0o644); err != nil {
+		t.Fatalf("write override connector.json: %v", err)
+	}
+	bundle, err := extension.BuildTrustBundle(cliVault, "vault", "")
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	rawBundle, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal trust bundle: %v", err)
+	}
+	if err := extension.ApplyTrustBundle(cliVault, rawBundle); err != nil {
+		t.Fatalf("ApplyTrustBundle: %v", err)
+	}
+	if err := SaveInstance(context.Background(), cliVault, InstanceConfig{
+		SchemaVersion:  ConnectorSchemaVersion,
+		Connector:      "gcalendar",
+		DefaultAccount: "work",
+		Accounts: map[string]AccountInstance{
+			"work": {Email: "user@acme.com", TransportKind: "cli"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveInstance(cliVault): %v", err)
+	}
+
+	qtA, err := ReadQuarantined(context.Background(), cliVault, "gcalendar", "work", "evt-cli-a", false)
+	if err != nil {
+		t.Fatalf("ReadQuarantined(evt-cli-a): %v", err)
+	}
+	if qtA.SubjectOrRoom != "Design Review" || len(qtA.Messages) != 1 || !strings.Contains(qtA.Messages[0].Body, "Design Review") {
+		t.Fatalf("expected synthesized plain text summary for evt-cli-a, got %+v", qtA)
+	}
+	qtB, err := ReadQuarantined(context.Background(), cliVault, "gcalendar", "work", "evt-cli-b", false)
+	if err != nil {
+		t.Fatalf("ReadQuarantined(evt-cli-b): %v", err)
+	}
+	if qtB.SubjectOrRoom != "Sprint Retro" {
+		t.Fatalf("expected Sprint Retro for evt-cli-b, got %+v", qtB)
+	}
+	invBytes, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("read countFile: %v", err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(invBytes)), "\n"); len(lines) != 1 {
+		t.Fatalf("expected 15s window cache to invoke CLI once across 2 back-to-back event reads, got %d invocations", len(lines))
+	}
+}
+
+func TestRunSubprocessReportsParentDeadlineTimeout(t *testing.T) {
+	slowScript := filepath.Join(t.TempDir(), "slow.sh")
+	if err := os.WriteFile(slowScript, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write slowScript: %v", err)
+	}
+	parentCtx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	_, _, err := RunSubprocess(parentCtx, SubprocessSpec{
+		Binary:  slowScript,
+		Timeout: 10 * time.Second,
+	})
+	if err == nil {
+		t.Fatalf("expected RunSubprocess timeout error")
+	}
+	if strings.Contains(err.Error(), "after 10s") {
+		t.Fatalf("expected error to report parent context deadline (<1s) rather than spec 10s, got: %v", err)
 	}
 }

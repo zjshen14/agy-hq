@@ -421,3 +421,79 @@ func TestScheduledAutomationsVisibilityAndTriggerControls(t *testing.T) {
 		t.Fatalf("expected Scheduled Automations table with paused gmail-inbox-watch in CONSOLE.md, got:\n%s", md)
 	}
 }
+
+func TestWebUIConcurrentStateSingleflightCacheInvalidationAndPollingJS(t *testing.T) {
+	vaultDir := t.TempDir()
+	h := NewHandler(vaultDir)
+
+	reqRoot := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/", nil)
+	recRoot := httptest.NewRecorder()
+	h.ServeHTTP(recRoot, reqRoot)
+	if recRoot.Code != http.StatusOK {
+		t.Fatalf("GET / failed: %d", recRoot.Code)
+	}
+	html := recRoot.Body.String()
+	if !strings.Contains(html, "scheduleNextRefresh") || !strings.Contains(html, "AbortController") || !strings.Contains(html, "visibilitychange") {
+		t.Fatalf("expected non-reentrant scheduleNextRefresh + AbortController + visibilitychange in HTML")
+	}
+	if strings.Contains(html, "setInterval(refreshState") {
+		t.Fatalf("expected legacy reentrant setInterval(refreshState) to be removed")
+	}
+
+	// Fire concurrent GET /api/state calls to exercise singleflight + cache under -race
+	errs := make(chan error, 12)
+	for i := 0; i < 12; i++ {
+		go func() {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/api/state", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				errs <- os.ErrInvalid
+				return
+			}
+			errs <- nil
+		}()
+	}
+	for i := 0; i < 12; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent GET /api/state failed: %v", err)
+		}
+	}
+
+	// Mutating pending proposals must immediately invalidate the 2s read cache via Vault directory stamp
+	prop, err := approvals.Create(vaultDir, "release_publish", "Immediate cache invalidation check", "echo ok-now", "", "conv-cache-1")
+	if err != nil {
+		t.Fatalf("approvals.Create: %v", err)
+	}
+	reqAfter := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/api/state", nil)
+	recAfter := httptest.NewRecorder()
+	h.ServeHTTP(recAfter, reqAfter)
+	var st DashboardState
+	if err := json.Unmarshal(recAfter.Body.Bytes(), &st); err != nil {
+		t.Fatalf("unmarshal /api/state: %v", err)
+	}
+	if len(st.Pending) != 1 || st.Pending[0].ID != prop.ID {
+		t.Fatalf("expected immediate cache invalidation after approvals.Create, got pending=%+v", st.Pending)
+	}
+
+	// Calling SyncMarkdownConsole twice with unchanged state should skip redundant disk rewrites
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("first SyncMarkdownConsole: %v", err)
+	}
+	consolePath := filepath.Join(vaultDir, "CONSOLE.md")
+	st1, err := os.Stat(consolePath)
+	if err != nil {
+		t.Fatalf("stat CONSOLE.md: %v", err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("second SyncMarkdownConsole: %v", err)
+	}
+	st2, err := os.Stat(consolePath)
+	if err != nil {
+		t.Fatalf("stat CONSOLE.md second: %v", err)
+	}
+	if st2.ModTime().UnixNano() != st1.ModTime().UnixNano() {
+		t.Fatalf("expected unchanged CONSOLE.md body to skip disk rewrite (mtime1=%d mtime2=%d)", st1.ModTime().UnixNano(), st2.ModTime().UnixNano())
+	}
+}

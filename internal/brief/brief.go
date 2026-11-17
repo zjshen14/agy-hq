@@ -28,8 +28,9 @@ import (
 
 const (
 	BriefExtensionSchemaVersion = 1
-	DefaultOverallTimeout       = 5 * time.Second
-	DefaultSourceTimeout        = 3 * time.Second
+	DefaultOverallTimeout       = 15 * time.Second
+	MaxOverallTimeout           = 60 * time.Second
+	DefaultSourceTimeout        = 8 * time.Second
 	MaxChecklistBytes           = 16 * 1024
 )
 
@@ -459,13 +460,13 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 		now = time.Now()
 	}
 	overallTimeout := opts.OverallTimeout
-	if overallTimeout <= 0 || overallTimeout > DefaultOverallTimeout {
+	if overallTimeout <= 0 {
 		overallTimeout = DefaultOverallTimeout
+	} else if overallTimeout > MaxOverallTimeout {
+		overallTimeout = MaxOverallTimeout
 	}
-	ctx, cancel := context.WithTimeout(parentCtx, overallTimeout)
-	defer cancel()
 
-	allowDesktop := opts.AllowDesktopScope || strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	allowDesktop := opts.AllowDesktopScope || connector.HasActiveDesktopPluginScope(vaultDir)
 	callerConv := resolveOptionalCallerConv(vaultDir, opts.FlagConv)
 
 	pkt := Packet{
@@ -510,7 +511,7 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 			}
 		}
 	}
-	if wState, wErr := watcher.LoadState(ctx, vaultDir); wErr == nil {
+	if wState, wErr := watcher.LoadState(parentCtx, vaultDir); wErr == nil {
 		for _, accSt := range wState.Accounts {
 			for _, ackID := range accSt.AckedItemIDs {
 				coveredRefs[accSt.Connector+":"+ackID] = true
@@ -578,8 +579,8 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 		perTimeout := DefaultSourceTimeout
 		if rc.Manifest.Capabilities.Brief.TimeoutMs > 0 {
 			perTimeout = time.Duration(rc.Manifest.Capabilities.Brief.TimeoutMs) * time.Millisecond
-			if perTimeout > DefaultOverallTimeout {
-				perTimeout = DefaultOverallTimeout
+			if perTimeout > overallTimeout {
+				perTimeout = overallTimeout
 			}
 		}
 		quarantined := rc.EffectiveBriefQuarantined(vaultDir)
@@ -734,8 +735,8 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 			perTimeout := DefaultSourceTimeout
 			if spec.TimeoutMs > 0 {
 				perTimeout = time.Duration(spec.TimeoutMs) * time.Millisecond
-				if perTimeout > DefaultOverallTimeout {
-					perTimeout = DefaultOverallTimeout
+				if perTimeout > overallTimeout {
+					perTimeout = overallTimeout
 				}
 			}
 			stdout, _, runErr := connector.RunSubprocess(jobCtx, connector.SubprocessSpec{
@@ -791,7 +792,11 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 	}
 
 	if len(jobs) > 0 {
-		outcomes := connector.RunPool(ctx, connector.DefaultMaxWorkers, jobs)
+		// Start overall collector deadline after local Vault/observability reads so slow index loads
+		// never starve external connector or brief-extension subprocess budgets.
+		poolCtx, cancel := context.WithTimeout(parentCtx, overallTimeout)
+		outcomes := connector.RunPool(poolCtx, connector.DefaultMaxWorkers, jobs)
+		cancel()
 		for _, out := range outcomes {
 			if out.warn != "" {
 				pkt.Warnings = append(pkt.Warnings, out.warn)

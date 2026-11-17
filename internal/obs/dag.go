@@ -10,10 +10,57 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func rollupsApproxEqual(a, b TokenRollup) bool {
+	const eps = 1e-6
+	diffQ := a.QuotaUnits - b.QuotaUnits
+	if diffQ < 0 {
+		diffQ = -diffQ
+	}
+	diffC := a.EstCostUSD - b.EstCostUSD
+	if diffC < 0 {
+		diffC = -diffC
+	}
+	return a.TurnCount == b.TurnCount &&
+		a.StepCount == b.StepCount &&
+		a.PlannerSteps == b.PlannerSteps &&
+		a.InputTokens == b.InputTokens &&
+		a.CacheReadTokens == b.CacheReadTokens &&
+		a.OutputTokens == b.OutputTokens &&
+		a.UncachedTokens == b.UncachedTokens &&
+		a.GrossTokens == b.GrossTokens &&
+		a.PeakContextTokens == b.PeakContextTokens &&
+		a.CompactionCount == b.CompactionCount &&
+		a.ActiveLatencyMs == b.ActiveLatencyMs &&
+		a.HumanWaitMs == b.HumanWaitMs &&
+		diffQ <= eps &&
+		diffC <= eps
+}
+
+func floatApproxEqual(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= 1e-6
+}
+
 func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	if idx == nil || len(idx.Conversations) == 0 {
 		return false
 	}
+	changed := false
 
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	fdID := ""
@@ -78,9 +125,14 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	// 2. Enrich each conversation's metadata (Ground-truth SpawnEdge > tasks.json > transcript fallback)
 	for cid, cm := range idx.Conversations {
 		origTitle := cm.Title
+		origSlug := cm.TaskSlug
 		origKind := cm.Kind
+		origScope := cm.Scope
 		origTier := cm.Tier
+		origModel := cm.Model
+		origStatus := cm.Status
 		origParent := cm.ParentConversationID
+		origSelf := cm.Self
 
 		if fdID != "" && cid == fdID {
 			cm.Kind = "front_desk"
@@ -188,16 +240,27 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 		}
 		cm.Tier = NormalizeTier(cm.Tier, cm.Model)
 
-		// Recompute per-turn and Self QBU/EstCostUSD now that Model and Tier are resolved
+		// Recompute per-turn and Self QBU/EstCostUSD on a cloned Turns slice if changed
+		turnsChanged := false
 		for ti := range cm.Turns {
-			t := &cm.Turns[ti]
-			t.QuotaUnits, t.EstCostUSD = ComputeQuotaAndCost(t.InputTokens, t.CacheReadTokens, t.OutputTokens, cm.Model, cm.Tier)
+			q, c := ComputeQuotaAndCost(cm.Turns[ti].InputTokens, cm.Turns[ti].CacheReadTokens, cm.Turns[ti].OutputTokens, cm.Model, cm.Tier)
+			if !floatApproxEqual(cm.Turns[ti].QuotaUnits, q) || !floatApproxEqual(cm.Turns[ti].EstCostUSD, c) {
+				if !turnsChanged {
+					clonedTurns := make([]TurnMetrics, len(cm.Turns))
+					copy(clonedTurns, cm.Turns)
+					cm.Turns = clonedTurns
+					turnsChanged = true
+				}
+				cm.Turns[ti].QuotaUnits = q
+				cm.Turns[ti].EstCostUSD = c
+			}
 		}
 		cm.Self = RollupTurns(cm.Turns, cm.Self.StepCount, cm.Model, cm.Tier)
-		cm.Tree = cm.Self
 
-		if cm.Title != origTitle || cm.Kind != origKind || cm.Tier != origTier || cm.ParentConversationID != origParent {
-			// Metadata updated
+		if turnsChanged || cm.Title != origTitle || cm.TaskSlug != origSlug || cm.Kind != origKind ||
+			cm.Scope != origScope || cm.Tier != origTier || cm.Model != origModel ||
+			cm.Status != origStatus || cm.ParentConversationID != origParent || !rollupsApproxEqual(cm.Self, origSelf) {
+			changed = true
 		}
 		idx.Conversations[cid] = cm
 	}
@@ -206,6 +269,9 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	for cid, cm := range idx.Conversations {
 		kids := childrenByParent[cid]
 		sort.Strings(kids)
+		if !stringSlicesEqual(cm.ChildConversationIDs, kids) {
+			changed = true
+		}
 		cm.ChildConversationIDs = kids
 
 		// Walk up parent chain to find RootConversationID (with cycle guard)
@@ -218,6 +284,9 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			}
 			visited[cur.ParentConversationID] = true
 			root = cur.ParentConversationID
+		}
+		if cm.RootConversationID != root {
+			changed = true
 		}
 		cm.RootConversationID = root
 		idx.Conversations[cid] = cm
@@ -251,11 +320,15 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	}
 
 	for cid, cm := range idx.Conversations {
-		cm.Tree = computeTree(cid)
+		nextTree := computeTree(cid)
+		if !rollupsApproxEqual(cm.Tree, nextTree) {
+			changed = true
+		}
+		cm.Tree = nextTree
 		idx.Conversations[cid] = cm
 	}
 
-	return true
+	return changed
 }
 
 // ReconcileSubagentAttribution repairs any FIFO-drifted subagent Title, TaskSlug, Scope, Tier,

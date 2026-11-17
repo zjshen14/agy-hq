@@ -1339,3 +1339,145 @@ func TestRFC0021SurgicalAskQuestionNoopGuardAndPolicyTamperProtection(t *testing
 		t.Fatalf("expected invalid regex in config.yaml write_file to be denied by PreToolUse validator, got: %s", out.String())
 	}
 }
+
+func TestTopLevelTaskApprovalSymmetryAndSubagentAskQuestionDeny(t *testing.T) {
+	vaultDir := t.TempDir()
+	worktreeDir := filepath.Join(t.TempDir(), "wt-release-task")
+	_ = os.MkdirAll(worktreeDir, 0o755)
+
+	parentSubID := "aaaaaaaa-1111-2222-3333-444444444444"
+	spawnedTaskID := "bbbbbbbb-1111-2222-3333-555555555555"
+
+	// 1. Queue a stale pending nested subagent AND pre-register an `hq spawn` top-level task (`ConversationID == ""`).
+	//    HandleSessionStart MUST link the pre-registered `hq spawn` task first without letting the pending nested subagent hijack it!
+	_, _ = kernel.QueuePendingNestedSubagent(vaultDir, parentSubID, "[quick] docs: Link Checker", "flash_lite", "Check broken links in docs")
+	spawnPrompt := "Review and publish release v2.1.0 from the release worktree"
+	if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:    "release-v2-1",
+		Title:       "[Task:release] Publish v2.1.0",
+		Kind:        "task",
+		WorktreeDir: worktreeDir,
+		Status:      "active",
+	}); err != nil {
+		t.Fatalf("RegisterTask pre-spawn: %v", err)
+	}
+
+	var startOut bytes.Buffer
+	startPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": spawnedTaskID,
+		"cwd":            worktreeDir,
+		"lastUserInput":  spawnPrompt,
+	})
+	if err := HandleSessionStart(bytes.NewReader(startPayload), &startOut, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart(spawnedTaskID): %v", err)
+	}
+	if kernel.IsNestedSubagentConversation(vaultDir, spawnedTaskID) || kernel.IsSubagentConversation(vaultDir, spawnedTaskID) {
+		t.Fatalf("expected pre-registered hq spawn task NOT to be hijacked as a subagent")
+	}
+
+	// 2. Subagent conversation (`parentSubID` registered as Kind="subagent") MUST be denied on ask_question for a pending proposal (no Catch-22!)
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "subagent-docs-helper",
+		Title:          "[Subagent:docs] Helper [quick]",
+		Kind:           "subagent",
+		ConversationID: parentSubID,
+		Status:         "active",
+	})
+	prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+		ActionType:     "release_publish",
+		Summary:        "Publish v2.1.0 tag",
+		Command:        "echo release-published-v2.1.0",
+		ConversationID: spawnedTaskID,
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions: %v", err)
+	}
+
+	var subAskOut bytes.Buffer
+	subAskPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": parentSubID,
+		"stepIdx":        2,
+		"toolCall": map[string]interface{}{
+			"name": "ask_question",
+			"args": map[string]interface{}{
+				"questions": []map[string]interface{}{
+					{"question": "Approve " + prop.ID + "?", "options": []string{"Approve", "Reject"}},
+				},
+			},
+		},
+	})
+	if err := HandlePreToolUse(bytes.NewReader(subAskPayload), &subAskOut, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse subagent ask_question: %v", err)
+	}
+	if !strings.Contains(subAskOut.String(), `"decision":"deny"`) {
+		t.Fatalf("expected subagent ask_question for pending proposal to be denied upfront, got: %s", subAskOut.String())
+	}
+
+	// 3. Top-level `[Task:...]` conversation (`spawnedTaskID`) is allowed to call ask_question AND subsequently execute `hq approve`!
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	_ = os.WriteFile(transcriptPath, []byte(`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Ship v2.1.0"}`+"\n"), 0o600)
+
+	var taskAskOut bytes.Buffer
+	taskAskPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": spawnedTaskID,
+		"transcriptPath": transcriptPath,
+		"stepIdx":        2,
+		"toolCall": map[string]interface{}{
+			"name": "ask_question",
+			"args": map[string]interface{}{
+				"questions": []map[string]interface{}{
+					{"question": "Approve " + prop.ID + "?", "options": []string{"Approve", "Reject"}},
+				},
+			},
+		},
+	})
+	if err := HandlePreToolUse(bytes.NewReader(taskAskPayload), &taskAskOut, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse task ask_question: %v", err)
+	}
+	var askResp struct {
+		Decision  string `json:"decision"`
+		Overwrite struct {
+			Questions []struct {
+				Options []string `json:"options"`
+			} `json:"questions"`
+		} `json:"overwrite"`
+	}
+	if err := json.Unmarshal(taskAskOut.Bytes(), &askResp); err != nil || askResp.Decision != "allow" || len(askResp.Overwrite.Questions) != 1 {
+		t.Fatalf("expected allow + rewritten options for top-level task ask_question, got: %s", taskAskOut.String())
+	}
+	selectedApproveOption := askResp.Overwrite.Questions[0].Options[0]
+
+	// Append genuine MODEL GENERIC DONE user selection step to transcript and verify `hq approve` succeeds!
+	answerLine, _ := json.Marshal(map[string]interface{}{
+		"step_index": 3,
+		"source":     "MODEL",
+		"type":       "GENERIC",
+		"status":     "DONE",
+		"content":    "User selected: " + selectedApproveOption,
+	})
+	f, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	_, _ = f.Write(append(answerLine, '\n'))
+	_ = f.Close()
+
+	var approveOut bytes.Buffer
+	approvePayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": spawnedTaskID,
+		"transcriptPath": transcriptPath,
+		"stepIdx":        4,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{
+				"CommandLine": fmt.Sprintf("hq approve %s --sha256=%s", prop.ID, prop.SHA256[:12]),
+			},
+		},
+	})
+	if err := HandlePreToolUse(bytes.NewReader(approvePayload), &approveOut, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse task approve: %v", err)
+	}
+	if !strings.Contains(approveOut.String(), `"decision":"allow"`) || !strings.Contains(approveOut.String(), "--cap=") {
+		t.Fatalf("expected top-level [Task:...] conversation hq approve to succeed with minted cap-token, got: %s", approveOut.String())
+	}
+}

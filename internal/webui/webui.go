@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
@@ -150,7 +151,8 @@ func NewHandler(vaultDir string) http.Handler {
 			http.Error(w, "forbidden cross-origin request", http.StatusForbidden)
 			return
 		}
-		state := loadState(vaultDir, "")
+		state := loadStateCached(vaultDir)
+		state.CSRFToken = ""
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(state)
 	})
@@ -694,7 +696,7 @@ func NewHandler(vaultDir string) http.Handler {
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		state := loadState(vaultDir, "")
+		state := loadStateCached(vaultDir)
 		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
@@ -833,6 +835,100 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	}
 }
 
+type vaultStateFingerprint [10]int64
+
+func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
+	var fp vaultStateFingerprint
+	statAt := func(idx int, p string) {
+		st, err := os.Stat(p)
+		if err != nil {
+			fp[idx] = -1
+			return
+		}
+		fp[idx] = st.ModTime().UnixNano() ^ (st.Size() << 13)
+	}
+	mem := filepath.Join(vaultDir, "memory")
+	statAt(0, filepath.Join(mem, "pending"))
+	statAt(1, filepath.Join(mem, "tasks.json"))
+	statAt(2, filepath.Join(mem, "quota.json"))
+	statAt(3, filepath.Join(mem, "outbox", "items.jsonl"))
+	statAt(4, filepath.Join(mem, "goals.json"))
+	statAt(5, filepath.Join(mem, "front_desk.json"))
+	statAt(6, filepath.Join(mem, "trigger_cursors.json"))
+	statAt(7, filepath.Join(mem, "console_spaces.json"))
+	statAt(8, filepath.Join(vaultDir, "extensions.json"))
+	statAt(9, filepath.Join(vaultDir, "worktrees"))
+	return fp
+}
+
+type stateCacheSlot struct {
+	state       DashboardState
+	fingerprint vaultStateFingerprint
+	expiresAt   time.Time
+	inflight    chan struct{}
+}
+
+var (
+	stateCacheMu sync.Mutex
+	stateCache   = make(map[string]*stateCacheSlot)
+)
+
+func invalidateStateCache(vaultDir string) {
+	key := filepath.Clean(vaultDir)
+	stateCacheMu.Lock()
+	if slot, ok := stateCache[key]; ok {
+		slot.expiresAt = time.Time{}
+	}
+	stateCacheMu.Unlock()
+}
+
+// loadStateCached coalesces concurrent GET / and GET /api/state requests per vaultDir
+// (singleflight) and serves a short 2s read-through cache while Vault mutation stamps match.
+func loadStateCached(vaultDir string) DashboardState {
+	key := filepath.Clean(vaultDir)
+	fp := computeVaultStateFingerprint(vaultDir)
+	now := time.Now()
+
+	for {
+		stateCacheMu.Lock()
+		slot, ok := stateCache[key]
+		if !ok {
+			slot = &stateCacheSlot{}
+			stateCache[key] = slot
+		}
+		if slot.inflight == nil && now.Before(slot.expiresAt) && slot.fingerprint == fp {
+			cached := slot.state
+			stateCacheMu.Unlock()
+			return cached
+		}
+		if slot.inflight != nil {
+			waitCh := slot.inflight
+			stateCacheMu.Unlock()
+			<-waitCh
+			stateCacheMu.Lock()
+			res := slot.state
+			stateCacheMu.Unlock()
+			return res
+		}
+		ch := make(chan struct{})
+		slot.inflight = ch
+		stateCacheMu.Unlock()
+
+		computed := loadState(vaultDir, "")
+		computed.CSRFToken = ""
+		postFP := computeVaultStateFingerprint(vaultDir)
+
+		stateCacheMu.Lock()
+		slot.state = computed
+		slot.fingerprint = postFP
+		slot.expiresAt = time.Now().Add(2 * time.Second)
+		slot.inflight = nil
+		close(ch)
+		stateCacheMu.Unlock()
+		return computed
+	}
+}
+
 func loadState(vaultDir, flashMsg string) DashboardState {
 	pending, _ := approvals.List(vaultDir)
 	for i := range pending {
@@ -844,9 +940,9 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	now := time.Now()
 	sel := kernel.SelectConsoleTasks(layer1Tasks, kernel.CountColdArchivedTasks(vaultDir), now)
 	turns := loadTodayJournals(vaultDir)
-	health := doctor.Run(vaultDir)
 	quota := kernel.LoadQuota(vaultDir)
 	obsSum := obs.BuildDashboardSummary(vaultDir, now)
+	health := doctor.RunWithObs(vaultDir, &obsSum)
 	activeSpaces, _ := ActiveSpaces(vaultDir, now)
 	allGoals, _ := kernel.ListGoals(vaultDir)
 	var activeGoals []kernel.Goal
@@ -1480,6 +1576,9 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
       <span>{{.Summary}}</span>
     </div>
     {{end}}
+    {{if gt .Observability.TotalAnomalies (len .Observability.Anomalies)}}
+    <div class="muted" style="margin-top:6px;font-size:11px">Showing top {{len .Observability.Anomalies}} of {{.Observability.TotalAnomalies}} anomalies — run <code>hq obs anomalies</code> for full list.</div>
+    {{end}}
   </div>
   {{end}}
 </div>
@@ -1783,9 +1882,18 @@ document.addEventListener('click', function(ev) {
   }
 });
 
+let refreshInFlight = false;
+let refreshTimer = null;
+
 async function refreshState() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
   try {
-    const res = await fetch('/api/state', { headers: { 'Accept': 'application/json' } });
+    const fetchOpts = { headers: { 'Accept': 'application/json' } };
+    if (controller) fetchOpts.signal = controller.signal;
+    const res = await fetch('/api/state', fetchOpts);
     if (!res.ok) return;
     const state = await res.json();
     document.getElementById('last-updated').textContent = 'Updated ' + state.updatedAt;
@@ -1895,11 +2003,30 @@ async function refreshState() {
     }
   } catch (err) {
     console.warn('background state refresh failed:', err);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    refreshInFlight = false;
   }
 }
 
-// Auto-refresh state every 3 seconds for real-time responsiveness
-setInterval(refreshState, 3000);
+function scheduleNextRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    if (!document.hidden) {
+      await refreshState();
+    }
+    scheduleNextRefresh();
+  }, 5000);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    refreshState();
+  }
+});
+
+// Non-overlapping background state refresh when Console UI is visible
+scheduleNextRefresh();
 </script>
 </body>
 </html>`))
@@ -1920,9 +2047,17 @@ func RecordArtifactDir(vaultDir, artifactDir string) {
 	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(artifactDir)), 0o644)
 }
 
+func stripConsoleTimestampHeader(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 && strings.HasPrefix(s, "# ") {
+		return s[idx+1:]
+	}
+	return s
+}
+
 // SyncMarkdownConsole deterministically regenerates `local/CONSOLE.md` and (if present)
 // `<artifactDirectoryPath>/hq_console.md` from live Vault state in 0 LLM tokens.
 func SyncMarkdownConsole(vaultDir string) error {
+	invalidateStateCache(vaultDir)
 	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
 	_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", time.Now())
 	_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
@@ -2247,25 +2382,39 @@ func SyncMarkdownConsole(vaultDir string) error {
 		fmt.Fprintf(&b, "| **%s** | %s `%s` | %s |\n", h.Name, icon, h.Status, h.Detail)
 	}
 
-	content := []byte(b.String())
-	if err := os.WriteFile(filepath.Join(vaultDir, "CONSOLE.md"), content, 0o644); err != nil {
-		return err
+	rendered := b.String()
+	content := []byte(rendered)
+	consolePath := filepath.Join(vaultDir, "CONSOLE.md")
+	unchangedBody := false
+	if prevBytes, rErr := os.ReadFile(consolePath); rErr == nil {
+		unchangedBody = stripConsoleTimestampHeader(string(prevBytes)) == stripConsoleTimestampHeader(rendered)
+	}
+	if !unchangedBody {
+		if err := os.WriteFile(consolePath, content, 0o644); err != nil {
+			return err
+		}
 	}
 
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ArtifactDir) != "" {
 		artDir := strings.TrimSpace(fd.ArtifactDir)
-		_ = os.MkdirAll(artDir, 0o755)
-		meta := map[string]interface{}{
-			"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees, Recent Turn Activity, and System Health.",
-			"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
-			"requestFeedback": false,
-			"userFacing":      true,
+		artConsole := filepath.Join(artDir, "hq_console.md")
+		artMeta := filepath.Join(artDir, "hq_console.md.metadata.json")
+		_, errArt := os.Stat(artConsole)
+		_, errMeta := os.Stat(artMeta)
+		if !unchangedBody || errArt != nil || errMeta != nil {
+			_ = os.MkdirAll(artDir, 0o755)
+			meta := map[string]interface{}{
+				"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees, Recent Turn Activity, and System Health.",
+				"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
+				"requestFeedback": false,
+				"userFacing":      true,
+			}
+			metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md"))
+			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"))
+			_ = os.WriteFile(artConsole, content, 0o644)
+			_ = os.WriteFile(artMeta, metaBytes, 0o644)
 		}
-		metaBytes, _ := json.MarshalIndent(meta, "", "  ")
-		_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md"))
-		_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"))
-		_ = os.WriteFile(filepath.Join(artDir, "hq_console.md"), content, 0o644)
-		_ = os.WriteFile(filepath.Join(artDir, "hq_console.md.metadata.json"), metaBytes, 0o644)
 	}
 	return nil
 }

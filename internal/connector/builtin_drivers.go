@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/extension"
@@ -1620,7 +1621,78 @@ func evalBuiltinGChat(ctx context.Context, vaultDir string, rc ResolvedConnector
 	return ProtocolResponse{ProtocolVersion: ProtocolVersionV1, OK: true}, nil
 }
 
-// --- Built-in GCalendar Driver (Low-Sensitivity FreeBusy + Brief Summary) ---
+// --- Built-in GCalendar Driver (Low-Sensitivity FreeBusy + Brief Summary + Quarantined Event Read) ---
+
+type gcalEventsCacheEntry struct {
+	items     []NormalizedItem
+	expiresAt time.Time
+}
+
+var (
+	gcalEventsCacheMu sync.Mutex
+	gcalEventsCache   = make(map[string]gcalEventsCacheEntry)
+)
+
+func gcalHasDedicatedReadVerb(rc ResolvedConnector) bool {
+	if rc.Manifest.Transport.CLI == nil {
+		return false
+	}
+	for _, v := range []string{"read_quarantined", "get_thread", "get", "read"} {
+		if tmpl, ok := rc.Manifest.Transport.CLI.Verbs[v]; ok && len(tmpl) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func buildGCalQuarantinedThread(connID, account, wantKey string, events []NormalizedItem) ProtocolResponse {
+	qt := &QuarantinedThread{
+		Connector: connID,
+		Account:   account,
+		ThreadKey: wantKey,
+	}
+	var matched []NormalizedItem
+	for _, it := range events {
+		if wantKey != "" && it.ItemID != wantKey && it.ThreadKey != wantKey {
+			continue
+		}
+		matched = append(matched, it)
+		qt.HeadItemID = it.ItemID
+		if qt.SubjectOrRoom == "" && it.SubjectOrRoom != "" {
+			qt.SubjectOrRoom = it.SubjectOrRoom
+		}
+		body := strings.TrimSpace(it.Body)
+		if body == "" {
+			if it.SubjectOrRoom != "" && it.Timestamp != "" {
+				body = fmt.Sprintf("%s (start: %s)", it.SubjectOrRoom, it.Timestamp)
+			} else if it.SubjectOrRoom != "" {
+				body = it.SubjectOrRoom
+			}
+		}
+		if it.Permalink != "" && !strings.Contains(body, it.Permalink) {
+			if body != "" {
+				body += "\nLink: " + it.Permalink
+			} else {
+				body = "Link: " + it.Permalink
+			}
+		}
+		qt.Messages = append(qt.Messages, QuarantinedMessage{
+			ItemID:    it.ItemID,
+			Sender:    it.Sender,
+			Timestamp: it.Timestamp,
+			Body:      body,
+		})
+		if it.Sender != "" {
+			qt.AuthenticatedParticipants = append(qt.AuthenticatedParticipants, it.Sender)
+		}
+	}
+	return ProtocolResponse{
+		ProtocolVersion: ProtocolVersionV1,
+		OK:              true,
+		Items:           matched,
+		Thread:          qt,
+	}
+}
 
 func evalBuiltinGCalendar(ctx context.Context, vaultDir string, rc ResolvedConnector, alias string, _ AccountInstance, req ProtocolRequest, allowDesktopScope bool) (ProtocolResponse, error) {
 	if req.Op == "brief" {
@@ -1668,12 +1740,77 @@ func evalBuiltinGCalendar(ctx context.Context, vaultDir string, rc ResolvedConne
 				},
 			}, nil
 		}
+		if req.Op == "read_quarantined" {
+			wantKey := ""
+			if req.Params != nil {
+				wantKey = strings.TrimSpace(req.Params["thread_key"])
+			}
+			return buildGCalQuarantinedThread(rc.ID, alias, wantKey, mockObj.Events), nil
+		}
 		return ProtocolResponse{
 			ProtocolVersion: ProtocolVersionV1,
 			OK:              true,
 			Items:           mockObj.Events,
 		}, nil
 	}
+
+	// Fallback for `hq watch read --connector=gcalendar` when manifest only declares `events` / `list`:
+	// fetch the bounded schedule window via `Op: "brief"` (cached 15s for multi-item batch reads) and filter by event ID.
+	if req.Op == "read_quarantined" && !gcalHasDedicatedReadVerb(rc) {
+		wantKey := ""
+		customWindow := false
+		startStr := ""
+		endStr := ""
+		if req.Params != nil {
+			wantKey = strings.TrimSpace(req.Params["thread_key"])
+			startStr = strings.TrimSpace(req.Params["start"])
+			endStr = strings.TrimSpace(req.Params["end"])
+		}
+		nowUTC := time.Now().UTC().Truncate(time.Minute)
+		if startStr == "" && endStr == "" {
+			startStr = nowUTC.Add(-24 * time.Hour).Format(time.RFC3339)
+			endStr = nowUTC.Add(48 * time.Hour).Format(time.RFC3339)
+		} else {
+			customWindow = true
+		}
+
+		cacheKey := filepath.Clean(vaultDir) + "\x00" + rc.FQID + "\x00" + alias + "\x00" + rc.SHA256
+		if !customWindow {
+			gcalEventsCacheMu.Lock()
+			if cached, ok := gcalEventsCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+				items := append([]NormalizedItem(nil), cached.items...)
+				gcalEventsCacheMu.Unlock()
+				return buildGCalQuarantinedThread(rc.ID, alias, wantKey, items), nil
+			}
+			gcalEventsCacheMu.Unlock()
+		}
+
+		listReq := ProtocolRequest{
+			ProtocolVersion: ProtocolVersionV1,
+			Op:              "brief",
+			Connector:       req.Connector,
+			Account:         alias,
+			MaxItems:        100,
+			Params: map[string]string{
+				"start": startStr,
+				"end":   endStr,
+			},
+		}
+		listResp, err := evalJSONMapConnector(ctx, vaultDir, rc, listReq, allowDesktopScope)
+		if err != nil {
+			return ProtocolResponse{}, err
+		}
+		if !customWindow {
+			gcalEventsCacheMu.Lock()
+			gcalEventsCache[cacheKey] = gcalEventsCacheEntry{
+				items:     append([]NormalizedItem(nil), listResp.Items...),
+				expiresAt: time.Now().Add(15 * time.Second),
+			}
+			gcalEventsCacheMu.Unlock()
+		}
+		return buildGCalQuarantinedThread(rc.ID, alias, wantKey, listResp.Items), nil
+	}
+
 	return evalJSONMapConnector(ctx, vaultDir, rc, req, allowDesktopScope)
 }
 

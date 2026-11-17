@@ -7,11 +7,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"testing"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
+
+const MaxDashboardAnomalies = 20
 
 // SubagentSpawnEdge records a ground-truth parent -> child subagent invocation extracted
 // directly from parent transcript tool calls / GENERIC responses or message files.
@@ -243,6 +248,7 @@ type DashboardSummary struct {
 	DeepBudgetPct           float64                   `json:"deepBudgetPct"`
 	DailyTrend              []DailyBurnPoint          `json:"dailyTrend"`
 	TierBreakdown           []TierBurnPoint           `json:"tierBreakdown"`
+	TotalAnomalies          int                       `json:"totalAnomalies,omitempty"`
 	Anomalies               []TokenAnomaly            `json:"anomalies,omitempty"`
 	TaskBadges              map[string]TaskTokenBadge `json:"taskBadges,omitempty"`
 }
@@ -401,6 +407,73 @@ func ResolveBrainDir(vaultDir string) string {
 	return hostpaths.Resolve(vaultDir).BrainDir
 }
 
+type fileStatStamp struct {
+	size    int64
+	modNano int64
+}
+
+func statFileStamp(path string) fileStatStamp {
+	if path == "" {
+		return fileStatStamp{}
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return fileStatStamp{size: -1, modNano: -1}
+	}
+	return fileStatStamp{size: st.Size(), modNano: st.ModTime().UnixNano()}
+}
+
+type obsMetaStamps struct {
+	tasks   fileStatStamp
+	archive fileStatStamp
+	nested  fileStatStamp
+	fd      fileStatStamp
+}
+
+func currentObsMetaStamps(vaultDir string) obsMetaStamps {
+	memDir := filepath.Join(vaultDir, "memory")
+	return obsMetaStamps{
+		tasks:   statFileStamp(filepath.Join(memDir, "tasks.json")),
+		archive: statFileStamp(filepath.Join(memDir, "tasks_archive.jsonl")),
+		nested:  statFileStamp(filepath.Join(memDir, "nested_conversations.json")),
+		fd:      statFileStamp(filepath.Join(memDir, "front_desk.json")),
+	}
+}
+
+type journalDateCacheEntry struct {
+	dirModNano int64
+	hints      []transcriptCandidate
+}
+
+type obsMemCacheEntry struct {
+	idx           *ObsIndex
+	indexStamp    fileStatStamp
+	metaStamps    obsMetaStamps
+	brainDir      string
+	lastCheckedAt time.Time
+	journalByDate map[string]journalDateCacheEntry
+}
+
+var (
+	obsCacheMu sync.Mutex
+	obsMemByV  = make(map[string]*obsMemCacheEntry)
+)
+
+func shallowCopyObsIndex(src *ObsIndex) *ObsIndex {
+	if src == nil {
+		return &ObsIndex{Version: 3, Conversations: make(map[string]ConversationMetrics)}
+	}
+	cp := &ObsIndex{
+		Version:       src.Version,
+		UpdatedAt:     src.UpdatedAt,
+		Conversations: make(map[string]ConversationMetrics, len(src.Conversations)),
+	}
+	for k, v := range src.Conversations {
+		cp.Conversations[k] = v
+	}
+	return cp
+}
+
 func loadCachedIndex(vaultDir string) *ObsIndex {
 	idx := &ObsIndex{
 		Version:       3,
@@ -419,16 +492,13 @@ func loadCachedIndex(vaultDir string) *ObsIndex {
 
 func saveCachedIndex(vaultDir string, idx *ObsIndex) error {
 	p := obsIndexFilePath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
 	idx.Version = 3
 	idx.UpdatedAt = time.Now().Format(time.RFC3339)
-	data, err := json.MarshalIndent(idx, "", "  ")
+	data, err := json.Marshal(idx)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	return store.WriteAtomic(p, append(data, '\n'), 0o644)
 }
 
 type transcriptCandidate struct {
@@ -437,7 +507,7 @@ type transcriptCandidate struct {
 	modelHint      string
 }
 
-func discoverTranscripts(vaultDir string) []transcriptCandidate {
+func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalDateCacheEntry) []transcriptCandidate {
 	byConv := make(map[string]transcriptCandidate)
 
 	// 1. Scan brain directory (<brainDir>/<convId>/.system_generated/logs/transcript.jsonl)
@@ -474,43 +544,78 @@ func discoverTranscripts(vaultDir string) []transcriptCandidate {
 		}
 	}
 
-	// 3. Scan local/memory/journal/*/*.json for any recorded transcriptPath + modelName
+	// 3. Scan local/memory/journal/*/*.json using per-date-directory mtime cache
 	journalRoot := filepath.Join(vaultDir, "memory", "journal")
 	if dateDirs, err := os.ReadDir(journalRoot); err == nil {
+		seenDates := make(map[string]bool, len(dateDirs))
 		for _, d := range dateDirs {
 			if !d.IsDir() {
 				continue
 			}
-			files, _ := os.ReadDir(filepath.Join(journalRoot, d.Name()))
-			for _, f := range files {
-				if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
-					continue
+			dateName := d.Name()
+			seenDates[dateName] = true
+			datePath := filepath.Join(journalRoot, dateName)
+			dirMod := int64(0)
+			if dInfo, iErr := d.Info(); iErr == nil {
+				dirMod = dInfo.ModTime().UnixNano()
+			}
+			var dateHints []transcriptCandidate
+			if journalCache != nil && dirMod != 0 {
+				if cachedDate, ok := journalCache[dateName]; ok && cachedDate.dirModNano == dirMod {
+					dateHints = cachedDate.hints
 				}
-				b, rErr := os.ReadFile(filepath.Join(journalRoot, d.Name(), f.Name()))
-				if rErr != nil {
-					continue
+			}
+			if dateHints == nil {
+				files, _ := os.ReadDir(datePath)
+				for _, f := range files {
+					if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
+						continue
+					}
+					b, rErr := os.ReadFile(filepath.Join(datePath, f.Name()))
+					if rErr != nil {
+						continue
+					}
+					var je struct {
+						ConversationID string `json:"conversationId"`
+						TranscriptPath string `json:"transcriptPath"`
+						ModelName      string `json:"modelName"`
+					}
+					if json.Unmarshal(b, &je) != nil || je.ConversationID == "" {
+						continue
+					}
+					dateHints = append(dateHints, transcriptCandidate{
+						convID:         strings.ToLower(strings.TrimSpace(je.ConversationID)),
+						transcriptPath: je.TranscriptPath,
+						modelHint:      je.ModelName,
+					})
 				}
-				var je struct {
-					ConversationID string `json:"conversationId"`
-					TranscriptPath string `json:"transcriptPath"`
-					ModelName      string `json:"modelName"`
+				if journalCache != nil && dirMod != 0 {
+					journalCache[dateName] = journalDateCacheEntry{
+						dirModNano: dirMod,
+						hints:      dateHints,
+					}
 				}
-				if json.Unmarshal(b, &je) != nil || je.ConversationID == "" {
-					continue
+			}
+			for _, h := range dateHints {
+				cand := byConv[h.convID]
+				cand.convID = h.convID
+				if h.modelHint != "" {
+					cand.modelHint = h.modelHint
 				}
-				cid := strings.ToLower(strings.TrimSpace(je.ConversationID))
-				cand := byConv[cid]
-				cand.convID = cid
-				if je.ModelName != "" {
-					cand.modelHint = je.ModelName
-				}
-				if cand.transcriptPath == "" && je.TranscriptPath != "" {
-					if info, sErr := os.Stat(je.TranscriptPath); sErr == nil && !info.IsDir() {
-						cand.transcriptPath = je.TranscriptPath
+				if cand.transcriptPath == "" && h.transcriptPath != "" {
+					if info, sErr := os.Stat(h.transcriptPath); sErr == nil && !info.IsDir() {
+						cand.transcriptPath = h.transcriptPath
 					}
 				}
 				if cand.transcriptPath != "" {
-					byConv[cid] = cand
+					byConv[h.convID] = cand
+				}
+			}
+		}
+		if journalCache != nil {
+			for k := range journalCache {
+				if !seenDates[k] {
+					delete(journalCache, k)
 				}
 			}
 		}
@@ -530,12 +635,43 @@ func discoverTranscripts(vaultDir string) []transcriptCandidate {
 
 // LoadOrRefreshIndex incrementally parses new/modified transcripts and builds the full
 // parent-child DAG and metadata attribution across Front Desk, Tasks, and Subagents.
+// Concurrent callers within the same process are serialized via obsCacheMu and share the
+// parsed in-memory index so large index.json files are never unmarshaled or rewritten redundantly.
 func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
-	idx := loadCachedIndex(vaultDir)
-	candidates := discoverTranscripts(vaultDir)
+	cleanVault := filepath.Clean(vaultDir)
+	obsCacheMu.Lock()
+	defer obsCacheMu.Unlock()
+
+	now := time.Now()
+	idxPath := obsIndexFilePath(vaultDir)
+	diskStamp := statFileStamp(idxPath)
+	metaStamps := currentObsMetaStamps(vaultDir)
+	curBrainDir := ResolveBrainDir(vaultDir)
+
+	mem, hasMem := obsMemByV[cleanVault]
+	if !hasMem || mem.idx == nil || mem.brainDir != curBrainDir || mem.indexStamp != diskStamp {
+		loaded := loadCachedIndex(vaultDir)
+		jCache := make(map[string]journalDateCacheEntry)
+		if hasMem && mem.journalByDate != nil && mem.brainDir == curBrainDir {
+			jCache = mem.journalByDate
+		}
+		mem = &obsMemCacheEntry{
+			idx:           loaded,
+			indexStamp:    diskStamp,
+			brainDir:      curBrainDir,
+			journalByDate: jCache,
+		}
+		obsMemByV[cleanVault] = mem
+		hasMem = false // force at least one DAG/stat verification pass after disk load
+	} else if !testing.Testing() && now.Sub(mem.lastCheckedAt) < 2*time.Second && mem.metaStamps == metaStamps {
+		return shallowCopyObsIndex(mem.idx), nil
+	}
+
+	idx := mem.idx
+	candidates := discoverTranscriptsCached(vaultDir, mem.journalByDate)
 	dirty := false
 
-	seen := make(map[string]bool)
+	seen := make(map[string]bool, len(candidates))
 	for _, cand := range candidates {
 		seen[cand.convID] = true
 		info, err := os.Stat(cand.transcriptPath)
@@ -568,16 +704,20 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 		}
 	}
 
-	// Enrich metadata from tasks.json, tasks_archive.jsonl, front_desk.json, and ground-truth spawn edges,
-	// then compute DAG Tree rollups.
-	if enrichAndBuildDAG(vaultDir, idx) {
-		dirty = true
+	// Only re-run DAG metadata enrichment when transcripts changed, metadata files changed, or after cold load.
+	if !hasMem || dirty || mem.metaStamps != metaStamps {
+		if enrichAndBuildDAG(vaultDir, idx) {
+			dirty = true
+		}
 	}
 
 	if dirty {
 		_ = saveCachedIndex(vaultDir, idx)
+		mem.indexStamp = statFileStamp(idxPath)
 	}
-	return idx, nil
+	mem.metaStamps = metaStamps
+	mem.lastCheckedAt = now
+	return shallowCopyObsIndex(idx), nil
 }
 
 func parseSinceCutoff(since string, now time.Time) time.Time {
@@ -984,6 +1124,21 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 		return sum
 	}
 
+	var hotConvIDs map[string]bool
+	if len(idx.Conversations) > 64 {
+		hotConvIDs = make(map[string]bool)
+		if hotTasks, lErr := kernel.ListTasks(vaultDir); lErr == nil {
+			for _, ht := range hotTasks {
+				if cid := strings.ToLower(strings.TrimSpace(ht.ConversationID)); cid != "" {
+					hotConvIDs[cid] = true
+				}
+			}
+		}
+		if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID != "" {
+			hotConvIDs[strings.ToLower(strings.TrimSpace(fd.ConversationID))] = true
+		}
+	}
+
 	todayStr := now.Format("2006-01-02")
 	var todayInput, todayCache, todayOutput int64
 	var allInput, allCache, allOutput int64
@@ -1020,22 +1175,23 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 		tierInput[tKey] += cm.Self.InputTokens
 		tierCache[tKey] += cm.Self.CacheReadTokens
 
-		badge := TaskTokenBadge{
-			ConversationID:       cm.ConversationID,
-			UncachedTokens:       cm.Self.UncachedTokens,
-			TreeUncachedTokens:   cm.Tree.UncachedTokens,
-			GrossTokens:          cm.Tree.GrossTokens,
-			CacheHitRatio:        cm.Tree.CacheHitRatio,
-			PeakContextTokens:    cm.Tree.PeakContextTokens,
-			CurrentContextTokens: cm.CurrentContextTokens,
-			QuotaUnits:           cm.Tree.QuotaUnits,
-			ChildCount:           len(cm.ChildConversationIDs),
-			CompactLabel: fmt.Sprintf("%s uncached (%.0f%% CHR)",
-				FormatTokensCompact(cm.Tree.UncachedTokens),
-				cm.Tree.CacheHitRatio*100.0,
-			),
+		if hotConvIDs == nil || hotConvIDs[cm.ConversationID] {
+			sum.TaskBadges[cm.ConversationID] = TaskTokenBadge{
+				ConversationID:       cm.ConversationID,
+				UncachedTokens:       cm.Self.UncachedTokens,
+				TreeUncachedTokens:   cm.Tree.UncachedTokens,
+				GrossTokens:          cm.Tree.GrossTokens,
+				CacheHitRatio:        cm.Tree.CacheHitRatio,
+				PeakContextTokens:    cm.Tree.PeakContextTokens,
+				CurrentContextTokens: cm.CurrentContextTokens,
+				QuotaUnits:           cm.Tree.QuotaUnits,
+				ChildCount:           len(cm.ChildConversationIDs),
+				CompactLabel: fmt.Sprintf("%s uncached (%.0f%% CHR)",
+					FormatTokensCompact(cm.Tree.UncachedTokens),
+					cm.Tree.CacheHitRatio*100.0,
+				),
+			}
 		}
-		sum.TaskBadges[cm.ConversationID] = badge
 
 		for _, t := range cm.Turns {
 			ds := localDateStr(t.StartedAt, now.Location())
@@ -1113,7 +1269,13 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 		sum.DeepBudgetPct = (float64(sum.TodayDeepUncachedTokens) / float64(budget.DailyDeepUncachedBudget)) * 100.0
 	}
 
-	sum.Anomalies = EvaluateAnomalies(vaultDir, idx, budget, now)
+	allAnomalies := EvaluateAnomalies(vaultDir, idx, budget, now)
+	sum.TotalAnomalies = len(allAnomalies)
+	if len(allAnomalies) > MaxDashboardAnomalies {
+		sum.Anomalies = allAnomalies[:MaxDashboardAnomalies]
+	} else {
+		sum.Anomalies = allAnomalies
+	}
 	return sum
 }
 

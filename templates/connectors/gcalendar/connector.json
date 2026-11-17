@@ -37,6 +37,9 @@
     "poll": {
       "enabled": false
     },
+    "read_quarantined": {
+      "enabled": true
+    },
     "brief": {
       "enabled": true,
       "quarantined": true,

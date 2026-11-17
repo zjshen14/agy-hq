@@ -268,3 +268,71 @@ func TestAnomaliesBudgetCircuitBreakerAndFrontDeskNudge(t *testing.T) {
 		t.Errorf("expected circuit breaker closed after reset, got %+v", qAfter)
 	}
 }
+
+func TestIndexSkipRedundantRewriteAndDashboardSummaryBounds(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "ffffffff-0000-0000-0000-000000000001"
+	_ = kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID))
+	writeTranscriptFixture(t, brainDir, fdID, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-12T08:00:00Z","content":"Status"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-12T08:00:02Z","input_tokens":10000,"cache_read_tokens":20000,"output_tokens":300,"content":"OK"}`,
+	})
+
+	// Seed 70 historical conversations, 30 of which exceed WarnContextTokens so >MaxDashboardAnomalies anomalies exist.
+	for i := 0; i < 70; i++ {
+		cid := fmt.Sprintf("10000000-0000-0000-0000-%012d", i+1)
+		inTok := 15000
+		if i < 30 {
+			inTok = 600000 // > default 500k MaxTurnUncachedTokens -> A3 anomaly
+		}
+		writeTranscriptFixture(t, brainDir, cid, []string{
+			`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-12T09:00:00Z","content":"Work item"}`,
+			fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-12T09:00:02Z","input_tokens":%d,"cache_read_tokens":0,"output_tokens":200,"content":"Done"}`, inTok),
+		})
+		if i < 2 {
+			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+				TaskSlug:       fmt.Sprintf("hot-task-%d", i+1),
+				Title:          fmt.Sprintf("[Task:core] Hot Task %d", i+1),
+				Kind:           "task",
+				ConversationID: cid,
+				Status:         "active",
+			})
+		}
+	}
+
+	if _, err := LoadOrRefreshIndex(vaultDir); err != nil {
+		t.Fatalf("first LoadOrRefreshIndex: %v", err)
+	}
+	idxPath := filepath.Join(vaultDir, "memory", "obs", "index.json")
+	st1, err := os.Stat(idxPath)
+	if err != nil {
+		t.Fatalf("stat index.json: %v", err)
+	}
+
+	time.Sleep(15 * time.Millisecond)
+	if _, err := LoadOrRefreshIndex(vaultDir); err != nil {
+		t.Fatalf("second LoadOrRefreshIndex: %v", err)
+	}
+	st2, err := os.Stat(idxPath)
+	if err != nil {
+		t.Fatalf("stat index.json second time: %v", err)
+	}
+	if st2.ModTime().UnixNano() != st1.ModTime().UnixNano() {
+		t.Fatalf("expected unchanged transcripts/metadata NOT to rewrite obs/index.json (mtime1=%d mtime2=%d)", st1.ModTime().UnixNano(), st2.ModTime().UnixNano())
+	}
+
+	sum := BuildDashboardSummary(vaultDir, time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC))
+	if len(sum.Anomalies) != MaxDashboardAnomalies {
+		t.Fatalf("expected Anomalies capped at %d, got %d", MaxDashboardAnomalies, len(sum.Anomalies))
+	}
+	if sum.TotalAnomalies < 30 {
+		t.Fatalf("expected TotalAnomalies >= 30, got %d", sum.TotalAnomalies)
+	}
+	if len(sum.TaskBadges) > 5 {
+		t.Fatalf("expected TaskBadges scoped to hot tasks + Front Desk (<=5), got %d", len(sum.TaskBadges))
+	}
+}

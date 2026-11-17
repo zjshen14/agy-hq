@@ -940,6 +940,9 @@ WorkingDirectory=%s
 ExecStart=%s daemon
 Restart=on-failure
 RestartSec=5
+MemoryHigh=512M
+MemoryMax=1G
+Environment=GOMEMLIMIT=512MiB
 Environment=HQ_MANAGED_DAEMON=1
 Environment=HQ_ROOT_DIR=%s
 Environment=HQ_VAULT_DIR=%s
@@ -975,6 +978,8 @@ func GenerateLaunchdPlist(binPath, rootDir, vaultDir string) string {
     <true/>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>GOMEMLIMIT</key>
+        <string>512MiB</string>
         <key>HQ_MANAGED_DAEMON</key>
         <string>1</string>
         <key>PATH</key>

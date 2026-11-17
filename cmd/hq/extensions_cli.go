@@ -812,6 +812,7 @@ func runBriefCLI(vaultDir string, args []string) {
 		fs := flag.NewFlagSet("brief collect", flag.ExitOnError)
 		lease := fs.Bool("lease", false, "Acquire non-destructive caller-bound lease over overnight brief_rollup items")
 		ttlStr := fs.String("ttl", "20m", "Lease TTL duration when --lease is set")
+		timeoutStr := fs.String("timeout", "15s", "Overall wall-clock timeout for parallel connector/extension collection")
 		convFlag := fs.String("conv", "", "Test-only conversation ID")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
@@ -819,11 +820,17 @@ func runBriefCLI(vaultDir string, args []string) {
 		if err != nil || ttl <= 0 {
 			ttl = 20 * time.Minute
 		}
+		overallTimeout, tErr := time.ParseDuration(*timeoutStr)
+		if tErr != nil || overallTimeout <= 0 {
+			overallTimeout = brief.DefaultOverallTimeout
+		}
 		pkt, err := brief.Collect(context.Background(), vaultDir, brief.CollectOptions{
-			Lease:    *lease,
-			TTL:      ttl,
-			FlagConv: *convFlag,
-			Now:      time.Now(),
+			Lease:             *lease,
+			TTL:               ttl,
+			FlagConv:          *convFlag,
+			AllowDesktopScope: connector.HasActiveDesktopPluginScope(vaultDir),
+			OverallTimeout:    overallTimeout,
+			Now:               time.Now(),
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq brief collect failed: %v\n", err)

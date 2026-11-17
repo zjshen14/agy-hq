@@ -276,6 +276,15 @@ func RunSubprocess(parentCtx context.Context, spec SubprocessSpec) ([]byte, stri
 	if timeout <= 0 {
 		timeout = DefaultSubprocessTimeout
 	}
+	effectiveTimeout := timeout
+	if dl, hasDL := parentCtx.Deadline(); hasDL {
+		if rem := time.Until(dl); rem > 0 && rem < effectiveTimeout {
+			effectiveTimeout = rem.Round(10 * time.Millisecond)
+			if effectiveTimeout <= 0 {
+				effectiveTimeout = rem
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
@@ -336,7 +345,7 @@ func RunSubprocess(parentCtx context.Context, spec SubprocessSpec) ([]byte, stri
 		return nil, sanitizedErr, fmt.Errorf("subprocess stdout exceeded %d-byte limit", MaxSubprocessStdoutBytes)
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return stdoutBuf.buf.Bytes(), sanitizedErr, fmt.Errorf("subprocess timed out after %s (%s)", timeout, sanitizedErr)
+		return stdoutBuf.buf.Bytes(), sanitizedErr, fmt.Errorf("subprocess timed out after %s (%s)", effectiveTimeout, sanitizedErr)
 	}
 	if waitErr != nil {
 		if sanitizedErr != "" {

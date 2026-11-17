@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
@@ -638,6 +639,75 @@ type PackDoctorItem struct {
 	Detail string `json:"detail"`
 }
 
+type binProbeCacheKey struct {
+	resolvedPath string
+	size         int64
+	modNano      int64
+	joinedArgv   string
+}
+
+type binProbeCacheVal struct {
+	status    string
+	detail    string
+	expiresAt time.Time
+}
+
+var (
+	binProbeMu    sync.Mutex
+	binProbeCache = make(map[binProbeCacheKey]binProbeCacheVal)
+)
+
+func probeRequiredPackBinary(packID, binName string, argv []string) PackDoctorItem {
+	itemName := fmt.Sprintf("pack:%s:bin:%s", packID, binName)
+	resolved := argv[0]
+	if lp, err := exec.LookPath(argv[0]); err == nil && lp != "" {
+		resolved = lp
+	}
+	var fSize, fMod int64 = -1, -1
+	if st, err := os.Stat(resolved); err == nil {
+		fSize = st.Size()
+		fMod = st.ModTime().UnixNano()
+	}
+	key := binProbeCacheKey{
+		resolvedPath: resolved,
+		size:         fSize,
+		modNano:      fMod,
+		joinedArgv:   strings.Join(argv, "\x00"),
+	}
+	now := time.Now()
+	binProbeMu.Lock()
+	if cached, ok := binProbeCache[key]; ok && now.Before(cached.expiresAt) {
+		binProbeMu.Unlock()
+		return PackDoctorItem{Name: itemName, Status: cached.status, Detail: cached.detail}
+	}
+	binProbeMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	out, pErr := cmd.CombinedOutput()
+	cancel()
+
+	res := PackDoctorItem{Name: itemName}
+	ttl := 5 * time.Minute
+	if pErr != nil {
+		res.Status = "WARN"
+		res.Detail = fmt.Sprintf("probe %v failed: %v", argv, pErr)
+		ttl = 15 * time.Second
+	} else {
+		res.Status = "PASS"
+		res.Detail = strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	}
+
+	binProbeMu.Lock()
+	binProbeCache[key] = binProbeCacheVal{
+		status:    res.Status,
+		detail:    res.Detail,
+		expiresAt: time.Now().Add(ttl),
+	}
+	binProbeMu.Unlock()
+	return res
+}
+
 // DoctorPacks checks trust integrity, binary prerequisites, and competing hooks across discovered packs.
 func DoctorPacks(vaultDir string) []PackDoctorItem {
 	packs, err := DiscoverPacks(vaultDir)
@@ -677,24 +747,7 @@ func DoctorPacks(vaultDir string) []PackDoctorItem {
 			if len(argv) == 0 {
 				continue
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-			out, pErr := cmd.CombinedOutput()
-			cancel()
-			if pErr != nil {
-				items = append(items, PackDoctorItem{
-					Name:   fmt.Sprintf("pack:%s:bin:%s", dp.ID, b.Name),
-					Status: "WARN",
-					Detail: fmt.Sprintf("probe %v failed: %v", argv, pErr),
-				})
-			} else {
-				firstLine := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
-				items = append(items, PackDoctorItem{
-					Name:   fmt.Sprintf("pack:%s:bin:%s", dp.ID, b.Name),
-					Status: "PASS",
-					Detail: firstLine,
-				})
-			}
+			items = append(items, probeRequiredPackBinary(dp.ID, b.Name, argv))
 		}
 	}
 	return items

@@ -652,10 +652,20 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 			if data, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
 				_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
 			}
+			if isExplicitTopLevelTask(tasks[i]) {
+				_ = RemoveNestedConversation(vaultDir, convID)
+			}
 			return tasks[i], true
 		}
 	}
 	return ActiveTask{}, false
+}
+
+func isExplicitTopLevelTask(t ActiveTask) bool {
+	if strings.HasPrefix(t.TaskSlug, "subagent-") || strings.HasPrefix(t.Title, "[Subagent:") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(t.Kind), "task") || t.EffectiveKind() == "task"
 }
 
 // RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
@@ -663,6 +673,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
 		return err
 	}
+	explicitTaskPromotion := strings.EqualFold(strings.TrimSpace(task.Kind), "task") &&
+		!strings.HasPrefix(task.TaskSlug, "subagent-") &&
+		!strings.HasPrefix(task.Title, "[Subagent:")
 	tasks, _ := ListTasks(vaultDir)
 	updated := false
 	for i := range tasks {
@@ -688,7 +701,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			if task.Model == "" {
 				task.Model = tasks[i].Model
 			}
-			if task.ParentConversationID == "" {
+			if task.ParentConversationID == "" && !explicitTaskPromotion {
 				task.ParentConversationID = tasks[i].ParentConversationID
 			}
 			task.WorktreeDir, task.WorktreeDirs = mergeTaskWorktrees(tasks[i], task)
@@ -802,7 +815,15 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		return err
+	}
+	for _, t := range tasks {
+		if t.ConversationID != "" && (t.ConversationID == task.ConversationID || (task.TaskSlug != "" && t.TaskSlug == task.TaskSlug)) && isExplicitTopLevelTask(t) {
+			_ = RemoveNestedConversation(vaultDir, t.ConversationID)
+		}
+	}
+	return nil
 }
 
 // CompleteTask marks an existing task in local/memory/tasks.json (matched by TaskSlug or ConversationID) as completed.
@@ -832,7 +853,10 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SetTaskPinned pins or unpins a task in local/memory/tasks.json so it stays anchored at the top of the Active board.
@@ -1056,6 +1080,9 @@ func ReopenTaskWithOptions(vaultDir, target string, opts ReopenTaskOptions) (Sid
 	}
 	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
 		return SidebarSingleSyncResult{}, err
+	}
+	if tasks[reopenedIdx].ConversationID != "" && isExplicitTopLevelTask(tasks[reopenedIdx]) {
+		_ = RemoveNestedConversation(vaultDir, tasks[reopenedIdx].ConversationID)
 	}
 
 	if opts.NoSidebar {
@@ -1591,7 +1618,10 @@ func CancelTasks(vaultDir string, conversationIDs []string, reason string) error
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 // CancelAllSubagentTasks marks all active subagent tasks as cancelled.
@@ -1618,7 +1648,10 @@ func CancelAllSubagentTasks(vaultDir string, reason string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
+	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 func frontDeskPath(vaultDir string) string {
@@ -3156,25 +3189,52 @@ func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt 
 	return item, err
 }
 
+func normalizeSubagentPromptText(s string) string {
+	s = strings.ReplaceAll(s, "<USER_REQUEST>", " ")
+	s = strings.ReplaceAll(s, "</USER_REQUEST>", " ")
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+func matchesPendingSubagentPrompt(callerPrompt, itemPrefix string) bool {
+	cp := normalizeSubagentPromptText(callerPrompt)
+	ip := normalizeSubagentPromptText(strings.TrimSuffix(strings.TrimSpace(itemPrefix), "..."))
+	if cp == "" || ip == "" {
+		return true
+	}
+	if runes := []rune(ip); len(runes) > 80 {
+		ip = string(runes[:80])
+	}
+	return strings.Contains(cp, ip) || strings.Contains(ip, cp)
+}
+
 // PopPendingSubagent pops the oldest unclaimed pending subagent created within maxAge.
 func PopPendingSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent, bool) {
+	return PopPendingSubagentForCaller(vaultDir, "", "", maxAge)
+}
+
+// PopPendingSubagentForCaller pops the oldest matching unclaimed pending subagent within maxAge,
+// rejecting self-parenting (`ParentConversationID == callerConvID`) and mismatched prompts when callerPrompt is known.
+func PopPendingSubagentForCaller(vaultDir, callerConvID, callerPrompt string, maxAge time.Duration) (PendingSubagent, bool) {
 	queue, err := loadPendingSubagents(vaultDir)
 	if err != nil || len(queue) == 0 {
 		return PendingSubagent{}, false
 	}
+	callerConvID = strings.TrimSpace(callerConvID)
 	cutoff := time.Now().Add(-maxAge)
 	var remaining []PendingSubagent
 	var matched PendingSubagent
 	found := false
 	for _, item := range queue {
-		if !found && item.CreatedAt.After(cutoff) {
+		if !item.CreatedAt.After(cutoff) {
+			continue
+		}
+		isSelf := callerConvID != "" && strings.TrimSpace(item.ParentConversationID) == callerConvID
+		if !found && !isSelf && matchesPendingSubagentPrompt(callerPrompt, item.PromptPrefix) {
 			matched = item
 			found = true
 			continue
 		}
-		if item.CreatedAt.After(cutoff) {
-			remaining = append(remaining, item)
-		}
+		remaining = append(remaining, item)
 	}
 	if found {
 		_ = savePendingSubagents(vaultDir, remaining)
@@ -3269,23 +3329,32 @@ func QueuePendingNestedSubagent(vaultDir, parentConvID, role, model, prompt stri
 
 // PopPendingNestedSubagent pops the oldest pending nested subagent created within maxAge.
 func PopPendingNestedSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent, bool) {
+	return PopPendingNestedSubagentForCaller(vaultDir, "", "", maxAge)
+}
+
+// PopPendingNestedSubagentForCaller pops the oldest matching pending nested subagent within maxAge,
+// rejecting self-parenting (`ParentConversationID == callerConvID`) and mismatched prompts when callerPrompt is known.
+func PopPendingNestedSubagentForCaller(vaultDir, callerConvID, callerPrompt string, maxAge time.Duration) (PendingSubagent, bool) {
 	queue, err := loadPendingNestedSubagents(vaultDir)
 	if err != nil || len(queue) == 0 {
 		return PendingSubagent{}, false
 	}
+	callerConvID = strings.TrimSpace(callerConvID)
 	cutoff := time.Now().Add(-maxAge)
 	var remaining []PendingSubagent
 	var matched PendingSubagent
 	found := false
 	for _, item := range queue {
-		if !found && item.CreatedAt.After(cutoff) {
+		if !item.CreatedAt.After(cutoff) {
+			continue
+		}
+		isSelf := callerConvID != "" && strings.TrimSpace(item.ParentConversationID) == callerConvID
+		if !found && !isSelf && matchesPendingSubagentPrompt(callerPrompt, item.PromptPrefix) {
 			matched = item
 			found = true
 			continue
 		}
-		if item.CreatedAt.After(cutoff) {
-			remaining = append(remaining, item)
-		}
+		remaining = append(remaining, item)
 	}
 	if found {
 		_ = savePendingNestedSubagents(vaultDir, remaining)
@@ -3313,14 +3382,21 @@ func loadNestedConversations(vaultDir string) (map[string]NestedConversation, er
 	if err := json.Unmarshal(data, &list); err == nil {
 		m := make(map[string]NestedConversation)
 		for _, item := range list {
-			if item.ConversationID != "" {
-				m[item.ConversationID] = item
+			cid := strings.TrimSpace(item.ConversationID)
+			pid := strings.TrimSpace(item.ParentConversationID)
+			if cid != "" && (pid == "" || cid != pid) {
+				m[cid] = item
 			}
 		}
 		return m, nil
 	}
 	var m map[string]NestedConversation
 	if err := json.Unmarshal(data, &m); err == nil {
+		for k, item := range m {
+			if item.ParentConversationID != "" && strings.TrimSpace(item.ConversationID) == strings.TrimSpace(item.ParentConversationID) {
+				delete(m, k)
+			}
+		}
 		return m, nil
 	}
 	return make(map[string]NestedConversation), nil
@@ -3347,7 +3423,8 @@ func saveNestedConversations(vaultDir string, m map[string]NestedConversation) e
 // RecordNestedConversation records a conversation ID as a nested descendant subagent.
 func RecordNestedConversation(vaultDir, convID, parentConvID string) error {
 	convID = strings.TrimSpace(convID)
-	if convID == "" {
+	parentConvID = strings.TrimSpace(parentConvID)
+	if convID == "" || (parentConvID != "" && convID == parentConvID) {
 		return nil
 	}
 	m, _ := loadNestedConversations(vaultDir)
@@ -3356,9 +3433,27 @@ func RecordNestedConversation(vaultDir, convID, parentConvID string) error {
 	}
 	m[convID] = NestedConversation{
 		ConversationID:       convID,
-		ParentConversationID: strings.TrimSpace(parentConvID),
+		ParentConversationID: parentConvID,
 		CreatedAt:            time.Now().Format(time.RFC3339),
 	}
+	return saveNestedConversations(vaultDir, m)
+}
+
+// RemoveNestedConversation deletes any stale nested-subagent classification for convID
+// (used when registering, spawning, or adopting a top-level Kind="task" conversation).
+func RemoveNestedConversation(vaultDir, convID string) error {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return nil
+	}
+	m, err := loadNestedConversations(vaultDir)
+	if err != nil || len(m) == 0 {
+		return nil
+	}
+	if _, exists := m[convID]; !exists {
+		return nil
+	}
+	delete(m, convID)
 	return saveNestedConversations(vaultDir, m)
 }
 
@@ -3379,15 +3474,17 @@ func IsNestedSubagentConversation(vaultDir, convID string) bool {
 
 // IsSubagentConversation returns true if convID belongs to an ephemeral child subagent
 // (Layer-1 subagent or nested descendant subagent), and should never be treated as a Front Desk conversation.
+// Explicit top-level `Kind: "task"` conversations are never classified as ephemeral subagents even if
+// previously adopted or poisoned in `nested_conversations.json`.
 func IsSubagentConversation(vaultDir, convID string) bool {
 	convID = strings.TrimSpace(convID)
 	if convID == "" {
 		return false
 	}
-	if IsNestedSubagentConversation(vaultDir, convID) {
-		return true
-	}
 	if task, _, found := FindTaskAnywhere(vaultDir, convID); found {
+		if isExplicitTopLevelTask(task) {
+			return false
+		}
 		if strings.EqualFold(task.Kind, "subagent") || task.EffectiveKind() == "subagent" ||
 			task.ParentConversationID != "" ||
 			strings.HasPrefix(task.TaskSlug, "subagent-") ||
@@ -3395,7 +3492,7 @@ func IsSubagentConversation(vaultDir, convID string) bool {
 			return true
 		}
 	}
-	return false
+	return IsNestedSubagentConversation(vaultDir, convID)
 }
 
 // IsLayer1Task returns true if task is a Layer-1 task orchestrated by the Front Desk:
@@ -3427,7 +3524,7 @@ func FilterLayer1Tasks(vaultDir string, tasks []ActiveTask) []ActiveTask {
 	fd, _ := GetFrontDesk(vaultDir)
 	var out []ActiveTask
 	for _, t := range tasks {
-		if t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
+		if !isExplicitTopLevelTask(t) && t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
 			continue
 		}
 		if IsLayer1Task(t, fd.ConversationID) {
@@ -3438,13 +3535,33 @@ func FilterLayer1Tasks(vaultDir string, tasks []ActiveTask) []ActiveTask {
 }
 
 // CleanNestedTasks archives or removes nested child subagents from local/memory/tasks.json,
-// moving them to tasks_archive.jsonl and adjusting quota so that only Layer-1 tasks are tracked.
+// moving them to tasks_archive.jsonl, scrubbing poisoned top-level task/self-parented IDs from
+// nested_conversations.json, and adjusting quota so that only Layer-1 tasks are tracked.
 func CleanNestedTasks(vaultDir string) ([]string, error) {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil {
 		return nil, err
 	}
 	fd, _ := GetFrontDesk(vaultDir)
+
+	explicitTaskIDs := make(map[string]bool)
+	for _, t := range tasks {
+		if t.ConversationID != "" && isExplicitTopLevelTask(t) {
+			explicitTaskIDs[strings.TrimSpace(t.ConversationID)] = true
+		}
+	}
+	if nestedMap, nErr := loadNestedConversations(vaultDir); nErr == nil && len(nestedMap) > 0 {
+		scrubbed := false
+		for cid, rec := range nestedMap {
+			if explicitTaskIDs[cid] || (fd.ConversationID != "" && cid == fd.ConversationID) || (rec.ParentConversationID != "" && cid == rec.ParentConversationID) {
+				delete(nestedMap, cid)
+				scrubbed = true
+			}
+		}
+		if scrubbed {
+			_ = saveNestedConversations(vaultDir, nestedMap)
+		}
+	}
 
 	// Pre-seed known nested conversations from quota events or journal if any
 	quota := LoadQuota(vaultDir)
@@ -3454,7 +3571,7 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 			if m := re.FindStringSubmatch(ev.Outcome); len(m) == 3 {
 				cid := m[1]
 				pid := m[2]
-				if fd.ConversationID != "" && pid != fd.ConversationID {
+				if fd.ConversationID != "" && pid != fd.ConversationID && !explicitTaskIDs[cid] {
 					_ = RecordNestedConversation(vaultDir, cid, pid)
 				}
 			}
@@ -3468,12 +3585,14 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 
 	for _, t := range tasks {
 		isNested := false
-		if t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
-			isNested = true
-		} else if t.EffectiveKind() == "subagent" {
-			parentID := strings.TrimSpace(t.ParentConversationID)
-			if parentID != "" && fd.ConversationID != "" && parentID != fd.ConversationID {
+		if !isExplicitTopLevelTask(t) && t.EffectiveKind() == "subagent" {
+			if t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
 				isNested = true
+			} else {
+				parentID := strings.TrimSpace(t.ParentConversationID)
+				if parentID != "" && fd.ConversationID != "" && parentID != fd.ConversationID {
+					isNested = true
+				}
 			}
 		}
 

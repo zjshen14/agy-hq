@@ -305,7 +305,7 @@ func VerifyAskAndMintCap(vaultDir, propID, shaPrefix, convID, transcriptPath str
 		return "", "", fmt.Errorf("corrupt ask challenge record for %s", propID)
 	}
 	if ask.ProposalID != propID || ask.ConvID != convID {
-		return "", "", fmt.Errorf("ask_question challenge for %s belongs to a different conversation", propID)
+		return "", "", fmt.Errorf("ask_question challenge for %s belongs to a different conversation (%s); either run `hq approve` in that conversation or present a fresh `ask_question` referencing %s in this conversation first", propID, ask.ConvID, propID)
 	}
 	if strings.ToLower(strings.TrimSpace(ask.FullSHA256)) != fullSHA {
 		return "", "", fmt.Errorf("proposal %s payload changed since ask_question challenge was shown", propID)

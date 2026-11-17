@@ -172,6 +172,17 @@ func emitDroppedEventAlerts(vaultDir string, dropped []events.Event, now time.Ti
 	}
 }
 
+// HasMaterialDispatchActions returns true when at least one returned dispatch action represents
+// an actual delivery or spawn rather than a "(deferred: ...)" hold, avoiding idle console sync thrash.
+func HasMaterialDispatchActions(actions []string) bool {
+	for _, a := range actions {
+		if !strings.Contains(a, " (deferred: ") {
+			return true
+		}
+	}
+	return false
+}
+
 // DispatchPendingEvents leases ready event batches from local/memory/events.json (enforcing
 // single-active-worker per ScopeKey and crash-lease expiry reaping) and dispatches them either
 // by waking the target SessionID or spawning a fresh background worker.
@@ -235,6 +246,20 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 				Prompt:       batch.Prompt,
 				ExplicitTier: effTier,
 			}).ModelID
+		}
+
+		if !dryRun {
+			qState := LoadQuota(vaultDir)
+			if qState.CircuitOpen || (qState.MaxDailySpawns > 0 && qState.SpawnsToday >= qState.MaxDailySpawns) {
+				reason := qState.CircuitReason
+				if reason == "" {
+					reason = fmt.Sprintf("daily spawn budget exhausted (%d/%d)", qState.SpawnsToday, qState.MaxDailySpawns)
+				}
+				newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, "quota circuit breaker is OPEN: "+reason, true, now)
+				emitDroppedEventAlerts(vaultDir, newlyDropped, now)
+				actions = append(actions, fmt.Sprintf("%s (deferred: quota circuit breaker is OPEN: %s)", label, reason))
+				continue
+			}
 		}
 
 		var prevTask ActiveTask

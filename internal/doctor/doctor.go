@@ -37,6 +37,12 @@ type CheckResult struct {
 
 // Run executes environment, sandbox, CLI, and Vault health checks.
 func Run(vaultDir string) []CheckResult {
+	return RunWithObs(vaultDir, nil)
+}
+
+// RunWithObs executes all doctor checks, reusing a precomputed DashboardSummary when non-nil
+// so callers like the Web UI and Markdown Console do not evaluate the observability index twice.
+func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckResult {
 	var results []CheckResult
 
 	// 0. Check Go Toolchain & Runtime
@@ -320,7 +326,12 @@ func Run(vaultDir string) []CheckResult {
 	}
 
 	// 10. Check Token Budget & Front Desk Context Health (RFC-0012)
-	obsSum := obs.BuildDashboardSummary(vaultDir, time.Time{})
+	var obsSum obs.DashboardSummary
+	if precomputedObs != nil {
+		obsSum = *precomputedObs
+	} else {
+		obsSum = obs.BuildDashboardSummary(vaultDir, time.Time{})
+	}
 	if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100 {
 		results = append(results, CheckResult{
 			Name:   "Token Budget & Context Health",
