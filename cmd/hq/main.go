@@ -1185,10 +1185,12 @@ func main() {
 
 	case "gmail":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: hq gmail <init|add-account|accounts|search|read-quarantined|draft|send-draft|precheck|triage-result|attachment-quarantine> [args]")
+			printGmailUsage(os.Stderr)
 			os.Exit(1)
 		}
 		switch os.Args[2] {
+		case "--help", "-h", "help":
+			printGmailUsage(os.Stdout)
 		case "init", "add-account":
 			fs := flag.NewFlagSet("gmail "+os.Args[2], flag.ExitOnError)
 			alias := fs.String("alias", "primary", "Account alias (e.g. primary, personal-2, shopping)")
@@ -1343,6 +1345,84 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Printf("Attachment saved to %s (autoRoutedToInbox=%v)\n", dest, autoRouted)
+
+		case "forward":
+			denyIfCallerTainted(vaultDir, "gmail forward")
+			fs := flag.NewFlagSet("gmail forward", flag.ExitOnError)
+			account := fs.String("account", "", "Account alias or email (defaults to defaultAccount)")
+			messageID := fs.String("message", "", "Source Gmail message ID to forward")
+			to := fs.String("to", "", "Comma-separated recipient email address(es)")
+			cc := fs.String("cc", "", "Optional comma-separated CC email address(es)")
+			subject := fs.String("subject", "", "Optional subject override (defaults to Fwd: <original subject>)")
+			note := fs.String("note", "", "Optional top note to prepend above the forwarded message")
+			noteStdin := fs.Bool("note-stdin", false, "Read top note from stdin")
+			noteFile := fs.String("note-file", "", "Read top note from file path")
+			convID := fs.String("conv", "", "Optional conversation ID")
+			resumeOnDecide := fs.Bool("resume-on-decide", false, "Wake the originating conversation upon human approve or reject")
+			continuation := fs.String("continuation", "", "Optional continuation instruction injected when resuming")
+			_ = fs.Parse(os.Args[3:])
+			resolvedNote, nErr := resolveBodyInput(*note, *noteStdin, *noteFile, os.Stdin)
+			if nErr != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail forward failed: %v\n", nErr)
+				os.Exit(1)
+			}
+			if *convID == "" {
+				*convID = vault.ResolveConversationID()
+			}
+			plan, err := gmail.PrepareForward(vaultDir, gmail.ForwardOptions{
+				Account:   *account,
+				MessageID: *messageID,
+				To:        *to,
+				Cc:        *cc,
+				Subject:   *subject,
+				Note:      resolvedNote,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail forward failed: %v\n", err)
+				os.Exit(1)
+			}
+			preview := resolvedNote
+			if preview == "" {
+				preview = "(no note; forwarding original message)"
+			}
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			meta := map[string]string{
+				"messageId":       plan.MessageID,
+				"account":         plan.Account,
+				"from":            plan.From,
+				"to":              plan.To,
+				"cc":              plan.Cc,
+				"subject":         plan.Subject,
+				"bodyFile":        plan.BodyFile,
+				"bodyPreview":     preview,
+				"attachmentCount": fmt.Sprintf("%d", len(plan.AttachmentFiles)),
+			}
+			prop, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+				ActionType:       "messaging",
+				Summary:          plan.Summary,
+				Command:          plan.Command,
+				CommandArgv:      plan.CommandArgv,
+				WorkDir:          resolveDefaultWorkDir(rootDir),
+				ConversationID:   *convID,
+				ResumeOnDecide:   *resumeOnDecide,
+				ContinuationNote: *continuation,
+				OriginSkill:      "gmail",
+				Metadata:         meta,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq gmail forward failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Staged Gmail forward proposal %s (message: %s, to: %s, attachments: %d, sha256: %s)\n",
+				prop.ID, plan.MessageID, plan.To, len(plan.AttachmentFiles), prop.SHA256[:12])
+			fmt.Printf("  Body file: %s\n", plan.BodyFile)
+			for i, attPath := range plan.AttachmentFiles {
+				fmt.Printf("  Attachment %d: %s\n", i+1, attPath)
+			}
+			fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
 
 		default:
 			fmt.Fprintf(os.Stderr, "unknown gmail subcommand: %s\n", os.Args[2])
@@ -3824,7 +3904,7 @@ Commands:
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
   worktree <add|list|attach|remove|prune>  Manage isolated git worktrees & prune merged orphans in <vault>/worktrees/
-  gmail <init|status|list|read|draft|triage>  Layer 1 Gmail primitives & sidecar precheck
+  gmail <init|status|list|read|draft|forward|triage>  Layer 1 Gmail primitives & sidecar precheck
   gchat <init|spaces|search|read|draft|triage> Layer 1 Google Chat primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
   subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation
@@ -3834,4 +3914,23 @@ Commands:
   adopt --conv=<id> --task=<slug>     Adopt an existing conversation (or demote Front Desk to a Task)
   claim-desk --conv=<id>              Claim the single active [HQ] Front Desk intake lease
   release-desk                        Release Front Desk lease so next new conversation claims it`)
+}
+
+func printGmailUsage(w io.Writer) {
+	fmt.Fprintln(w, `Usage: hq gmail <subcommand> [args]
+
+Subcommands:
+  init | add-account        Configure a Gmail account in <vault>/private/gmail/accounts.json
+  accounts | status         Show configured Gmail accounts
+  search | list             Search Gmail messages
+  read-quarantined | read   Read a Gmail thread in quarantined mode
+  draft                     Create or update a plain-text Gmail draft
+  send-draft | send         Verify content hash and send an existing Gmail draft
+  forward                   Fetch message HTML + attachments, prepend note/header, and stage via hq propose
+                              Flags: --message=<id> --to=<emails> [--cc=<emails>] [--subject=...]
+                                     [--note="..." | --note-file=<path> | --note-stdin] [--account=<alias>]
+                                     [--conv=<id>] [--resume-on-decide] [--continuation="..."]
+  precheck | triage         Run 0-token unread Gmail precheck
+  triage-result             Record validated triage results
+  attachment-quarantine     Quarantine a downloaded attachment`)
 }
