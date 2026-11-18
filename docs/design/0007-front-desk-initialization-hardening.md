@@ -1,6 +1,6 @@
 # RFC-0007: Front Desk Initialization & Handover Lifecycle Hardening
 
-- **Status:** Draft / In Review
+- **Status:** Implemented (Verified by `TestCUJ13_FrontDeskInitHardeningAndTriggerArming`)
 - **Related Docs:** [RFC-0001](0001-vault-and-task-isolation.md), [RFC-0002](0002-memory-and-consolidation.md), [RFC-0004](0004-heartbeat-and-channels.md), [AGENTS.md](../../AGENTS.md)
 
 ---

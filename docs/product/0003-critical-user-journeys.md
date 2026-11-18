@@ -14,7 +14,7 @@
 | **CUJ-3** | Dedicated Task Conversation Lifecycle (Spawn, Adopt, Stop Sync, Complete) | `hq spawn`, `hq adopt`, `hq hook stop`, `hq complete` | `TestCUJ3_TaskConversationLifecycle` |
 | **CUJ-4** | Smart Model & Thinking-Depth Routing + 429 Quota Fallback | `hq spawn`, `kernel.ResolveModel`, `kernel.SpawnTask` | `TestCUJ4_SmartModelRoutingAndQuotaFallback` |
 | **CUJ-5** | Approval-Bound Outbound Execution & Tamper Rejection | `hq hook pre-tool`, `hq propose`, `hq approve`, `hq reject` | `TestCUJ5_ApprovalBoundOutboundExecution` |
-| **CUJ-6** | Parallel Multi-Repo Git Worktree Lifecycle | `hq worktree add`, `hq worktree list`, `hq worktree remove` | `TestCUJ6_ParallelWorktreeLifecycle` |
+| **CUJ-6** | Parallel Multi-Repo Git Worktree Lifecycle & Orphan Prune | `hq worktree add`, `hq worktree list`, `hq worktree remove`, `hq worktree sync` | `TestCUJ6_ParallelWorktreeLifecycle`, `TestCUJ_MultiWorktreeLifecycleAndOrphanPrune` |
 | **CUJ-7** | Quarantined Inbox Drop & 0-Token Heartbeat Gatekeeper | `hq heartbeat`, `local/inbox/` | `TestCUJ7_InboxRoutingAndHeartbeatGatekeeper` |
 | **CUJ-8** | Zero-Token Per-Turn Journaling & Live Console Sync | `hq hook stop`, `local/CONSOLE.md`, `hq_console.md` | `TestCUJ8_TurnJournalingAndLiveConsoleSync` |
 | **CUJ-9** | Engine Upgrade & Non-Destructive Vault Migration | `hq upgrade`, `hq migrate` | `TestCUJ9_EngineUpgradeAndVaultMigration` |
@@ -26,6 +26,7 @@
 | **CUJ-15** | 4-Layer Memory Engine & Dreaming Verification | `hq memory`, `local/memory/topics/`, `local/memory/facts.jsonl` | `TestCUJ15_MemoryEngineUpgradeAndDreamingVerification` |
 | **CUJ-16A** | Google Chat Integration, Quarantine Lockdown & Approval-Bound Send | `hq gchat`, `local/memory/gchat/` | `TestCUJ16_GoogleChatQuarantineAndApproval` |
 | **CUJ-16B** | Scalable Task Board, Per-Tier Visibility & Cold Archive Recall | `hq tasks`, `local/memory/tasks.json` | `TestCUJ16_TaskBoardTieredConsoleAndColdArchive` |
+| **CUJ-16C** | Antigravity Sidebar Conversation Archive Sync | `hq archive`, `hq tasks compact`, `hq reopen`, `hq tasks sync-sidebar` | `TestCUJ_SidebarConversationArchiveSync` |
 | **CUJ-17** | Bounded Agent Recursive Self-Improvement (RSI) | `hq rsi`, `internal/rsi` | `TestCUJ17_AgentRSIMiningVerificationAndApproval` |
 | **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
 | **CUJ-19** | End-to-End Token & Context Observability, Subagent DAG Attribution & Budget Circuit Breaker | `hq obs`, `internal/obs`, `hq hook stop`, `hq doctor` | `TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards` |
@@ -34,6 +35,19 @@
 | **CUJ-22** | Stateful Multi-Day `Goals`, Milestones & Zero-Token `WaitingOn` SLA Sweep | `hq goals`, `hq heartbeat`, `local/memory/goals.json` | `TestCUJ22_StatefulGoalsMilestonesAndWaitingOnSLASweep` |
 | **CUJ-23** | Context-Scheduled Console `Spaces`, On-Demand Entity Dossiers & 4-Layer Surgical `forget` | `hq spaces`, `hq memory add-entity|lookup|forget` | `TestCUJ23_ScheduledConsoleSpacesEntityLookupAndSurgicalForget` |
 | **CUJ-24** | Universal Credential Vault Read-Guard, `24h` Proposal TTL & Outbound Contextual-PII Badge | `hq hook pre-tool`, `hq propose --ttl`, `hq approve` | `TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge` |
+| **CUJ-25** | Global Plugin Packaging, Standalone Vault Resolution & External Workspace Safety | `hq plugin`, `hq version`, `hq vault-path` | `TestCUJ25_GlobalPluginPackagingAndStandaloneVault` |
+| **CUJ-26** | Crash-Safe Event Inbox, Authenticated Webhook Push & Precheck Error Health | `hq events`, `hq heartbeat`, `hq doctor` | `TestCUJ26_CrashSafeEventInboxWebhookPushAndPrecheckHealth` |
+| **CUJ-27** | Agent-Armed Durable Follow-Up Timer Across Run Exit | `hq timers`, `hq heartbeat` | `TestCUJ27_AgentFollowUpTimerAcrossRunExit` |
+| **CUJ-28** | Deferred Approval Resumption, Shell-Free Argv Scrub & Progress Checkpoints | `hq propose`, `hq approve`, `hq reject`, `hq progress` | `TestCUJ28_DeferredApprovalResumptionArgvScrubAndProgressCheckpoints` |
+| **CUJ-29** | Lean `[Auto]` `SessionStart`, Gray-Zone `PreToolUse` Guard, Exec Sandbox & Outbox Eval | `hq hook session-start`, `hq hook pre-tool`, `hq outbox eval` | `TestCUJ29_UnattendedAutoGrayZoneGuardSandboxAndOutboxEval` |
+| **CUJ-30** | Modular Connector Protocol, CLI Transport & 0-Token Watcher Engine | `hq connector`, `hq watch` | `TestCUJ30_ConnectorProtocolCLITransportAndWatcherEngine` |
+| **CUJ-31** | Provenance Taint, Human-Presence Approval Proof & Offer Gateway | `hq hook session-start`, `hq hook pre-tool`, `hq offer stage`, `hq approve --cap` | `TestCUJ31_ProvenanceTaintApprovalProofAndOfferGateway` |
+| **CUJ-32** | Outbox Quiet-Hours DND, Tainted Dedup Isolation & Fenced System Cards | `hq outbox add`, `hq heartbeat` | `TestCUJ32_OutboxQuietHoursAndFencedSystemDelivery` |
+| **CUJ-33** | Lease-Based Morning Brief, Quarantined Extensions & Backward-Compatible Drain | `hq brief collect`, `hq brief commit` | `TestCUJ33_LeaseBasedMorningBriefAndStructuredExtensions` |
+| **CUJ-34** | Companion Extension Packs, Trust Ceremony, Host Portability & Pure-Go Sidecar | `hq ext`, `hq trust`, `hq dispatch resolve`, `hq sidecar console` | `TestCUJ34_ExtensionPacksTrustAndHostPortability` |
+| **CUJ-35** | Two-Tier RSI, Vault Skills (`local/skills/`), Inline Overlays & Tier 2 Upstream Export | `hq skill`, `hq rsi`, `hq dispatch resolve` | `TestCUJ35_TwoTierRSIVaultSkillsAndOverlays` |
+| **CUJ-36** | Customizable Outbound Approval Policy, Native Coexistence & Lifecycle Hardening | `hq propose`, `hq hook pre-tool`, `hq approve`, `hq reject --dismiss` | `TestCUJ36_CustomizableApprovalPolicyAndUXHardening` |
+| **CUJ-38** | Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling | `hq channels`, `hq daemon`, `hq hook stop` | `TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling` |
 
 ---
 
@@ -111,7 +125,7 @@
 ## CUJ-9: Multi-Machine Engine Upgrade & Non-Destructive Vault Migration
 1. **Pre-Upgrade Vault Snapshot (`local/.git`):** Before touching anything, `./bin/hq upgrade` (or `hq migrate`) commits any uncommitted changes in `local/.git` as a restore point (`chore(vault): pre-upgrade snapshot`).
 2. **Upstream Code Pull & Binary Rebuild:** Pulls the latest commits on the root `agy-hq` repository (`git pull --ff-only`), recompiles `./bin/hq`, and re-execs the newly compiled `./bin/hq migrate` subprocess so newly pulled migration steps take effect immediately.
-3. **Auto-Rebuild on `git pull` (`SessionStart` Hook):** Even if the user runs `git pull` manually without running `./bin/hq upgrade`, the `SessionStart` hook in `.agents/hooks.json` detects when `.go` files in `cmd/` or `internal/` are newer than `./bin/hq`, automatically recompiles `./bin/hq`, and runs `./bin/hq migrate --quiet`.
+3. **Auto-Rebuild on `git pull` (`SessionStart` Hook):** Even if the user runs `git pull` manually without running `./bin/hq upgrade`, the `SessionStart` hook in `.agents/plugins/agy-hq/hooks.json` detects when `.go` files in `cmd/` or `internal/` are newer than `./bin/hq`, automatically recompiles `./bin/hq`, and runs `./bin/hq migrate --quiet`.
 4. **Non-Destructive Schema & Template Migration (`local/memory/schema_version.json`):**
    - Never overwrites user-customized `USER.md`, `MEMORY.md`, `config.yaml`, or `triggers.yaml`.
    - Creates any newly added directories or template files.
@@ -189,7 +203,7 @@
 
 ## CUJ-18: Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate
 1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 6 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist, P6 contextual PII & real `spaces/<id>` guard) across staged diffs (`--staged`), the full tracked tree, and commit history (`--history`).
-2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B (`.agents/hooks.json` == `.agents/plugins/agy-hq/hooks.json` byte parity + 21-probe `PreToolUse` security/credential-guard/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
+2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B/H2-C (single-source `.agents/plugins/agy-hq/hooks.json` contract, `plugin.json` == `version.Version` SemVer parity, sidecar `main.mjs` byte parity, and `PreToolUse` security/credential-guard/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
 3. **Local Git Hook Enforcement (`hq ci install-hooks` / `pre-commit` / `pre-push`):** Automatically installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` and rejects commits containing leaked PII/credentials, unformatted Go files, or broken Markdown links before they leave the developer workstation.
 
 ---
@@ -236,3 +250,82 @@
 1. **Universal Credential Vault Isolation (`hq hook pre-tool`):** Denies direct `read_file`, `write_file`, `edit_file`, `grep_search`, `find_by_name`, and shell inspection (`cat`, symlinked path tokens, etc.) targeting `local/private/{gmail,gchat,credentials,pii-denylist.txt}` across **every** session (tainted or untainted), while preserving untainted worker access to `local/private/{ledger,taxes}/`.
 2. **Outbound Contextual-PII Leak Warning (`hq propose` + `ask_question`):** Scans staged outbound payloads against `pii-denylist.txt` and SSN/account/street-address patterns, recording `RiskFlags` and prepending a prominent `⚠️ [PII WARNING: ...]` banner into `ask_question` and `:4242`.
 3. **Deterministic Proposal Expiration (`--ttl`, Default `24h`):** Rejects `hq approve` calls on expired pending proposals (`status = "expired"`) so stale drafts can never execute days later.
+
+---
+
+## CUJ-16C: Antigravity Sidebar Conversation Archive Sync ([RFC-0016](../design/0016-sidebar-conversation-archive-sync.md))
+1. **ConnectRPC Sidebar Mirroring (`hq archive`, `hq tasks compact`, `hq reopen`):** Mirrors task archival and cold recall into Antigravity's sidebar (`UpdateConversationAnnotations` `is_archived`) while enforcing Front Desk, pinned-task, and active-turn safety gates.
+2. **Offline Retry Queue & Backfill (`hq tasks sync-sidebar`):** Queues sidebar archive/unarchive mutations durably when no live language server is reachable and drains or backfills cleanly once reconnected.
+
+---
+
+## CUJ-25: Global Plugin Packaging, Standalone Vault Resolution & External Workspace Safety ([RFC-0015](../design/0015-global-plugin-packaging.md))
+1. **Global Bundle & Embedded Templates (`hq plugin install|status|uninstall`, `hq version`):** Installs `~/.local/bin/hq` and `~/.gemini/config/plugins/agy-hq/` with single-source `.agents/plugins/agy-hq/hooks.json` and embedded `templates/` scaffolding.
+2. **5-Step Vault Resolution & External Repo Isolation (`hq vault-path`):** Resolves the user's canonical Vault across workspaces without scattering `local/` directories into external repositories and keeps regular project sessions free of Front Desk lookup caps.
+
+---
+
+## CUJ-26: Crash-Safe Event Inbox, Authenticated Webhook Push & Precheck Error Health ([RFC-0018](../design/0018-always-on-agent-runtime-hardening.md))
+1. **Durable Lease State Machine (`hq events`):** Transitions inbound events atomically through `pending` -> `leased` -> `done`/`dropped` with crash-safe lease expiry recovery and single-worker scope serialization.
+2. **Loopback Push Ingress & Precheck Health (`hq doctor`):** Accepts authenticated webhook push events into the durable inbox and surfaces failing gatekeeper prechecks in `hq doctor` instead of silently masking errors as `0`-token skips.
+
+---
+
+## CUJ-27: Agent-Armed Durable Follow-Up Timer Across Run Exit ([RFC-0018](../design/0018-always-on-agent-runtime-hardening.md))
+1. **Durable Timer Persistence (`hq timers set|list|cancel`):** Persists self-scheduled follow-up timers across process restarts while blocking tainted sessions from arming wakeups.
+2. **Originating Session Resumption (`hq heartbeat`):** Evaluates due timers in `0` LLM tokens and resumes the originating task conversation (or dispatches a bounded worker) once the timer fires.
+
+---
+
+## CUJ-28: Deferred Approval Resumption, Shell-Free Argv Scrub & Progress Checkpoints ([RFC-0018](../design/0018-always-on-agent-runtime-hardening.md))
+1. **Closed-Loop Approval/Rejection Wakeup (`hq approve` / `hq reject`):** Automatically notifies the originating task conversation with structured execution output or rejection reason so multi-step runs resume cleanly.
+2. **Scrubbed Execution & Cross-Run Progress (`hq progress`):** Supports shell-free `CommandArgv` proposals with scrubbed child environments and structured `local/memory/progress/<slug>.md` checkpoints across turns.
+
+---
+
+## CUJ-29: Lean `[Auto]` `SessionStart`, Gray-Zone `PreToolUse` Guard, Exec Sandbox & Outbox Eval ([RFC-0018](../design/0018-always-on-agent-runtime-hardening.md))
+1. **Fail-Closed Unattended Guardrails (`hq hook session-start`, `hq hook pre-tool`):** Serves a lean static-first `SessionStart` context to `[Auto]` runs and blocks gray-zone external mutations (`git push`, `gh issue`, `gh pr`, outbound `curl POST`) unless staged via `hq propose`.
+2. **Offline Outbox Replay (`hq outbox eval`):** Scores attention-tier routing and suppression accuracy deterministically against labeled fixture corpora in `0` LLM tokens.
+
+---
+
+## CUJ-30: Modular Connector Protocol, CLI Transport & 0-Token Watcher Engine ([RFC-0017a](../design/0017a-connector-protocol-and-watcher-engine.md))
+1. **Declarative Connector & CLI Transport (`hq connector`):** Separates immutable `connector.json` transport profiles from per-account `instance.json` state across Gmail, Google Chat, Calendar, and companion packs.
+2. **Cursor-Locked Watcher Engine (`hq watch poll|ack`):** Runs scrubbed connector subprocesses under `internal/store` rank locks, paginates `events.Enqueue`, and quarantines poison items after bounded retries.
+
+---
+
+## CUJ-31: Provenance Taint, Human-Presence Approval Proof & Offer Gateway ([RFC-0017b](../design/0017b-provenance-taint-and-offer-gateway.md))
+1. **Lease-Time Taint & Offer Staging (`hq offer stage`):** Binds `[hq-spawn:<token>]` quarantined sessions on `SessionStart`, enforces authenticated thread-participant recipient locks on `reply_draft`, and requires prior `inspect_thread` verification.
+2. **Transcript-Verified Human-Presence Capability (`hq approve --cap`):** Mints short-lived single-use HMAC capability tokens in `PreToolUse` when `ask_question` surfaces a verified proposal and rejects capability-less `hq approve` calls in live sessions.
+
+---
+
+## CUJ-32: Outbox Quiet-Hours DND, Tainted Dedup Isolation & Fenced System Cards ([RFC-0017b](../design/0017b-provenance-taint-and-offer-gateway.md) & [RFC-0017c](../design/0017c-lease-based-morning-brief-and-extensions.md))
+1. **Quiet-Hours DND Suppression & Tainted Dedup Isolation (`hq outbox add`):** Holds `interrupt` deliveries during configured quiet hours (unless `--urgent-override` on untainted callers) and isolates tainted dedup keys so quarantined readers cannot suppress legitimate alerts.
+2. **Nonce-Fenced System Cards:** Wraps untrusted summaries in per-delivery cryptographic boundary fences before waking `[HQ] Front Desk`.
+
+---
+
+## CUJ-33: Lease-Based Morning Brief, Quarantined Extensions & Backward-Compatible Drain ([RFC-0017c](../design/0017c-lease-based-morning-brief-and-extensions.md))
+1. **Two-Phase Brief Lease (`hq brief collect --lease` / `hq brief commit`):** Collects outbox rollups, `<4h` expiring proposals, tainted reader summaries, and `brief.d` extension sections non-destructively until explicitly committed after brief persistence.
+
+---
+
+## CUJ-34: Companion Extension Packs, Trust Ceremony, Host Portability & Pure-Go Sidecar ([RFC-0017d](../design/0017d-enterprise-extensibility-and-portability.md))
+1. **Trust-Pinned Companion Packs (`hq ext`, `hq trust`, `hq dispatch resolve`):** Discovers companion `hq-extension.json` packs, enforces explicit SHA-256 binary pinning in `local/private/trust.json`, resolves role-scoped overlays and `hq triggers pause|resume`, and serves the pure-Go console sidecar (`hq sidecar console`).
+
+---
+
+## CUJ-35: Two-Tier RSI, Vault Skills (`local/skills/`), Inline Overlays & Tier 2 Upstream Export ([RFC-0019](../design/0019-two-tier-rsi-vault-overlay.md))
+1. **Core OS vs. Vault Skill Split (`hq skill`, `hq dispatch resolve`):** Keeps Core OS skills in `.agents/plugins/agy-hq/skills/`, manages user-space starter/custom skills in `local/skills/` (wired via `.agents/skills.json`), injects Tier-1 personal RSI rules inline via `hq dispatch resolve`, and exports sanitized Tier-2 upstream skill patches.
+
+---
+
+## CUJ-36: Customizable Outbound Approval Policy, Native Coexistence & Lifecycle Hardening ([RFC-0021](../design/0021-customizable-approval-policy-and-ux.md))
+1. **Data-Driven `approvals.rules` & Native Coexistence (`hq propose`, `hq hook pre-tool`):** Evaluates `always`, `third_party_only` (`owned_repos`), `auto_only`, and `never` rules across interactive, `[Auto]`, and tainted sessions, rejects dummy `echo`/`true` placeholder commands, preserves multi-question `ask_question` payloads with `24h` `ask_ttl` idempotency, auto-supersedes prior `(ConversationID, ActionType)` proposals, and reconciles UI `Reject` selections and already-landed git refs in `0` LLM tokens.
+
+---
+
+## CUJ-38: Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling ([RFC-0023](../design/0023-front-desk-channel-bridge.md))
+1. **Trust-Pinned `hq-channel-bridge/v1` Lifecycle (`hq channels`, `hq daemon`, `hq hook stop`):** Supervises SHA-256-pinned companion channel bridges with LLM-invisible `0600` credentials (`local/private/channels/`), tunnels inbound messages and `0`-token `desk_reply` mirrors across Front Desk rotations (`bind-desk`), fans out `interrupt` and task `blocked`/`done` cards, and verifies single-use `bca_`/`bcr_` mobile approval/rejection callbacks.
