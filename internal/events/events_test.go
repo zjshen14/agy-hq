@@ -75,7 +75,7 @@ func TestEventInboxSerializationBatchingAndCrashRetry(t *testing.T) {
 	if err := BindBatchConversation(vaultDir, []string{ev1.ID, ev2.ID}, "00000000-0000-0000-0000-000000000001", now.Add(10*time.Second), 5*time.Minute); err != nil {
 		t.Fatalf("BindBatchConversation: %v", err)
 	}
-	completed, err := CompleteByConversation(vaultDir, "00000000-0000-0000-0000-000000000001", now.Add(20*time.Second))
+	completed, _, _, err := FinalizeByConversation(vaultDir, "00000000-0000-0000-0000-000000000001", now.Add(20*time.Second))
 	if err != nil || len(completed) != 2 {
 		t.Fatalf("expected 2 completed events, got %d (%v)", len(completed), err)
 	}

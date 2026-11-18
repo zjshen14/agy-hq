@@ -2206,17 +2206,6 @@ func renderHTML(w http.ResponseWriter, state DashboardState) {
 	_ = pageTmpl.Execute(w, state)
 }
 
-// RecordArtifactDir stores the active conversation's artifactDirectoryPath so CLI commands
-// (`hq propose`, `hq approve`, `hq reject`, `hq worktree`, `hq heartbeat`) can deterministically
-// keep `hq_console.md` in sync on every state mutation.
-func RecordArtifactDir(vaultDir, artifactDir string) {
-	if artifactDir == "" {
-		return
-	}
-	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
-	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"), []byte(strings.TrimSpace(artifactDir)), 0o644)
-}
-
 func stripConsoleTimestampHeader(s string) string {
 	if idx := strings.IndexByte(s, '\n'); idx >= 0 && strings.HasPrefix(s, "# ") {
 		return s[idx+1:]

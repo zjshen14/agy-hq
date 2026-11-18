@@ -1089,40 +1089,6 @@ func TryRenewLeaseByConversation(vaultDir, convID string, now time.Time, leaseTT
 	})
 }
 
-// RenewLeaseByConversation extends LeaseExpiresAt for all leased events bound to convID.
-func RenewLeaseByConversation(vaultDir, convID string, now time.Time, leaseTTL time.Duration) error {
-	convID = strings.TrimSpace(convID)
-	if convID == "" {
-		return nil
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if leaseTTL <= 0 {
-		leaseTTL = DefaultLeaseTTL
-	}
-	return withEventsLock(vaultDir, func() error {
-		active, err := loadActiveUnlocked(vaultDir)
-		if err != nil || len(active) == 0 {
-			return err
-		}
-		changed := false
-		expStr := now.Add(leaseTTL).UTC().Format(time.RFC3339)
-		nowStr := now.UTC().Format(time.RFC3339)
-		for i := range active {
-			if active[i].Status == StatusLeased && active[i].LeaseConvID == convID {
-				active[i].LeaseExpiresAt = expStr
-				active[i].UpdatedAt = nowStr
-				changed = true
-			}
-		}
-		if !changed {
-			return nil
-		}
-		return saveActiveUnlocked(vaultDir, active)
-	})
-}
-
 // DeferBatchOnSpawnError returns leased events to StatusPending when SpawnTask or session delivery fails.
 // When quotaDeferred is true (e.g., CircuitOpen / daily spawn cap), AttemptCount is NOT incremented so events
 // wait safely for quota recovery without dead-lettering.
@@ -1222,13 +1188,6 @@ func CompleteIDs(vaultDir string, eventIDs []string, now time.Time) ([]Event, er
 		}
 		return saveActiveUnlocked(vaultDir, kept)
 	})
-	return completed, err
-}
-
-// CompleteByConversation transitions leased events bound to convID to StatusDone (or requeues/drops
-// unacknowledged events when Metadata["requires_ack"]=="1" and Metadata["acked"]!="1").
-func CompleteByConversation(vaultDir, convID string, now time.Time) ([]Event, error) {
-	completed, _, _, err := FinalizeByConversation(vaultDir, convID, now)
 	return completed, err
 }
 

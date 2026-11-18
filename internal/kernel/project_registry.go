@@ -283,27 +283,6 @@ func ValidateProjectMatchesWorkspace(vaultDir, projectID, workspaceDir string) (
 	return false, true
 }
 
-// ResolveProjectIDForWorkspace looks up the Antigravity projectId registered for workspaceDir in `<ConfigDir>/projects/*.json`.
-func ResolveProjectIDForWorkspace(vaultDir, workspaceDir string) string {
-	normWS := normalizeWorkspaceFolderPath(workspaceDir)
-	if normWS == "" {
-		return ""
-	}
-	list, _, avail := loadAntigravityProjects(vaultDir)
-	if !avail {
-		return ""
-	}
-	if id := matchProjectIDForFolder(list, normWS); id != "" {
-		return id
-	}
-	if IsManagedWorktreeDir(vaultDir, workspaceDir) {
-		if primary := normalizeWorkspaceFolderPath(primaryVaultWorkspaceDir(vaultDir)); primary != "" {
-			return matchProjectIDForFolder(list, primary)
-		}
-	}
-	return ""
-}
-
 // ResolveVerifiedWorkspaceProjectID validates candidateProjectID against workspaceDir using `<ConfigDir>/projects/*.json`,
 // repairing mismatched/poisoned projectIds or resolving an empty projectId from the registry when available.
 func ResolveVerifiedWorkspaceProjectID(vaultDir, workspaceDir, candidateProjectID string) (projectID string, registryAvailable bool, repaired bool) {

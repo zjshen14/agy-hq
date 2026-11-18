@@ -38,7 +38,7 @@ func extractTestCSRFToken(t *testing.T, html string) string {
 
 func TestWebUIServerAndApprovalFlow(t *testing.T) {
 	vaultDir := t.TempDir()
-	prop, err := approvals.Create(vaultDir, "test_action", "Run echo via UI", "echo ui-approved-ok", "", "conv-ui")
+	prop, err := approvals.CreateWithMetadata(vaultDir, "test_action", "Run echo via UI", "echo ui-approved-ok", "", "conv-ui", nil)
 	if err != nil {
 		t.Fatalf("Create proposal: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestWebUIServerAndApprovalFlow(t *testing.T) {
 	}
 
 	// 5. Create second proposal and test JSON-based reject with X-HQ-CSRF-Token header
-	prop2, err := approvals.Create(vaultDir, "test_action_2", "Second action to reject", "echo reject-me", "", "conv-ui-2")
+	prop2, err := approvals.CreateWithMetadata(vaultDir, "test_action_2", "Second action to reject", "echo reject-me", "", "conv-ui-2", nil)
 	if err != nil {
 		t.Fatalf("Create proposal 2: %v", err)
 	}
@@ -461,9 +461,9 @@ func TestWebUIConcurrentStateSingleflightCacheInvalidationAndPollingJS(t *testin
 	}
 
 	// Mutating pending proposals must immediately invalidate the 2s read cache via Vault directory stamp
-	prop, err := approvals.Create(vaultDir, "release_publish", "Immediate cache invalidation check", "echo ok-now", "", "conv-cache-1")
+	prop, err := approvals.CreateWithMetadata(vaultDir, "release_publish", "Immediate cache invalidation check", "echo ok-now", "", "conv-cache-1", nil)
 	if err != nil {
-		t.Fatalf("approvals.Create: %v", err)
+		t.Fatalf("approvals.CreateWithMetadata: %v", err)
 	}
 	reqAfter := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/api/state", nil)
 	recAfter := httptest.NewRecorder()

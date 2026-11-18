@@ -269,20 +269,6 @@ func SaveRegistry(vaultDir string, reg AccountRegistry) error {
 	return os.Rename(tmp, registryPath(vaultDir))
 }
 
-// InitOrAddAccount registers a primary or additional Gmail account in local/private/gmail/accounts.json
-// without performing any implicit network plugin download (auto_install_plugin defaults to false).
-func InitOrAddAccount(vaultDir, alias, email, agyAccount, tokenFile, query string, setDefault bool) (AccountConfig, error) {
-	return InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{
-		Alias:         alias,
-		Email:         email,
-		AGYAccount:    agyAccount,
-		TokenFile:     tokenFile,
-		Query:         query,
-		SetDefault:    setDefault,
-		InstallPlugin: false,
-	})
-}
-
 // InitOrAddAccountWithOptions registers a Gmail account and optionally installs the official marketplace
 // Gmail plugin via `agy plugin install` only when opts.InstallPlugin is explicitly true.
 func InitOrAddAccountWithOptions(vaultDir string, opts InitAccountOptions) (AccountConfig, error) {

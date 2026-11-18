@@ -51,14 +51,6 @@ func (s ScheduleTrigger) IsEnabled() bool {
 	return true
 }
 
-// EffectiveCatchUp returns "last" when configured, otherwise "none".
-func (s ScheduleTrigger) EffectiveCatchUp() string {
-	if strings.EqualFold(strings.TrimSpace(s.CatchUp), "last") {
-		return "last"
-	}
-	return "none"
-}
-
 // EffectiveMode returns the normalized execution mode ("front_desk_cron", "isolated_worker", or "daemon_gatekeeper").
 func (s ScheduleTrigger) EffectiveMode() string {
 	m := strings.ToLower(strings.TrimSpace(s.Mode))
@@ -516,15 +508,6 @@ func isDaemonProcess(pid int) bool {
 		cmdline := string(out)
 		return strings.Contains(cmdline, "daemon")
 	}
-	return true
-}
-
-func checkPort(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
 	return true
 }
 

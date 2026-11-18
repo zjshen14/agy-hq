@@ -14,9 +14,9 @@ func TestMultiAccountRegistryAndResolution(t *testing.T) {
 	vaultDir := t.TempDir()
 
 	// 1. Initialize primary Gmail account
-	primary, err := InitOrAddAccount(vaultDir, "primary", "primary@gmail.com", "", "", "", true)
+	primary, err := InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{Alias: "primary", Email: "primary@gmail.com", SetDefault: true})
 	if err != nil {
-		t.Fatalf("InitOrAddAccount primary failed: %v", err)
+		t.Fatalf("InitOrAddAccountWithOptions primary failed: %v", err)
 	}
 	if primary.Alias != "primary" || primary.Email != "primary@gmail.com" {
 		t.Fatalf("unexpected primary config: %+v", primary)
@@ -29,9 +29,9 @@ func TestMultiAccountRegistryAndResolution(t *testing.T) {
 	}
 
 	// 2. Add a second personal Gmail account (extensible N-account support)
-	second, err := InitOrAddAccount(vaultDir, "secondary", "secondary@gmail.com", "", "", "", false)
+	second, err := InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{Alias: "secondary", Email: "secondary@gmail.com"})
 	if err != nil {
-		t.Fatalf("InitOrAddAccount secondary failed: %v", err)
+		t.Fatalf("InitOrAddAccountWithOptions secondary failed: %v", err)
 	}
 	if second.Alias != "secondary" {
 		t.Fatalf("unexpected secondary alias: %s", second.Alias)
@@ -48,9 +48,9 @@ func TestMultiAccountRegistryAndResolution(t *testing.T) {
 
 func TestSanitizeHTMLAndQuarantinedFlowAndSidecarPrecheck(t *testing.T) {
 	vaultDir := t.TempDir()
-	_, err := InitOrAddAccount(vaultDir, "primary", "me@gmail.com", "", "", "", true)
+	_, err := InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{Alias: "primary", Email: "me@gmail.com", SetDefault: true})
 	if err != nil {
-		t.Fatalf("InitOrAddAccount: %v", err)
+		t.Fatalf("InitOrAddAccountWithOptions: %v", err)
 	}
 
 	// Set up mock Gmail messages and thread
@@ -148,7 +148,7 @@ func TestSanitizeHTMLAndQuarantinedFlowAndSidecarPrecheck(t *testing.T) {
 
 func TestQuarantineAttachmentDKIMAllowlist(t *testing.T) {
 	vaultDir := t.TempDir()
-	_, _ = InitOrAddAccount(vaultDir, "primary", "me@gmail.com", "", "", "", true)
+	_, _ = InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{Alias: "primary", Email: "me@gmail.com", SetDefault: true})
 
 	// 1. Trusted sender (fidelity.com) with dkim=pass -> auto-routed to local/inbox/
 	path1, auto1, err := QuarantineAttachment(vaultDir, "2026-1099-DIV.pdf", []byte("%PDF-1.4 trusted"), "Fidelity <statements@fidelity.com>", "mx.google.com; dkim=pass header.i=@fidelity.com")

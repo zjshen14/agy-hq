@@ -115,7 +115,7 @@ func TestCDPTransportAndGmailNotificationBridgeFallback(t *testing.T) {
 	vaultDir := t.TempDir()
 
 	// 1. Configure primary Gmail account with mock `chat-noreply@google.com` notification
-	if _, err := gmail.InitOrAddAccount(vaultDir, "primary", "user@gmail.com", "", "", "", true); err != nil {
+	if _, err := gmail.InitOrAddAccountWithOptions(vaultDir, gmail.InitAccountOptions{Alias: "primary", Email: "user@gmail.com", SetDefault: true}); err != nil {
 		t.Fatalf("gmail init: %v", err)
 	}
 	gmailMock := filepath.Join(vaultDir, "memory", "gmail", "mock")

@@ -1267,20 +1267,6 @@ func ReadItems(ctx context.Context, vaultDir, connID, account string, threadOrIt
 	return strings.Join(fences, "\n"), threads, nil
 }
 
-// ReadItem (`hq watch read`) CAS-binds optional spawnToken, verifies batch scope, persists monotonic taint
-// BEFORE reading untrusted content, strips active/hidden markup, and renders inside a cryptographic nonce fence.
-func ReadItem(ctx context.Context, vaultDir, connID, account, threadOrItemKey, rawSpawnToken, flagConv string) (string, connector.QuarantinedThread, error) {
-	threadOrItemKey = strings.TrimSpace(threadOrItemKey)
-	if !ValidateItemIdentifier(threadOrItemKey) {
-		return "", connector.QuarantinedThread{}, fmt.Errorf("invalid thread/item identifier %q", threadOrItemKey)
-	}
-	fenced, threads, err := ReadItems(ctx, vaultDir, connID, account, []string{threadOrItemKey}, rawSpawnToken, flagConv)
-	if err != nil || len(threads) == 0 {
-		return "", connector.QuarantinedThread{}, err
-	}
-	return fenced, threads[0], nil
-}
-
 // Query (`hq watch query`) enforces sensitivity == "low" and `project_fields` projection when the caller is tainted.
 func Query(ctx context.Context, vaultDir, connID, account, queryName string, params map[string]string, flagConv string) (map[string]interface{}, error) {
 	if ctx == nil {

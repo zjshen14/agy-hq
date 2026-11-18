@@ -474,12 +474,6 @@ type HypothesizeOptions struct {
 	Upstream bool
 }
 
-// Hypothesize executes Stage 2 (Bounded Hypothesis & Mutation Synthesis), converting high-ROI
-// open FrictionEvents into Tier 1 personal Vault RSIHypothesis specifications.
-func Hypothesize(rootDir, vaultDir string, targetObsID string, force bool) ([]RSIHypothesis, error) {
-	return HypothesizeWithOptions(rootDir, vaultDir, targetObsID, HypothesizeOptions{Force: force})
-}
-
 // HypothesizeWithOptions synthesizes either Tier 1 personal Vault mutations (default)
 // or Tier 2 upstream contributor PR mutations in an isolated git worktree (`--upstream`).
 func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts HypothesizeOptions) ([]RSIHypothesis, error) {

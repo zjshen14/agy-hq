@@ -120,13 +120,6 @@ func ListGoals(vaultDir string) ([]Goal, error) {
 	return out, err
 }
 
-// SaveGoals persists goals atomically to local/memory/goals.json (0600 permissions) under RankGoals.
-func SaveGoals(vaultDir string, goals []Goal) error {
-	return withGoalsLock(vaultDir, func() error {
-		return saveGoalsUnlocked(vaultDir, goals)
-	})
-}
-
 // AddGoal creates or updates an active multi-day Goal in local/memory/goals.json.
 func AddGoal(vaultDir, slug, title, scope, targetDate string, now time.Time) (Goal, error) {
 	if now.IsZero() {
@@ -256,20 +249,6 @@ func CheckMilestone(vaultDir, goalSlug, target string, now time.Time) (Goal, err
 		return fmt.Errorf("goal %q not found", goalSlug)
 	})
 	return out, err
-}
-
-// AddWaitingOn registers a counterparty follow-up obligation with a deterministic SLA timer on a Goal.
-func AddWaitingOn(vaultDir, goalSlug, counterparty, channel, threadOrSpace, summary string, sla time.Duration, now time.Time) (Goal, WaitingOn, error) {
-	return AddWaitingOnWithOptions(vaultDir, WaitingOnOptions{
-		GoalSlug:      goalSlug,
-		Counterparty:  counterparty,
-		Channel:       channel,
-		Connector:     channel,
-		ThreadKey:     threadOrSpace,
-		ThreadOrSpace: threadOrSpace,
-		Summary:       summary,
-		SLA:           sla,
-	}, now)
 }
 
 // AddWaitingOnWithOptions registers a connector-aware counterparty follow-up obligation on a Goal.

@@ -93,16 +93,6 @@ func IsInitializedVault(dir string) bool {
 	return false
 }
 
-func resolveHomeDir() (string, error) {
-	if h := strings.TrimSpace(os.Getenv("HQ_HOME_DIR")); h != "" {
-		return filepath.Abs(h)
-	}
-	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
-		return filepath.Clean(h), nil
-	}
-	return os.UserHomeDir()
-}
-
 // GlobalConfigPath returns <AppDataDir>/hq/config.json (default ~/.gemini/antigravity/hq/config.json).
 func GlobalConfigPath() (string, error) {
 	roots := hostpaths.Resolve("")

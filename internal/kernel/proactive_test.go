@@ -89,8 +89,17 @@ func TestGoalsAndWaitingOnSLASweep(t *testing.T) {
 		t.Fatalf("CheckMilestone: %v", err)
 	}
 
-	if _, w, err := AddWaitingOn(vaultDir, g.Slug, "Alice Chen", "gmail", "thread-acme-1", "Signed redlines", 24*time.Hour, now); err != nil || w.ID != "wait-1" {
-		t.Fatalf("AddWaitingOn: %v", err)
+	if _, w, err := AddWaitingOnWithOptions(vaultDir, WaitingOnOptions{
+		GoalSlug:      g.Slug,
+		Counterparty:  "Alice Chen",
+		Channel:       "gmail",
+		Connector:     "gmail",
+		ThreadKey:     "thread-acme-1",
+		ThreadOrSpace: "thread-acme-1",
+		Summary:       "Signed redlines",
+		SLA:           24 * time.Hour,
+	}, now); err != nil || w.ID != "wait-1" {
+		t.Fatalf("AddWaitingOnWithOptions: %v", err)
 	}
 
 	// At +12h: SLA not yet expired
@@ -116,26 +125,6 @@ func TestGoalsAndWaitingOnSLASweep(t *testing.T) {
 	_, dueWaits, _ := DueGoals(vaultDir, 48*time.Hour, now.Add(26*time.Hour))
 	if len(dueWaits) != 0 {
 		t.Fatalf("expected 0 due waits after MarkWaitingReplied, got %+v", dueWaits)
-	}
-}
-
-func TestCoalescedTriageBatching(t *testing.T) {
-	vaultDir := t.TempDir()
-	t0 := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
-
-	// Window = 15m -> first two bursts at t0 and t0+5m buffer without flushing
-	r1 := EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", "primary", "b1", []string{"th-1"}, 15*time.Minute, t0)
-	if len(r1) != 0 {
-		t.Fatalf("expected buffer hold at t0, got %+v", r1)
-	}
-	r2 := EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", "primary", "b2", []string{"th-2", "th-3"}, 15*time.Minute, t0.Add(5*time.Minute))
-	if len(r2) != 0 {
-		t.Fatalf("expected buffer hold at t0+5m, got %+v", r2)
-	}
-	// At t0+16m -> flushes single consolidated entry with both batches and all 3 threads!
-	r3 := EnqueueOrFlushCoalescedTriage(vaultDir, "gmail", "primary", "", nil, 15*time.Minute, t0.Add(16*time.Minute))
-	if len(r3) != 1 || len(r3[0].BatchIDs) != 2 || len(r3[0].Targets) != 3 {
-		t.Fatalf("expected 1 coalesced flush with 2 batches and 3 threads, got %+v", r3)
 	}
 }
 
@@ -187,7 +176,11 @@ func TestGatekeeperPrecheckFailureHealthAndStrandedInboxRecovery(t *testing.T) {
 	qOpen.CircuitReason = "test circuit open"
 	_ = SaveQuota(vaultDir, qOpen)
 
-	defActions, err := ProcessInbox(vaultDir, false)
+	nowInbox := time.Now()
+	if err := EnqueueInboxFiles(vaultDir, nowInbox); err != nil {
+		t.Fatalf("EnqueueInboxFiles: %v", err)
+	}
+	defActions, err := DispatchPendingEvents(vaultDir, nowInbox, false)
 	if err != nil || len(defActions) != 1 || !strings.Contains(defActions[0], "deferred") {
 		t.Fatalf("expected stranded inbox file to enqueue and defer under CircuitOpen, got actions=%v err=%v", defActions, err)
 	}

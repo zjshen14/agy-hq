@@ -12,9 +12,9 @@ import (
 
 func TestCreateApproveAndReject(t *testing.T) {
 	vaultDir := t.TempDir()
-	prop, err := Create(vaultDir, "test_echo", "Echo test message", "echo approved-ok", "", "conv-1")
+	prop, err := CreateWithMetadata(vaultDir, "test_echo", "Echo test message", "echo approved-ok", "", "conv-1", nil)
 	if err != nil {
-		t.Fatalf("Create failed: %v", err)
+		t.Fatalf("CreateWithMetadata failed: %v", err)
 	}
 	if prop.ExpiresAt == "" {
 		t.Fatalf("expected default 24h ExpiresAt on new proposal")
@@ -26,28 +26,28 @@ func TestCreateApproveAndReject(t *testing.T) {
 	}
 
 	// Wrong SHA prefix must fail
-	if _, err := Approve(vaultDir, prop.ID, "000000000000"); err == nil {
+	if _, err := ApproveProposal(vaultDir, prop.ID, "000000000000"); err == nil {
 		t.Fatalf("expected error on mismatched sha256 prefix")
 	}
 
 	// Empty or short SHA prefix must fail
-	if _, err := Approve(vaultDir, prop.ID, ""); err == nil {
+	if _, err := ApproveProposal(vaultDir, prop.ID, ""); err == nil {
 		t.Fatalf("expected error on empty sha256 prefix")
 	}
-	if _, err := Approve(vaultDir, prop.ID, prop.SHA256[:4]); err == nil {
+	if _, err := ApproveProposal(vaultDir, prop.ID, prop.SHA256[:4]); err == nil {
 		t.Fatalf("expected error on short (<8 char) sha256 prefix")
 	}
 
 	// Path traversal proposal ID must fail on Approve and Reject
-	if _, err := Approve(vaultDir, "../../outside", prop.SHA256[:12]); err == nil {
+	if _, err := ApproveProposal(vaultDir, "../../outside", prop.SHA256[:12]); err == nil {
 		t.Fatalf("expected error on path traversal proposal ID in Approve")
 	}
-	if err := Reject(vaultDir, "../../outside", "nope"); err == nil {
+	if err := RejectProposalWithOptions(vaultDir, "../../outside", RejectOptions{Reason: "nope"}); err == nil {
 		t.Fatalf("expected error on path traversal proposal ID in Reject")
 	}
 
 	// Valid SHA prefix must execute command and remove from pending
-	out, err := Approve(vaultDir, prop.ID, prop.SHA256[:12])
+	out, err := ApproveProposal(vaultDir, prop.ID, prop.SHA256[:12])
 	if err != nil {
 		t.Fatalf("Approve failed: %v", err)
 	}
@@ -137,8 +137,8 @@ func TestStructuredArgvScrubbedEnvAndDeferredResumption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWithOptions reject: %v", err)
 	}
-	if err := RejectProposal(vaultDir, propReject.ID, "Move proposed meeting to Thursday 2pm PT"); err != nil {
-		t.Fatalf("RejectProposal: %v", err)
+	if err := RejectProposalWithOptions(vaultDir, propReject.ID, RejectOptions{Reason: "Move proposed meeting to Thursday 2pm PT"}); err != nil {
+		t.Fatalf("RejectProposalWithOptions: %v", err)
 	}
 	pendingEvents2, _ := events.List(vaultDir, "pending", false, 0)
 	if len(pendingEvents2) != 2 {

@@ -145,20 +145,20 @@ func TestSubagentRoleParsingAndLifecycle(t *testing.T) {
 
 	// 2. Queue and Pop
 	vaultDir := t.TempDir()
-	item, err := QueuePendingSubagent(vaultDir, "[standard] agy-hq: Test Fixer", "flash", "fix bug")
+	item, err := QueuePendingSubagentWithParent(vaultDir, "", "[standard] agy-hq: Test Fixer", "flash", "fix bug")
 	if err != nil {
-		t.Fatalf("QueuePendingSubagent error: %v", err)
+		t.Fatalf("QueuePendingSubagentWithParent error: %v", err)
 	}
 	if item.Title != "[Subagent:agy-hq] Test Fixer [standard]" {
 		t.Fatalf("unexpected item title: %s", item.Title)
 	}
 
-	popped, ok := PopPendingSubagent(vaultDir, 10*time.Minute)
+	popped, ok := PopPendingSubagentForCaller(vaultDir, "", "", 10*time.Minute)
 	if !ok || popped.TaskSlug != "subagent-agy-hq-test-fixer" {
 		t.Fatalf("expected to pop pending subagent, got ok=%v, item=%+v", ok, popped)
 	}
 	// Second pop should be empty
-	_, ok2 := PopPendingSubagent(vaultDir, 10*time.Minute)
+	_, ok2 := PopPendingSubagentForCaller(vaultDir, "", "", 10*time.Minute)
 	if ok2 {
 		t.Fatalf("expected queue to be empty on second pop")
 	}
@@ -365,9 +365,9 @@ func TestArchiveAndReopenTask(t *testing.T) {
 		t.Fatalf("expected task status archived, got %+v", tasks)
 	}
 
-	// 3. ReopenTask must restore worktree dir and set status to active
-	if err := ReopenTask(vaultDir, taskSlug); err != nil {
-		t.Fatalf("ReopenTask failed: %v", err)
+	// 3. ReopenTaskWithOptions must restore worktree dir and set status to active
+	if _, err := ReopenTaskWithOptions(vaultDir, taskSlug, ReopenTaskOptions{}); err != nil {
+		t.Fatalf("ReopenTaskWithOptions failed: %v", err)
 	}
 	if _, err := os.Stat(wtDir); err != nil {
 		t.Fatalf("expected worktree dir %q to be restored, stat err: %v", wtDir, err)
@@ -425,7 +425,7 @@ func TestLayer1TaskInvariantAndNestedSubagents(t *testing.T) {
 		t.Fatalf("unexpected parentConvID: %s", item.ParentConversationID)
 	}
 
-	popped, ok := PopPendingNestedSubagent(vaultDir, 10*time.Minute)
+	popped, ok := PopPendingNestedSubagentForCaller(vaultDir, "", "", 10*time.Minute)
 	if !ok || popped.ParentConversationID != "conv-secondary-task" {
 		t.Fatalf("expected popped nested subagent, got %+v (ok=%v)", popped, ok)
 	}

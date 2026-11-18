@@ -542,7 +542,7 @@ func TestLeanAutoSessionStartGrayZoneGuardAndCompactionNudge(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /tmp/mock"), 0o644)
 	}
 	for i := 1; i <= 4; i++ {
-		_, _ = approvals.Create(vaultDir, "external_action", fmt.Sprintf("Deploy service #%d to staging cluster", i), fmt.Sprintf("kubectl apply -f svc-%d.yaml", i), "", "conv-interactive")
+		_, _ = approvals.CreateWithMetadata(vaultDir, "external_action", fmt.Sprintf("Deploy service #%d to staging cluster", i), fmt.Sprintf("kubectl apply -f svc-%d.yaml", i), "", "conv-interactive", nil)
 	}
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 	for i := 1; i <= 6; i++ {
@@ -593,7 +593,7 @@ func TestLeanAutoSessionStartGrayZoneGuardAndCompactionNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveProgress: %v", err)
 	}
-	_ = outbox.RecordReported(vaultDir, outbox.ReportedEntry{
+	_ = outbox.RecordReportedFromItem(vaultDir, outbox.OutboxItem{
 		Tier:        outbox.TierInterrupt,
 		SourceSkill: "swe-pulse",
 		Scope:       "headquarter",

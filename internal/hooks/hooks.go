@@ -627,24 +627,16 @@ var (
 
 	reChannelAPIRoute = regexp.MustCompile(`(?i)/api/channels(?:/|%2f|%5c|$|[\s"'])`)
 
-	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
-	reHQOutboundBodyCmd      = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
-	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
-	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
-	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|watch\s+(?:read|query|ack)|offer\s+stage|brief\s+format-quarantined|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/channels)(?:[\s"'/]|$)`)
+	reDoubleQuotedCmdSubst = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
+	reHQOutboundBodyCmd    = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
+	reDoubleQuotedBodyFlag = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
+	reSingleShellVarOnly   = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
+	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/channels)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
 	reHQClaimDesk        = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
-
-	reCurlMutatingFlag = regexp.MustCompile(`(?i)(?:^|\s)(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b|(?:-d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form|--json|--upload-file|-T)(?:=|\s|$))`)
-	reWgetMutatingFlag = regexp.MustCompile(`(?i)(?:^|\s)(?:--post-data|--post-file|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)`)
-	reLoopbackURLOnly  = regexp.MustCompile(`(?i)https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/|\s|"|'|$)`)
-	reExternalURL      = regexp.MustCompile(`(?i)https?://([^\s/"':]+)`)
-	reAutoForgeMutate  = regexp.MustCompile(`(?i)\b(?:gh\s+(?:pr|issue)\s+(?:create|close|reopen|comment|edit|ready|review)\b|gh\s+api\b.*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)|(?:\s|^)-[fF]\s|--field\b|--raw-field\b)|git\s+push\b.*(?:--force\b|--force-with-lease\b|\s-f\b|--delete\b))`)
-	reAutoPkgPublish   = regexp.MustCompile(`(?i)\b(?:npm\s+publish|pnpm\s+publish|yarn\s+publish|cargo\s+publish|twine\s+upload|gem\s+push|docker\s+push|helm\s+push|terraform\s+apply|kubectl\s+(?:apply|delete|patch))\b`)
 )
 
 const PreCompactionFlushTokens int64 = 120000
@@ -927,40 +919,6 @@ func hasUnsafeDoubleQuotedDollar(cmdLine string) bool {
 		}
 	}
 	return false
-}
-
-func hasNonLoopbackURL(cmdLine string) bool {
-	matches := reExternalURL.FindAllStringSubmatch(cmdLine, -1)
-	if len(matches) == 0 {
-		return !reLoopbackURLOnly.MatchString(cmdLine)
-	}
-	for _, m := range matches {
-		host := strings.ToLower(strings.TrimSpace(m[1]))
-		if host != "127.0.0.1" && host != "localhost" && host != "[::1]" {
-			return true
-		}
-	}
-	return false
-}
-
-// classifyUnattendedAutoCommand inspects run_command strings executed inside autonomous
-// background (`kind: auto`) runs and blocks external mutating HTTP requests, forge mutations,
-// and package/deployment publishes unless staged via `hq propose`.
-func classifyUnattendedAutoCommand(checkLine string) (bool, string) {
-	if reAutoForgeMutate.MatchString(checkLine) {
-		return true, "external_forge_mutation"
-	}
-	if reAutoPkgPublish.MatchString(checkLine) {
-		return true, "package_or_infra_publish"
-	}
-	lower := strings.ToLower(checkLine)
-	if strings.Contains(lower, "curl") && reCurlMutatingFlag.MatchString(checkLine) && hasNonLoopbackURL(checkLine) {
-		return true, "mutating_external_http"
-	}
-	if strings.Contains(lower, "wget") && reWgetMutatingFlag.MatchString(checkLine) && hasNonLoopbackURL(checkLine) {
-		return true, "mutating_external_http"
-	}
-	return false, ""
 }
 
 func extractProposeCmdForValidation(cmdLine string) (hasCmd bool, cmdVal string, argv []string) {
@@ -2466,10 +2424,6 @@ func nextExecutionNum(dateDir, convID string) int {
 	return maxNum + 1
 }
 
-func priorJournalStepCount(vaultDir, convID string, currentExecNum int) int {
-	return priorJournalStepCountWithDate(vaultDir, convID, time.Now().Format("2006-01-02"), currentExecNum)
-}
-
 func priorJournalStepCountWithDate(vaultDir, convID, todayDateStr string, currentExecNum int) int {
 	if convID == "" {
 		return 0
@@ -2520,11 +2474,6 @@ func resolveParentConversationID(vaultDir, convID string) string {
 	return ""
 }
 
-func parseTranscriptSummary(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string) {
-	toolsUsed, filesModified, lastResponse, lastUserPrompt, _, _ = parseTranscriptSummaryWithMetrics(transcriptPath)
-	return toolsUsed, filesModified, lastResponse, lastUserPrompt
-}
-
 // isReadOnlyFileViewerOutput returns true if the tool output step is a file viewer (`read_file`)
 // or if the preceding planner step only invoked non-command tools (preventing string literals like
 // "Command exited with code 1" inside source files from triggering false-positive error counts).
@@ -2549,10 +2498,6 @@ func hasCommandExitNonZeroLine(content string) bool {
 		}
 	}
 	return false
-}
-
-func isTranscriptStepError(status, content string) bool {
-	return isTranscriptStepErrorWithContext(status, content, false, true)
 }
 
 func isPreToolDenialStep(status, content string) bool {
@@ -2621,11 +2566,6 @@ type transcriptTurnMetrics struct {
 	TransientErrors         int
 	PreToolDenials          int
 	TaintedCmdSeen          bool
-}
-
-func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string, stepCount int, toolErrorCount int) {
-	tm := parseTranscriptTurnMetrics(transcriptPath, 0)
-	return tm.ToolsUsed, tm.FilesModified, tm.LastResponse, tm.LastUserPrompt, tm.StepCount, tm.ToolErrorCount
 }
 
 func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcriptTurnMetrics {

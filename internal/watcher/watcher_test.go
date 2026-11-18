@@ -140,12 +140,12 @@ func TestWatcherPrecheckReadAckAndPoisonLifecycle(t *testing.T) {
 	}
 	convID := "conv-watcher-worker-1"
 
-	rendered, _, err := watcher.ReadItem(context.Background(), vaultDir, "corp-mail", "default", "th-100", batches[0].SpawnToken, convID)
+	rendered, _, err := watcher.ReadItems(context.Background(), vaultDir, "corp-mail", "default", []string{"th-100"}, batches[0].SpawnToken, convID)
 	if err != nil {
-		t.Fatalf("ReadItem failed: %v", err)
+		t.Fatalf("ReadItems failed: %v", err)
 	}
 	if _, ok := taint.Check(vaultDir, convID); !ok {
-		t.Fatalf("expected conversation %s to be marked tainted before/during ReadItem", convID)
+		t.Fatalf("expected conversation %s to be marked tainted before/during ReadItems", convID)
 	}
 	if strings.Contains(rendered, "<script>") || strings.Contains(rendered, "<<<HQ_FAKE") {
 		t.Fatalf("expected script block and forged fence marker stripped, got:\n%s", rendered)
@@ -155,8 +155,8 @@ func TestWatcherPrecheckReadAckAndPoisonLifecycle(t *testing.T) {
 	}
 
 	// Attempt out-of-scope read from tainted worker -> must fail closed!
-	if _, _, scopeErr := watcher.ReadItem(context.Background(), vaultDir, "corp-mail", "default", "th-999-foreign", "", convID); scopeErr == nil {
-		t.Fatalf("expected out-of-scope ReadItem to fail closed under taint")
+	if _, _, scopeErr := watcher.ReadItems(context.Background(), vaultDir, "corp-mail", "default", []string{"th-999-foreign"}, "", convID); scopeErr == nil {
+		t.Fatalf("expected out-of-scope ReadItems to fail closed under taint")
 	}
 
 	// Unacknowledged Stop requeues the item

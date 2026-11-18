@@ -187,7 +187,6 @@ const (
 	MaxHotCompletedSubagents        = 10
 	MaxConsoleIdleTasks             = 5
 	MaxConsoleCompletedTasks        = 3
-	ConsoleCompletedMaxAge          = 2 * time.Hour
 	MaxSessionStartIdleTasks        = 5
 	MaxSessionStartCompletedTasks   = 3
 )
@@ -1033,14 +1032,6 @@ type ReopenTaskOptions struct {
 	NoWorktree    bool
 	NoSidebar     bool
 	SidebarConfig SidebarSyncConfig
-}
-
-// ReopenTask restores a task in local/memory/tasks.json (or recalls it from cold storage
-// local/memory/tasks_archive.jsonl) back to active status, recreating its git worktree if needed
-// and unarchiving the conversation in Antigravity's sidebar.
-func ReopenTask(vaultDir, target string) error {
-	_, err := ReopenTaskWithOptions(vaultDir, target, ReopenTaskOptions{})
-	return err
 }
 
 // ReopenTaskWithOptions restores a task back to active status and optionally restores its git worktree and sidebar state.
@@ -2516,16 +2507,9 @@ func ReleaseFrontDesk(vaultDir string) error {
 }
 
 var (
-	reTaxForm          = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
-	reSecFiling        = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
-	reDeepHighOnlyTask = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|falsif|kc-?1|breach|rfc)\b`)
-	reDeepTask         = regexp.MustCompile(`(?i)\b(architect|architecture|design|security|audit|race\s+condition|root\s+cause|thesis|falsif|kc-?1|breach|rfc|complex|deep)\b`)
-	reDeepMediumTask   = regexp.MustCompile(`(?i)\b(sleep[- ]?consolidat\w*|consolidat(?:e|ion)|dreaming|research\s+memo|deep\s+research)\b`)
-	reHeavySweepTask   = regexp.MustCompile(`(?i)\b(exhaustive|multi[- ]?file\s+refactor\w*|hard\s+e2e|e2e\s+debug\w*|test\s+debug\w*|sweep)\b`)
-	reRoutineTask      = regexp.MustCompile(`(?i)\b(morning[- ]?brief|edgar[- ]?close[- ]?watch|close\s+watch|filing\s+extract\w*|multi[- ]?source\s+summar\w*|brief)\b`)
-	reQuickTask        = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|list|format|lint|typo|quick|hiive|poll\w*|lookup)\b`)
-	reUUID             = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	rePromptModelHint  = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|hydrogen|flash_lite|flash-lite|flash)\b`)
+	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
+	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
+	reUUID      = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 )
 
 // ExtractUUID returns the first UUID v4 found in s (e.g., from agentapi stdout), or "".
@@ -2835,11 +2819,6 @@ func LoadQuota(vaultDir string) QuotaState {
 		state.CircuitReason = ""
 	}
 	return state
-}
-
-// LoadQuotaState is an alias for LoadQuota.
-func LoadQuotaState(vaultDir string) QuotaState {
-	return LoadQuota(vaultDir)
 }
 
 // SaveQuota persists today's QuotaState to quota-YYYY-MM-DD.json and quota_state.json.
@@ -3234,22 +3213,6 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	return output, nil
 }
 
-// SpawnFlashTask is a convenience wrapper for background watcher spawns resolved via standard tier.
-func SpawnFlashTask(vaultDir, trigger, skill, title, prompt string, dryRun bool) (string, error) {
-	modelID, _, _ := ResolveVaultModel(vaultDir, prompt, "", "", "standard")
-	return SpawnTask(vaultDir, trigger, skill, title, prompt, modelID, dryRun)
-}
-
-// ProcessInbox scans local/inbox/ for newly dropped files, moves each to local/inbox/queued/,
-// recovers any stranded files in local/inbox/queued/, enqueues durable events, and dispatches ready batches.
-func ProcessInbox(vaultDir string, dryRun bool) ([]string, error) {
-	now := time.Now()
-	if err := EnqueueInboxFiles(vaultDir, now); err != nil {
-		return nil, err
-	}
-	return DispatchPendingEvents(vaultDir, now, dryRun)
-}
-
 // RunHeartbeat executes the zero-token Go sidecar pre-check loop (proposal TTL sweep, durable timer evaluation,
 // inbox drop router, schedule-gated daemon gatekeepers/watchers, event inbox dispatch, outbox interrupt
 // delivery, and Waiting-On obligation SLA sweeps).
@@ -3436,11 +3399,6 @@ func savePendingSubagents(vaultDir string, items []PendingSubagent) error {
 	return os.WriteFile(pendingSubagentsFilePath(vaultDir), data, 0o644)
 }
 
-// QueuePendingSubagent enqueues metadata for an invoked subagent.
-func QueuePendingSubagent(vaultDir, role, model, prompt string) (PendingSubagent, error) {
-	return QueuePendingSubagentWithParent(vaultDir, "", role, model, prompt)
-}
-
 // QueuePendingSubagentWithParent enqueues metadata for an invoked subagent along with its parentConversationId.
 func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt string) (PendingSubagent, error) {
 	tier, scope, _, title, slug := ParseSubagentRole(role, model)
@@ -3497,11 +3455,6 @@ func matchesPendingSubagentPrompt(callerPrompt, itemPrefix string) bool {
 		ip = string(runes[:80])
 	}
 	return strings.Contains(cp, ip) || strings.Contains(ip, cp)
-}
-
-// PopPendingSubagent pops the oldest unclaimed pending subagent created within maxAge.
-func PopPendingSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent, bool) {
-	return PopPendingSubagentForCaller(vaultDir, "", "", maxAge)
 }
 
 // PopPendingSubagentForCaller pops the oldest matching unclaimed pending subagent within maxAge,
@@ -3617,11 +3570,6 @@ func QueuePendingNestedSubagent(vaultDir, parentConvID, role, model, prompt stri
 	active = append(active, item)
 	err := savePendingNestedSubagents(vaultDir, active)
 	return item, err
-}
-
-// PopPendingNestedSubagent pops the oldest pending nested subagent created within maxAge.
-func PopPendingNestedSubagent(vaultDir string, maxAge time.Duration) (PendingSubagent, bool) {
-	return PopPendingNestedSubagentForCaller(vaultDir, "", "", maxAge)
 }
 
 // PopPendingNestedSubagentForCaller pops the oldest matching pending nested subagent within maxAge,

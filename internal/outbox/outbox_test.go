@@ -214,8 +214,8 @@ func TestDispatcherRetryReportedLedgerSemanticDedupAndEvalSuite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWithOptions: %v", err)
 	}
-	if err := approvals.RejectProposal(vaultDir, prop.ID, "Too chatty"); err != nil {
-		t.Fatalf("RejectProposal: %v", err)
+	if err := approvals.RejectProposalWithOptions(vaultDir, prop.ID, approvals.RejectOptions{Reason: "Too chatty"}); err != nil {
+		t.Fatalf("RejectProposalWithOptions: %v", err)
 	}
 	stats, err := ComputeSkillDismissalStats(vaultDir)
 	if err != nil {

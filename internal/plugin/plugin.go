@@ -937,12 +937,6 @@ func ProbeDaemonHealth(addr string) (bool, string, string) {
 	return true, body.Version, body.Commit
 }
 
-// RestartDaemonIfSkewed checks whether a local `hq daemon` is running an older version/commit
-// and restarts it cleanly using targetBin with a sanitized environment.
-func RestartDaemonIfSkewed(vaultDir, targetBin string) bool {
-	return EnsureDaemonSynced(vaultDir, targetBin, "", false)
-}
-
 // EnsureDaemonSynced checks whether a local `hq daemon` is skewed (or forceRestart is set)
 // and restarts it cleanly using targetBin and SanitizedDaemonEnv().
 func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) bool {

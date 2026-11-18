@@ -347,19 +347,6 @@ func upsertItemThread(entries []ItemThreadEntry, updated ItemThreadEntry, now ti
 	return out
 }
 
-func lookupItemThread(entries []ItemThreadEntry, itemKey string) (ItemThreadEntry, bool) {
-	itemKey = strings.TrimSpace(itemKey)
-	if itemKey == "" {
-		return ItemThreadEntry{}, false
-	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].ItemKey == itemKey {
-			return entries[i], true
-		}
-	}
-	return ItemThreadEntry{}, false
-}
-
 func prunePendingReplies(entries []PendingReplyCorrelation, now time.Time) []PendingReplyCorrelation {
 	if len(entries) == 0 {
 		return nil

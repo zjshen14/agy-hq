@@ -26,7 +26,6 @@ const (
 	FrictionPreTool          FrictionCategory = "pretool_friction"
 	FrictionUserIntervention FrictionCategory = "user_intervention"
 	FrictionDraftEdited      FrictionCategory = "draft_edited"
-	FrictionRepeatedWorkflow FrictionCategory = "repeated_workflow"
 	FrictionQuotaAnomaly     FrictionCategory = "quota_anomaly"
 	FrictionProactiveNoise   FrictionCategory = "proactive_noise"
 )

@@ -219,15 +219,6 @@ func mergeGitignoreAdditiveFromTemplate(templateDir, tmplName, dstPath string) i
 	return mergeGitignoreAdditiveBytes(tmplBytes, dstBytes, dstPath)
 }
 
-func mergeGitignoreAdditive(tmplPath, dstPath string) int {
-	tmplBytes, err1 := os.ReadFile(tmplPath)
-	dstBytes, err2 := os.ReadFile(dstPath)
-	if err1 != nil || err2 != nil {
-		return 0
-	}
-	return mergeGitignoreAdditiveBytes(tmplBytes, dstBytes, dstPath)
-}
-
 func mergeGitignoreAdditiveBytes(tmplBytes, dstBytes []byte, dstPath string) int {
 	existing := make(map[string]bool)
 	for _, line := range strings.Split(string(dstBytes), "\n") {
@@ -532,17 +523,6 @@ func seedActiveExistingVaultStarters(vaultDir, templateDir string) []string {
 // has top-level keys ("key:") absent from the user's local YAML, and appends their block non-destructively.
 func mergeMissingTopLevelYAMLBlocksFromTemplate(templateDir, tmplName, dstPath string) []string {
 	tmplBytes, err1 := ReadTemplateFile(templateDir, tmplName)
-	dstBytes, err2 := os.ReadFile(dstPath)
-	if err1 != nil || err2 != nil {
-		return nil
-	}
-	return mergeMissingTopLevelYAMLBlocksBytes(tmplBytes, dstBytes, dstPath)
-}
-
-// mergeMissingTopLevelYAMLBlocks checks if template YAML has top-level keys ("key:")
-// that are absent from the user's local YAML, and appends their block non-destructively.
-func mergeMissingTopLevelYAMLBlocks(tmplPath, dstPath string) []string {
-	tmplBytes, err1 := os.ReadFile(tmplPath)
 	dstBytes, err2 := os.ReadFile(dstPath)
 	if err1 != nil || err2 != nil {
 		return nil

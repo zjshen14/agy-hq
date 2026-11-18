@@ -314,8 +314,8 @@ func TestGitBackedProjectRegistryFolderURI(t *testing.T) {
 	if !regAvail || repaired || resolved != "proj-git-backed-hq" {
 		t.Fatalf("expected ResolveVerifiedWorkspaceProjectID to preserve proj-git-backed-hq without repair, got resolved=%q regAvail=%v repaired=%v", resolved, regAvail, repaired)
 	}
-	if fromBlank := ResolveProjectIDForWorkspace(vaultDir, wsGitRepo); fromBlank != "proj-git-backed-hq" {
-		t.Fatalf("expected ResolveProjectIDForWorkspace to return proj-git-backed-hq, got %q", fromBlank)
+	if fromBlank, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, wsGitRepo, ""); fromBlank != "proj-git-backed-hq" {
+		t.Fatalf("expected ResolveVerifiedWorkspaceProjectID from blank to return proj-git-backed-hq, got %q", fromBlank)
 	}
 }
 
@@ -457,11 +457,11 @@ func TestProjectRegistryFastPathAndCacheInvalidation(t *testing.T) {
 	}
 
 	// 2. Cold scan populates in-process snapshot cache; adding a new project file invalidates fingerprint immediately.
-	if emptyProj := ResolveProjectIDForWorkspace(vaultDir, wsSecond); emptyProj != "" {
+	if emptyProj, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, wsSecond, ""); emptyProj != "" {
 		t.Fatalf("expected empty projectId before registering wsSecond, got %q", emptyProj)
 	}
 	writeProjectRegistryFixture(t, cfgDir, "proj-second-2", wsSecond)
-	if resolvedSecond := ResolveProjectIDForWorkspace(vaultDir, wsSecond); resolvedSecond != "proj-second-2" {
+	if resolvedSecond, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, wsSecond, ""); resolvedSecond != "proj-second-2" {
 		t.Fatalf("expected cache invalidation on new project file to return proj-second-2, got %q", resolvedSecond)
 	}
 }

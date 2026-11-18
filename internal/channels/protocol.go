@@ -36,7 +36,6 @@ const (
 	KindTaskBlocked    = "task_blocked"
 	KindTestPing       = "test_ping"
 
-	ErrCodeTransient           = "transient"
 	ErrCodeRateLimited         = "rate_limited"
 	ErrCodeAuthExpired         = "auth_expired"
 	ErrCodeDestinationNotFound = "destination_not_found"

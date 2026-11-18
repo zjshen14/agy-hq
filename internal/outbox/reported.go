@@ -96,42 +96,6 @@ func RecordReportedBatch(vaultDir string, items []OutboxItem, now time.Time) err
 	})
 }
 
-// RecordReported appends an entry to local/memory/reported.jsonl and compacts entries older than 72h.
-func RecordReported(vaultDir string, entry ReportedEntry, now time.Time) error {
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if strings.TrimSpace(entry.Timestamp) == "" {
-		entry.Timestamp = now.UTC().Format(time.RFC3339)
-	}
-	return WithOutboxLock(vaultDir, func() error {
-		existing, _ := LoadRecentReported(vaultDir, now, MaxReportedRetention, MaxReportedStored)
-		if entry.ItemID != "" {
-			for _, prev := range existing {
-				if prev.ItemID == entry.ItemID {
-					return nil
-				}
-			}
-		}
-		existing = append(existing, entry)
-		if len(existing) > MaxReportedStored {
-			existing = existing[len(existing)-MaxReportedStored:]
-		}
-
-		p := reportedFilePath(vaultDir)
-		var sb strings.Builder
-		for _, r := range existing {
-			b, err := json.Marshal(r)
-			if err != nil {
-				continue
-			}
-			sb.Write(b)
-			sb.WriteByte('\n')
-		}
-		return store.WriteAtomic(p, []byte(sb.String()), 0o600)
-	})
-}
-
 // LoadRecentReported returns recent reported entries within window, ordered oldest to newest (capped at limit).
 func LoadRecentReported(vaultDir string, now time.Time, window time.Duration, limit int) ([]ReportedEntry, error) {
 	if now.IsZero() {

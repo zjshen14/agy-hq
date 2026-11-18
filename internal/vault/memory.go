@@ -11,12 +11,8 @@ import (
 	"time"
 )
 
-const (
-	// MaxMemoryIndexLines is the target line-count budget for local/MEMORY.md as a Roadmap Index.
-	MaxMemoryIndexLines = 80
-	// MaxMemoryIndexTokens is the target token budget for local/MEMORY.md.
-	MaxMemoryIndexTokens = 1200
-)
+// MaxMemoryIndexLines is the target line-count budget for local/MEMORY.md as a Roadmap Index.
+const MaxMemoryIndexLines = 80
 
 // TopicPage represents a single Knowledge Wiki page discovered in local/memory/topics/<slug>.md.
 type TopicPage struct {

@@ -85,15 +85,15 @@ func TestMineHypothesizeVerifyProposeApplyAndAblate(t *testing.T) {
 
 	// 3. Test 75% Quota Circuit Breaker blocks non-forced Hypothesize
 	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "quota_state.json"), []byte(`{"spawnsToday":16,"dailyLimit":20}`), 0o644)
-	if _, err := Hypothesize(rootDir, vaultDir, "", false); err == nil || !strings.Contains(err.Error(), "Quota Circuit Breaker") {
-		t.Fatalf("expected 75%% Quota Circuit Breaker to block Hypothesize, got: %v", err)
+	if _, err := HypothesizeWithOptions(rootDir, vaultDir, "", HypothesizeOptions{}); err == nil || !strings.Contains(err.Error(), "Quota Circuit Breaker") {
+		t.Fatalf("expected 75%% Quota Circuit Breaker to block HypothesizeWithOptions, got: %v", err)
 	}
 	_ = os.Remove(filepath.Join(vaultDir, "memory", "quota_state.json"))
 
 	// 4. Run Stage 2: Hypothesize
-	hyps, err := Hypothesize(rootDir, vaultDir, "", false)
+	hyps, err := HypothesizeWithOptions(rootDir, vaultDir, "", HypothesizeOptions{})
 	if err != nil {
-		t.Fatalf("Hypothesize failed: %v", err)
+		t.Fatalf("HypothesizeWithOptions failed: %v", err)
 	}
 	if len(hyps) < 2 {
 		t.Fatalf("expected at least 2 hypotheses synthesized, got %d", len(hyps))
@@ -288,7 +288,7 @@ func TestTwoTierRSI_GeneralFallbackOverlayExternalVaultAndMigrate(t *testing.T) 
 
 	// 2. Tier 1 Hypothesize -> Verify -> Propose (rsi_overlay) -> Apply writes external vault overlay, leaving rootDir untouched
 	coreBefore, _ := os.ReadFile(filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills", "morning-brief", "SKILL.md"))
-	hyps, err := Hypothesize(rootDir, extVault, "", true)
+	hyps, err := HypothesizeWithOptions(rootDir, extVault, "", HypothesizeOptions{Force: true})
 	if err != nil || len(hyps) == 0 {
 		t.Fatalf("Hypothesize failed: %v (len=%d)", err, len(hyps))
 	}

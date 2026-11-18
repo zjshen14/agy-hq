@@ -1709,13 +1709,13 @@ func runDispatchCLI(vaultDir string, args []string) {
 				}
 			}
 			if st, err := extension.LoadVaultState(vaultDir); err == nil {
-				if ov, ok := st.LookupScheduleOverride(wantFQ); ok && ov.Enabled != nil && !*ov.Enabled {
-					res.Enabled = false
-					if ov.PausedReason != "" {
-						res.Reason = ov.PausedReason
-					} else if res.Reason == "" {
-						res.Reason = "schedule_paused"
-					}
+				res.Enabled = st.IsScheduleEnabled(wantFQ, res.Enabled)
+				if res.Enabled {
+					res.Reason = ""
+				} else if ov, ok := st.LookupScheduleOverride(wantFQ); ok && ov.PausedReason != "" {
+					res.Reason = ov.PausedReason
+				} else if res.Reason == "" {
+					res.Reason = "schedule_paused"
 				}
 			}
 		}

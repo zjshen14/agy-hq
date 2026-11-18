@@ -296,11 +296,6 @@ func ScanOutboundContextualPII(vaultDir, text string) []string {
 	return flags
 }
 
-// Create stages a new pending proposal in local/memory/pending/<id>.json.
-func Create(vaultDir, actionType, summary, command, workDir, convID string) (Proposal, error) {
-	return CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID, nil)
-}
-
 // CreateWithMetadata stages a new pending proposal with optional structured metadata, 24h TTL,
 // and automatic outbound contextual-PII warning inspection.
 func CreateWithMetadata(vaultDir, actionType, summary, command, workDir, convID string, meta map[string]string) (Proposal, error) {
@@ -690,12 +685,6 @@ func SanitizedApprovalEnv(vaultDir string) []string {
 	return env
 }
 
-// Approve verifies the SHA-256 prefix and TTL, executes the staged command deterministically in Go,
-// removes the pending file, and appends an audit entry to local/memory/interventions.jsonl.
-func Approve(vaultDir, id, shaPrefix string) (string, error) {
-	return ApproveProposal(vaultDir, id, shaPrefix)
-}
-
 // ApproveProposal verifies the SHA-256 prefix and TTL, executes the staged command deterministically in Go
 // (using CommandArgv without sh -c when available and a scrubbed environment), logs to interventions.jsonl,
 // and enqueues a continuation event if ResumeOnDecide is enabled.
@@ -863,17 +852,6 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 type RejectOptions struct {
 	Reason         string
 	SuppressResume bool
-}
-
-// Reject removes the proposal from pending/ and logs the rejection to interventions.jsonl.
-func Reject(vaultDir, id, reason string) error {
-	return RejectProposal(vaultDir, id, reason)
-}
-
-// RejectProposal removes the proposal from pending/, logs the rejection to interventions.jsonl,
-// and enqueues a steering resumption event to prop.ConversationID when the user provides feedback or ResumeOnDecide is set.
-func RejectProposal(vaultDir, id, reason string) error {
-	return RejectProposalWithOptions(vaultDir, id, RejectOptions{Reason: reason})
 }
 
 // RejectProposalWithOptions removes the proposal from pending/, logs the rejection to interventions.jsonl,
