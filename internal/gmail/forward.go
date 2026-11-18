@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/zjshen14/agy-hq/internal/connector"
 )
 
 // ForwardOptions configures `hq gmail forward` message fetching, HTML composition, and staging.
@@ -68,14 +70,34 @@ func PrepareForward(vaultDir string, opts ForwardOptions) (ForwardPlan, error) {
 
 	cfg, err := ResolveAccount(vaultDir, opts.Account)
 	if err != nil {
-		if strings.TrimSpace(opts.Account) == "" && resolveGmailBinary(AccountConfig{}) != "" {
-			cfg = AccountConfig{Alias: "default"}
-		} else {
-			return ForwardPlan{}, err
+		if rc, cErr := connector.Resolve(vaultDir, "gmail"); cErr == nil && len(rc.Instance.Accounts) > 0 {
+			want := strings.ToLower(strings.TrimSpace(opts.Account))
+			if want == "" {
+				want = rc.Instance.DefaultAccount
+			}
+			for alias, acc := range rc.Instance.Accounts {
+				if want == "" || strings.EqualFold(alias, want) || strings.EqualFold(acc.Email, want) || strings.EqualFold(acc.AgyAccount, want) {
+					cfg = AccountConfig{
+						Alias:      alias,
+						Email:      acc.Email,
+						AGYAccount: acc.AgyAccount,
+						CLIPath:    rc.Manifest.Transport.CLI.Path,
+					}
+					err = nil
+					break
+				}
+			}
+		}
+		if err != nil {
+			if strings.TrimSpace(opts.Account) == "" && resolveGmailBinary(AccountConfig{}) != "" {
+				cfg = AccountConfig{Alias: "default"}
+			} else {
+				return ForwardPlan{}, err
+			}
 		}
 	}
 
-	rawOut, err := runGmailCLI(cfg, "readonly", "get", "--json", "--", messageID)
+	rawOut, err := runGmailCLI(vaultDir, cfg, "readonly", "get", "--json", "--", messageID)
 	if err != nil {
 		return ForwardPlan{}, fmt.Errorf("gmail readonly get %s failed: %w (%s)", messageID, err, strings.TrimSpace(string(rawOut)))
 	}
@@ -104,6 +126,13 @@ func PrepareForward(vaultDir string, opts ForwardOptions) (ForwardPlan, error) {
 	if err != nil {
 		return ForwardPlan{}, fmt.Errorf("create temp dir for forward: %w", err)
 	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
 	bodyFilePath := filepath.Join(tmpDir, "forward-body.html")
 	if err := os.WriteFile(bodyFilePath, []byte(forwardedHTML), 0o600); err != nil {
 		return ForwardPlan{}, fmt.Errorf("write forward HTML body: %w", err)
@@ -114,7 +143,7 @@ func PrepareForward(vaultDir string, opts ForwardOptions) (ForwardPlan, error) {
 	for _, att := range det.Attachments {
 		dedupName := DeduplicateAttachmentFilename(att.Filename, usedNames)
 		destPath := filepath.Join(tmpDir, dedupName)
-		if out, err := runGmailCLI(cfg, "readonly", "download-attachment", messageID, att.AttachmentID, destPath); err != nil {
+		if out, err := runGmailCLI(vaultDir, cfg, "readonly", "download-attachment", messageID, att.AttachmentID, destPath); err != nil {
 			return ForwardPlan{}, fmt.Errorf("download attachment %q (%s): %w (%s)", att.Filename, att.AttachmentID, err, strings.TrimSpace(string(out)))
 		}
 		attachmentPaths = append(attachmentPaths, destPath)
@@ -133,6 +162,7 @@ func PrepareForward(vaultDir string, opts ForwardOptions) (ForwardPlan, error) {
 	summary := fmt.Sprintf("Forward Gmail %s [From: %s -> To: %s | Subject: %s | Attachments: %d]",
 		messageID, fromDisplay, to, subject, len(attachmentPaths))
 
+	cleanupTmp = false
 	return ForwardPlan{
 		Account:         cfg.Alias,
 		From:            cfg.Email,

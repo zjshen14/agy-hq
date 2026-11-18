@@ -239,3 +239,39 @@ exit 1
 		t.Fatalf("expected send-with-attachment command, got %v", plan.CommandArgv)
 	}
 }
+
+func TestPrepareForward_CleansTempDirOnAttachmentError(t *testing.T) {
+	vaultDir := t.TempDir()
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+	binDir := t.TempDir()
+	mockGmail := filepath.Join(binDir, "gmail")
+
+	var rawMsg rawGmailMessage
+	rawMsg.ID = "msg-fail-att"
+	rawMsg.ThreadID = "thr-fail-att"
+	var att rawGmailPart
+	att.MimeType = "application/pdf"
+	att.Filename = "broken.pdf"
+	att.Body.AttachmentID = "att-broken"
+	rawMsg.Payload.Parts = []rawGmailPart{att}
+	rawJSON, _ := json.Marshal(rawMsg)
+	jsonPath := filepath.Join(binDir, "msg.json")
+	_ = os.WriteFile(jsonPath, rawJSON, 0o600)
+
+	script := "#!/bin/sh\nif [ \"$1\" = \"readonly\" ] && [ \"$2\" = \"get\" ]; then\n  cat \"" + jsonPath + "\"\n  exit 0\nfi\necho \"download failed\" >&2\nexit 1\n"
+	if err := os.WriteFile(mockGmail, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{Alias: "primary", Email: "me@example.com", CLIPath: mockGmail, SetDefault: true})
+
+	if _, err := PrepareForward(vaultDir, ForwardOptions{MessageID: "msg-fail-att", To: "bob@example.com"}); err == nil {
+		t.Fatalf("expected PrepareForward to fail when attachment download exits non-zero")
+	}
+	entries, _ := os.ReadDir(tmpRoot)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "hq-gmail-forward-") {
+			t.Fatalf("expected failed PrepareForward to remove temp dir, found leaked %s", e.Name())
+		}
+	}
+}

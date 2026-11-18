@@ -508,6 +508,7 @@ func SupersedeByThread(vaultDir, connector, account, threadKey, newPropID string
 			if os.Remove(fullPath) == nil {
 				removeIdemMarker(vaultDir, p.IdempotencyKey)
 				removePayloadArtifact(vaultDir, p.ID)
+				cleanupForwardTempDir(p)
 				CleanupApprovalArtifacts(vaultDir, p.ID)
 				p.Status = "superseded"
 				p.SupersededBy = newPropID
@@ -560,6 +561,7 @@ func ExpireStaleProposals(vaultDir string, now time.Time) ([]Proposal, error) {
 			if os.Remove(fullPath) == nil {
 				removeIdemMarker(vaultDir, p.IdempotencyKey)
 				removePayloadArtifact(vaultDir, p.ID)
+				cleanupForwardTempDir(p)
 				CleanupApprovalArtifacts(vaultDir, p.ID)
 				p.Status = "expired"
 				appendIntervention(vaultDir, InterventionRecord{
@@ -828,6 +830,7 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	if pipeReader != nil {
 		_ = pipeReader.Close()
 	}
+	cleanupForwardTempDir(prop)
 	output := string(outBytes)
 
 	prop.Status = "approved"
@@ -875,6 +878,7 @@ func RejectProposalWithOptions(vaultDir, id string, opts RejectOptions) error {
 	_ = os.Remove(pendingPath)
 	removeIdemMarker(vaultDir, prop.IdempotencyKey)
 	removePayloadArtifact(vaultDir, prop.ID)
+	cleanupForwardTempDir(prop)
 	CleanupApprovalArtifacts(vaultDir, prop.ID)
 
 	reason := opts.Reason
@@ -989,4 +993,22 @@ func LoadInterventions(vaultDir string) ([]InterventionRecord, error) {
 		}
 	}
 	return out, scanner.Err()
+}
+
+func cleanupForwardTempDir(prop Proposal) {
+	if prop.Metadata == nil {
+		return
+	}
+	raw := strings.TrimSpace(prop.Metadata["forwardTempDir"])
+	if raw == "" {
+		return
+	}
+	cleaned := filepath.Clean(raw)
+	if !strings.HasPrefix(filepath.Base(cleaned), "hq-gmail-forward-") {
+		return
+	}
+	if filepath.Dir(cleaned) != filepath.Clean(os.TempDir()) {
+		return
+	}
+	_ = os.RemoveAll(cleaned)
 }

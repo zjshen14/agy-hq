@@ -241,7 +241,7 @@ function proxy(req, res, targetPath) {
   req.pipe(pReq, { end: true });
 }
 
-if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT && listenPort !== TARGET_PORT) {
+if ((process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || process.env.PORT) && listenPort > 0 && listenPort <= 65535 && listenPort !== TARGET_PORT) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://localhost:${listenPort}`);
     if (url.pathname === '/preload.js') {

@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
@@ -621,23 +623,9 @@ func DetachProjectPlugin(projectDir string) (bool, error) {
 }
 
 // SanitizedDaemonEnv strips session- and sidecar-scoped Antigravity environment variables
-// (such as ANTIGRAVITY_PROJECT_ID from agy-hq/agy-hq-console) while keeping Language Server connectivity.
+// (such as ANTIGRAVITY_PROJECT_ID and ANTIGRAVITY_CREDENTIAL_SCOPE) while keeping Language Server connectivity.
 func SanitizedDaemonEnv() []string {
-	raw := os.Environ()
-	out := make([]string, 0, len(raw))
-	for _, kv := range raw {
-		if strings.HasPrefix(kv, "ANTIGRAVITY_PROJECT_ID=") ||
-			strings.HasPrefix(kv, "ANTIGRAVITY_CONVERSATION_ID=") ||
-			strings.HasPrefix(kv, "ANTIGRAVITY_TRAJECTORY_ID=") ||
-			strings.HasPrefix(kv, "ANTIGRAVITY_SOURCE_METADATA=") ||
-			strings.HasPrefix(kv, "ANTIGRAVITY_SIDECAR_WEB_PORT=") ||
-			strings.HasPrefix(kv, "ANTIGRAVITY_SIDECAR_UI_TOKEN=") ||
-			strings.HasPrefix(kv, "PORT=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
+	return extension.SanitizedDaemonEnv(nil)
 }
 
 func ensureConvenienceBinSymlink(pluginDir, targetBin string) {
@@ -959,6 +947,23 @@ func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) 
 	}
 	if !skewed {
 		return false
+	}
+	if !vault.IsTempPath(targetBin) && dInfo.ServiceInstalled {
+		switch runtime.GOOS {
+		case "linux":
+			if os.Getenv("HQ_SKIP_SYSTEMCTL") != "1" {
+				if exec.Command("systemctl", "--user", "try-restart", "agy-hq.service").Run() == nil {
+					return true
+				}
+			}
+		case "darwin":
+			if os.Getenv("HQ_SKIP_LAUNCHCTL") != "1" {
+				target := fmt.Sprintf("gui/%d/com.antigravity.agy-hq", os.Getuid())
+				if exec.Command("launchctl", "kickstart", "-k", target).Run() == nil {
+					return true
+				}
+			}
+		}
 	}
 	if proc, pErr := os.FindProcess(dInfo.PID); pErr == nil {
 		_ = proc.Signal(syscall.SIGTERM)

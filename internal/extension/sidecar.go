@@ -65,6 +65,7 @@ func SanitizedDaemonEnv(base []string) []string {
 		"ANTIGRAVITY_SIDECAR_WEB_PORT": true,
 		"ANTIGRAVITY_SIDECAR_UI_TOKEN": true,
 		"ANTIGRAVITY_CREDENTIAL_SCOPE": true,
+		"HQ_MANAGED_DAEMON":            true,
 		"PORT":                         true,
 	}
 	out := make([]string, 0, len(base))

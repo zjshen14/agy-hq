@@ -25,9 +25,6 @@ func piggybackLockPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "watcher", ".desktop_piggyback.lock")
 }
 
-// MaybeLaunchDesktopPiggyback launches a detached (`Setsid: true`) `hq watch precheck --desktop-only`
-// child from `Stop` when `ANTIGRAVITY_CREDENTIAL_SCOPE` is present in memory, rate-limited to once per 15m
-// with non-blocking singleflight locking and ZERO disk persistence of `ANTIGRAVITY_CREDENTIAL_SCOPE`.
 // DesktopPollNeeded reports enabled pollable connector accounts requiring a desktop session
 // whose last successful poll is missing or older than minInterval relative to now.
 func DesktopPollNeeded(vaultDir string, minInterval time.Duration, now time.Time) ([]string, bool) {
@@ -77,6 +74,9 @@ func DesktopPollNeeded(vaultDir string, minInterval time.Duration, now time.Time
 	return needed, len(needed) > 0
 }
 
+// MaybeLaunchDesktopPiggyback launches a detached (`Setsid: true`) `hq watch precheck --desktop-only`
+// child from `Stop` when `ANTIGRAVITY_CREDENTIAL_SCOPE` is present in memory, rate-limited to once per 15m
+// with non-blocking singleflight locking and ZERO disk persistence of `ANTIGRAVITY_CREDENTIAL_SCOPE`.
 func MaybeLaunchDesktopPiggyback(vaultDir string, now time.Time) bool {
 	if strings.TrimSpace(vaultDir) == "" {
 		return false
@@ -97,6 +97,9 @@ func MaybeLaunchDesktopPiggyback(vaultDir string, now time.Time) bool {
 		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
 			minInterval = d
 		}
+	}
+	if _, needed := DesktopPollNeeded(vaultDir, minInterval, now); !needed {
+		return false
 	}
 
 	claimed := false

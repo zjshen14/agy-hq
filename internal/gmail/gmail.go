@@ -585,7 +585,7 @@ func SearchMessages(vaultDir, accountAlias, query string, maxResults int) ([]Mes
 			return msgs, nil
 		}
 	}
-	if msgs, err := searchViaPluginCLI(cfg, query, maxResults); err == nil {
+	if msgs, err := searchViaPluginCLI(vaultDir, cfg, query, maxResults); err == nil {
 		return msgs, nil
 	}
 
@@ -664,10 +664,10 @@ func ReadQuarantinedThread(vaultDir, accountAlias, threadID, convID string) (Thr
 			if strings.TrimSpace(cfg.TokenFile) != "" {
 				td, err = readThreadViaOAuthToken(cfg, threadID)
 				if err != nil {
-					td, err = readThreadViaPluginCLI(cfg, threadID)
+					td, err = readThreadViaPluginCLI(vaultDir, cfg, threadID)
 				}
 			} else {
-				td, err = readThreadViaPluginCLI(cfg, threadID)
+				td, err = readThreadViaPluginCLI(vaultDir, cfg, threadID)
 			}
 		}
 	}
@@ -782,7 +782,7 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, threadID, to, cc, subj
 	if mockDir(vaultDir) == "" {
 		if remoteID, connDraftErr := createDraftViaConnector(vaultDir, cfg, draftID, threadID, to, cc, subject, body); connDraftErr == nil && remoteID != "" {
 			draftID = remoteID
-		} else if remoteID, cliErr := createDraftViaPluginCLI(cfg, draftID, threadID, to, cc, subject, body); cliErr == nil && remoteID != "" {
+		} else if remoteID, cliErr := createDraftViaPluginCLI(vaultDir, cfg, draftID, threadID, to, cc, subject, body); cliErr == nil && remoteID != "" {
 			draftID = remoteID
 		}
 	}
@@ -882,7 +882,7 @@ func VerifyAndSendDraft(vaultDir, accountAlias, draftID, expectedHash string) (s
 		return fmt.Sprintf("Sent draft %s [From: %s -> To: %s | Subject: %s]: %s", cleanID, spec.From, spec.To, spec.Subject, connOut), nil
 	}
 
-	out, err := sendDraftViaPluginCLI(cfg, cleanID)
+	out, err := sendDraftViaPluginCLI(vaultDir, cfg, cleanID)
 	if err != nil {
 		return "", err
 	}
@@ -1283,7 +1283,7 @@ func resolveGmailBinary(cfg AccountConfig) string {
 	return ""
 }
 
-func runGmailCLI(cfg AccountConfig, args ...string) ([]byte, error) {
+func runGmailCLI(vaultDir string, cfg AccountConfig, args ...string) ([]byte, error) {
 	bin := resolveGmailBinary(cfg)
 	if bin == "" {
 		return nil, fmt.Errorf("gmail plugin binary not found")
@@ -1293,7 +1293,7 @@ func runGmailCLI(cfg AccountConfig, args ...string) ([]byte, error) {
 	if cfg.AGYAccount != "" {
 		extra["AGY_ACCOUNT"] = cfg.AGYAccount
 	}
-	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+	allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != "" || connector.HasActiveDesktopPluginScope(vaultDir)
 	cmd.Env = connector.SanitizedSubprocessEnv(os.Environ(), []string{"AGY_ACCOUNT"}, extra, allowDesktop)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1409,8 +1409,8 @@ func parseRawGmailMessage(rm rawGmailMessage, account string) (MessageSummary, M
 	return sum, det
 }
 
-func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]MessageSummary, error) {
-	out, err := runGmailCLI(cfg, "readonly", "read", fmt.Sprintf("--max=%d", maxResults), "--json", "--", query)
+func searchViaPluginCLI(vaultDir string, cfg AccountConfig, query string, maxResults int) ([]MessageSummary, error) {
+	out, err := runGmailCLI(vaultDir, cfg, "readonly", "read", fmt.Sprintf("--max=%d", maxResults), "--json", "--", query)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1441,8 +1441,8 @@ func searchViaPluginCLI(cfg AccountConfig, query string, maxResults int) ([]Mess
 	return summaries, nil
 }
 
-func readThreadViaPluginCLI(cfg AccountConfig, threadID string) (ThreadDetail, error) {
-	out, err := runGmailCLI(cfg, "readonly", "get-thread", "--json", "--", threadID)
+func readThreadViaPluginCLI(vaultDir string, cfg AccountConfig, threadID string) (ThreadDetail, error) {
+	out, err := runGmailCLI(vaultDir, cfg, "readonly", "get-thread", "--json", "--", threadID)
 	if err != nil {
 		return ThreadDetail{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1481,7 +1481,7 @@ func readThreadViaPluginCLI(cfg AccountConfig, threadID string) (ThreadDetail, e
 	}, nil
 }
 
-func createDraftViaPluginCLI(cfg AccountConfig, draftID, threadID, to, cc, subject, body string) (string, error) {
+func createDraftViaPluginCLI(vaultDir string, cfg AccountConfig, draftID, threadID, to, cc, subject, body string) (string, error) {
 	args := []string{"mutate", "create-draft", "--to=" + to, "--subject=" + subject, "--body=" + body, "--json"}
 	if cc != "" {
 		args = append(args, "--cc="+cc)
@@ -1489,7 +1489,7 @@ func createDraftViaPluginCLI(cfg AccountConfig, draftID, threadID, to, cc, subje
 	if threadID != "" {
 		args = append(args, "--thread="+threadID)
 	}
-	out, err := runGmailCLI(cfg, args...)
+	out, err := runGmailCLI(vaultDir, cfg, args...)
 	if err != nil {
 		return "", err
 	}
@@ -1508,8 +1508,8 @@ func createDraftViaPluginCLI(cfg AccountConfig, draftID, threadID, to, cc, subje
 	return draftID, nil
 }
 
-func sendDraftViaPluginCLI(cfg AccountConfig, draftID string) (string, error) {
-	out, err := runGmailCLI(cfg, "mutate", "send-draft", "--json", "--", draftID)
+func sendDraftViaPluginCLI(vaultDir string, cfg AccountConfig, draftID string) (string, error) {
+	out, err := runGmailCLI(vaultDir, cfg, "mutate", "send-draft", "--json", "--", draftID)
 	if err != nil {
 		return "", fmt.Errorf("gmail send-draft failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

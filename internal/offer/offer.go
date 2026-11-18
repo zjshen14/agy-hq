@@ -47,7 +47,7 @@ func RegisterPreconditions() {
 		if rc.Manifest.Capabilities.InspectThread == nil || !rc.Manifest.Capabilities.InspectThread.Enabled {
 			return nil
 		}
-		allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != ""
+		allowDesktop := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != "" || connector.HasActiveDesktopPluginScope(vaultDir)
 		insp, err := connector.InspectThread(context.Background(), vaultDir, rc.FQID, prop.TargetAccount, prop.TargetThreadKey, expectedHead, allowDesktop)
 		if err != nil {
 			return fmt.Errorf("failed to inspect thread %s before applying offer: %w", prop.TargetThreadKey, err)

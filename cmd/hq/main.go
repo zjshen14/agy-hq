@@ -1337,6 +1337,7 @@ func main() {
 				"cc":              plan.Cc,
 				"subject":         plan.Subject,
 				"bodyFile":        plan.BodyFile,
+				"forwardTempDir":  plan.TempDir,
 				"bodyPreview":     preview,
 				"attachmentCount": fmt.Sprintf("%d", len(plan.AttachmentFiles)),
 			}
@@ -1353,6 +1354,7 @@ func main() {
 				Metadata:         meta,
 			})
 			if err != nil {
+				_ = os.RemoveAll(plan.TempDir)
 				fmt.Fprintf(os.Stderr, "hq gmail forward failed: %v\n", err)
 				os.Exit(1)
 			}
