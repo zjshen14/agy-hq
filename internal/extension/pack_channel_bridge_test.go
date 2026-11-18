@@ -103,6 +103,30 @@ func TestLintPackChannelBridgesValidation(t *testing.T) {
 }`,
 			wantSub: "timeout_ms",
 		},
+		{
+			name: "self hq binary rejected",
+			extJSON: `{
+  "schema_version": 1, "id": "acme-messaging", "version": "1.0.0",
+  "components": { "channel_bridges": [{ "id": "desk-bridge", "protocol": "hq-channel-bridge/v1", "command": ["hq", "status"] }] }
+}`,
+			wantSub: "shell or generic interpreter wrapper",
+		},
+		{
+			name: "go runner wrapper rejected",
+			extJSON: `{
+  "schema_version": 1, "id": "acme-messaging", "version": "1.0.0",
+  "components": { "channel_bridges": [{ "id": "desk-bridge", "protocol": "hq-channel-bridge/v1", "command": ["go", "run", "."] }] }
+}`,
+			wantSub: "shell or generic interpreter wrapper",
+		},
+		{
+			name: "tiny max_body_runes rejected",
+			extJSON: `{
+  "schema_version": 1, "id": "acme-messaging", "version": "1.0.0",
+  "components": { "channel_bridges": [{ "id": "desk-bridge", "protocol": "hq-channel-bridge/v1", "command": ["acme-bridge"], "max_body_runes": 2 }] }
+}`,
+			wantSub: "max_body_runes",
+		},
 	}
 
 	for _, tc := range cases {

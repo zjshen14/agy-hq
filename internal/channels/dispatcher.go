@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,18 +27,80 @@ func init() {
 	}
 }
 
-var enqueueGen atomic.Uint64
+var (
+	enqueueGen    atomic.Uint64
+	vaultFlushMap sync.Map // map[string]*sync.Mutex (serializes in-process SyncAndFlush per vaultDir)
+	reRedactURL   = regexp.MustCompile(`(?i)https?://\S+`)
+)
 
-func bumpEnqueueGeneration() {
+// InvalidateSyncMemo forces the next SyncAndFlush pass to re-evaluate disk state immediately.
+func InvalidateSyncMemo() {
 	enqueueGen.Add(1)
+}
+
+func vaultFlushMutex(vaultDir string) *sync.Mutex {
+	key := canonicalVaultDir(vaultDir)
+	if v, ok := vaultFlushMap.Load(key); ok {
+		return v.(*sync.Mutex)
+	}
+	m := &sync.Mutex{}
+	actual, _ := vaultFlushMap.LoadOrStore(key, m)
+	return actual.(*sync.Mutex)
+}
+
+func redactDiagnosticError(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s = reRedactURL.ReplaceAllString(s, "[redacted-url]")
+	return truncateUTF8Runes(s, 240)
+}
+
+type channelsVaultFingerprint [8]int64
+
+func computeChannelsVaultFingerprint(vaultDir string) channelsVaultFingerprint {
+	var fp channelsVaultFingerprint
+	statFile := func(p string) int64 {
+		st, err := os.Stat(p)
+		if err != nil {
+			return -1
+		}
+		return st.ModTime().UnixNano() ^ (st.Size() << 11)
+	}
+	statDirAndJSON := func(dir string) int64 {
+		st, err := os.Stat(dir)
+		if err != nil {
+			return -1
+		}
+		acc := st.ModTime().UnixNano()
+		if entries, rErr := os.ReadDir(dir); rErr == nil {
+			for _, e := range entries {
+				if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+					continue
+				}
+				if info, iErr := e.Info(); iErr == nil {
+					acc ^= info.ModTime().UnixNano() + (info.Size() << 7)
+				}
+			}
+		}
+		return acc
+	}
+	fp[0] = statFile(filepath.Join(vaultDir, "memory", "front_desk.json"))
+	fp[1] = statDirAndJSON(memoryChannelsDir(vaultDir))
+	fp[2] = statFile(filepath.Join(vaultDir, "extensions.json"))
+	fp[3] = statFile(filepath.Join(vaultDir, "private", "trust.json"))
+	fp[4] = statDirAndJSON(privateChannelsDir(vaultDir))
+	fp[5] = statDirAndJSON(filepath.Join(privateChannelsDir(vaultDir), "credentials"))
+	fp[6] = statFile(filepath.Join(vaultDir, "memory", "outbox", "items.jsonl"))
+	fp[7] = statFile(filepath.Join(vaultDir, "config.yaml"))
+	return fp
 }
 
 type fastSyncMemo struct {
 	mu              sync.Mutex
 	vaultDir        string
-	fdModUnixNano   int64
-	fdSize          int64
-	fdExists        bool
+	fp              channelsVaultFingerprint
 	seenGen         uint64
 	nextDueAt       time.Time
 	hasNextDue      bool
@@ -63,14 +127,6 @@ func readFrontDeskDiskSnapshot(vaultDir string) (frontDeskDiskSnapshot, bool) {
 		return snap, false
 	}
 	return snap, true
-}
-
-func frontDeskStatFingerprint(vaultDir string) (bool, int64, int64) {
-	st, err := os.Stat(filepath.Join(vaultDir, "memory", "front_desk.json"))
-	if err != nil {
-		return false, 0, 0
-	}
-	return true, st.ModTime().UnixNano(), st.Size()
 }
 
 // FlushReport summarizes one SyncAndFlush execution pass.
@@ -123,10 +179,40 @@ func isAttemptDue(nextAttemptAt string, now time.Time) bool {
 	return !now.Before(t)
 }
 
+func parseHHMM(s string) (int, int, bool) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
+}
+
 func nextWakeAfterQuietHours(attCfg outbox.AttentionConfig, now time.Time) time.Time {
-	// Re-evaluate every 5 minutes during quiet hours so timezone/config changes or quiet-hours exit flush promptly.
-	_ = attCfg
-	return now.Add(5 * time.Minute)
+	fallback := now.Add(5 * time.Minute)
+	endH, endM, ok := parseHHMM(attCfg.QuietHours.End)
+	if !ok {
+		return fallback
+	}
+	loc := time.Local
+	if tz := strings.TrimSpace(attCfg.QuietHours.Timezone); tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
+	}
+	localNow := now.In(loc)
+	endToday := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), endH, endM, 0, 0, loc)
+	if !endToday.After(localNow) {
+		endToday = endToday.AddDate(0, 0, 1)
+	}
+	if endToday.Before(fallback) {
+		return endToday.UTC()
+	}
+	return fallback
 }
 
 func workspaceDisplayName(workspaceDir string) string {
@@ -138,11 +224,11 @@ func workspaceDisplayName(workspaceDir string) string {
 }
 
 // SyncAndFlush detects `front_desk.json` `ConversationID` rotations/vacations and drains due
-// per-bridge retry queues using a 3-phase lock-safe pipeline (`RankChannels = 65`).
+// per-bridge retry queues using a serialized 3-phase lock-safe pipeline (`RankChannels = 65`).
 func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bool) (FlushReport, error) {
-	var rep FlushReport
+	var total FlushReport
 	if strings.TrimSpace(vaultDir) == "" {
-		return rep, nil
+		return total, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -151,35 +237,51 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 		now = time.Now()
 	}
 
-	fdExists, fdMod, fdSize := frontDeskStatFingerprint(vaultDir)
+	flushMu := vaultFlushMutex(vaultDir)
+	flushMu.Lock()
+	defer flushMu.Unlock()
+
+	// Up to 2 passes if a mid-flight desk rotation settled during Pass 1 and queued a successor bind.
+	for pass := 0; pass < 2; pass++ {
+		rep, followUpImmediate, err := syncAndFlushSinglePass(ctx, vaultDir, now, dryRun)
+		total.BindsSent += rep.BindsSent
+		total.NotificationsSent += rep.NotificationsSent
+		total.RetriedLater += rep.RetriedLater
+		total.DroppedPermanent += rep.DroppedPermanent
+		if err != nil || !followUpImmediate {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func syncAndFlushSinglePass(ctx context.Context, vaultDir string, now time.Time, dryRun bool) (FlushReport, bool, error) {
+	var rep FlushReport
+	fp := computeChannelsVaultFingerprint(vaultDir)
 	curGen := enqueueGen.Load()
 
 	daemonSyncMemo.mu.Lock()
 	canSkip := daemonSyncMemo.vaultDir == vaultDir &&
-		daemonSyncMemo.fdExists == fdExists &&
-		daemonSyncMemo.fdModUnixNano == fdMod &&
-		daemonSyncMemo.fdSize == fdSize &&
+		daemonSyncMemo.fp == fp &&
 		daemonSyncMemo.seenGen == curGen &&
 		!daemonSyncMemo.lastCheckedWall.IsZero() &&
 		now.Sub(daemonSyncMemo.lastCheckedWall) < 60*time.Second &&
 		(!daemonSyncMemo.hasNextDue || now.Before(daemonSyncMemo.nextDueAt))
 	daemonSyncMemo.mu.Unlock()
 	if canSkip {
-		return rep, nil
+		return rep, false, nil
 	}
 
 	bridges, err := DiscoverBridges(vaultDir)
 	if err != nil || len(bridges) == 0 {
 		daemonSyncMemo.mu.Lock()
 		daemonSyncMemo.vaultDir = vaultDir
-		daemonSyncMemo.fdExists = fdExists
-		daemonSyncMemo.fdModUnixNano = fdMod
-		daemonSyncMemo.fdSize = fdSize
+		daemonSyncMemo.fp = fp
 		daemonSyncMemo.seenGen = curGen
 		daemonSyncMemo.hasNextDue = false
 		daemonSyncMemo.lastCheckedWall = now
 		daemonSyncMemo.mu.Unlock()
-		return rep, err
+		return rep, false, err
 	}
 
 	attCfg := outbox.LoadAttentionConfig(vaultDir)
@@ -195,7 +297,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 	nowStr := now.UTC().Format(time.RFC3339)
 	claimUntilStr := now.Add(DispatchClaimTTL).UTC().Format(time.RFC3339)
 
-	// Phase A (under RankChannels = 65): detect desk rotation, auto-clear recovered pauses, and claim due work.
+	// Phase A (under RankChannels = 65): detect desk rotation, auto-clear recovered pauses, and claim bounded due work.
 	var claimed []claimedBridgeWork
 	var rollups []rollupNotice
 	var earliestDue time.Time
@@ -223,7 +325,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 			}
 			dirty := false
 
-			// Auto-recover paused_auth / paused_permanent when credential file or private config changes.
+			// Auto-recover paused_auth / paused_permanent when credential file, private config, or pack manifest changes.
 			if st.Health.Status == HealthStatusPausedAuth {
 				if rb.PrivateCfg.CredFingerprint != st.Health.CredFingerprintAtPause || rb.PrivateCfg.ConfigSHA256 != st.Health.ConfigSHA256AtPause {
 					st.Health.Status = HealthStatusHealthy
@@ -235,7 +337,8 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 				}
 			}
 			if st.Health.Status == HealthStatusPausedPermanent {
-				if rb.PrivateCfg.ConfigSHA256 != st.Health.ConfigSHA256AtPause {
+				manifestChanged := st.Health.PackManifestSHAAtPause != "" && rb.PackManifestSHA256 != "" && rb.PackManifestSHA256 != st.Health.PackManifestSHAAtPause
+				if rb.PrivateCfg.ConfigSHA256 != st.Health.ConfigSHA256AtPause || manifestChanged {
 					st.Health.Status = HealthStatusHealthy
 					st.Health.PausedReason = ""
 					st.Health.ConsecutiveErrors = 0
@@ -245,17 +348,19 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 				}
 			}
 
-			// Detect Front Desk rotation (`"" -> cid1`, `cid1 -> cid2`, `cid1 -> ""` vacated).
+			// Detect Front Desk rotation (`"" -> cid1`, `cid1 -> cid2`, `cid1 -> ""` vacated),
+			// never overwriting an actively claimed in-flight PendingBind (`P1-5` monotonic causal order).
 			if !st.LastDeskInitialized && !hasFD {
 				st.LastDeskInitialized = true
 				st.LastDeskCID = ""
 				st.LastDeskLeaseState = LeaseStateVacated
 				dirty = true
 			} else if rb.Spec.Capabilities.DeskBinding && (!st.LastDeskInitialized || st.LastDeskCID != curDeskCID || st.LastDeskLeaseState != curLeaseState) {
+				inFlightOtherProcess := st.PendingBind != nil && !isClaimExpired(st.PendingBind.DispatchClaimUntil, now)
 				alreadyQueuedSame := st.PendingBind != nil &&
 					st.PendingBind.ConversationID == curDeskCID &&
 					st.PendingBind.LeaseState == curLeaseState
-				if !alreadyQueuedSame {
+				if !inFlightOtherProcess && !alreadyQueuedSame {
 					prevShort := st.LastDeskCID
 					if len(prevShort) > 8 {
 						prevShort = prevShort[:8]
@@ -333,6 +438,11 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 					keptQueue = append(keptQueue, q)
 					continue
 				}
+				if len(work.Items) >= MaxItemsPerFlushPass {
+					noteDue(now.Add(time.Second).UTC().Format(time.RFC3339))
+					keptQueue = append(keptQueue, q)
+					continue
+				}
 
 				disp := EvaluateNotificationPolicy(q, rb.PrivateCfg.ResolvedPolicy, attCfg, &st.RateWindow, now)
 				switch disp {
@@ -372,10 +482,11 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 		return nil
 	})
 	if err != nil {
-		return rep, err
+		return rep, false, err
 	}
 
-	// Phase B (unlocked): execute `bind-desk` and `notify` subprocesses without holding RankChannels.
+	// Phase B (unlocked): execute `bind-desk` and `notify` subprocesses without holding RankChannels,
+	// short-circuiting remaining items on `auth_expired` / `destination_not_found`.
 	type bindOutcome struct {
 		resp      BindDeskResponse
 		err       error
@@ -385,6 +496,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 	}
 	type itemOutcome struct {
 		key        string
+		executed   bool
 		resp       NotifyResponse
 		err        error
 		pErr       *ProtocolError
@@ -406,6 +518,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 		}
 		hasCred := strings.TrimSpace(w.Bridge.PrivateCfg.Config.CredentialFile) != ""
 		activeDeskThreadID := strings.TrimSpace(w.DeskThread.ExternalThreadID)
+		abortRemainingItems := false
 
 		if w.Bind != nil {
 			var dtPtr *DeskThreadRef
@@ -462,6 +575,11 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 				}
 				if runErr == nil && parsed.OK && parsed.DeskThread != nil && strings.TrimSpace(parsed.DeskThread.ExternalThreadID) != "" {
 					activeDeskThreadID = strings.TrimSpace(parsed.DeskThread.ExternalThreadID)
+				} else if runErr != nil || !parsed.OK {
+					cls, _, _ := ClassifyError(pErr, runErr)
+					if cls == ErrClassAuthExpired || cls == ErrClassPermanentDestination {
+						abortRemainingItems = true
+					}
 				}
 				bo.bindOut = &bindOutcome{
 					resp:      parsed,
@@ -474,11 +592,18 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 		}
 
 		for _, q := range w.Items {
+			if abortRemainingItems {
+				bo.items[q.IdempotencyKey] = itemOutcome{
+					key:      q.IdempotencyKey,
+					executed: false,
+				}
+				continue
+			}
 			sanitized := SanitizeAndFormatNotification(q.Notification, w.Bridge.PrivateCfg.ResolvedPolicy)
 			if w.Bridge.Spec.Capabilities.CallbackButtons &&
 				w.Bridge.PrivateCfg.ResolvedPolicy.PrivacyMode != PrivacyModeZeroBody &&
 				len(sanitized.ProposalIDs) > 0 && !dryRun {
-				if acts, mErr := MintProposalActionTokens(vaultDir, w.Bridge.FQID, sanitized.ProposalIDs, now); mErr == nil && len(acts) > 0 {
+				if acts, mErr := MintProposalActionTokens(vaultDir, w.Bridge.FQID, sanitized.ProposalIDs, sanitized.TaintedOrigin, now); mErr == nil && len(acts) > 0 {
 					sanitized.Actions = acts
 				}
 			}
@@ -519,7 +644,6 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 				ThreadHint:         hint,
 				Notification:       sanitized,
 			}
-			// Compute audit hash over sanitized notification WITHOUT one-shot callback tokens.
 			auditCopy := sanitized
 			auditCopy.Actions = nil
 			auditBytes, _ := json.Marshal(auditCopy)
@@ -528,6 +652,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 			if dryRun {
 				bo.items[q.IdempotencyKey] = itemOutcome{
 					key:        q.IdempotencyKey,
+					executed:   true,
 					resp:       NotifyResponse{Protocol: ProtocolV1, OK: true, DeliveryID: "dry-run"},
 					payHash:    pHash,
 					sentThread: hint.ExistingExternalThreadID,
@@ -549,12 +674,19 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 			if runErr == nil && !parsed.OK && pErr == nil {
 				runErr = fmt.Errorf("bridge returned ok=false on notify")
 			}
+			if runErr != nil || !parsed.OK {
+				cls, _, _ := ClassifyError(pErr, runErr)
+				if cls == ErrClassAuthExpired || cls == ErrClassPermanentDestination {
+					abortRemainingItems = true
+				}
+			}
 			extThr := strings.TrimSpace(parsed.ExternalThreadID)
 			if extThr == "" {
 				extThr = hint.ExistingExternalThreadID
 			}
 			bo.items[q.IdempotencyKey] = itemOutcome{
 				key:        q.IdempotencyKey,
+				executed:   true,
 				resp:       parsed,
 				err:        runErr,
 				pErr:       pErr,
@@ -567,6 +699,15 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 	}
 
 	// Phase C (under RankChannels = 65): reload state, commit outcomes, update backoff/pauses, and write channels.jsonl.
+	followUpImmediate := false
+	liveFD, liveHasFD := readFrontDeskDiskSnapshot(vaultDir)
+	liveDeskCID := ""
+	liveLeaseState := LeaseStateVacated
+	if liveHasFD {
+		liveDeskCID = strings.TrimSpace(liveFD.ConversationID)
+		liveLeaseState = LeaseStateActive
+	}
+
 	err = WithChannelsLock(ctx, vaultDir, func(_ context.Context) error {
 		for _, bo := range results {
 			rb := bo.work.Bridge
@@ -575,44 +716,62 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 				continue
 			}
 
+			batchHalted := false
+			markHealthy := func() {
+				if batchHalted {
+					return
+				}
+				st.Health.Status = HealthStatusHealthy
+				st.Health.PausedReason = ""
+				st.Health.ConsecutiveErrors = 0
+				st.Health.LastSuccessAt = nowStr
+				st.Health.LastError = ""
+			}
+
 			applyBridgeError := func(cls ErrorClass, msg string, code string) {
+				cleanMsg := redactDiagnosticError(msg)
 				st.Health.ConsecutiveErrors++
 				st.Health.LastErrorAt = nowStr
-				st.Health.LastError = msg
+				st.Health.LastError = cleanMsg
 				switch cls {
 				case ErrClassAuthExpired:
+					batchHalted = true
 					if st.Health.Status != HealthStatusPausedAuth {
 						rollups = append(rollups, rollupNotice{
 							SourceSkill: "channels",
 							Scope:       rb.FQID,
 							Title:       fmt.Sprintf("Channel bridge %s paused (authentication expired)", rb.FQID),
-							Summary:     fmt.Sprintf("Bridge returned auth_expired (%s). Refresh credentials and run `hq channel status %s`.", msg, rb.FQID),
+							Summary:     fmt.Sprintf("Bridge returned auth_expired (%s). Refresh credentials and run `hq channel status %s`.", cleanMsg, rb.FQID),
 						})
 					}
 					st.Health.Status = HealthStatusPausedAuth
-					st.Health.PausedReason = msg
+					st.Health.PausedReason = cleanMsg
 					st.Health.ConfigSHA256AtPause = rb.PrivateCfg.ConfigSHA256
 					st.Health.CredFingerprintAtPause = rb.PrivateCfg.CredFingerprint
 				case ErrClassPermanentDestination:
+					batchHalted = true
 					if st.Health.Status != HealthStatusPausedPermanent {
 						rollups = append(rollups, rollupNotice{
 							SourceSkill: "channels",
 							Scope:       rb.FQID,
 							Title:       fmt.Sprintf("Channel bridge %s paused (%s)", rb.FQID, code),
-							Summary:     fmt.Sprintf("Bridge returned permanent destination error (%s). Update private/channels config to resume.", msg),
+							Summary:     fmt.Sprintf("Bridge returned permanent destination error (%s). Update private/channels config or pack manifest to resume.", cleanMsg),
 						})
 					}
 					st.Health.Status = HealthStatusPausedPermanent
-					st.Health.PausedReason = msg
+					st.Health.PausedReason = cleanMsg
 					st.Health.ConfigSHA256AtPause = rb.PrivateCfg.ConfigSHA256
+					st.Health.PackManifestSHAAtPause = rb.PackManifestSHA256
 				default:
-					st.Health.Status = HealthStatusDegraded
+					if !batchHalted {
+						st.Health.Status = HealthStatusDegraded
+					}
 					if st.Health.ConsecutiveErrors == 3 {
 						rollups = append(rollups, rollupNotice{
 							SourceSkill: "channels",
 							Scope:       rb.FQID,
 							Title:       fmt.Sprintf("Channel bridge %s experiencing transient errors (3 consecutive failures)", rb.FQID),
-							Summary:     msg,
+							Summary:     cleanMsg,
 						})
 					}
 				}
@@ -629,7 +788,6 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 					if bOut.resp.DeskThread != nil && strings.TrimSpace(bOut.resp.DeskThread.ExternalThreadID) != "" {
 						st.DeskThread = DeskThreadRef{
 							ExternalThreadID: strings.TrimSpace(bOut.resp.DeskThread.ExternalThreadID),
-							Permalink:        strings.TrimSpace(bOut.resp.DeskThread.Permalink),
 							Metadata:         bOut.resp.DeskThread.Metadata,
 						}
 					}
@@ -644,10 +802,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 					}
 					st.PendingBind = nil
 					st.RecentDeliveredKeys = addSeenKey(st.RecentDeliveredKeys, bo.work.Bind.IdempotencyKey, RecentKeyTTL, now)
-					st.Health.Status = HealthStatusHealthy
-					st.Health.ConsecutiveErrors = 0
-					st.Health.LastSuccessAt = nowStr
-					st.Health.LastError = ""
+					markHealthy()
 					_ = appendAuditEntry(vaultDir, AuditEntry{
 						TS:                 nowStr,
 						BridgeID:           rb.FQID,
@@ -662,6 +817,9 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 						Attempt:            attempt,
 						LatencyMs:          bOut.latencyMs,
 					})
+					if rb.Spec.Capabilities.DeskBinding && (st.LastDeskCID != liveDeskCID || st.LastDeskLeaseState != liveLeaseState) {
+						followUpImmediate = true
+					}
 				} else {
 					cls, msg, retrySec := ClassifyError(bOut.pErr, bOut.err)
 					code := string(cls)
@@ -676,7 +834,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 						rep.RetriedLater++
 						st.PendingBind.Attempt = attempt
 						st.PendingBind.DispatchClaimUntil = ""
-						st.PendingBind.LastError = msg
+						st.PendingBind.LastError = redactDiagnosticError(msg)
 						st.PendingBind.NextAttemptAt = now.Add(retryBackoffDuration(attempt, retrySec)).UTC().Format(time.RFC3339)
 						noteDue(st.PendingBind.NextAttemptAt)
 					}
@@ -708,6 +866,11 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 						nextQueue = append(nextQueue, q)
 						continue
 					}
+					if !iOut.executed {
+						q.DispatchClaimUntil = ""
+						nextQueue = append(nextQueue, q)
+						continue
+					}
 					attempt := q.Attempt + 1
 					if iOut.err == nil && iOut.resp.OK {
 						rep.NotificationsSent++
@@ -734,10 +897,7 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 								Status:           status,
 							}, now)
 						}
-						st.Health.Status = HealthStatusHealthy
-						st.Health.ConsecutiveErrors = 0
-						st.Health.LastSuccessAt = nowStr
-						st.Health.LastError = ""
+						markHealthy()
 						_ = appendAuditEntry(vaultDir, AuditEntry{
 							TS:                 nowStr,
 							BridgeID:           rb.FQID,
@@ -772,13 +932,13 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 							SourceSkill: "channels",
 							Scope:       rb.FQID,
 							Title:       fmt.Sprintf("Channel notification exhausted %d retries: %s", MaxDeliveryAttempts, q.Notification.Title),
-							Summary:     fmt.Sprintf("Last error: %s\n\n%s", msg, q.Notification.BodyMarkdown),
+							Summary:     fmt.Sprintf("Last error: %s\n\n%s", redactDiagnosticError(msg), q.Notification.BodyMarkdown),
 						})
 					} else {
 						rep.RetriedLater++
 						q.Attempt = attempt
 						q.DispatchClaimUntil = ""
-						q.LastError = msg
+						q.LastError = redactDiagnosticError(msg)
 						q.NextAttemptAt = now.Add(retryBackoffDuration(attempt, retrySec)).UTC().Format(time.RFC3339)
 						noteDue(q.NextAttemptAt)
 						nextQueue = append(nextQueue, q)
@@ -798,6 +958,9 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 						ErrorCode:      code,
 					})
 				}
+				if len(nextQueue) > 0 && !batchHalted && !hasEarliestDue {
+					followUpImmediate = true
+				}
 				st.RetryQueue = nextQueue
 			}
 			_ = saveBridgeStateUnlocked(vaultDir, st, now)
@@ -816,19 +979,21 @@ func SyncAndFlush(ctx context.Context, vaultDir string, now time.Time, dryRun bo
 		}, now)
 	}
 
-	fdExists2, fdMod2, fdSize2 := frontDeskStatFingerprint(vaultDir)
+	fpAfter := computeChannelsVaultFingerprint(vaultDir)
 	daemonSyncMemo.mu.Lock()
 	daemonSyncMemo.vaultDir = vaultDir
-	daemonSyncMemo.fdExists = fdExists2
-	daemonSyncMemo.fdModUnixNano = fdMod2
-	daemonSyncMemo.fdSize = fdSize2
+	daemonSyncMemo.fp = fpAfter
 	daemonSyncMemo.seenGen = curGen
 	daemonSyncMemo.hasNextDue = hasEarliestDue
 	daemonSyncMemo.nextDueAt = earliestDue
-	daemonSyncMemo.lastCheckedWall = now
+	if followUpImmediate {
+		daemonSyncMemo.lastCheckedWall = time.Time{}
+	} else {
+		daemonSyncMemo.lastCheckedWall = now
+	}
 	daemonSyncMemo.mu.Unlock()
 
-	return rep, err
+	return rep, followUpImmediate, err
 }
 
 func outboxItemKey(it outbox.OutboxItem) string {
@@ -841,9 +1006,7 @@ func outboxItemKey(it outbox.OutboxItem) string {
 	return "outbox:" + strings.TrimSpace(it.ID)
 }
 
-// EnqueueOutboxInterrupts enqueues delivered Front Desk `TierInterrupt` items into each enabled bridge's
-// independent retry queue (`idempotency_key = "outbox:" + it.ID`), preventing duplicate Front Desk wakeups on chat API errors.
-func EnqueueOutboxInterrupts(vaultDir, deskCID string, items []outbox.OutboxItem, now time.Time) error {
+func enqueueOutboxInterruptsFiltered(vaultDir, deskCID string, items []outbox.OutboxItem, onlyQuietExempt bool, now time.Time) error {
 	if len(items) == 0 || strings.TrimSpace(vaultDir) == "" {
 		return nil
 	}
@@ -858,6 +1021,9 @@ func EnqueueOutboxInterrupts(vaultDir, deskCID string, items []outbox.OutboxItem
 	err = WithChannelsLock(context.Background(), vaultDir, func(_ context.Context) error {
 		for _, rb := range bridges {
 			if !rb.EffectiveEnabled() || !rb.PrivateCfg.ResolvedPolicy.DeliverInterrupts {
+				continue
+			}
+			if onlyQuietExempt && rb.PrivateCfg.ResolvedPolicy.RespectQuietHours {
 				continue
 			}
 			st, lErr := loadBridgeStateUnlocked(vaultDir, rb.FQID)
@@ -887,15 +1053,18 @@ func EnqueueOutboxInterrupts(vaultDir, deskCID string, items []outbox.OutboxItem
 						SourceSkill:   it.SourceSkill,
 						Scope:         it.Scope,
 						Title:         it.Title,
-						BodyMarkdown:  it.Summary,
+						BodyMarkdown:  truncateUTF8Runes(it.Summary, MaxQueuedBodyRunes),
 						ProposalIDs:   it.ProposalIDs,
 						TaintedOrigin: it.Tainted,
 					},
 					CreatedAt: now.UTC().Format(time.RFC3339),
 				}
-				st.RetryQueue = enqueueWithBoundedEviction(st.RetryQueue, q)
-				changed = true
-				enqueued++
+				var added bool
+				st.RetryQueue, added = enqueueWithBoundedEviction(st.RetryQueue, q)
+				if added {
+					changed = true
+					enqueued++
+				}
 			}
 			if changed {
 				_ = saveBridgeStateUnlocked(vaultDir, st, now)
@@ -904,21 +1073,18 @@ func EnqueueOutboxInterrupts(vaultDir, deskCID string, items []outbox.OutboxItem
 		return nil
 	})
 	if enqueued > 0 {
-		bumpEnqueueGeneration()
+		InvalidateSyncMemo()
 	}
 	return err
 }
 
-// EnqueuePendingInterruptsWhenDeskVacant peeks pending `TierInterrupt` items while `front_desk.json` is vacant
-// so urgent mobile/chat notifications still deliver immediately without altering `OutboxItem.Status`.
-// When a new Front Desk later claims the lease, `RecentDeliveredKeys["outbox:"+it.ID]` prevents duplicate sends.
-func EnqueuePendingInterruptsWhenDeskVacant(vaultDir string, now time.Time) error {
-	if strings.TrimSpace(vaultDir) == "" {
-		return nil
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
+// EnqueueOutboxInterrupts enqueues delivered Front Desk `TierInterrupt` items into each enabled bridge's
+// independent retry queue (`idempotency_key = "outbox:" + it.ID`), preventing duplicate Front Desk wakeups on chat API errors.
+func EnqueueOutboxInterrupts(vaultDir, deskCID string, items []outbox.OutboxItem, now time.Time) error {
+	return enqueueOutboxInterruptsFiltered(vaultDir, deskCID, items, false, now)
+}
+
+func peekPendingOutboxInterrupts(vaultDir string, now time.Time) ([]outbox.OutboxItem, error) {
 	var pendingInterrupts []outbox.OutboxItem
 	err := outbox.WithOutboxLock(vaultDir, func() error {
 		all, lErr := outbox.LoadAllUnlocked(vaultDir)
@@ -938,10 +1104,39 @@ func EnqueuePendingInterruptsWhenDeskVacant(vaultDir string, now time.Time) erro
 		}
 		return nil
 	})
-	if err != nil || len(pendingInterrupts) == 0 {
+	return pendingInterrupts, err
+}
+
+// EnqueuePendingInterruptsWhenDeskVacant peeks pending `TierInterrupt` items while `front_desk.json` is vacant
+// so urgent mobile/chat notifications still deliver immediately without altering `OutboxItem.Status`.
+func EnqueuePendingInterruptsWhenDeskVacant(vaultDir string, now time.Time) error {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	pending, err := peekPendingOutboxInterrupts(vaultDir, now)
+	if err != nil || len(pending) == 0 {
 		return err
 	}
-	return EnqueueOutboxInterrupts(vaultDir, "", pendingInterrupts, now)
+	return enqueueOutboxInterruptsFiltered(vaultDir, "", pending, false, now)
+}
+
+// EnqueuePendingInterruptsForQuietExemptBridges delivers pending `TierInterrupt` items to bridges explicitly
+// configured with `respect_quiet_hours: false` while `[HQ] Front Desk` holds them during quiet hours.
+func EnqueuePendingInterruptsForQuietExemptBridges(vaultDir, deskCID string, now time.Time) error {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	pending, err := peekPendingOutboxInterrupts(vaultDir, now)
+	if err != nil || len(pending) == 0 {
+		return err
+	}
+	return enqueueOutboxInterruptsFiltered(vaultDir, deskCID, pending, true, now)
 }
 
 // EnqueueTaskDone enqueues an opt-in (`policy.deliver_task_done: true`) Layer-1 `kind: "task"` completion digest.
@@ -966,7 +1161,7 @@ func EnqueueTaskDone(vaultDir, slug, title, summary, completedAt string, now tim
 	if cleanTitle == "" {
 		cleanTitle = "Task completed: " + slug
 	}
-	body := strings.TrimSpace(summary)
+	body := truncateUTF8Runes(strings.TrimSpace(summary), MaxQueuedBodyRunes)
 	if body == "" {
 		body = "Task `" + slug + "` marked completed."
 	}
@@ -984,7 +1179,8 @@ func EnqueueTaskDone(vaultDir, slug, title, summary, completedAt string, now tim
 			if hasSeenKey(st.RecentDeliveredKeys, idemKey, now) {
 				continue
 			}
-			st.RetryQueue = enqueueWithBoundedEviction(st.RetryQueue, QueuedNotification{
+			var added bool
+			st.RetryQueue, added = enqueueWithBoundedEviction(st.RetryQueue, QueuedNotification{
 				IdempotencyKey:     idemKey,
 				DeskConversationID: strings.TrimSpace(fd.ConversationID),
 				ItemKey:            "task:" + slug,
@@ -999,14 +1195,14 @@ func EnqueueTaskDone(vaultDir, slug, title, summary, completedAt string, now tim
 				},
 				CreatedAt: now.UTC().Format(time.RFC3339),
 			})
-			if saveBridgeStateUnlocked(vaultDir, st, now) == nil {
+			if added && saveBridgeStateUnlocked(vaultDir, st, now) == nil {
 				enqueued++
 			}
 		}
 		return nil
 	})
 	if enqueued > 0 {
-		bumpEnqueueGeneration()
+		InvalidateSyncMemo()
 	}
 	return err
 }
@@ -1024,8 +1220,6 @@ func EnqueueTaskBlocked(vaultDir string, prop approvals.Proposal, now time.Time)
 	if hasFD && strings.TrimSpace(fd.ConversationID) == propConv {
 		return nil
 	}
-	// Quarantine / [Auto] inbox-triage runs already escalate explicitly via `hq outbox add --tier=interrupt`
-	// when urgent; avoid duplicate alerts for tainted reader sessions.
 	if _, err := os.Stat(filepath.Join(vaultDir, "private", "taint", propConv+".json")); err == nil {
 		return nil
 	}
@@ -1036,7 +1230,10 @@ func EnqueueTaskBlocked(vaultDir string, prop approvals.Proposal, now time.Time)
 	}
 	idemKey := sanitizeIdempotencyKey("task-blocked:" + prop.ID)
 	title := fmt.Sprintf("Task awaiting approval (%s): %s", prop.ActionType, prop.Summary)
-	body := fmt.Sprintf("Proposal `%s` (`%s`) staged and awaiting human approval.\n\n- **Summary:** %s", prop.ID, prop.ActionType, prop.Summary)
+	body := truncateUTF8Runes(
+		fmt.Sprintf("Proposal `%s` (`%s`) staged and awaiting human approval.\n\n- **Summary:** %s", prop.ID, prop.ActionType, prop.Summary),
+		MaxQueuedBodyRunes,
+	)
 
 	enqueued := 0
 	err = WithChannelsLock(context.Background(), vaultDir, func(_ context.Context) error {
@@ -1051,7 +1248,8 @@ func EnqueueTaskBlocked(vaultDir string, prop approvals.Proposal, now time.Time)
 			if hasSeenKey(st.RecentDeliveredKeys, idemKey, now) {
 				continue
 			}
-			st.RetryQueue = enqueueWithBoundedEviction(st.RetryQueue, QueuedNotification{
+			var added bool
+			st.RetryQueue, added = enqueueWithBoundedEviction(st.RetryQueue, QueuedNotification{
 				IdempotencyKey:     idemKey,
 				DeskConversationID: strings.TrimSpace(fd.ConversationID),
 				ItemKey:            "proposal:" + prop.ID,
@@ -1066,14 +1264,14 @@ func EnqueueTaskBlocked(vaultDir string, prop approvals.Proposal, now time.Time)
 				},
 				CreatedAt: now.UTC().Format(time.RFC3339),
 			})
-			if saveBridgeStateUnlocked(vaultDir, st, now) == nil {
+			if added && saveBridgeStateUnlocked(vaultDir, st, now) == nil {
 				enqueued++
 			}
 		}
 		return nil
 	})
 	if enqueued > 0 {
-		bumpEnqueueGeneration()
+		InvalidateSyncMemo()
 	}
 	return err
 }
@@ -1088,7 +1286,7 @@ func ListBridgeSummaries(vaultDir string) ([]BridgeSummary, error) {
 	for _, rb := range bridges {
 		st, _ := loadBridgeStateUnlocked(vaultDir, rb.FQID)
 		health := st.Health.Status
-		lastErr := st.Health.LastError
+		lastErr := redactDiagnosticError(st.Health.LastError)
 		switch {
 		case !rb.PackTrusted || !rb.BinaryTrusted:
 			health = HealthStatusUntrusted
@@ -1098,7 +1296,7 @@ func ListBridgeSummaries(vaultDir string) ([]BridgeSummary, error) {
 			health = HealthStatusUnconfigured
 		case rb.PrivateCfgErr != nil:
 			health = HealthStatusDegraded
-			lastErr = rb.PrivateCfgErr.Error()
+			lastErr = redactDiagnosticError(rb.PrivateCfgErr.Error())
 		case health == "":
 			health = HealthStatusHealthy
 		}
@@ -1138,7 +1336,7 @@ type BridgeStatusResult struct {
 }
 
 // ProbeStatus invokes `op: "status"` on one or all configured channel bridges and triggers self-healing `bind-desk`
-// whenever `inbound_tunnel_bound_cid` drifts from `front_desk.json`.
+// whenever `inbound_tunnel_bound_cid` drifts from `front_desk.json` (and flushes unpaused items when auth recovers).
 func ProbeStatus(ctx context.Context, vaultDir, filterFQID string, now time.Time) ([]BridgeStatusResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1180,7 +1378,7 @@ func ProbeStatus(ctx context.Context, vaultDir, filterFQID string, now time.Time
 			QueuedCount:     len(st.RetryQueue),
 		}
 		if rb.PrivateCfgErr != nil {
-			res.Error = rb.PrivateCfgErr.Error()
+			res.Error = redactDiagnosticError(rb.PrivateCfgErr.Error())
 			results = append(results, res)
 			continue
 		}
@@ -1207,7 +1405,7 @@ func ProbeStatus(ctx context.Context, vaultDir, filterFQID string, now time.Time
 		}
 		if runErr != nil || !parsed.OK {
 			_, msg, _ := ClassifyError(parsed.Error, runErr)
-			res.Error = msg
+			res.Error = redactDiagnosticError(msg)
 			res.AuthState = parsed.AuthState
 			results = append(results, res)
 			continue
@@ -1216,10 +1414,11 @@ func ProbeStatus(ctx context.Context, vaultDir, filterFQID string, now time.Time
 		res.Healthy = parsed.Healthy
 		res.AuthState = parsed.AuthState
 		res.InboundTunnelBoundCID = strings.TrimSpace(parsed.InboundTunnelBoundCID)
-		res.Detail = parsed.Detail
+		res.Detail = redactDiagnosticError(parsed.Detail)
 
-		// Clear paused_auth if live status probe confirms authenticated health.
-		if parsed.Healthy {
+		authLower := strings.ToLower(strings.TrimSpace(parsed.AuthState))
+		if parsed.Healthy && authLower != "expired" && authLower != "unauthenticated" {
+			clearedPause := false
 			_ = WithChannelsLock(ctx, vaultDir, func(_ context.Context) error {
 				cur, _ := loadBridgeStateUnlocked(vaultDir, rb.FQID)
 				if cur.Health.Status == HealthStatusPausedAuth || cur.Health.Status == HealthStatusDegraded {
@@ -1227,9 +1426,14 @@ func ProbeStatus(ctx context.Context, vaultDir, filterFQID string, now time.Time
 					cur.Health.PausedReason = ""
 					cur.Health.ConsecutiveErrors = 0
 					_ = saveBridgeStateUnlocked(vaultDir, cur, now)
+					clearedPause = len(cur.RetryQueue) > 0 || cur.PendingBind != nil
 				}
 				return nil
 			})
+			if clearedPause {
+				InvalidateSyncMemo()
+				needsHealFlush = true
+			}
 		}
 
 		if rb.Spec.Capabilities.DeskBinding && res.InboundTunnelBoundCID != expectedCID {
@@ -1251,7 +1455,7 @@ func ProbeStatus(ctx context.Context, vaultDir, filterFQID string, now time.Time
 				}
 				return saveBridgeStateUnlocked(vaultDir, cur, now)
 			})
-			bumpEnqueueGeneration()
+			InvalidateSyncMemo()
 			needsHealFlush = true
 		}
 		results = append(results, res)
@@ -1348,7 +1552,7 @@ func SendTestPing(ctx context.Context, vaultDir, fqid string, now time.Time) (Br
 				ErrorCode:      string(cls),
 			})
 		})
-		return BridgeTestResult{}, fmt.Errorf("test ping failed (%s): %s", cls, msg)
+		return BridgeTestResult{}, fmt.Errorf("test ping failed (%s): %s", cls, redactDiagnosticError(msg))
 	}
 
 	_ = WithChannelsLock(ctx, vaultDir, func(_ context.Context) error {
@@ -1404,11 +1608,10 @@ func DoctorChecks(vaultDir string) []DoctorFinding {
 		return []DoctorFinding{{
 			Name:   "Channel Bridges",
 			Status: "WARN",
-			Detail: err.Error(),
+			Detail: redactDiagnosticError(err.Error()),
 		}}
 	}
 
-	// Also inspect orphan files in private/channels/*.json that don't match any discovered pack bridge.
 	knownFiles := make(map[string]bool)
 	var findings []DoctorFinding
 
@@ -1424,7 +1627,7 @@ func DoctorChecks(vaultDir string) []DoctorFinding {
 			findings = append(findings, DoctorFinding{
 				Name:   name,
 				Status: "FAIL",
-				Detail: rb.PrivateCfgErr.Error(),
+				Detail: redactDiagnosticError(rb.PrivateCfgErr.Error()),
 			})
 			continue
 		}
@@ -1451,7 +1654,7 @@ func DoctorChecks(vaultDir string) []DoctorFinding {
 			findings = append(findings, DoctorFinding{
 				Name:   name,
 				Status: "WARN",
-				Detail: fmt.Sprintf("status=%s · queued=%d · lastError=%s", st.Health.Status, len(st.RetryQueue), st.Health.LastError),
+				Detail: fmt.Sprintf("status=%s · queued=%d · lastError=%s", st.Health.Status, len(st.RetryQueue), redactDiagnosticError(st.Health.LastError)),
 			})
 			continue
 		}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/store"
 )
 
@@ -25,7 +26,10 @@ const (
 
 // Exact 36-byte compact token format: "bca_" or "bcr_" + 32 base64url chars (192 bits CSPRNG entropy),
 // fitting comfortably inside Telegram's 64-byte InlineKeyboardButton.callback_data limit.
-var reValidCallbackToken = regexp.MustCompile(`^bc[ar]_[A-Za-z0-9_-]{32}$`)
+var (
+	reValidCallbackToken = regexp.MustCompile(`^bc[ar]_[A-Za-z0-9_-]{32}$`)
+	reHex64              = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 // BridgeCapRecord persists ONLY SHA-256 hashes of one-shot button tokens in <vault>/private/approval_bridge_caps/<token-sha256>.json.
 // Plaintext `bca_...` / `bcr_...` tokens are NEVER written to disk.
@@ -47,6 +51,7 @@ type CallbackRequest struct {
 	CallbackToken  string `json:"callback_token"`
 	Reason         string `json:"reason,omitempty"`
 	SuppressResume bool   `json:"suppress_resume,omitempty"`
+	DaemonToken    string `json:"daemon_token,omitempty"`
 }
 
 // CallbackResult summarizes 0-token button callback execution.
@@ -84,7 +89,7 @@ func generateCallbackToken(prefix string) (string, string, error) {
 
 // MintProposalActionTokens mints single-use 36-byte `bca_...` / `bcr_...` button tokens for each unexpired
 // pending proposal in proposalIDs, writing only SHA-256(token) records to <vault>/private/approval_bridge_caps/.
-func MintProposalActionTokens(vaultDir, bridgeFQID string, proposalIDs []string, now time.Time) ([]NotificationAction, error) {
+func MintProposalActionTokens(vaultDir, bridgeFQID string, proposalIDs []string, taintedOrigin bool, now time.Time) ([]NotificationAction, error) {
 	if len(proposalIDs) == 0 {
 		return nil, nil
 	}
@@ -191,10 +196,14 @@ func MintProposalActionTokens(vaultDir, bridgeFQID string, proposalIDs []string,
 			return nil, err
 		}
 
+		cleanSum := outbox.SanitizeAntiCue(prop.Summary, 160)
+		if taintedOrigin {
+			cleanSum = DefangURLs(cleanSum)
+		}
 		actions = append(actions, NotificationAction{
 			ProposalID:           propID,
 			ActionType:           prop.ActionType,
-			Summary:              truncateUTF8Runes(prop.Summary, 160),
+			Summary:              cleanSum,
 			SHA256Prefix:         shaPrefix,
 			ApproveCallbackToken: appTok,
 			RejectCallbackToken:  rejTok,
@@ -251,7 +260,7 @@ func HandleCallback(ctx context.Context, vaultDir string, req CallbackRequest, n
 		return CallbackResult{}, fmt.Errorf("corrupt callback capability")
 	}
 	// Immediately invalidate the sibling button token so Approve and Reject can never both fire.
-	if pair := strings.TrimSpace(rec.PairHash); len(pair) == 64 {
+	if pair := strings.ToLower(strings.TrimSpace(rec.PairHash)); reHex64.MatchString(pair) {
 		_ = os.Remove(filepath.Join(capsDir, pair+".json"))
 	}
 

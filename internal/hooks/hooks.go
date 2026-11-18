@@ -625,30 +625,14 @@ var (
 	reHQPropose    = regexp.MustCompile(`(?i)(?:^|&&|;)\s*(?:\S+/)?hq\s+propose\b`)
 	reCmdFlagValue = regexp.MustCompile(`--cmd=(?:"(?:\\.|[^"\\])*"|'[^']*'|\S+)`)
 
-	outboundCommandPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\bgws\s+(gmail|chat)\s+(send|create|post|patch|update|delete)\b`),
-		regexp.MustCompile(`(?i)(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:["']?(?:\S+/)?language_server["']?\s+plugin-cli\s+)?["']?(?:\S+/)?gmail(?:-[0-9]+)?["']?\s+[^;&|\n]*\b(?:mutate\s+(?:send-message|send-draft|send-with-attachment|send|reply|forward)|send-message|send-draft)\b`),
-		regexp.MustCompile(`(?i)\bhq\s+gmail\s+send-draft\b`),
-		regexp.MustCompile(`(?i)\bhq\s+gchat\s+(send|send-draft)\b`),
-		regexp.MustCompile(`(?i)\bchat\.googleapis\.com/v1/spaces/[^\s]*messages\b`),
-		regexp.MustCompile(`(?i)\bgh\s+pr\s+merge\b`),
-		regexp.MustCompile(`(?i)\bgh\s+release\s+create\b`),
-		regexp.MustCompile(`(?i)\bvercel\s+(--prod|deploy\s+--prod)\b`),
-		regexp.MustCompile(`(?i)\bhq\s+rsi\s+apply\b`),
-		regexp.MustCompile(`(?i)\bhq\s+connector\s+apply-offer\b`),
-		regexp.MustCompile(`(?i)\bhq\s+extension\s+apply-trust\b`),
-		regexp.MustCompile(`(?i)\bhq\s+channel\s+apply-config\b`),
-		regexp.MustCompile(`(?i)/api/(?:approve|reject)\b`),
-	}
-
-	reHQChannelDaemonOnly = regexp.MustCompile(`(?i)(?:(?:\S+/)?hq\s+channel\s+(?:inbound|callback|flush)\b|/api/channels/(?:inbound|callback|flush)\b)`)
+	reChannelAPIRoute = regexp.MustCompile(`(?i)/api/channels(?:/|%2f|%5c|$|[\s"'])`)
 
 	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
 	reHQOutboundBodyCmd      = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
 	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|watch\s+(?:read|query|ack)|offer\s+stage|brief\s+format-quarantined|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/channels)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -664,6 +648,236 @@ var (
 )
 
 const PreCompactionFlushTokens int64 = 120000
+
+func splitShellSegmentsUnquoted(cmd string) []string {
+	var out []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+		if escaped {
+			cur.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			}
+			cur.WriteByte(ch)
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inDouble = false
+			}
+			cur.WriteByte(ch)
+			continue
+		}
+		switch ch {
+		case '\\':
+			escaped = true
+			cur.WriteByte(ch)
+		case '\'':
+			inSingle = true
+			cur.WriteByte(ch)
+		case '"':
+			inDouble = true
+			cur.WriteByte(ch)
+		case ';', '|', '&', '\n', '\r', '(', ')', '`':
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				out = append(out, s)
+			}
+			cur.Reset()
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		out = append(out, s)
+	}
+	return out
+}
+
+func tokenizeShellWordsUnquoted(seg string) []string {
+	var out []string
+	var cur strings.Builder
+	inTok := false
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(seg); i++ {
+		ch := seg[i]
+		if escaped {
+			cur.WriteByte(ch)
+			inTok = true
+			escaped = false
+			continue
+		}
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(ch)
+			}
+			inTok = true
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inDouble = false
+			} else {
+				cur.WriteByte(ch)
+			}
+			inTok = true
+			continue
+		}
+		switch ch {
+		case ' ', '\t':
+			if inTok {
+				out = append(out, cur.String())
+				cur.Reset()
+				inTok = false
+			}
+		case '\\':
+			escaped = true
+			inTok = true
+		case '\'':
+			inSingle = true
+			inTok = true
+		case '"':
+			inDouble = true
+			inTok = true
+		default:
+			cur.WriteByte(ch)
+			inTok = true
+		}
+	}
+	if inTok {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// isBlockedChannelGatewayShell structurally detects quote/env/`go run`-wrapped invocations of
+// `hq channel inbound|callback|flush|apply-config` or `/api/channels/*` across all LLM sessions.
+func isBlockedChannelGatewayShell(cmdLine string) bool {
+	if reChannelAPIRoute.MatchString(cmdLine) {
+		return true
+	}
+	for _, seg := range splitShellSegmentsUnquoted(cmdLine) {
+		toks := tokenizeShellWordsUnquoted(seg)
+		// Strip leading env assignments (`FOO=bar`), `env [-u X / --unset=X / -i / --]`, `command`, `exec`, `nohup`, `nice`, `timeout <dur>`
+		i := 0
+		for i < len(toks) {
+			t := toks[i]
+			if strings.Contains(t, "=") && !strings.HasPrefix(t, "-") {
+				i++
+				continue
+			}
+			switch t {
+			case "env":
+				i++
+				for i < len(toks) {
+					et := toks[i]
+					if et == "--" {
+						i++
+						break
+					}
+					if et == "-u" || et == "--unset" || et == "-C" || et == "--chdir" || et == "-S" {
+						i += 2
+						continue
+					}
+					if strings.HasPrefix(et, "-") || strings.Contains(et, "=") {
+						i++
+						continue
+					}
+					break
+				}
+				continue
+			case "command", "exec", "nohup", "builtin":
+				i++
+				for i < len(toks) && strings.HasPrefix(toks[i], "-") {
+					i++
+				}
+				continue
+			case "nice":
+				i++
+				if i < len(toks) && (toks[i] == "-n" || strings.HasPrefix(toks[i], "--adjustment")) {
+					if toks[i] == "-n" {
+						i += 2
+					} else {
+						i++
+					}
+				}
+				continue
+			case "timeout":
+				i++
+				for i < len(toks) && strings.HasPrefix(toks[i], "-") {
+					if toks[i] == "-k" || toks[i] == "-s" {
+						i += 2
+					} else {
+						i++
+					}
+				}
+				if i < len(toks) {
+					i++ // duration arg
+				}
+				continue
+			}
+			break
+		}
+		if i >= len(toks) {
+			continue
+		}
+		rest := toks[i:]
+		// Normalize `go run [flags] ./cmd/hq[/] <args...>` -> `hq <args...>`
+		base0 := strings.ToLower(strings.TrimSuffix(filepath.Base(rest[0]), ".exe"))
+		if base0 == "go" && len(rest) >= 3 && rest[1] == "run" {
+			j := 2
+			for j < len(rest) && strings.HasPrefix(rest[j], "-") {
+				j++
+			}
+			if j < len(rest) {
+				pkgClean := strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(rest[j])), "/")
+				if strings.HasSuffix(pkgClean, "cmd/hq") {
+					rest = append([]string{"hq"}, rest[j+1:]...)
+					base0 = "hq"
+				}
+			}
+		}
+		if base0 != "hq" {
+			continue
+		}
+		// Find first positional subcommands after `hq`
+		var pos []string
+		for _, a := range rest[1:] {
+			if a == "--" {
+				break
+			}
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			pos = append(pos, strings.ToLower(strings.TrimSpace(a)))
+			if len(pos) >= 2 {
+				break
+			}
+		}
+		if len(pos) >= 2 && pos[0] == "channel" {
+			switch pos[1] {
+			case "inbound", "callback", "flush", "apply-config":
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func isAutoConversation(vaultDir, convID string) bool {
 	convID = strings.TrimSpace(convID)
@@ -1298,10 +1512,10 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 				"reason":   "Blocked by agy-hq integrity policy: direct shell access to .system_generated transcript/log directories is prohibited across all sessions.",
 			})
 		}
-		if reHQChannelDaemonOnly.MatchString(cmdLine) {
+		if isBlockedChannelGatewayShell(cmdLine) {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Channel Bridge policy: `hq channel inbound`, `hq channel callback`, and `/api/channels/*` are daemon/sidecar-only gateways and may never be invoked by an LLM session.",
+				"reason":   "Blocked by agy-hq Channel Bridge policy: `hq channel inbound|callback|flush|apply-config` and `/api/channels/*` are daemon/approval-only gateways and may never be invoked directly by an LLM session (use `hq channel configure` to stage config updates).",
 			})
 		}
 		if reHQClaimDesk.MatchString(cmdLine) && (kernel.IsSubagentConversation(vaultDir, payload.ConversationID) || isAutoConversation(vaultDir, payload.ConversationID)) {
@@ -1331,7 +1545,8 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 				if vBase == "" || vBase == "." {
 					continue
 				}
-				if strings.Contains(cmdLine, filepath.Join(vBase, "approvals")) {
+				if strings.Contains(cmdLine, filepath.Join(vBase, "approvals")) ||
+					strings.Contains(cmdLine, filepath.Join(vBase, "memory", "channels")) {
 					credShellHit = true
 					break
 				}
@@ -1347,7 +1562,10 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 			}
 		}
 		if !credShellHit && canonVault != "" {
-			credTargets := []string{filepath.Join(canonVault, "approvals")}
+			credTargets := []string{
+				filepath.Join(canonVault, "approvals"),
+				filepath.Join(canonVault, "memory", "channels"),
+			}
 			for _, sub := range protectedPrivateSubs {
 				credTargets = append(credTargets, filepath.Join(canonVault, "private", sub))
 			}
@@ -1381,22 +1599,7 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		if credShellHit {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,channels,taint,trust.json,approval_asks,approval_caps,approval_bridge_caps,pii-denylist.txt,daemon_token} or roots.json is strictly prohibited across all sessions.",
-			})
-		}
-		// Protect memory/channels runtime state & channels.jsonl audit log from direct shell mutation
-		if (strings.Contains(cmdLine, "memory/channels") || (canonVault != "" && strings.Contains(cmdLine, filepath.Join(canonVault, "memory", "channels")))) &&
-			(strings.ContainsAny(cmdLine, ">") ||
-				strings.Contains(cmdLine, "sed ") ||
-				strings.Contains(cmdLine, "tee ") ||
-				strings.Contains(cmdLine, "cp ") ||
-				strings.Contains(cmdLine, "mv ") ||
-				strings.Contains(cmdLine, "rm ") ||
-				strings.Contains(cmdLine, "python") ||
-				strings.Contains(cmdLine, "perl")) {
-			return json.NewEncoder(w).Encode(map[string]interface{}{
-				"decision": "deny",
-				"reason":   "Blocked by agy-hq integrity policy: direct shell mutations to memory/channels state or channels.jsonl audit log are prohibited across all sessions.",
+				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,channels,taint,trust.json,approval_asks,approval_caps,approval_bridge_caps,pii-denylist.txt,daemon_token}, local/memory/channels, or roots.json is strictly prohibited across all sessions.",
 			})
 		}
 
@@ -1511,7 +1714,10 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 	switch payload.ToolCall.Name {
 	case "read_file", "write_file", "edit_file", "grep_search", "find_by_name":
 		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
-		credPaths := []string{filepath.Join(canonVault, "approvals")}
+		credPaths := []string{
+			filepath.Join(canonVault, "approvals"),
+			filepath.Join(canonVault, "memory", "channels"),
+		}
 		for _, sub := range protectedPrivateSubs {
 			credPaths = append(credPaths, filepath.Join(canonVault, "private", sub))
 		}
@@ -2214,12 +2420,12 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			_, _ = approvals.ReconcileAskRejections(vaultDir, payload.ConversationID, payload.TranscriptPath, time.Now())
 			_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
 
-			replyText := strings.TrimSpace(summary)
+			replyText := strings.TrimSpace(payload.LastResponse)
 			if replyText == "" {
-				replyText = strings.TrimSpace(payload.LastResponse)
+				replyText = strings.TrimSpace(tm.CurrentTurnFullResponse)
 			}
 			if replyText != "" {
-				if enqCount, _ := channels.EnqueueTurnReplyIfCorrelated(vaultDir, payload.ConversationID, execNum, replyText, time.Time{}, time.Now()); enqCount > 0 {
+				if enqCount, _ := channels.EnqueueTurnReplyIfCorrelated(vaultDir, payload.ConversationID, execNum, replyText, tm.CurrentTurnStartedAt, time.Now()); enqCount > 0 {
 					channels.BestEffortFlushLoopback(vaultDir, 150*time.Millisecond)
 				}
 			}
@@ -2402,17 +2608,19 @@ func isTransientExternalError(content string) bool {
 }
 
 type transcriptTurnMetrics struct {
-	ToolsUsed       []string
-	FilesModified   []string
-	LastResponse    string
-	LastUserPrompt  string
-	StepCount       int
-	ToolErrorCount  int
-	TurnStepCount   int
-	TurnErrorCount  int
-	TransientErrors int
-	PreToolDenials  int
-	TaintedCmdSeen  bool
+	ToolsUsed               []string
+	FilesModified           []string
+	LastResponse            string
+	CurrentTurnFullResponse string
+	CurrentTurnStartedAt    time.Time
+	LastUserPrompt          string
+	StepCount               int
+	ToolErrorCount          int
+	TurnStepCount           int
+	TurnErrorCount          int
+	TransientErrors         int
+	PreToolDenials          int
+	TaintedCmdSeen          bool
 }
 
 func parseTranscriptSummaryWithMetrics(transcriptPath string) (toolsUsed []string, filesModified []string, lastResponse string, lastUserPrompt string, stepCount int, toolErrorCount int) {
@@ -2446,6 +2654,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 			Type      string `json:"type"`
 			Status    string `json:"status"`
 			Content   string `json:"content"`
+			CreatedAt string `json:"created_at"`
 			ToolCalls []struct {
 				Name string                 `json:"name"`
 				Args map[string]interface{} `json:"args"`
@@ -2457,6 +2666,13 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 		curIdx := tm.StepCount
 		tm.StepCount++
 		inCurrentTurn := curIdx >= stepStartIdx
+		if inCurrentTurn && tm.CurrentTurnStartedAt.IsZero() && strings.TrimSpace(step.CreatedAt) != "" {
+			if ts, pErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(step.CreatedAt)); pErr == nil {
+				tm.CurrentTurnStartedAt = ts
+			} else if ts2, pErr2 := time.Parse(time.RFC3339, strings.TrimSpace(step.CreatedAt)); pErr2 == nil {
+				tm.CurrentTurnStartedAt = ts2
+			}
+		}
 
 		if isTranscriptStepErrorWithContext(step.Status, step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) {
 			tm.ToolErrorCount++
@@ -2480,7 +2696,15 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 		}
 		if step.Type == "PLANNER_RESPONSE" {
 			if strings.TrimSpace(step.Content) != "" {
-				tm.LastResponse = strings.TrimSpace(step.Content)
+				full := strings.TrimSpace(step.Content)
+				if inCurrentTurn {
+					if runes := []rune(full); len(runes) > 8000 {
+						tm.CurrentTurnFullResponse = string(runes[:7997]) + "..."
+					} else {
+						tm.CurrentTurnFullResponse = full
+					}
+				}
+				tm.LastResponse = full
 				if runes := []rune(tm.LastResponse); len(runes) > 500 {
 					tm.LastResponse = string(runes[:500]) + "..."
 				}

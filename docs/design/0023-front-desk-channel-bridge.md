@@ -372,7 +372,7 @@ When `ok == false` (or exit status `!= 0`), bridges return `error: {"code": "...
 
 ### 5.1 LLM-Invisible Destination Config (`<vault>/private/channels/<bridge-id>.json`)
 
-Destination coordinates and per-bridge policy live strictly inside `<vault>/private/channels/<safe-id>.json` (`0600`, where `<safe-id>` maps `<pack>/<id>` to `<pack>--<id>.json` with `^[a-z0-9][a-z0-9._-]{1,80}$` validation):
+Destination coordinates and per-bridge policy live strictly inside `<vault>/private/channels/<safe-id>.json` (`0600`, where `<safe-id>` maps `<pack>/<id>` injectively to `<pack>__<id>.json` since `^[a-z0-9][a-z0-9-]{1,62}$` forbids `_`):
 
 ```json
 {
@@ -429,7 +429,7 @@ Runtime cursor, thread mapping, inbound reply correlation, and retry state live 
    - When `policy.privacy_mode == "zero_body"`, `title` and `body_markdown` are replaced with generic zero-PII text (`"agy-hq: 1 urgent item awaiting review in Front Desk"`) and `notification.actions` is omitted, unifying cleanly with [RFC-0020 §4.3](./0020-proactive-ambient-synthesis-and-mobile-push.md).
    - UTF-8 rune-safe truncation caps `body_markdown` at `min(spec.MaxBodyRunes, policy.MaxBodyRunes, 4000)` (default `1600` runes).
 4. **SHA-256 Audit Log (`<vault>/memory/channels/channels.jsonl`, `0600`):**
-   - Appended via `store.AppendLineNoFollow` (`<= 5000` hot lines, compacted during `/sleep-consolidate`), storing **zero raw room IDs, zero callback tokens, and zero message bodies**:
+   - Appended via `store.AppendLineNoFollow` (`<= 5000` hot lines, compacted on `hq daemon`'s `30m` heartbeat loop; both `<vault>/memory/channels/**` and `<vault>/private/{channels,approval_bridge_caps}/**` are blocked from direct LLM reads/writes/shell access in `PreToolUse`), storing **zero raw room IDs, zero callback tokens, and zero message bodies**:
      ```json
      {"ts":"2026-11-17T21:16:05Z","bridge_id":"acme-messaging/desk-bridge","op":"notify","kind":"interrupt","idempotency_key":"outbox:idea-1794904100-7f8e9d0c","desk_cid":"9a41bc10-7712-4c11-8a00-112233445566","dest_sha256":"e3b0c44298fc","external_thread_hash":"8f434346648f","payload_sha256":"6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b","outcome":"delivered","attempt":1,"latency_ms":142}
      ```
@@ -482,8 +482,9 @@ Add top-level `hq channel` subcommand (and register `"channel"` in `validHQTopSu
 - `hq channel status [<bridge-fqid>] [--json]` — Invokes `op: "status"`, checks `inbound_tunnel_bound_cid` alignment against `front_desk.json`, and triggers self-healing `bind-desk` on drift.
 - `hq channel test <bridge-fqid>` — Sends a synthetic `kind: "test_ping"` notification to the pre-configured `<vault>/private/channels/<bridge-id>.json` destination (zero recipient flags).
 - `hq channel pause <bridge-fqid> [--reason="..."]` / `hq channel resume <bridge-fqid>` — Toggles `ChannelBridgeOverrides` in `<vault>/extensions.json`.
+- `hq channel configure <bridge-fqid>` — Reads strict `0600` private destination JSON from `stdin` (writing directly when invoked outside an agent session, or staging an approval-gated `/dev/fd/3` `hq channel apply-config` `rsi_apply` proposal inside an agent session).
 - `hq channel audit [--limit=20]` — Displays recent SHA-256 audit rows from `channels.jsonl`.
-- `hq channel inbound` / `hq channel callback` — Daemon/sidecar-only `stdin` JSON gateways (`POST /api/channels/inbound`, `POST /api/channels/callback`, `POST /api/channels/flush` on loopback `:4242` with `Bearer <daemon_token>`); hard-blocked across all LLM sessions in `PreToolUse` and when `ANTIGRAVITY_CONVERSATION_ID != ""`.
+- `hq channel inbound` / `hq channel callback` / `hq channel flush` — Daemon/sidecar-only `stdin` JSON gateways (`POST /api/channels/inbound`, `POST /api/channels/callback`, `POST /api/channels/flush` on loopback `:4242` with `Bearer <daemon_token>`, or CLI with `--daemon-token-file` / `HQ_DAEMON_TOKEN`); hard-blocked across all LLM sessions in `PreToolUse` and when `ANTIGRAVITY_CONVERSATION_ID != ""`.
 - `hq doctor` — Validates `<vault>/private/channels/*.json` strict schemas (`0600` permissions, non-symlink), `private/trust.json` binary pins, and `health.status`.
 
 ---

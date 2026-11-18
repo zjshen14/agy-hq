@@ -33,8 +33,10 @@ const (
 	MaxRecentKeys           = 256
 	RecentKeyTTL            = 72 * time.Hour
 	MaxRetryQueueEntries    = 64
+	MaxItemsPerFlushPass    = 8
+	MaxQueuedBodyRunes      = 8000
 	MaxDeliveryAttempts     = 6
-	DispatchClaimTTL        = 30 * time.Second
+	DispatchClaimTTL        = 150 * time.Second // >= (1 bind + 8 notify) * 15s max subprocess timeout + 15s margin
 	MaxHotAuditLines        = 5000
 	RunawayUnsolicitedCap1H = 30
 )
@@ -229,6 +231,8 @@ func saveBridgeStateUnlocked(vaultDir string, st BridgeState, now time.Time) err
 		return err
 	}
 	st.SchemaVersion = BridgeStateSchemaVersion
+	// Never persist external room permalinks onto disk (prevents room URL exposure).
+	st.DeskThread.Permalink = ""
 	if !now.IsZero() {
 		st.UpdatedAt = now.UTC().Format(time.RFC3339)
 	}
@@ -374,13 +378,14 @@ func prunePendingReplies(entries []PendingReplyCorrelation, now time.Time) []Pen
 }
 
 // enqueueWithBoundedEviction enforces MaxRetryQueueEntries (64), evicting oldest `task_done` -> `task_blocked`
-// before ever dropping `critical_breach`, `interrupt`, or `desk_reply`.
-func enqueueWithBoundedEviction(queue []QueuedNotification, item QueuedNotification) []QueuedNotification {
+// before ever dropping `critical_breach`, `interrupt`, or `desk_reply`. Returns `(updatedQueue, true)` only when newly inserted.
+func enqueueWithBoundedEviction(queue []QueuedNotification, item QueuedNotification) ([]QueuedNotification, bool) {
 	for _, existing := range queue {
 		if existing.IdempotencyKey == item.IdempotencyKey {
-			return queue
+			return queue, false
 		}
 	}
+	item.Notification.BodyMarkdown = truncateUTF8Runes(item.Notification.BodyMarkdown, MaxQueuedBodyRunes)
 	queue = append(queue, item)
 	for len(queue) > MaxRetryQueueEntries {
 		evictIdx := -1
@@ -399,12 +404,11 @@ func enqueueWithBoundedEviction(queue []QueuedNotification, item QueuedNotificat
 			}
 		}
 		if evictIdx < 0 {
-			// All entries are high-priority; drop the oldest entry only if new item is also high-priority.
 			evictIdx = 0
 		}
 		queue = append(queue[:evictIdx], queue[evictIdx+1:]...)
 	}
-	return queue
+	return queue, true
 }
 
 func retryBackoffDuration(attempt int, retryAfterSec int) time.Duration {

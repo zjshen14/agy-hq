@@ -12,10 +12,31 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/channels"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
 )
+
+func requireCLIDaemonAuth(vaultDir, verb, tokenFile, jsonToken string) {
+	if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {
+		fmt.Fprintf(os.Stderr, "hq channel %s refused: daemon/sidecar-only gateway cannot be invoked inside an agent session\n", verb)
+		os.Exit(1)
+	}
+	candidate := strings.TrimSpace(jsonToken)
+	if candidate == "" && strings.TrimSpace(tokenFile) != "" {
+		if b, err := os.ReadFile(strings.TrimSpace(tokenFile)); err == nil {
+			candidate = strings.TrimSpace(string(b))
+		}
+	}
+	if candidate == "" {
+		candidate = strings.TrimSpace(os.Getenv("HQ_DAEMON_TOKEN"))
+	}
+	if !events.ValidateDaemonToken(vaultDir, candidate) {
+		fmt.Fprintf(os.Stderr, "hq channel %s unauthorized: valid daemon_token required (pass --daemon-token-file, HQ_DAEMON_TOKEN, or daemon_token JSON field)\n", verb)
+		os.Exit(1)
+	}
+}
 
 func runChannelCLI(rootDir, vaultDir string, args []string) {
 	sub := "list"
@@ -24,6 +45,8 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		sub = args[0]
 		rest = args[1:]
 	}
+	// Defense-in-depth: block all `hq channel` subcommands inside tainted/quarantined sessions.
+	denyIfCallerTainted(vaultDir, "channel "+sub)
 
 	switch sub {
 	case "list":
@@ -88,7 +111,6 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		}
 
 	case "test":
-		denyIfCallerTainted(vaultDir, "channel test")
 		pos, fl := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("channel test", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -112,7 +134,6 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			res.BridgeID, res.DestSHA256Short, res.DeliveryID, res.LatencyMs)
 
 	case "pause":
-		denyIfCallerTainted(vaultDir, "channel pause")
 		pos, fl := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("channel pause", flag.ExitOnError)
 		reason := fs.String("reason", "", "Optional pause reason")
@@ -131,6 +152,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq channel pause failed: %v\n", err)
 			os.Exit(1)
 		}
+		channels.InvalidateSyncMemo()
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
 			enc := json.NewEncoder(os.Stdout)
@@ -141,7 +163,6 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		fmt.Printf("Paused channel bridge %s\n", pos[0])
 
 	case "resume":
-		denyIfCallerTainted(vaultDir, "channel resume")
 		pos, fl := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("channel resume", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -159,6 +180,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq channel resume failed: %v\n", err)
 			os.Exit(1)
 		}
+		channels.InvalidateSyncMemo()
 		_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), false)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
@@ -195,7 +217,6 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		}
 
 	case "configure":
-		denyIfCallerTainted(vaultDir, "channel configure")
 		pos, fl := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("channel configure", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -222,6 +243,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 				fmt.Fprintf(os.Stderr, "hq channel configure save failed: %v\n", sErr)
 				os.Exit(1)
 			}
+			channels.InvalidateSyncMemo()
 			_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), false)
 			if *asJSON {
 				enc := json.NewEncoder(os.Stdout)
@@ -236,7 +258,6 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Printf("Saved private channel config for %s (dest sha256:%s, mode 0600)\n", fqid, saved.DestSHA256Short)
 			return
 		}
-		// Inside an agent conversation: stage an approval-gated `/dev/fd/3` proposal (`rsi_apply`).
 		hqBin := resolveProposalHQBin(rootDir)
 		argv := []string{hqBin, "channel", "apply-config", "--bridge=" + fqid, "--payload-file={{payload_file}}"}
 		prop, pErr := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
@@ -262,7 +283,10 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		fmt.Printf("Staged channel config proposal %s for %s (sha256:%s)\n", prop.ID, fqid, prop.SHA256[:12])
 
 	case "apply-config":
-		denyIfCallerTainted(vaultDir, "channel apply-config")
+		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {
+			fmt.Fprintln(os.Stderr, "hq channel apply-config refused: cannot execute directly inside an agent session (use 'hq channel configure' + human approval)")
+			os.Exit(1)
+		}
 		fs := flag.NewFlagSet("channel apply-config", flag.ExitOnError)
 		bridgeFlag := fs.String("bridge", "", "Channel bridge FQID (<pack>/<id>)")
 		payloadFile := fs.String("payload-file", "", "Path or /dev/fd/3 pipe containing private channel config JSON")
@@ -281,15 +305,15 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq channel apply-config failed: %v\n", err)
 			os.Exit(1)
 		}
+		channels.InvalidateSyncMemo()
 		_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), false)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Applied private channel config for %s (dest:%s)\n", strings.TrimSpace(*bridgeFlag), saved.DestSHA256Short)
 
 	case "inbound":
-		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {
-			fmt.Fprintln(os.Stderr, "hq channel inbound refused: daemon/sidecar-only gateway cannot be invoked inside an agent session")
-			os.Exit(1)
-		}
+		fs := flag.NewFlagSet("channel inbound", flag.ExitOnError)
+		tokFile := fs.String("daemon-token-file", "", "Path to <vault>/private/daemon_token")
+		_ = fs.Parse(rest)
 		raw, err := io.ReadAll(io.LimitReader(os.Stdin, 64*1024))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq channel inbound stdin error: %v\n", err)
@@ -300,6 +324,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq channel inbound JSON error: %v\n", err)
 			os.Exit(1)
 		}
+		requireCLIDaemonAuth(vaultDir, "inbound", *tokFile, req.DaemonToken)
 		res, err := channels.HandleInbound(context.Background(), vaultDir, req, time.Now())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq channel inbound failed: %v\n", err)
@@ -311,10 +336,9 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		_ = enc.Encode(res)
 
 	case "callback":
-		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {
-			fmt.Fprintln(os.Stderr, "hq channel callback refused: daemon/sidecar-only gateway cannot be invoked inside an agent session")
-			os.Exit(1)
-		}
+		fs := flag.NewFlagSet("channel callback", flag.ExitOnError)
+		tokFile := fs.String("daemon-token-file", "", "Path to <vault>/private/daemon_token")
+		_ = fs.Parse(rest)
 		raw, err := io.ReadAll(io.LimitReader(os.Stdin, 16*1024))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq channel callback stdin error: %v\n", err)
@@ -325,6 +349,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq channel callback JSON error: %v\n", err)
 			os.Exit(1)
 		}
+		requireCLIDaemonAuth(vaultDir, "callback", *tokFile, req.DaemonToken)
 		res, err := channels.HandleCallback(context.Background(), vaultDir, req, time.Now())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq channel callback failed: %v\n", err)
@@ -336,10 +361,11 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		_ = enc.Encode(res)
 
 	case "flush":
-		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {
-			fmt.Fprintln(os.Stderr, "hq channel flush refused inside agent session")
-			os.Exit(1)
-		}
+		fs := flag.NewFlagSet("channel flush", flag.ExitOnError)
+		tokFile := fs.String("daemon-token-file", "", "Path to <vault>/private/daemon_token")
+		_ = fs.Parse(rest)
+		requireCLIDaemonAuth(vaultDir, "flush", *tokFile, "")
+		channels.InvalidateSyncMemo()
 		rep, err := channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq channel flush failed: %v\n", err)

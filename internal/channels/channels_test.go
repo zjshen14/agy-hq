@@ -710,3 +710,122 @@ func TestQuietHoursCriticalPierceAndNonUrgentRateCaps(t *testing.T) {
 		t.Fatalf("expected 3 notifications (1 held interrupt + 2 rate-capped task_done), got rep=%+v err=%v", repDay, err)
 	}
 }
+
+func TestAdversarialMemoInvalidationBatchedInboundAndRaceSafety(t *testing.T) {
+	// 1. Boundary: tiny maxRunes in outbox.SanitizeAntiCue & SafeBridgeFileStem injectivity
+	if got := outbox.SanitizeAntiCue("hello world", 2); got != "he" {
+		t.Fatalf("expected SanitizeAntiCue maxRunes=2 not to panic and return 'he', got %q", got)
+	}
+	stemA, errA := SafeBridgeFileStem("acme--msg/desk")
+	stemB, errB := SafeBridgeFileStem("acme/msg--desk")
+	if errA != nil || errB != nil || stemA == stemB {
+		t.Fatalf("expected SafeBridgeFileStem to be injective on '--' slugs, got %q vs %q (%v, %v)", stemA, stemB, errA, errB)
+	}
+
+	vaultDir, stateDir, fqid := setupTrustedBridgeVault(t, "")
+	now := time.Date(2026, 11, 17, 19, 0, 0, 0, time.UTC)
+	deskCID := "00000000-0000-4000-8000-000000000500"
+	writeFrontDeskJSON(t, vaultDir, deskCID, now)
+
+	// Prime daemonSyncMemo in-process
+	if _, err := SyncAndFlush(context.Background(), vaultDir, now, false); err != nil {
+		t.Fatalf("initial SyncAndFlush: %v", err)
+	}
+
+	// 2. Cross-process write simulation: mutate RetryQueue on disk WITHOUT calling InvalidateSyncMemo()
+	stateFile, _ := statePathForBridge(vaultDir, fqid)
+	rawSt, _ := os.ReadFile(stateFile)
+	var diskSt BridgeState
+	_ = json.Unmarshal(rawSt, &diskSt)
+	diskSt.RetryQueue = append(diskSt.RetryQueue, QueuedNotification{
+		IdempotencyKey:     "cross-proc-item-01",
+		DeskConversationID: deskCID,
+		Notification: NotificationPayload{
+			Kind:         KindInterrupt,
+			Title:        "Cross-process enqueue",
+			BodyMarkdown: "Written by external hook process",
+		},
+		CreatedAt: now.Add(time.Second).Format(time.RFC3339),
+	})
+	modBytes, _ := json.MarshalIndent(diskSt, "", "  ")
+	// Advance mtime by 2s to guarantee filesystem mtime tick even on coarse filesystems
+	_ = os.WriteFile(stateFile, append(modBytes, '\n'), 0o600)
+	futureMtime := now.Add(2 * time.Second)
+	_ = os.Chtimes(stateFile, futureMtime, futureMtime)
+
+	repCross, err := SyncAndFlush(context.Background(), vaultDir, now.Add(2*time.Second), false)
+	if err != nil || repCross.NotificationsSent != 1 {
+		t.Fatalf("expected SyncAndFlush to detect cross-process disk change without 60s stall, got rep=%+v err=%v", repCross, err)
+	}
+
+	// 3. Batched rapid inbound messages: 2 inbound messages before 1 Stop hook -> 1 desk_reply, 0 leftover leak on next turn
+	for i := 1; i <= 2; i++ {
+		if _, err := HandleInbound(context.Background(), vaultDir, InboundRequest{
+			BridgeID:          fqid,
+			ExternalMessageID: fmt.Sprintf("batch_msg_%d", i),
+			ExternalThreadID:  "thr_desk_pinned",
+			Text:              fmt.Sprintf("Rapid question %d", i),
+		}, now.Add(time.Duration(10+i)*time.Second)); err != nil {
+			t.Fatalf("HandleInbound %d: %v", i, err)
+		}
+	}
+	enqBatch, err := EnqueueTurnReplyIfCorrelated(vaultDir, deskCID, 1, "Combined answer to both questions", now.Add(10*time.Second), now.Add(15*time.Second))
+	if err != nil || enqBatch != 1 {
+		t.Fatalf("expected coalesced 1 desk_reply for 2 batched messages on same thread, got %d (err=%v)", enqBatch, err)
+	}
+	enqDesktopNext, _ := EnqueueTurnReplyIfCorrelated(vaultDir, deskCID, 2, "Subsequent desktop-only turn", now.Add(16*time.Second), now.Add(17*time.Second))
+	if enqDesktopNext != 0 {
+		t.Fatalf("expected 0 leftover correlations after batched turn settled, got %d", enqDesktopNext)
+	}
+	_, _ = SyncAndFlush(context.Background(), vaultDir, now.Add(18*time.Second), false)
+
+	// 4. `paused_permanent` recovery when pack manifest hash updates (`PackManifestSHAAtPause`)
+	_ = os.WriteFile(filepath.Join(stateDir, "fail_mode.txt"), []byte("destination_not_found"), 0o600)
+	_ = EnqueueOutboxInterrupts(vaultDir, deskCID, []outbox.OutboxItem{{
+		ID: "perm-1", Tier: outbox.TierInterrupt, SourceSkill: "pulse", Title: "Fail perm", Summary: "body",
+	}}, now.Add(20*time.Second))
+	_, _ = SyncAndFlush(context.Background(), vaultDir, now.Add(20*time.Second), false)
+	sums1, _ := ListBridgeSummaries(vaultDir)
+	if len(sums1) != 1 || sums1[0].HealthStatus != HealthStatusPausedPermanent {
+		t.Fatalf("expected paused_permanent, got %+v", sums1)
+	}
+	_ = os.Remove(filepath.Join(stateDir, "fail_mode.txt"))
+	packDir := filepath.Join(vaultDir, "packs", "acme-messaging")
+	extPath := filepath.Join(packDir, "hq-extension.json")
+	rawExt, _ := os.ReadFile(extPath)
+	updatedExt := strings.Replace(string(rawExt), `"version": "1.0.0"`, `"version": "1.0.1"`, 1)
+	_ = os.WriteFile(extPath, []byte(updatedExt), 0o644)
+	_ = os.WriteFile(filepath.Join(packDir, "plugin.json"), []byte(`{"name":"acme-messaging","version":"1.0.1"}`), 0o644)
+	b2, err := extension.BuildTrustBundle(vaultDir, "pack:acme-messaging", packDir)
+	if err != nil {
+		t.Fatalf("BuildTrustBundle 1.0.1: %v", err)
+	}
+	b2Raw, _ := json.Marshal(b2)
+	_ = extension.ApplyTrustBundle(vaultDir, b2Raw)
+	InvalidateSyncMemo()
+	_, _ = SyncAndFlush(context.Background(), vaultDir, now.Add(25*time.Second), false)
+	sums2, _ := ListBridgeSummaries(vaultDir)
+	if len(sums2) != 1 || sums2[0].HealthStatus != HealthStatusHealthy {
+		t.Fatalf("expected paused_permanent to recover on re-trusted hq-extension.json change, got %+v", sums2)
+	}
+
+	// 5. Concurrent SyncAndFlush + rapid rotation stress under -race
+	var wg sync.WaitGroup
+	for g := 0; g < 6; g++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _ = SyncAndFlush(context.Background(), vaultDir, now.Add(time.Duration(30+idx)*time.Second), false)
+		}(g)
+	}
+	writeFrontDeskJSON(t, vaultDir, "00000000-0000-4000-8000-000000000501", now.Add(31*time.Second))
+	InvalidateSyncMemo()
+	writeFrontDeskJSON(t, vaultDir, "", now.Add(32*time.Second))
+	InvalidateSyncMemo()
+	wg.Wait()
+	_, _ = SyncAndFlush(context.Background(), vaultDir, now.Add(40*time.Second), false)
+	boundRaw, _ := os.ReadFile(filepath.Join(stateDir, "bound_cid.txt"))
+	if strings.TrimSpace(string(boundRaw)) != "" {
+		t.Fatalf("expected monotonic final sidecar state to be vacated (''), got %q", string(boundRaw))
+	}
+}

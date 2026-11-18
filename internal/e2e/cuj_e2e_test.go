@@ -5644,40 +5644,38 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 		t.Fatalf("hq channel test failed: %v (%s)", err, out)
 	}
 
-	// 2. Claim Front Desk (`cid1`), rotate (`cid1 -> cid2`), and demote via `hq adopt` (`cid2 -> ""` vacated)
+	// 2. Mint daemon_token, test CLI daemon_token enforcement, then claim Front Desk (`cid1`), rotate (`cid1 -> cid2`), and demote via `hq adopt` (`cid2 -> ""` vacated)
+	daemonTok, err := events.EnsureDaemonToken(env.vaultDir)
+	if err != nil {
+		t.Fatalf("EnsureDaemonToken: %v", err)
+	}
+	if _, unauthErr := env.run("", "channel", "flush"); unauthErr == nil {
+		t.Fatalf("expected unauthenticated CLI `hq channel flush` without daemon_token to be rejected")
+	}
+	daemonEnv := []string{"HQ_DAEMON_TOKEN=" + daemonTok}
+
 	cid1 := "00000000-0000-4000-8000-000000003801"
 	cid2 := "00000000-0000-4000-8000-000000003802"
 	if out, err := env.run("", "claim-desk", "--conv="+cid1); err != nil {
 		t.Fatalf("claim-desk cid1: %v (%s)", err, out)
 	}
-	if out, err := env.run("", "channel", "flush"); err != nil {
+	if out, err := env.runWithEnv("", daemonEnv, "channel", "flush"); err != nil {
 		t.Fatalf("channel flush cid1: %v (%s)", err, out)
 	}
 	if out, err := env.run("", "claim-desk", "--conv="+cid2); err != nil {
 		t.Fatalf("claim-desk cid2: %v (%s)", err, out)
 	}
-	if out, err := env.run("", "channel", "flush"); err != nil {
+	if out, err := env.runWithEnv("", daemonEnv, "channel", "flush"); err != nil {
 		t.Fatalf("channel flush cid2: %v (%s)", err, out)
 	}
 	if out, err := env.run("", "adopt", "--conv="+cid2, "--task=demoted-shift", "--title=[Task:ops] Demoted Shift"); err != nil {
 		t.Fatalf("adopt cid2: %v (%s)", err, out)
 	}
-	if out, err := env.run("", "channel", "flush"); err != nil {
+	if out, err := env.runWithEnv("", daemonEnv, "channel", "flush"); err != nil {
 		t.Fatalf("channel flush vacated: %v (%s)", err, out)
 	}
 
-	// Claim fresh active Front Desk (`cid3`) for bidirectional mobile round-trip
-	cid3 := "00000000-0000-4000-8000-000000003803"
-	if out, err := env.run("", "claim-desk", "--conv="+cid3); err != nil {
-		t.Fatalf("claim-desk cid3: %v (%s)", err, out)
-	}
-	_, _ = env.run("", "channel", "flush")
-
-	// 3. Start loopback WebUI handler & verify Bearer daemon_token enforcement on `/api/channels/inbound` + `/api/channels/callback`
-	daemonTok, err := events.EnsureDaemonToken(env.vaultDir)
-	if err != nil {
-		t.Fatalf("EnsureDaemonToken: %v", err)
-	}
+	// 3. Start loopback WebUI handler & verify vacant-desk single-turn inbound + >500-rune transcript `desk_reply`
 	srv := httptest.NewServer(webui.NewHandler(env.vaultDir))
 	defer srv.Close()
 
@@ -5688,7 +5686,7 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 	}
 	_ = unauthResp.Body.Close()
 
-	// Authenticated inbound owner message -> routes to cid3
+	// While Front Desk is VACANT (after `adopt`), send inbound message -> queues serialized vacant-desk bootstrap (`BootstrappedDesk: true`)
 	inBody := `{"bridge_id":"acme-messaging/desk-bridge","external_message_id":"tg_9001","external_thread_id":"thr_cuj38_desk","text":"Stage deployment marker"}`
 	inReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/channels/inbound", strings.NewReader(inBody))
 	inReq.Header.Set("Authorization", "Bearer "+daemonTok)
@@ -5700,11 +5698,18 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 	var inParsed channels.InboundResult
 	_ = json.NewDecoder(inResp.Body).Decode(&inParsed)
 	_ = inResp.Body.Close()
-	if !inParsed.OK || inParsed.TargetConversationID != cid3 {
-		t.Fatalf("expected inbound turn routed to cid3 (%s), got %+v", cid3, inParsed)
+	if !inParsed.OK || !inParsed.BootstrappedDesk || inParsed.TargetConversationID != "" {
+		t.Fatalf("expected vacant-desk inbound to queue single-turn bootstrap, got %+v", inParsed)
 	}
 
-	// Stage a deterministic proposal inside cid3, then invoke `hq hook stop` (`HandleStop` `desk_reply` mirroring)
+	// Simulate the spawned single-turn Front Desk (`cid3`) claiming the lease and binding vacant correlation
+	cid3 := "00000000-0000-4000-8000-000000003803"
+	if out, err := env.run("", "claim-desk", "--conv="+cid3); err != nil {
+		t.Fatalf("claim-desk cid3: %v (%s)", err, out)
+	}
+	channels.BindVacantCorrelations(env.vaultDir, cid3, time.Now())
+
+	// Stage a deterministic proposal inside cid3, write a >900-rune transcript PLANNER_RESPONSE, and run `hq hook stop`
 	markerFile := filepath.Join(t.TempDir(), "cuj38-button-approved.txt")
 	prop, err := approvals.CreateWithOptions(env.vaultDir, approvals.CreateOptions{
 		ActionType:     "external_action",
@@ -5717,22 +5722,33 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 		t.Fatalf("CreateWithOptions: %v", err)
 	}
 
+	longReply := "FULL_CURRENT_TURN_REPLY_START:" + strings.Repeat("A", 900) + ":END_MARKER"
+	transcriptPath := filepath.Join(t.TempDir(), "cid3-transcript.jsonl")
+	tLines := fmt.Sprintf(
+		"{\"step_index\":0,\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":%q,\"content\":\"Stage deployment marker\"}\n"+
+			"{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":%q,\"content\":%q}\n",
+		time.Now().Add(-2*time.Second).UTC().Format(time.RFC3339),
+		time.Now().UTC().Format(time.RFC3339),
+		longReply,
+	)
+	_ = os.WriteFile(transcriptPath, []byte(tLines), 0o600)
+
 	stopJSON, _ := json.Marshal(map[string]interface{}{
 		"conversationId": cid3,
+		"transcriptPath": transcriptPath,
 		"executionNum":   1,
-		"lastResponse":   "Staged marker proposal for 1-tap mobile review.",
 	})
 	if stopOut, err := env.run(string(stopJSON), "hook", "stop"); err != nil || !strings.Contains(stopOut, `"decision":"stop"`) {
 		t.Fatalf("hq hook stop failed: %v (%s)", err, stopOut)
 	}
-	_, _ = env.run("", "channel", "flush")
+	_, _ = env.runWithEnv("", daemonEnv, "channel", "flush")
 
-	// Inspect recorded bridge calls -> verify `desk_reply` carried 36-byte `bca_`/`bcr_` tokens and scrubbed CSRF!
+	// Inspect recorded bridge calls -> verify `desk_reply` preserved >500-rune body, carried 36-byte `bca_`/`bcr_` tokens, and scrubbed CSRF!
 	callsRaw, err := os.ReadFile(filepath.Join(bridgeStateDir, "calls.jsonl"))
 	if err != nil {
 		t.Fatalf("read bridge calls.jsonl: %v", err)
 	}
-	var approveTok, rejectTok string
+	var approveTok, rejectTok, gotReplyBody string
 	sawVacated := false
 	for _, ln := range strings.Split(strings.TrimSpace(string(callsRaw)), "\n") {
 		if strings.TrimSpace(ln) == "" {
@@ -5760,11 +5776,15 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 			if nReq.Notification.Kind == channels.KindDeskReply && len(nReq.Notification.Actions) == 1 {
 				approveTok = nReq.Notification.Actions[0].ApproveCallbackToken
 				rejectTok = nReq.Notification.Actions[0].RejectCallbackToken
+				gotReplyBody = nReq.Notification.BodyMarkdown
 			}
 		}
 	}
 	if !sawVacated {
 		t.Fatalf("expected bind-desk with lease_state=vacated after hq adopt demotion")
+	}
+	if !strings.HasSuffix(gotReplyBody, ":END_MARKER") || len(gotReplyBody) < 900 {
+		t.Fatalf("expected untruncated >900-rune desk_reply body, got len=%d body=%q", len(gotReplyBody), gotReplyBody)
 	}
 	if len(approveTok) != 36 || len(rejectTok) != 36 {
 		t.Fatalf("expected 36-byte bca_/bcr_ tokens in desk_reply, got approve=%q reject=%q", approveTok, rejectTok)
@@ -5797,18 +5817,37 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 	}
 	_ = cbRespReplay.Body.Close()
 
-	// 5. Verify PreToolUse blocks LLM reads/shells on private/{channels,approval_bridge_caps}, writes on memory/channels, and daemon-only CLI/HTTP gateways
+	// 5. Load templates/config.yaml (`hq init` Vault) & verify adversarial PreToolUse + tainted CLI bypasses are ALL denied!
+	tplCfgBytes, err := os.ReadFile(filepath.Join(env.rootDir, "templates", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read templates/config.yaml: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "config.yaml"), tplCfgBytes, 0o644)
+
 	for _, probe := range []map[string]interface{}{
-		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "read_file", "args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "private", "channels", "acme-messaging--desk-bridge.json")}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "read_file", "args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "private", "channels", "acme-messaging__desk-bridge.json")}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "read_file", "args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "memory", "channels", "channels.jsonl")}}},
 		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "write_file", "args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "memory", "channels", "channels.jsonl"), "Content": "{}"}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "truncate -s 0 " + filepath.Join(env.vaultDir, "memory", "channels", "channels.jsonl")}}},
 		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "hq channel inbound"}}},
-		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "hq channel callback"}}},
-		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "curl -X POST http://127.0.0.1:4242/api/channels/inbound -d '{}'"}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": `env -u ANTIGRAVITY_CONVERSATION_ID "./bin/hq" 'channel' 'inbound'`}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": `go run ./cmd/hq/ channel callback`}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": `./bin/hq channel apply-config --bridge=acme-messaging/desk-bridge --payload-file=/tmp/evil.json`}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": `curl -X POST http://127.0.0.1:4242/api/channels%2finbound -d '{}'`}}},
 	} {
 		rawProbe, _ := json.Marshal(probe)
 		preOut, pErr := env.run(string(rawProbe), "hook", "pre-tool")
 		if pErr != nil || !strings.Contains(preOut, `"decision":"deny"`) {
 			t.Fatalf("expected PreToolUse deny on %s, got err=%v out=%s", string(rawProbe), pErr, preOut)
+		}
+	}
+
+	// Tainted session MUST be rejected by CLI defense-in-depth on `hq channel status|list|audit`
+	taintedCID := "00000000-0000-4000-8000-000000003899"
+	_, _ = taint.Mark(nil, env.vaultDir, taint.Record{ConvID: taintedCID, Source: "test"})
+	for _, sub := range []string{"list", "status", "audit"} {
+		if _, tErr := env.runWithEnv("", []string{"ANTIGRAVITY_CONVERSATION_ID=" + taintedCID}, "channel", sub); tErr == nil {
+			t.Fatalf("expected tainted session to be denied on `hq channel %s`", sub)
 		}
 	}
 

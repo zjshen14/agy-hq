@@ -92,18 +92,19 @@ type LoadedPrivateConfig struct {
 
 // ResolvedBridge joins an extension pack's ChannelBridgeSpec with Vault activation, trust, private config, and runtime state.
 type ResolvedBridge struct {
-	FQID          string
-	PackID        string
-	BridgeID      string
-	PackDir       string
-	PackEnabled   bool
-	PackTrusted   bool
-	BinaryTrusted bool
-	OverrideOn    bool
-	Spec          extension.ChannelBridgeSpec
-	HasPrivateCfg bool
-	PrivateCfg    LoadedPrivateConfig
-	PrivateCfgErr error
+	FQID               string
+	PackID             string
+	BridgeID           string
+	PackDir            string
+	PackManifestSHA256 string
+	PackEnabled        bool
+	PackTrusted        bool
+	BinaryTrusted      bool
+	OverrideOn         bool
+	Spec               extension.ChannelBridgeSpec
+	HasPrivateCfg      bool
+	PrivateCfg         LoadedPrivateConfig
+	PrivateCfgErr      error
 }
 
 // EffectiveEnabled returns true only when pack, Vault override, trust pins, and private config all enable dispatch.
@@ -148,13 +149,14 @@ func ParseBridgeFQID(fqid string) (string, string, error) {
 	return packID, bridgeID, nil
 }
 
-// SafeBridgeFileStem converts validated "<pack>/<id>" to "<pack>--<id>".
+// SafeBridgeFileStem converts validated "<pack>/<id>" to injective "<pack>__<id>"
+// (`reValidSlugSegment` forbids '_', preventing any collision when IDs contain '--').
 func SafeBridgeFileStem(fqid string) (string, error) {
 	packID, bridgeID, err := ParseBridgeFQID(fqid)
 	if err != nil {
 		return "", err
 	}
-	return packID + "--" + bridgeID, nil
+	return packID + "__" + bridgeID, nil
 }
 
 func privateChannelsDir(vaultDir string) string {
@@ -191,8 +193,13 @@ func ResolvePolicy(pol BridgePolicyConfig, specMaxRunes int) (ResolvedPolicy, er
 		}
 		maxRunes = *pol.MaxBodyRunes
 	}
-	if specMaxRunes > 0 && specMaxRunes < maxRunes {
-		maxRunes = specMaxRunes
+	if specMaxRunes > 0 {
+		if specMaxRunes < 80 {
+			specMaxRunes = 80
+		}
+		if specMaxRunes < maxRunes {
+			maxRunes = specMaxRunes
+		}
 	}
 	if maxRunes > HardMaxBodyRunes {
 		maxRunes = HardMaxBodyRunes
@@ -379,6 +386,7 @@ func DiscoverBridges(vaultDir string) ([]ResolvedBridge, error) {
 	vaultState, _ := extension.LoadVaultState(vaultDir)
 	var out []ResolvedBridge
 	for _, dp := range packs {
+		packManifestSHA, _ := extension.ComputeStatCachedSHA256(filepath.Join(dp.Path, "hq-extension.json"))
 		for _, spec := range dp.Manifest.Components.ChannelBridges {
 			fqid := dp.ID + "/" + strings.TrimSpace(spec.ID)
 			binTrusted := false
@@ -393,18 +401,19 @@ func DiscoverBridges(vaultDir string) ([]ResolvedBridge, error) {
 			}
 			loadedCfg, hasCfg, cfgErr := LoadBridgePrivateConfig(vaultDir, fqid, spec.MaxBodyRunes)
 			out = append(out, ResolvedBridge{
-				FQID:          fqid,
-				PackID:        dp.ID,
-				BridgeID:      strings.TrimSpace(spec.ID),
-				PackDir:       dp.Path,
-				PackEnabled:   dp.Enabled,
-				PackTrusted:   dp.Trusted,
-				BinaryTrusted: binTrusted,
-				OverrideOn:    overrideOn,
-				Spec:          spec,
-				HasPrivateCfg: hasCfg,
-				PrivateCfg:    loadedCfg,
-				PrivateCfgErr: cfgErr,
+				FQID:               fqid,
+				PackID:             dp.ID,
+				BridgeID:           strings.TrimSpace(spec.ID),
+				PackDir:            dp.Path,
+				PackManifestSHA256: packManifestSHA,
+				PackEnabled:        dp.Enabled,
+				PackTrusted:        dp.Trusted,
+				BinaryTrusted:      binTrusted,
+				OverrideOn:         overrideOn,
+				Spec:               spec,
+				HasPrivateCfg:      hasCfg,
+				PrivateCfg:         loadedCfg,
+				PrivateCfgErr:      cfgErr,
 			})
 		}
 	}

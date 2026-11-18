@@ -657,21 +657,29 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		"conversationId": "conv-worker",
 		"toolCall": map[string]interface{}{
 			"name": "read_file",
-			"args": map[string]interface{}{"Path": filepath.Join(vaultDir, "private", "channels", "acme--desk.json")},
+			"args": map[string]interface{}{"Path": filepath.Join(vaultDir, "private", "channels", "acme__desk.json")},
 		},
 	})
 	if !strings.Contains(chanCredOut, `"decision":"deny"`) {
 		return false, "Universal Credential Vault guard failed to deny untainted read_file on private/channels/"
 	}
-	chanDaemonOut, _ := runHook(map[string]interface{}{
-		"conversationId": "conv-worker",
-		"toolCall": map[string]interface{}{
-			"name": "run_command",
-			"args": map[string]interface{}{"CommandLine": "hq channel inbound"},
-		},
-	})
-	if !strings.Contains(chanDaemonOut, `"decision":"deny"`) {
-		return false, "Channel daemon-only gateway guard failed to deny LLM `hq channel inbound`"
+	for _, blockedCmd := range []string{
+		"hq channel inbound",
+		`env -u ANTIGRAVITY_CONVERSATION_ID "./bin/hq" 'channel' 'inbound'`,
+		`go run ./cmd/hq/ channel callback`,
+		`./bin/hq channel apply-config --bridge=acme/desk --payload-file=/tmp/x.json`,
+		`truncate -s 0 ` + filepath.Join(vaultDir, "memory", "channels", "channels.jsonl"),
+	} {
+		chanDaemonOut, _ := runHook(map[string]interface{}{
+			"conversationId": "conv-worker",
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": blockedCmd},
+			},
+		})
+		if !strings.Contains(chanDaemonOut, `"decision":"deny"`) {
+			return false, fmt.Sprintf("Channel security guard failed to deny %q", blockedCmd)
+		}
 	}
 	ledgerReadOut, _ := runHook(map[string]interface{}{
 		"conversationId": "conv-worker",

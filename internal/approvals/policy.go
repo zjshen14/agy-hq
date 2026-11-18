@@ -621,7 +621,12 @@ func mergeRuleIntoSlice(rules []Rule, incoming Rule, source string) ([]Rule, err
 			merged.TargetResolver = strings.ToLower(strings.TrimSpace(incoming.TargetResolver))
 		}
 		if len(incoming.Commands) > 0 {
-			merged.Commands = append([]string(nil), incoming.Commands...)
+			if CoreNonDisableablePackRules[merged.ID] {
+				// Preserve built-in Ring-0 command patterns across upgrades even when pre-existing Vault config.yaml lists older patterns.
+				merged.Commands = appendUniqueStrings(append([]string(nil), merged.Commands...), incoming.Commands...)
+			} else {
+				merged.Commands = append([]string(nil), incoming.Commands...)
+			}
 		}
 		if len(incoming.AutoCategories) > 0 {
 			merged.AutoCategories = append([]string(nil), incoming.AutoCategories...)

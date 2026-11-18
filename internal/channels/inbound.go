@@ -23,10 +23,6 @@ const MaxInboundTextRunes = 16000
 
 var reValidExternalMsgID = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,160}$`)
 
-// RegisteredFrontDeskBootstrapper is wired by internal/kernel at init time to auto-bootstrap
-// a fresh `[HQ] Front Desk` session when an owner sends an inbound message while `front_desk.json` is vacant.
-var RegisteredFrontDeskBootstrapper func(vaultDir string, now time.Time) (string, error)
-
 // InboundRequest is sent by a trusted companion sidecar to POST /api/channels/inbound or `hq channel inbound`.
 type InboundRequest struct {
 	BridgeID          string `json:"bridge_id"`
@@ -34,6 +30,7 @@ type InboundRequest struct {
 	ExternalThreadID  string `json:"external_thread_id,omitempty"`
 	Text              string `json:"text"`
 	Timestamp         string `json:"timestamp,omitempty"`
+	DaemonToken       string `json:"daemon_token,omitempty"`
 }
 
 // InboundResult reports how `agy-hq` routed an inbound owner message.
@@ -126,6 +123,8 @@ func requireActiveTrustedBridge(vaultDir, fqid string) (ResolvedBridge, error) {
 
 // HandleInbound authenticates, deduplicates, routes, and correlates a verified 1:1 owner message
 // from a companion sidecar to `[HQ] Front Desk` (or a matched open item thread's task session).
+// When `front_desk.json` is vacant, it enqueues a serialized `front_desk:channel_inbound` event (`SessionID: ""`)
+// so `DispatchPendingEvents` spawns `[HQ] Front Desk` directly with the owner's prompt in a single turn.
 func HandleInbound(ctx context.Context, vaultDir string, req InboundRequest, now time.Time) (InboundResult, error) {
 	start := time.Now()
 	if now.IsZero() {
@@ -203,18 +202,15 @@ func HandleInbound(ctx context.Context, vaultDir string, req InboundRequest, now
 		}, nil
 	}
 
-	// Step 2 (unlocked): resolve target session (matched item thread -> active Front Desk -> auto-bootstrap vacant desk).
+	// Step 2 (unlocked): resolve target session (matched item thread -> active Front Desk -> serialized vacant-desk spawn).
 	targetCID := matchedTaskCID
 	bootstrapped := false
 	if targetCID == "" {
 		fd, hasFD := readFrontDeskDiskSnapshot(vaultDir)
 		if hasFD && strings.TrimSpace(fd.ConversationID) != "" {
 			targetCID = strings.TrimSpace(fd.ConversationID)
-		} else if RegisteredFrontDeskBootstrapper != nil {
-			if newCID, bErr := RegisteredFrontDeskBootstrapper(vaultDir, now); bErr == nil && strings.TrimSpace(newCID) != "" {
-				targetCID = strings.TrimSpace(newCID)
-				bootstrapped = true
-			}
+		} else {
+			bootstrapped = true
 		}
 	}
 
@@ -286,7 +282,7 @@ func HandleInbound(ctx context.Context, vaultDir string, req InboundRequest, now
 			LatencyMs:          time.Since(start).Milliseconds(),
 		})
 	})
-	bumpEnqueueGeneration()
+	InvalidateSyncMemo()
 
 	return InboundResult{
 		OK:                   true,
@@ -297,6 +293,41 @@ func HandleInbound(ctx context.Context, vaultDir string, req InboundRequest, now
 		EventID:              ev.ID,
 		CorrelationID:        corrID,
 	}, nil
+}
+
+// BindVacantCorrelations attaches any unbound vacant-desk `PendingReplyCorrelation` (`TargetConversationID == ""`)
+// to `newFrontDeskCID` once `DispatchPendingEvents` spawns/claims the new `[HQ] Front Desk` session.
+func BindVacantCorrelations(vaultDir, newFrontDeskCID string, now time.Time) {
+	newFrontDeskCID = strings.TrimSpace(newFrontDeskCID)
+	if strings.TrimSpace(vaultDir) == "" || newFrontDeskCID == "" {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	bridges, err := DiscoverBridges(vaultDir)
+	if err != nil || len(bridges) == 0 {
+		return
+	}
+	_ = WithChannelsLock(context.Background(), vaultDir, func(_ context.Context) error {
+		for _, rb := range bridges {
+			st, lErr := loadBridgeStateUnlocked(vaultDir, rb.FQID)
+			if lErr != nil {
+				continue
+			}
+			changed := false
+			for i := range st.PendingReplies {
+				if strings.TrimSpace(st.PendingReplies[i].TargetConversationID) == "" {
+					st.PendingReplies[i].TargetConversationID = newFrontDeskCID
+					changed = true
+				}
+			}
+			if changed {
+				_ = saveBridgeStateUnlocked(vaultDir, st, now)
+			}
+		}
+		return nil
+	})
 }
 
 func collectRecentProposalsForConversation(vaultDir, convID string, since, now time.Time) []string {
@@ -332,9 +363,10 @@ func collectRecentProposalsForConversation(vaultDir, convID string, since, now t
 	return ids
 }
 
-// EnqueueTurnReplyIfCorrelated is invoked by `HandleStop` at turn completion. If `convID` has an unexpired
-// `PendingReplyCorrelation` (or `policy.mirror_all_desk_turns == true` on `[HQ] Front Desk`), it enqueues
-// `op: "notify", kind: "desk_reply"` (including newly staged `proposal_ids`) without scraping `transcript.jsonl`.
+// EnqueueTurnReplyIfCorrelated is invoked by `HandleStop` at turn completion. If `convID` has one or more
+// unexpired `PendingReplyCorrelation` entries (consuming ALL matched correlations for the turn so batched
+// messages never leak subsequent desktop turns) or `policy.mirror_all_desk_turns == true` on `[HQ] Front Desk`,
+// it enqueues `op: "notify", kind: "desk_reply"` without scraping `transcript.jsonl` from external packs.
 func EnqueueTurnReplyIfCorrelated(
 	vaultDir, convID string,
 	execNum int,
@@ -342,7 +374,7 @@ func EnqueueTurnReplyIfCorrelated(
 	turnStartedAt, now time.Time,
 ) (int, error) {
 	convID = strings.TrimSpace(convID)
-	body := strings.TrimSpace(lastResponse)
+	body := truncateUTF8Runes(strings.TrimSpace(lastResponse), MaxQueuedBodyRunes)
 	if convID == "" || body == "" {
 		return 0, nil
 	}
@@ -369,77 +401,108 @@ func EnqueueTurnReplyIfCorrelated(
 			}
 			st.PendingReplies = prunePendingReplies(st.PendingReplies, now)
 
-			matchedIdx := -1
-			var matchedCorr PendingReplyCorrelation
-			for i := range st.PendingReplies {
-				c := st.PendingReplies[i]
+			var matched []PendingReplyCorrelation
+			kept := make([]PendingReplyCorrelation, 0, len(st.PendingReplies))
+			for _, c := range st.PendingReplies {
 				if c.TargetConversationID == convID || (c.TargetConversationID == "" && isFrontDesk) {
-					matchedIdx = i
-					matchedCorr = c
-					break
+					matched = append(matched, c)
+				} else {
+					kept = append(kept, c)
 				}
 			}
 
-			shouldMirror := matchedIdx >= 0 || (isFrontDesk && rb.PrivateCfg.ResolvedPolicy.MirrorAllDeskTurns)
+			shouldMirror := len(matched) > 0 || (isFrontDesk && rb.PrivateCfg.ResolvedPolicy.MirrorAllDeskTurns)
 			if !shouldMirror {
 				continue
 			}
+			st.PendingReplies = kept
 
-			if matchedIdx >= 0 {
-				st.PendingReplies = append(st.PendingReplies[:matchedIdx], st.PendingReplies[matchedIdx+1:]...)
-			}
-
-			since := turnStartedAt
-			if since.IsZero() && matchedCorr.CreatedAt != "" {
-				if ct, pErr := time.Parse(time.RFC3339, matchedCorr.CreatedAt); pErr == nil {
-					since = ct
+			earliestSince := turnStartedAt
+			for _, mc := range matched {
+				if mc.CreatedAt != "" {
+					if ct, pErr := time.Parse(time.RFC3339, mc.CreatedAt); pErr == nil {
+						if earliestSince.IsZero() || ct.Before(earliestSince) {
+							earliestSince = ct
+						}
+					}
 				}
 			}
-			if since.IsZero() {
-				since = now.Add(-5 * time.Minute)
+			if earliestSince.IsZero() {
+				earliestSince = now
 			}
-			propIDs := collectRecentProposalsForConversation(vaultDir, convID, since, now)
+			propIDs := collectRecentProposalsForConversation(vaultDir, convID, earliestSince, now)
 
-			idemKey := sanitizeIdempotencyKey(fmt.Sprintf("desk-reply:%s:%d:%s", convID, execNum, matchedCorr.CorrelationID))
-			if hasSeenKey(st.RecentDeliveredKeys, idemKey, now) {
+			// Emit at most one `desk_reply` per distinct target thread (coalescing batched inbound messages).
+			type replyTarget struct {
+				corrID  string
+				thread  string
+				itemKey string
+			}
+			var targets []replyTarget
+			seenThreads := make(map[string]bool)
+			if len(matched) == 0 {
+				thr := strings.TrimSpace(st.DeskThread.ExternalThreadID)
+				targets = append(targets, replyTarget{corrID: "mirror", thread: thr})
+			} else {
+				for _, mc := range matched {
+					thr := strings.TrimSpace(mc.ExternalThreadID)
+					if thr == "" {
+						thr = strings.TrimSpace(st.DeskThread.ExternalThreadID)
+					}
+					dedupKey := thr + "|" + strings.TrimSpace(mc.ItemKey)
+					if seenThreads[dedupKey] {
+						continue
+					}
+					seenThreads[dedupKey] = true
+					targets = append(targets, replyTarget{
+						corrID:  mc.CorrelationID,
+						thread:  thr,
+						itemKey: strings.TrimSpace(mc.ItemKey),
+					})
+				}
+			}
+
+			changed := false
+			for _, tgt := range targets {
+				idemKey := sanitizeIdempotencyKey(fmt.Sprintf("desk-reply:%s:%d:%s", convID, execNum, tgt.corrID))
+				if hasSeenKey(st.RecentDeliveredKeys, idemKey, now) {
+					continue
+				}
+				itemKey := tgt.itemKey
+				if itemKey == "" && len(propIDs) > 0 {
+					itemKey = "proposal:" + propIDs[0]
+				}
+				qItem := QueuedNotification{
+					IdempotencyKey:     idemKey,
+					DeskConversationID: strings.TrimSpace(fd.ConversationID),
+					ItemKey:            itemKey,
+					TargetConvID:       convID,
+					PreferredThreadID:  tgt.thread,
+					Notification: NotificationPayload{
+						Kind:         KindDeskReply,
+						Severity:     "normal",
+						SourceSkill:  "front-desk",
+						Title:        "[HQ] Front Desk Reply",
+						BodyMarkdown: body,
+						ProposalIDs:  propIDs,
+					},
+					CreatedAt: now.UTC().Format(time.RFC3339),
+				}
+				var added bool
+				st.RetryQueue, added = enqueueWithBoundedEviction(st.RetryQueue, qItem)
+				if added {
+					changed = true
+					enqueued++
+				}
+			}
+			if changed || len(matched) > 0 {
 				_ = saveBridgeStateUnlocked(vaultDir, st, now)
-				continue
-			}
-
-			prefThread := strings.TrimSpace(matchedCorr.ExternalThreadID)
-			if prefThread == "" {
-				prefThread = strings.TrimSpace(st.DeskThread.ExternalThreadID)
-			}
-			itemKey := strings.TrimSpace(matchedCorr.ItemKey)
-			if itemKey == "" && len(propIDs) > 0 {
-				itemKey = "proposal:" + propIDs[0]
-			}
-
-			qItem := QueuedNotification{
-				IdempotencyKey:     idemKey,
-				DeskConversationID: strings.TrimSpace(fd.ConversationID),
-				ItemKey:            itemKey,
-				TargetConvID:       convID,
-				PreferredThreadID:  prefThread,
-				Notification: NotificationPayload{
-					Kind:         KindDeskReply,
-					Severity:     "normal",
-					SourceSkill:  "front-desk",
-					Title:        "[HQ] Front Desk Reply",
-					BodyMarkdown: body,
-					ProposalIDs:  propIDs,
-				},
-				CreatedAt: now.UTC().Format(time.RFC3339),
-			}
-			st.RetryQueue = enqueueWithBoundedEviction(st.RetryQueue, qItem)
-			if sErr := saveBridgeStateUnlocked(vaultDir, st, now); sErr == nil {
-				enqueued++
 			}
 		}
 		return nil
 	})
 	if enqueued > 0 {
-		bumpEnqueueGeneration()
+		InvalidateSyncMemo()
 	}
 	return enqueued, err
 }
@@ -447,6 +510,7 @@ func EnqueueTurnReplyIfCorrelated(
 // BestEffortFlushLoopback sends a bounded loopback POST /api/channels/flush nudge to `hq daemon`
 // when daemon.json + daemon_token are present, falling back silently to the 15s `fastTicker` if offline.
 func BestEffortFlushLoopback(vaultDir string, timeout time.Duration) {
+	InvalidateSyncMemo()
 	if strings.TrimSpace(vaultDir) == "" {
 		return
 	}

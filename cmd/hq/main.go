@@ -350,10 +350,21 @@ func main() {
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		pending, _ := approvals.List(vaultDir)
 		wts, _ := worktree.List(vaultDir)
+		bridges, _ := channels.ListBridgeSummaries(vaultDir)
 		if !*quiet {
 			fmt.Printf("Vault:            %s\n", vaultDir)
 			fmt.Printf("Pending Actions:  %d\n", len(pending))
 			fmt.Printf("Active Worktrees: %d\n", len(wts))
+			if len(bridges) > 0 {
+				fmt.Printf("Channel Bridges:  %d\n", len(bridges))
+				for _, b := range bridges {
+					dest := b.DestSHA256Short
+					if dest == "" {
+						dest = "-"
+					}
+					fmt.Printf("  - [%s] enabled=%v health=%s dest=%s queued=%d\n", b.BridgeID, b.Enabled, b.HealthStatus, dest, b.QueuedCount)
+				}
+			}
 			for _, p := range pending {
 				fmt.Printf("  - [%s] %s (%s) sha256:%s\n", p.ID, p.Summary, p.ActionType, p.SHA256[:12])
 			}

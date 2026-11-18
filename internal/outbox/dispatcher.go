@@ -40,7 +40,11 @@ func SanitizeAntiCue(s string, maxRunes int) string {
 	out = reInjectionCue.ReplaceAllString(out, "[redacted-injection-cue]")
 	if maxRunes > 0 {
 		if runes := []rune(out); len(runes) > maxRunes {
-			out = string(runes[:maxRunes-3]) + "..."
+			if maxRunes <= 3 {
+				out = string(runes[:maxRunes])
+			} else {
+				out = string(runes[:maxRunes-3]) + "..."
+			}
 		}
 	}
 	return strings.TrimSpace(out)

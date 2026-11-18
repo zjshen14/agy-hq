@@ -20,28 +20,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
-func init() {
-	channels.RegisteredFrontDeskBootstrapper = func(vaultDir string, now time.Time) (string, error) {
-		if fd, ok := GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ConversationID) != "" {
-			return strings.TrimSpace(fd.ConversationID), nil
-		}
-		modelID := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"}).ModelID
-		out, err := SpawnTask(vaultDir, "channel_inbound:bootstrap", "", "[HQ] Front Desk", "Initialize [HQ] Front Desk and stand by for incoming owner messages.", modelID, false)
-		if err != nil {
-			return "", err
-		}
-		uuid := ExtractUUID(out)
-		if uuid == "" {
-			return "", fmt.Errorf("bootstrap Front Desk returned no session UUID")
-		}
-		_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
-		if sErr := SetFrontDesk(vaultDir, uuid, ""); sErr != nil {
-			return "", sErr
-		}
-		return uuid, nil
-	}
-}
-
 // DeliverMessageToSession injects a user/system message into an existing Antigravity conversation
 // (used for resumable follow-up timers, deferred human-approval continuations, and Front Desk alerts).
 // It attempts LanguageServerService/SendUserCascadeMessage first when LS credentials are present,
@@ -294,7 +272,7 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 
 		var prevTask ActiveTask
 		hadPrev := false
-		if !dryRun {
+		if !dryRun && head.Source != "channel_inbound" {
 			if existingTasks, lErr := ListTasks(vaultDir); lErr == nil {
 				for _, et := range existingTasks {
 					if et.TaskSlug == autoSlug {
@@ -320,6 +298,14 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 			}
 		}
 
+		if !dryRun && head.Source == "channel_inbound" {
+			// Clear .vacated BEFORE SpawnTask so SessionStart during Turn 1 immediately activates [HQ] Front Desk Coordinator!
+			_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
+			if strings.TrimSpace(effectiveModel) == "" {
+				effectiveModel = routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"}).ModelID
+			}
+		}
+
 		spawnPrompt := batch.Prompt
 		if batch.SpawnToken != "" {
 			spawnPrompt = spawnPrompt + "\n\n[hq-spawn:" + batch.SpawnToken + "]"
@@ -327,7 +313,7 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 
 		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, effectiveModel, dryRun)
 		if spawnErr != nil {
-			if !dryRun && !hadPrev {
+			if !dryRun && !hadPrev && head.Source != "channel_inbound" {
 				removeTaskBySlug(vaultDir, autoSlug)
 			}
 			newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, spawnErr.Error(), isQuotaDeferralError(spawnErr), now)
@@ -340,11 +326,9 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 			_, _ = events.CompleteIDs(vaultDir, ids, now)
 		} else if uuid := ExtractUUID(out); uuid != "" {
 			if head.Source == "channel_inbound" {
-				if !hadPrev {
-					removeTaskBySlug(vaultDir, autoSlug)
-				}
 				_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
 				_ = SetFrontDesk(vaultDir, uuid, "")
+				channels.BindVacantCorrelations(vaultDir, uuid, now)
 				_, _ = events.CompleteIDs(vaultDir, ids, now)
 				actions = append(actions, fmt.Sprintf("%s (bootstrapped Front Desk %s)", label, uuid))
 				continue
@@ -534,6 +518,9 @@ func DispatchOutboxToFrontDesk(vaultDir string, now time.Time, dryRun bool) (int
 	})
 	if len(delivered) > 0 {
 		_ = channels.EnqueueOutboxInterrupts(vaultDir, fd.ConversationID, delivered, now)
+	}
+	if outbox.InQuietHours(outbox.LoadAttentionConfig(vaultDir), now) {
+		_ = channels.EnqueuePendingInterruptsForQuietExemptBridges(vaultDir, fd.ConversationID, now)
 	}
 	_, _ = channels.SyncAndFlush(context.Background(), vaultDir, now, dryRun)
 	return len(delivered), err

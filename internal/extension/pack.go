@@ -152,7 +152,9 @@ var (
 	}
 	blockedBridgeShellBinaries = map[string]bool{
 		"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "csh": true, "tcsh": true, "fish": true,
+		"pwsh": true, "powershell": true, "busybox": true,
 		"ssh": true, "env": true, "xargs": true, "sudo": true, "su": true,
+		"go": true, "npx": true, "pnpx": true, "bunx": true, "uv": true, "uvx": true, "pipx": true,
 		"python": true, "python2": true, "python3": true,
 		"node": true, "nodejs": true, "deno": true, "bun": true,
 		"perl": true, "ruby": true, "php": true, "lua": true, "awk": true, "gawk": true, "sed": true,
@@ -160,6 +162,9 @@ var (
 )
 
 func isBlockedBridgeCommand0(raw string) bool {
+	if IsSelfHQBinary(raw) {
+		return true
+	}
 	base := strings.ToLower(strings.TrimSuffix(filepath.Base(strings.TrimSpace(raw)), ".exe"))
 	if base == "" || base == "." || base == ".." {
 		return true
@@ -408,8 +413,8 @@ func LintPack(packDir string) ([]string, error) {
 		if cb.TimeoutMs < 0 || cb.TimeoutMs > 15000 {
 			return nil, fmt.Errorf("channel_bridges %q timeout_ms=%d out of range [0, 15000]", bid, cb.TimeoutMs)
 		}
-		if cb.MaxBodyRunes < 0 || cb.MaxBodyRunes > 4000 {
-			return nil, fmt.Errorf("channel_bridges %q max_body_runes=%d out of range [0, 4000]", bid, cb.MaxBodyRunes)
+		if cb.MaxBodyRunes != 0 && (cb.MaxBodyRunes < 80 || cb.MaxBodyRunes > 4000) {
+			return nil, fmt.Errorf("channel_bridges %q max_body_runes=%d out of range (expected 0 or [80, 4000])", bid, cb.MaxBodyRunes)
 		}
 		for _, envKey := range cb.EnvAllow {
 			ek := strings.TrimSpace(envKey)

@@ -354,6 +354,7 @@ func NewHandler(vaultDir string) http.Handler {
 		if !requireDaemonBearer(w, r) {
 			return
 		}
+		channels.InvalidateSyncMemo()
 		rep, err := channels.SyncAndFlush(r.Context(), vaultDir, time.Now(), false)
 		events.TriggerWake()
 		w.Header().Set("Content-Type", "application/json")
@@ -919,7 +920,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	}
 }
 
-type vaultStateFingerprint [12]int64
+type vaultStateFingerprint [14]int64
 
 func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	var fp vaultStateFingerprint
@@ -945,6 +946,8 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	statAt(9, filepath.Join(vaultDir, "worktrees"))
 	statAt(10, filepath.Join(vaultDir, "config.yaml"))
 	statAt(11, filepath.Join(mem, "journal", today))
+	statAt(12, filepath.Join(mem, "channels"))
+	statAt(13, filepath.Join(vaultDir, "private", "channels"))
 	return fp
 }
 
