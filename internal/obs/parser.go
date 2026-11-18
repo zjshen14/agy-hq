@@ -403,107 +403,105 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 	return cm, nil
 }
 
-// ParseSingleTurnSlice extracts token, context, compaction, and latency metrics for steps[stepStartIdx:]
-// so HandleStop can enrich JournalEntry in O(1) without scanning all conversations.
-func ParseSingleTurnSlice(transcriptPath string, stepStartIdx int) TurnMetrics {
-	var tm TurnMetrics
-	if transcriptPath == "" {
-		return tm
+// TurnSliceScanner incrementally computes TurnMetrics over JSONL transcript lines for steps[stepStartIdx:]
+// so callers that already stream a transcript file can compute turn token/latency metrics in a single pass.
+type TurnSliceScanner struct {
+	stepStartIdx              int
+	idx                       int
+	lastStepTime              time.Time
+	lastPlannerHadAskQuestion bool
+	tm                        TurnMetrics
+}
+
+// NewTurnSliceScanner creates a single-pass TurnMetrics accumulator starting at stepStartIdx.
+func NewTurnSliceScanner(stepStartIdx int) *TurnSliceScanner {
+	return &TurnSliceScanner{stepStartIdx: stepStartIdx}
+}
+
+// ObserveLine feeds one JSONL line from transcript.jsonl into the accumulator.
+func (s *TurnSliceScanner) ObserveLine(raw []byte) {
+	var st rawStep
+	if json.Unmarshal(raw, &st) != nil {
+		return
 	}
-	f, err := os.Open(transcriptPath)
-	if err != nil {
-		return tm
+	normalizeRawStep(&st)
+	curIdx := s.idx
+	s.idx++
+
+	ctx := st.InputTokens + st.CacheReadTokens
+	if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
+		s.tm.CurrentContextTokens = ctx
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 4*1024*1024)
+	if curIdx < s.stepStartIdx {
+		return
+	}
 
-	idx := 0
-	var lastStepTime time.Time
-	lastPlannerHadAskQuestion := false
+	if s.tm.StartedAt == "" && st.CreatedAt != "" {
+		s.tm.StartedAt = st.CreatedAt
+	}
+	if st.CreatedAt != "" {
+		s.tm.EndedAt = st.CreatedAt
+	}
+	stTime := parseTimestamp(st.CreatedAt)
 
-	for scanner.Scan() {
-		var st rawStep
-		if json.Unmarshal(scanner.Bytes(), &st) != nil {
-			continue
+	if st.InputTokens > 0 || st.CacheReadTokens > 0 || st.OutputTokens > 0 {
+		s.tm.InputTokens += st.InputTokens
+		s.tm.CacheReadTokens += st.CacheReadTokens
+		s.tm.OutputTokens += st.OutputTokens
+		s.tm.UncachedTokens += st.InputTokens + st.OutputTokens
+		s.tm.GrossTokens += st.InputTokens + st.CacheReadTokens + st.OutputTokens
+		if ctx > s.tm.PeakContextTokens {
+			s.tm.PeakContextTokens = ctx
 		}
-		normalizeRawStep(&st)
-		curIdx := idx
-		idx++
-
-		ctx := st.InputTokens + st.CacheReadTokens
-		if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
-			tm.CurrentContextTokens = ctx
+	}
+	if st.Type == "CHECKPOINT" {
+		s.tm.CompactionCount++
+	}
+	if st.Type == "PLANNER_RESPONSE" {
+		s.tm.PlannerSteps++
+		if !stTime.IsZero() && !s.lastStepTime.IsZero() && stTime.After(s.lastStepTime) {
+			deltaMs := stTime.Sub(s.lastStepTime).Milliseconds()
+			if deltaMs > 0 && deltaMs <= 180_000 {
+				s.tm.LLMLatencyMs += deltaMs
+			}
+		} else {
+			s.tm.LLMLatencyMs += 250
 		}
-
-		if curIdx < stepStartIdx {
-			continue
-		}
-
-		if tm.StartedAt == "" && st.CreatedAt != "" {
-			tm.StartedAt = st.CreatedAt
-		}
-		if st.CreatedAt != "" {
-			tm.EndedAt = st.CreatedAt
-		}
-		stTime := parseTimestamp(st.CreatedAt)
-
-		if st.InputTokens > 0 || st.CacheReadTokens > 0 || st.OutputTokens > 0 {
-			tm.InputTokens += st.InputTokens
-			tm.CacheReadTokens += st.CacheReadTokens
-			tm.OutputTokens += st.OutputTokens
-			tm.UncachedTokens += st.InputTokens + st.OutputTokens
-			tm.GrossTokens += st.InputTokens + st.CacheReadTokens + st.OutputTokens
-			if ctx > tm.PeakContextTokens {
-				tm.PeakContextTokens = ctx
+		s.lastPlannerHadAskQuestion = false
+		for _, tc := range st.ToolCalls {
+			if tc.Name == "ask_question" {
+				s.lastPlannerHadAskQuestion = true
 			}
 		}
-		if st.Type == "CHECKPOINT" {
-			tm.CompactionCount++
-		}
-		if st.Type == "PLANNER_RESPONSE" {
-			tm.PlannerSteps++
-			if !stTime.IsZero() && !lastStepTime.IsZero() && stTime.After(lastStepTime) {
-				deltaMs := stTime.Sub(lastStepTime).Milliseconds()
-				if deltaMs > 0 && deltaMs <= 180_000 {
-					tm.LLMLatencyMs += deltaMs
-				}
+	}
+	if st.Type == "GENERIC" {
+		if tStart, tEnd, ok := parseToolResultTiming(st.Content); ok {
+			durMs := tEnd.Sub(tStart).Milliseconds()
+			if durMs < 0 {
+				durMs = 0
+			}
+			if s.lastPlannerHadAskQuestion {
+				s.tm.HumanWaitMs += durMs
 			} else {
-				tm.LLMLatencyMs += 250
+				s.tm.ToolLatencyMs += durMs
 			}
-			lastPlannerHadAskQuestion = false
-			for _, tc := range st.ToolCalls {
-				if tc.Name == "ask_question" {
-					lastPlannerHadAskQuestion = true
-				}
-			}
-		}
-		if st.Type == "GENERIC" {
-			if tStart, tEnd, ok := parseToolResultTiming(st.Content); ok {
-				durMs := tEnd.Sub(tStart).Milliseconds()
-				if durMs < 0 {
-					durMs = 0
-				}
-				if lastPlannerHadAskQuestion {
-					tm.HumanWaitMs += durMs
-				} else {
-					tm.ToolLatencyMs += durMs
-				}
-				lastStepTime = tEnd
-			} else if !stTime.IsZero() {
-				lastStepTime = stTime
-			}
+			s.lastStepTime = tEnd
 		} else if !stTime.IsZero() {
-			lastStepTime = stTime
+			s.lastStepTime = stTime
 		}
+	} else if !stTime.IsZero() {
+		s.lastStepTime = stTime
 	}
+}
 
-	if idx > stepStartIdx {
-		tm.StepStartIdx = stepStartIdx
-		tm.StepEndIdx = idx - 1
-		tm.StepCount = idx - stepStartIdx
+// Finish finalizes derived step range, cache hit ratio, and active latency fields.
+func (s *TurnSliceScanner) Finish() TurnMetrics {
+	tm := s.tm
+	if s.idx > s.stepStartIdx {
+		tm.StepStartIdx = s.stepStartIdx
+		tm.StepEndIdx = s.idx - 1
+		tm.StepCount = s.idx - s.stepStartIdx
 	}
 	denom := tm.InputTokens + tm.CacheReadTokens
 	if denom > 0 {
@@ -511,6 +509,29 @@ func ParseSingleTurnSlice(transcriptPath string, stepStartIdx int) TurnMetrics {
 	}
 	tm.ActiveLatencyMs = tm.LLMLatencyMs + tm.ToolLatencyMs
 	return tm
+}
+
+// ParseSingleTurnSlice extracts token, context, compaction, and latency metrics for steps[stepStartIdx:]
+// so HandleStop can enrich JournalEntry in O(1) without scanning all conversations.
+func ParseSingleTurnSlice(transcriptPath string, stepStartIdx int) TurnMetrics {
+	if transcriptPath == "" {
+		return TurnMetrics{}
+	}
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return TurnMetrics{}
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+
+	acc := NewTurnSliceScanner(stepStartIdx)
+	for scanner.Scan() {
+		acc.ObserveLine(scanner.Bytes())
+	}
+	return acc.Finish()
 }
 
 func normalizeRawStep(st *rawStep) {

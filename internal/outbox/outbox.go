@@ -229,14 +229,23 @@ func LoadAttentionConfig(vaultDir string) AttentionConfig {
 	return ParseAttentionConfig(string(data))
 }
 
-func parseHHMM(s string) (int, bool) {
+// ParseHHMM parses a 24-hour "HH:MM" clock string into hour and minute components.
+func ParseHHMM(s string) (hour, minute int, ok bool) {
 	parts := strings.Split(strings.TrimSpace(s), ":")
 	if len(parts) != 2 {
-		return 0, false
+		return 0, 0, false
 	}
 	h, err1 := strconv.Atoi(parts[0])
 	m, err2 := strconv.Atoi(parts[1])
 	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
+}
+
+func parseHHMM(s string) (int, bool) {
+	h, m, ok := ParseHHMM(s)
+	if !ok {
 		return 0, false
 	}
 	return h*60 + m, true

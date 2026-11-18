@@ -73,6 +73,9 @@ type DashboardState struct {
 	Health         []doctor.CheckResult           `json:"health"`
 	FlashResult    string                         `json:"flashResult,omitempty"`
 	CSRFToken      string                         `json:"-"`
+	TaskSelection  kernel.ConsoleTaskSelection    `json:"-"`
+	Layer1Count    int                            `json:"-"`
+	ColdTaskCount  int                            `json:"-"`
 }
 
 // IsLoopbackAddr returns true if listenAddr binds strictly to a loopback interface (127.0.0.1, ::1, or localhost).
@@ -1028,7 +1031,8 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	tasks, _ := kernel.ListTasks(vaultDir)
 	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
 	now := time.Now()
-	sel := kernel.SelectConsoleTasks(layer1Tasks, kernel.CountColdArchivedTasks(vaultDir), now)
+	coldCount := kernel.CountColdArchivedTasks(vaultDir)
+	sel := kernel.SelectConsoleTasks(layer1Tasks, coldCount, now)
 	turns := loadTodayJournals(vaultDir)
 	quota := trimQuotaForDashboard(kernel.LoadQuota(vaultDir))
 	obsSum := obs.BuildDashboardSummary(vaultDir, now)
@@ -1082,6 +1086,9 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 		TodayTurns:     turns,
 		Health:         health,
 		FlashResult:    flashMsg,
+		TaskSelection:  sel,
+		Layer1Count:    len(layer1Tasks),
+		ColdTaskCount:  coldCount,
 	}
 }
 
@@ -2331,12 +2338,9 @@ func SyncMarkdownConsole(vaultDir string) error {
 	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 
 	now := time.Now()
-	allTasks, _ := kernel.ListTasks(vaultDir)
-	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, allTasks)
-	coldCount := kernel.CountColdArchivedTasks(vaultDir)
-	sel := kernel.SelectConsoleTasks(layer1Tasks, coldCount, now)
+	sel := state.TaskSelection
 
-	if len(layer1Tasks) == 0 && coldCount == 0 {
+	if state.Layer1Count == 0 && state.ColdTaskCount == 0 {
 		fmt.Fprintf(&b, "## 📋 2. Task Board (`0` Tracked Conversations)\n")
 		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
 	} else {

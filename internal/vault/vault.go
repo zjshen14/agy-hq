@@ -40,18 +40,7 @@ type Fact struct {
 
 // IsTempPath returns true if p resides inside os.TempDir() (handling macOS /private/var symlink resolution).
 func IsTempPath(p string) bool {
-	if p == "" {
-		return false
-	}
-	tmp := filepath.Clean(os.TempDir())
-	cleanP := filepath.Clean(p)
-	if strings.HasPrefix(cleanP, tmp) || strings.HasPrefix(cleanP, "/private"+tmp) || strings.HasPrefix(cleanP, "/tmp/") || strings.HasPrefix(cleanP, "/private/tmp/") {
-		return true
-	}
-	if evalTmp, err := filepath.EvalSymlinks(tmp); err == nil && evalTmp != "" && strings.HasPrefix(cleanP, filepath.Clean(evalTmp)) {
-		return true
-	}
-	return false
+	return hostpaths.IsTempPath(p)
 }
 
 // IsAgyHQRepo returns true iff dir contains a go.mod declaring module github.com/zjshen14/agy-hq.

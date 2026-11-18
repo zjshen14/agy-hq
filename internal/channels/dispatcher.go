@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -179,22 +178,9 @@ func isAttemptDue(nextAttemptAt string, now time.Time) bool {
 	return !now.Before(t)
 }
 
-func parseHHMM(s string) (int, int, bool) {
-	parts := strings.Split(strings.TrimSpace(s), ":")
-	if len(parts) != 2 {
-		return 0, 0, false
-	}
-	h, err1 := strconv.Atoi(parts[0])
-	m, err2 := strconv.Atoi(parts[1])
-	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
-		return 0, 0, false
-	}
-	return h, m, true
-}
-
 func nextWakeAfterQuietHours(attCfg outbox.AttentionConfig, now time.Time) time.Time {
 	fallback := now.Add(5 * time.Minute)
-	endH, endM, ok := parseHHMM(attCfg.QuietHours.End)
+	endH, endM, ok := outbox.ParseHHMM(attCfg.QuietHours.End)
 	if !ok {
 		return fallback
 	}

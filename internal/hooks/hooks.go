@@ -2133,7 +2133,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			execNum = nextExecutionNum(dateDir, payload.ConversationID)
 		}
 		stepStartIdx := priorJournalStepCountWithDate(vaultDir, payload.ConversationID, todayDateStr, execNum)
-		tm := parseTranscriptTurnMetrics(payload.TranscriptPath, stepStartIdx)
+		tm, obsTurn := parseTranscriptTurnMetrics(payload.TranscriptPath, stepStartIdx)
 
 		// B1 Duplicate Stop Hook Guard: When both workspace and plugin hooks.json invoke `hq hook stop`
 		// back-to-back on the same turn completion (ExecutionNum == 0, 0 new steps since the entry written <3s ago),
@@ -2146,7 +2146,6 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 		}
 
-		obsTurn := obs.ParseSingleTurnSlice(payload.TranscriptPath, stepStartIdx)
 		toolsUsed := tm.ToolsUsed
 		filesModified := tm.FilesModified
 		summary := tm.LastResponse
@@ -2157,7 +2156,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 		if userPrompt == "" {
 			userPrompt = transcriptUserPrompt
 		}
-		_, isTainted := gmail.IsSessionTainted(vaultDir, payload.ConversationID)
+		_, isTainted := taint.Check(vaultDir, payload.ConversationID)
 		parentConvID := resolveParentConversationID(vaultDir, payload.ConversationID)
 
 		if _, err := os.Stat(dateDir); err == nil {
@@ -2568,14 +2567,14 @@ type transcriptTurnMetrics struct {
 	TaintedCmdSeen          bool
 }
 
-func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcriptTurnMetrics {
+func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transcriptTurnMetrics, obs.TurnMetrics) {
 	var tm transcriptTurnMetrics
 	if transcriptPath == "" {
-		return tm
+		return tm, obs.TurnMetrics{}
 	}
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return tm
+		return tm, obs.TurnMetrics{}
 	}
 	defer f.Close()
 
@@ -2584,12 +2583,15 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 2*1024*1024)
+	scanner.Buffer(buf, 4*1024*1024)
 
+	obsAcc := obs.NewTurnSliceScanner(stepStartIdx)
 	lastPlannerHadTools := false
 	lastPlannerHadRunCommand := false
 
 	for scanner.Scan() {
+		rawLine := scanner.Bytes()
+		obsAcc.ObserveLine(rawLine)
 		var step struct {
 			Type      string `json:"type"`
 			Status    string `json:"status"`
@@ -2600,7 +2602,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 				Args map[string]interface{} `json:"args"`
 			} `json:"tool_calls"`
 		}
-		if err := json.Unmarshal(scanner.Bytes(), &step); err != nil {
+		if err := json.Unmarshal(rawLine, &step); err != nil {
 			continue
 		}
 		curIdx := tm.StepCount
@@ -2697,7 +2699,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) transcr
 	for k := range fileSet {
 		tm.FilesModified = append(tm.FilesModified, k)
 	}
-	return tm
+	return tm, obsAcc.Finish()
 }
 
 func cleanUserPrompt(raw string) string {

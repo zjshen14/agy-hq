@@ -12,16 +12,15 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/extension"
-	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
@@ -211,19 +210,8 @@ func randomHex16() string {
 }
 
 func resolveOptionalCallerConv(vaultDir, flagConv string) string {
-	strict := os.Getenv("HQ_STRICT_CALLER_ENV") == "1"
-	envConv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
-	fc := strings.TrimSpace(flagConv)
-	if testing.Testing() && !strict && hostpaths.IsTempPath(vaultDir) && fc != "" {
-		return fc
-	}
-	if envConv != "" {
-		return envConv
-	}
-	if !strict && hostpaths.IsTempPath(vaultDir) && fc != "" {
-		return fc
-	}
-	return ""
+	convID, _ := taint.ResolveCallerConvID(vaultDir, flagConv)
+	return convID
 }
 
 func extractSenderDomain(raw string) string {

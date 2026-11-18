@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
@@ -458,7 +457,7 @@ func ApproveFromCLI(vaultDir, id, shaPrefix, rawCap string) (string, error) {
 	rawCap = strings.TrimSpace(rawCap)
 	if rawCap == "" {
 		allowCaplessTest := os.Getenv("HQ_FORCE_CAP_CHECK") == "" &&
-			(testing.Testing() || (strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) == "" && hostpaths.IsTempPath(vaultDir)))
+			(store.InGoTest() || (strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) == "" && hostpaths.IsTempPath(vaultDir)))
 		if allowCaplessTest {
 			return ApproveProposal(vaultDir, id, shaPrefix)
 		}

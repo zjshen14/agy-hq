@@ -132,22 +132,12 @@ type UninstallReport struct {
 	PreservedVaultDir      string `json:"preservedVaultDir"`
 }
 
-func resolveHomeDir() (string, error) {
-	if h := strings.TrimSpace(os.Getenv("HQ_HOME_DIR")); h != "" {
-		return filepath.Abs(h)
-	}
-	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
-		return filepath.Clean(h), nil
-	}
-	return os.UserHomeDir()
-}
-
 // DefaultBinDir returns ~/.local/bin (or HQ_BIN_DIR if set).
 func DefaultBinDir() (string, error) {
 	if b := strings.TrimSpace(os.Getenv("HQ_BIN_DIR")); b != "" {
 		return filepath.Abs(b)
 	}
-	home, err := resolveHomeDir()
+	home, err := hostpaths.ResolveHomeDir()
 	if err != nil {
 		return "", err
 	}
@@ -984,7 +974,7 @@ func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) 
 			}
 		}
 		if cmd.Dir == "" {
-			if home, hErr := resolveHomeDir(); hErr == nil && home != "" {
+			if home, hErr := hostpaths.ResolveHomeDir(); hErr == nil && home != "" {
 				cmd.Dir = home
 			}
 		}

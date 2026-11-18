@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
@@ -68,7 +67,7 @@ func ResolveCallerConvID(vaultDir, flagConv string) (string, error) {
 	strict := os.Getenv("HQ_STRICT_CALLER_ENV") == "1"
 	envConv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
 	fc := strings.TrimSpace(flagConv)
-	if testing.Testing() && !strict && hostpaths.IsTempPath(vaultDir) && fc != "" {
+	if store.InGoTest() && !strict && hostpaths.IsTempPath(vaultDir) && fc != "" {
 		return fc, nil
 	}
 	if envConv != "" {

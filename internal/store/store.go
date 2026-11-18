@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
-	"testing"
 )
 
 // Rank defines the strict increasing lock acquisition order across Vault stores.
@@ -49,7 +49,32 @@ type heldRank struct {
 var (
 	pathMuMap      sync.Map // map[string]*sync.Mutex
 	goroutineRanks sync.Map // map[uint64][]heldRank (active in tests / HQ_STRICT_LOCK_RANK=1)
+
+	inGoTestOnce = sync.OnceValue(func() bool {
+		if len(os.Args) == 0 {
+			return false
+		}
+		base := strings.ToLower(filepath.Base(os.Args[0]))
+		if strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe") {
+			return true
+		}
+		for _, arg := range os.Args[1:] {
+			if arg == "--" {
+				break
+			}
+			if strings.HasPrefix(arg, "-test.") {
+				return true
+			}
+		}
+		return false
+	})
 )
+
+// InGoTest reports whether the current process is executing under `go test` without
+// linking the standard library `testing` package into production `hq` binaries.
+func InGoTest() bool {
+	return inGoTestOnce()
+}
 
 func currentGoroutineID() uint64 {
 	var buf [64]byte
@@ -64,7 +89,7 @@ func currentGoroutineID() uint64 {
 }
 
 func pushGoroutineRank(rank Rank, lockKey string) (func(), error) {
-	if !testing.Testing() && os.Getenv("HQ_STRICT_LOCK_RANK") != "1" {
+	if !InGoTest() && os.Getenv("HQ_STRICT_LOCK_RANK") != "1" {
 		return func() {}, nil
 	}
 	gid := currentGoroutineID()
@@ -128,7 +153,7 @@ func checkAndPushRank(ctx context.Context, rank Rank, lockKey string) (context.C
 	for _, h := range existing {
 		if rank <= h.Rank {
 			err := fmt.Errorf("%w: attempted rank %d (%s) while holding rank %d (%s)", ErrLockOrderViolation, rank, lockKey, h.Rank, h.Path)
-			if testing.Testing() || os.Getenv("HQ_STRICT_LOCK_RANK") == "1" {
+			if InGoTest() || os.Getenv("HQ_STRICT_LOCK_RANK") == "1" {
 				panic(err)
 			}
 			return ctx, err
