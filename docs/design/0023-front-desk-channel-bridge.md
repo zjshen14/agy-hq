@@ -509,7 +509,7 @@ An external extension pack (living in its own private or open-source repositoryâ
 4. **Inbound Owner Tunnel & Interactive Approvals:** In the companion sidecar's inbound listener (e.g., Telegram long-polling, Slack Socket Mode, WhatsApp webhook, or host RPC stream), verify platform transport signatures + `sender_id == pinned_owner_id`:
    - On owner text messages, forward `{bridge_id, external_message_id, external_thread_id, text}` to `POST /api/channels/inbound` (`Bearer <daemon_token>`) or `hq channel inbound`; `HandleStop` automatically delivers the `desk_reply` back to `external_thread_id` without any `transcript.jsonl` parsing.
    - On interactive button taps (`callback_buttons: true`), forward `{bridge_id, callback_token}` to `POST /api/channels/callback` (`Bearer <daemon_token>`) or `hq channel callback` for 0-token execution (or broker native `ask_question` cards when `native_ask_cards: true`).
-5. **Activation & Trust Ceremony:** Run `hq extension enable <pack>`, approve `hq extension trust <pack>` (`private/trust.json`), write `<vault>/private/channels/<pack>--<id>.json` (`0600`), and verify with `hq channel test <pack>/<id>`.
+5. **Activation & Trust Ceremony:** Run `hq extension enable <pack>`, approve `hq extension trust <pack>` (`private/trust.json`), write `<vault>/private/channels/<pack>__<id>.json` (`0600`), and verify with `hq channel test <pack>/<id>`.
 
 ---
 
