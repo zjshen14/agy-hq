@@ -112,19 +112,25 @@ type Fact struct {
 - Recording `InjectedCount` inside `facts.jsonl` during `SessionStart` would turn a `<2ms` read-only hook into a mutating disk write and dirty `local/.git` on every conversation turn.
 - Instead, git-ignored `local/memory/fact_telemetry.json` (`0600`, guarded by `store.RankMemory`) stores per-`Fact.ID` counters (`InjectedCount`, `HitCount`, `LastInjectedAt`, `LastHitAt`), updated asynchronously in **0 LLM tokens** during `HandleStop` and `hq memory eval` by scanning turn transcripts.
 
-### 3.2 Zero-Token `ExpiresAt` Auto-Expiration & Statement Guardrails
+### 3.2 Dual-Speed Write Path, Live-Connector Grounding Boundary & `ExpiresAt` Auto-Expiration
 
-1. **`hq memory add-fact` Enhancements:**
+Cross-benchmarking Anthropic (*Dreaming*), Google *Gemini* (`save_memory` + *Working Memory Delta* + live *App Grounding*), and OpenAI *`dots`* ([Research 19 §6](../research/19_anthropic_memory_components_and_vault_audit.md)) resolves *when* and *what* agents should write to `facts.jsonl`:
+
+1. **Dual-Speed Write Path (*Fast Explicit* vs. *Slow Dreaming*):**
+   - **Fast Path (Synchronous `hq memory add-fact` on Explicit User Instructions/Corrections Only):** When the user explicitly states a standing preference, constraint, or correction in chat (e.g., *"Remember: never book Basic Economy"*), the active session (including `[HQ] Front Desk`, where `hq` CLI calls cost `0` lookup quota) writes it immediately via `hq memory add-fact --verified` (`<5ms`), achieving **`0`-second cross-tab visibility** without waiting until `23:30` consolidation.
+   - **Slow Path (Offline Dreaming for Implicit Episodic Synthesis):** During coding, debugging, or research turns, agents do **not** pause mid-task to write speculative notes (avoiding *Pokémon* focus distraction and *Sonnet 4.6* unverified guesses); `HandleStop` logs 0-token turn journals and `/sleep-consolidate` verifies outcomes against `transcript.jsonl`.
+   - **Ephemeral Scratch Opt-Out (`hq spawn --ephemeral`, *Gemini Temporary Chats* Pattern):** Adds `Ephemeral bool` (`json:"ephemeral,omitempty"`) to `kernel.ActiveTask` (`hq spawn --ephemeral ...`), instructing `dream-plan` and `hq rsi mine` to skip consolidating throwaway brainstorming threads.
+2. **Live-Connector Grounding Rule (Anti-Stale-Copy Guard):**
+   - Mirroring Gemini *App Grounding* and Anthropic's *Pokémon* observable-state principle, `facts.jsonl` and `MEMORY.md` must **never** copy raw live connector state already queryable on demand (raw Calendar slots, unread Gmail threads, open GitHub PR lists)—storing **only** non-derivable human decisions, constraints, or interpretations, with mandatory `--expires` on any time-bound decision.
+3. **`hq memory add-fact` Guardrails & Automatic TTL Expiration:**
    ```sh
    hq memory add-fact --topic=<topic> --statement="<concise <=240c fact>" \
      [--kind=invariant|prediction|state|event] [--scope=global|repo:<name>|domain:<name>|skill:<name>] \
      [--salience=0.0..1.0] [--expires=<RFC3339|YYYY-MM-DD|+7d>] [--pinned] [--source=<convId>] [--verified]
    ```
    - Rejects `--statement` exceeding **`240` runes** (`~60` tokens) with an actionable error instructing the caller to place multi-sentence details in `topics/<slug>.md` or `playbooks/<scope>.md` and link it.
-   - If `--statement` contains an explicit calendar date (`YYYY-MM-DD` or `Month DD`) and both `--expires` and `--kind` are omitted, `AddFact` emits a stderr hint recommending `--expires=<date+24h>` so transient calendar facts self-clean.
-2. **Automatic Expiration on Read & Compaction:**
-   - `LoadFactsStateAt(vaultDir, now)` treats any entry with `ExpiresAt != "" && now.After(parsedExpiresAt)` as **expired** immediately in `0` LLM tokens (`SessionStart` stops injecting it the second the deadline passes).
-   - `CompactFacts` materializes `ValidTo = &ExpiresAt` on newly elapsed TTL facts.
+   - If `--statement` contains an explicit calendar date (`YYYY-MM-DD` or `Month DD`) and both `--expires` and `--kind` are omitted, `AddFact` emits a stderr hint recommending `--expires=<date+24h>` so transient event facts self-clean.
+   - `LoadFactsStateAt(vaultDir, now)` treats any entry with `ExpiresAt != "" && now.After(parsedExpiresAt)` as **expired** immediately in `0` LLM tokens (`SessionStart` stops injecting it the second the deadline passes), and `CompactFacts` materializes `ValidTo = &ExpiresAt`.
 
 ### 3.3 Deterministic Prediction-Utility Scoring (`SelectFactsForSession`)
 
@@ -191,17 +197,21 @@ As established in [Research 08 §2.2](../research/08_token_observability_and_tel
 2. **Intra-Conversation Prefix Cache (`92.1%–97.9%` CHR Across Steps `2..K`):** `SessionStart` runs once at Turn 1; every subsequent step within the conversation caches **both Zone 1 and Zone 2**.
 3. **Why Zone 1 Purity Still Matters:** Keeping Zone 1 strictly global (`USER.md` + compact `MEMORY.md` + sorted Topic Index + `rsi/rules/general.md`) with zero volatile timestamps and zero repo-specific clutter guarantees (a) clean cross-run caching in headless/SDK harnesses that hoist system messages, and (b) high instruction adherence without cross-repo rule interference.
 
-### 5.2 Scope-Bound Operational Playbooks (`<vault>/memory/playbooks/<scope>.md`)
+### 5.2 Scope-Bound Operational Playbooks (`<vault>/memory/playbooks/<scope>.md` — *Grok Bot / Grok Build* Pattern)
 
-To stop repo-specific quirks (e.g., `repo:blogs` Reddit title guidance, `repo:agy-hq` `SanitizedApprovalEnv` rules, `domain:investing` secondary SPV rubrics) from polluting global `MEMORY.md`, `USER.md`, or `facts.jsonl`, we introduce **Scoped Playbooks**:
+Directly aligning with xAI `Grok Bot`'s *"memory belongs to the specialist lane, not the generic account"* and `Grok Build`'s workspace-external repository memory (`~/.grok/memory/` — [Research 19 §6.3](../research/19_anthropic_memory_components_and_vault_audit.md)), we stop repo- and lane-specific quirks (e.g., `repo:blogs` Reddit title guidance, `repo:agy-hq` `SanitizedApprovalEnv` rules, `domain:investing` secondary SPV rubrics) from polluting global `MEMORY.md`, `USER.md`, or `facts.jsonl`:
 
-1. **Naming & Triplet Entry Format (Anthropic Opus 5 Closed-Loop Schema):**
+1. **Naming, Structured Sections & Triplet Entry Format (Anthropic Opus 5 + `Grok Build` Schema):**
    - Path: `<vault>/memory/playbooks/<scope-slug>.md` (`0600`), where `<scope-slug>` is `repo-<repo-name>` (e.g. `repo-agy-hq`, `repo-blogs`, `repo-acme-api`) or `domain-<scope>` (e.g. `domain-investing`, `domain-career`).
-   - Entries follow the compact **Rule + Provenance + Trap** triplet (`<= 3` lines per rule):
+   - `repo-<repo-name>.md` standardizes three concise sections (`Build & Verification Commands`, `Architecture & Workflow Conventions`, `Verified Trap Warnings`) stored inside `<vault>/` so third-party repositories incur **`0` untracked/dirty files**, with entries following the **Rule + Provenance + Trap** triplet (`<= 3` lines per rule):
      ```markdown
      # Scoped Playbook: `repo:blogs`
      > **Scope:** `repo:blogs` | **Budget:** <= 60 lines / 2,400 bytes
 
+     ## Build & Verification Commands
+     - Run `bundle exec jekyll build --strict_front_matter` before pushing bilingual posts.
+
+     ## Verified Trap Warnings
      - **[Social Post Framing]** (`verified:640edff`): Lead casual developer posts with a concrete builder story hook rather than RFC headers; **Trap:** `r/google_antigravity` Post Guidance blocks the word `"quota"` in titles—use `"token usage"` instead.
      ```
 2. **Deterministic Scope Resolution (`ResolveSessionScopes`):**
@@ -334,15 +344,13 @@ Similar to `hq outbox eval` ([RFC-0018](0018-always-on-agent-runtime-hardening.m
 
 ---
 
-## 11. Open Design Decisions for User Review
+## 11. Design Decisions & Review Status
 
-Before beginning Phase 2 implementation, please review and confirm the following design choices:
-
-1. **D1 — `SessionStart` Byte/Token Budgets (`12,000 B` / `~3,000` tok `full`, `4,800 B` / `~1,200` tok `lean_auto`):**
-   - **Recommended:** Enforce hard dual caps (`MEMORY.md <= 60L & 3,600 B` with duplicate `## Knowledge Map` removed; `Active Vault Facts <= 15 & 3,000 B` in `full` / `<= 6 & 1,200 B` in `lean_auto`), cutting `SessionStart` by **`~66%`** (`30.9 KB` $\rightarrow$ `<= 12.0 KB`) immediately on migration.
-2. **D2 — Dedicated `<vault>/memory/playbooks/<scope>.md` vs. Frontmatter-Tagged `topics/<slug>.md`:**
-   - **Recommended (`playbooks/<scope>.md`):** Keep `playbooks/<scope>.md` (`<= 60L / 2.4 KB` succinct operational rules + trap warnings, auto-injected in Zone 2 when working in `repo:<slug>` or `domain:<slug>`) distinct from `topics/<slug>.md` (`<= 6 KB` deep architectural/investment reference pages read on-demand via `read_file` / `hq memory search`). *Alternative:* Merge both into `topics/<slug>.md` using an `auto_inject_scope:` header field.
-3. **D3 — Unattended `sleep-consolidate` Zero-Token `DREAM_NOOP` Gatekeeper:**
-   - **Recommended:** Enable `hq memory dream-plan --since=24h` as a 0-token precheck so quiet days (`0` untainted sessions, `0` expired TTLs, `!OverBudget`) skip spawning the `23:30` `gemini-4-carbon-medium` worker completely, while active days receive pre-verified transcript digests and wiki link/duplicate checks.
-4. **D4 — Rollout Sequencing:**
-   - **Recommended:** Ship all four sub-phases (`2A` $\rightarrow$ `2D`) cleanly on this branch (or split `2A+2B` first, then `2C+2D`) after RFC sign-off.
+1. **D1 — `SessionStart` Byte/Token Budgets [Confirmed 2026-11-18]:**
+   - Enforce hard dual caps (`12,000 B` / `~3,000` tok `full`, `4,800 B` / `~1,200` tok `lean_auto`; `MEMORY.md <= 60L & 3,600 B` with duplicate `## Knowledge Map` removed; `Active Vault Facts <= 15 & 3,000 B` in `full` / `<= 6 & 1,200 B` in `lean_auto`).
+2. **D2 — Dedicated `<vault>/memory/playbooks/<scope>.md` [Confirmed 2026-11-18]:**
+   - Keep `playbooks/<scope>.md` (`<= 60L / 2.4 KB` succinct operational rules, build/test commands, and trap warnings auto-injected in Zone 2 when working in `repo:<slug>` or `domain:<slug>`) distinct from on-demand reference pages in `topics/<slug>.md`.
+3. **D3 — Unattended `sleep-consolidate` Zero-Token `DREAM_NOOP` Gatekeeper [Confirmed 2026-11-18]:**
+   - Enable `hq memory dream-plan --since=24h` as a 0-token gatekeeper so 100% idle days skip spawning the `23:30` Carbon worker, while active days receive pre-verified transcript digests and wiki link/duplicate checks.
+4. **D4 — Phase 2 Implementation Gate [Pending Final User Review]:**
+   - Holding in Phase 1 until final user review sign-off before starting Phase 2A–2D code implementation.
