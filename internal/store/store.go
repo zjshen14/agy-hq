@@ -28,6 +28,7 @@ const (
 	RankEvents     Rank = 40 // <vault>/memory/events.json
 	RankGoals      Rank = 50 // <vault>/memory/goals.json
 	RankOutbox     Rank = 60 // <vault>/memory/outbox/items.jsonl
+	RankChannels   Rank = 65 // <vault>/memory/channels/<bridge>.json
 	RankTaint      Rank = 70 // <vault>/private/taint/*.json (leaf store)
 )
 

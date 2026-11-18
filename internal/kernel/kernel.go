@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
@@ -862,6 +863,7 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 	}
 	nowStr := time.Now().Format(time.RFC3339)
 	found := false
+	var completedTask ActiveTask
 	for i := range tasks {
 		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
 			tasks[i].Status = "completed"
@@ -870,6 +872,7 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 			if strings.TrimSpace(summary) != "" {
 				tasks[i].LastSummary = strings.TrimSpace(summary)
 			}
+			completedTask = tasks[i]
 			found = true
 			break
 		}
@@ -883,6 +886,9 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 	}
 	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
 		return err
+	}
+	if completedTask.EffectiveKind() == "task" && !IsNestedSubagentConversation(vaultDir, completedTask.ConversationID) {
+		_ = channels.EnqueueTaskDone(vaultDir, completedTask.TaskSlug, completedTask.Title, completedTask.LastSummary, completedTask.CompletedAt, time.Now())
 	}
 	return nil
 }
@@ -1707,7 +1713,7 @@ func saveFrontDeskLease(vaultDir string, lease FrontDeskLease) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(frontDeskPath(vaultDir), data, 0o644)
+	return store.WriteAtomic(frontDeskPath(vaultDir), append(data, '\n'), 0o644)
 }
 
 // SetFrontDesk atomically claims the single Front Desk intake lease for convID.

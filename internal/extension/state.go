@@ -52,17 +52,27 @@ type PackActivation struct {
 	UpdatedAt      string            `json:"updated_at,omitempty"`
 }
 
+// ChannelBridgeOverride records Vault-level pause/resume overrides for a companion channel bridge.
+type ChannelBridgeOverride struct {
+	Enabled      *bool  `json:"enabled,omitempty"`
+	PausedAt     string `json:"paused_at,omitempty"`
+	PausedReason string `json:"paused_reason,omitempty"`
+	ResumedAt    string `json:"resumed_at,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
 // VaultState represents the locked JSON control plane at <vault>/extensions.json.
 type VaultState struct {
-	SchemaVersion      int                          `json:"schema_version"`
-	EnabledPacks       []string                     `json:"enabled_packs,omitempty"`
-	Packs              map[string]PackActivation    `json:"packs,omitempty"`
-	SkillOverrides     map[string]string            `json:"skill_overrides,omitempty"` // coreSkill -> "<pack>/<skill>" or "core"
-	ScheduleOverrides  map[string]ScheduleOverride  `json:"schedule_overrides,omitempty"`
-	ConnectorOverrides map[string]ConnectorOverride `json:"connector_overrides,omitempty"`
-	SecurityLoosening  []SecurityLooseningRule      `json:"security_loosening,omitempty"`
-	WinnerOverrides    map[string]string            `json:"winner_overrides,omitempty"` // bare component id -> winning pack id
-	UpdatedAt          string                       `json:"updated_at,omitempty"`
+	SchemaVersion          int                              `json:"schema_version"`
+	EnabledPacks           []string                         `json:"enabled_packs,omitempty"`
+	Packs                  map[string]PackActivation        `json:"packs,omitempty"`
+	SkillOverrides         map[string]string                `json:"skill_overrides,omitempty"` // coreSkill -> "<pack>/<skill>" or "core"
+	ScheduleOverrides      map[string]ScheduleOverride      `json:"schedule_overrides,omitempty"`
+	ConnectorOverrides     map[string]ConnectorOverride     `json:"connector_overrides,omitempty"`
+	ChannelBridgeOverrides map[string]ChannelBridgeOverride `json:"channel_bridge_overrides,omitempty"`
+	SecurityLoosening      []SecurityLooseningRule          `json:"security_loosening,omitempty"`
+	WinnerOverrides        map[string]string                `json:"winner_overrides,omitempty"` // bare component id -> winning pack id
+	UpdatedAt              string                           `json:"updated_at,omitempty"`
 }
 
 // OrderedEnabledPacks returns the deterministic ordered list of enabled pack IDs.
@@ -129,11 +139,12 @@ func BareCoreScheduleID(fqid string) string {
 
 func emptyVaultState() VaultState {
 	return VaultState{
-		SchemaVersion:      VaultExtensionsSchemaVersion,
-		Packs:              make(map[string]PackActivation),
-		SkillOverrides:     make(map[string]string),
-		ScheduleOverrides:  make(map[string]ScheduleOverride),
-		ConnectorOverrides: make(map[string]ConnectorOverride),
+		SchemaVersion:          VaultExtensionsSchemaVersion,
+		Packs:                  make(map[string]PackActivation),
+		SkillOverrides:         make(map[string]string),
+		ScheduleOverrides:      make(map[string]ScheduleOverride),
+		ConnectorOverrides:     make(map[string]ConnectorOverride),
+		ChannelBridgeOverrides: make(map[string]ChannelBridgeOverride),
 	}
 }
 
@@ -170,6 +181,9 @@ func loadStateUnlocked(vaultDir string) (VaultState, error) {
 	}
 	if st.ConnectorOverrides == nil {
 		st.ConnectorOverrides = make(map[string]ConnectorOverride)
+	}
+	if st.ChannelBridgeOverrides == nil {
+		st.ChannelBridgeOverrides = make(map[string]ChannelBridgeOverride)
 	}
 	if st.WinnerOverrides == nil {
 		st.WinnerOverrides = make(map[string]string)
@@ -265,6 +279,53 @@ func SetSchedulePaused(ctx context.Context, vaultDir, scheduleID string, paused 
 		return nil
 	})
 	return fqid, updated, err
+}
+
+// LookupChannelBridgeOverride returns a Vault-level pause/resume override for bridgeFQID ("<pack>/<id>").
+func (s VaultState) LookupChannelBridgeOverride(bridgeFQID string) (ChannelBridgeOverride, bool) {
+	if len(s.ChannelBridgeOverrides) == 0 {
+		return ChannelBridgeOverride{}, false
+	}
+	ov, ok := s.ChannelBridgeOverrides[strings.TrimSpace(bridgeFQID)]
+	return ov, ok
+}
+
+// IsChannelBridgeEnabled returns whether bridgeFQID is enabled in extensions.json (defaulting to declaredDefault).
+func (s VaultState) IsChannelBridgeEnabled(bridgeFQID string, declaredDefault bool) bool {
+	if ov, ok := s.LookupChannelBridgeOverride(bridgeFQID); ok && ov.Enabled != nil {
+		return *ov.Enabled
+	}
+	return declaredDefault
+}
+
+// SetChannelBridgePaused sets enabled=false (or true on resume) for bridgeFQID in <vault>/extensions.json.
+func SetChannelBridgePaused(ctx context.Context, vaultDir, bridgeFQID string, paused bool, reason string, now time.Time) (ChannelBridgeOverride, error) {
+	fqid := strings.TrimSpace(bridgeFQID)
+	if fqid == "" || !strings.Contains(fqid, "/") {
+		return ChannelBridgeOverride{}, fmt.Errorf("channel bridge FQID (<pack>/<id>) is required")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	var updated ChannelBridgeOverride
+	err := UpdateVaultState(ctx, vaultDir, func(st *VaultState) error {
+		ov, _ := st.LookupChannelBridgeOverride(fqid)
+		enabled := !paused
+		ov.Enabled = &enabled
+		ov.UpdatedAt = nowStr
+		if paused {
+			ov.PausedAt = nowStr
+			ov.PausedReason = strings.TrimSpace(reason)
+		} else {
+			ov.ResumedAt = nowStr
+			ov.PausedReason = ""
+		}
+		st.ChannelBridgeOverrides[fqid] = ov
+		updated = ov
+		return nil
+	})
+	return updated, err
 }
 
 // NonOverridableCoreSkills lists security-boundary skills that extension packs can never shadow.

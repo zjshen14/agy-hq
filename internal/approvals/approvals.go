@@ -462,8 +462,14 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 			_, _ = SupersedeByConvAndType(vaultDir, prop.ConversationID, prop.ActionType, prop.ID, now)
 		}
 	}
+	if RegisteredProposalCreatedHook != nil {
+		RegisteredProposalCreatedHook(vaultDir, prop)
+	}
 	return prop, nil
 }
+
+// RegisteredProposalCreatedHook is wired by internal/channels to enqueue optional task_blocked digests.
+var RegisteredProposalCreatedHook func(vaultDir string, prop Proposal)
 
 // SupersedeByThread atomically removes older pending proposals targeting the same (connector, account, threadKey)
 // and records `"superseded"` entries in interventions.jsonl so stale replies can never be double-approved.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
@@ -55,22 +56,23 @@ type ScheduleSummaryRow struct {
 
 // DashboardState aggregates live Vault, approval, worktree, task, schedule, journal, quota, observability, spaces, goals, ideas, and doctor state.
 type DashboardState struct {
-	VaultDir      string                         `json:"vaultDir"`
-	UpdatedAt     string                         `json:"updatedAt"`
-	Quota         kernel.QuotaState              `json:"quota"`
-	Observability obs.DashboardSummary           `json:"observability"`
-	Pending       []approvals.Proposal           `json:"pending"`
-	Schedules     []ScheduleSummaryRow           `json:"schedules,omitempty"`
-	ActiveSpaces  []ConsoleSpace                 `json:"activeSpaces,omitempty"`
-	Goals         []kernel.Goal                  `json:"goals,omitempty"`
-	OverdueWaits  []kernel.OverdueWaitingSummary `json:"overdueWaits,omitempty"`
-	Ideas         []outbox.OutboxItem            `json:"ideas,omitempty"`
-	Worktrees     []string                       `json:"worktrees"`
-	Tasks         []kernel.ActiveTask            `json:"tasks"`
-	TodayTurns    []hooks.JournalEntry           `json:"todayTurns"`
-	Health        []doctor.CheckResult           `json:"health"`
-	FlashResult   string                         `json:"flashResult,omitempty"`
-	CSRFToken     string                         `json:"-"`
+	VaultDir       string                         `json:"vaultDir"`
+	UpdatedAt      string                         `json:"updatedAt"`
+	Quota          kernel.QuotaState              `json:"quota"`
+	Observability  obs.DashboardSummary           `json:"observability"`
+	Pending        []approvals.Proposal           `json:"pending"`
+	Schedules      []ScheduleSummaryRow           `json:"schedules,omitempty"`
+	ActiveSpaces   []ConsoleSpace                 `json:"activeSpaces,omitempty"`
+	Goals          []kernel.Goal                  `json:"goals,omitempty"`
+	OverdueWaits   []kernel.OverdueWaitingSummary `json:"overdueWaits,omitempty"`
+	Ideas          []outbox.OutboxItem            `json:"ideas,omitempty"`
+	Worktrees      []string                       `json:"worktrees"`
+	Tasks          []kernel.ActiveTask            `json:"tasks"`
+	ChannelBridges []channels.BridgeSummary       `json:"channelBridges,omitempty"`
+	TodayTurns     []hooks.JournalEntry           `json:"todayTurns"`
+	Health         []doctor.CheckResult           `json:"health"`
+	FlashResult    string                         `json:"flashResult,omitempty"`
+	CSRFToken      string                         `json:"-"`
 }
 
 // IsLoopbackAddr returns true if listenAddr binds strictly to a loopback interface (127.0.0.1, ::1, or localhost).
@@ -279,6 +281,88 @@ func NewHandler(vaultDir string) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"timers": list,
 		})
+	})
+
+	requireDaemonBearer := func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return false
+		}
+		authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+		if !strings.HasPrefix(strings.ToLower(authHdr), "bearer ") || !events.ValidateDaemonToken(vaultDir, strings.TrimSpace(authHdr[7:])) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "unauthorized: valid Authorization: Bearer <daemon_token> required",
+			})
+			return false
+		}
+		return true
+	}
+
+	mux.HandleFunc("/api/channels/inbound", func(w http.ResponseWriter, r *http.Request) {
+		if !requireDaemonBearer(w, r) {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+		var req channels.InboundRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		res, err := channels.HandleInbound(r.Context(), vaultDir, req, time.Now())
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		events.TriggerWake()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/api/channels/callback", func(w http.ResponseWriter, r *http.Request) {
+		if !requireDaemonBearer(w, r) {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+		var req channels.CallbackRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		res, err := channels.HandleCallback(r.Context(), vaultDir, req, time.Now())
+		_ = SyncMarkdownConsole(vaultDir)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		events.TriggerWake()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/api/channels/flush", func(w http.ResponseWriter, r *http.Request) {
+		if !requireDaemonBearer(w, r) {
+			return
+		}
+		rep, err := channels.SyncAndFlush(r.Context(), vaultDir, time.Now(), false)
+		events.TriggerWake()
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(rep)
 	})
 
 	mux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
@@ -977,22 +1061,24 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	}
 	ideas, _ := outbox.List(vaultDir, outbox.TierIdeasFeed, outbox.StatusPending, now)
 	schedules := buildScheduleSummaries(vaultDir, tasks)
+	bridgeSummaries, _ := channels.ListBridgeSummaries(vaultDir)
 	return DashboardState{
-		VaultDir:      vaultDir,
-		UpdatedAt:     now.Format("15:04:05"),
-		Quota:         quota,
-		Observability: obsSum,
-		Pending:       pending,
-		Schedules:     schedules,
-		ActiveSpaces:  activeSpaces,
-		Goals:         activeGoals,
-		OverdueWaits:  overdueWaits,
-		Ideas:         ideas,
-		Worktrees:     wts,
-		Tasks:         sel.VisibleRows,
-		TodayTurns:    turns,
-		Health:        health,
-		FlashResult:   flashMsg,
+		VaultDir:       vaultDir,
+		UpdatedAt:      now.Format("15:04:05"),
+		Quota:          quota,
+		Observability:  obsSum,
+		Pending:        pending,
+		Schedules:      schedules,
+		ActiveSpaces:   activeSpaces,
+		Goals:          activeGoals,
+		OverdueWaits:   overdueWaits,
+		Ideas:          ideas,
+		Worktrees:      wts,
+		Tasks:          sel.VisibleRows,
+		ChannelBridges: bridgeSummaries,
+		TodayTurns:     turns,
+		Health:         health,
+		FlashResult:    flashMsg,
 	}
 }
 

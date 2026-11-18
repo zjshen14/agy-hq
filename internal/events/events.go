@@ -102,6 +102,11 @@ func SubscribeWake() <-chan struct{} {
 	return wakeNotify
 }
 
+// TriggerWake nudges the in-process daemon select loop immediately when running inside `hq daemon`.
+func TriggerWake() {
+	signalWake()
+}
+
 func signalWake() {
 	wakeMu.Lock()
 	ch := wakeNotify

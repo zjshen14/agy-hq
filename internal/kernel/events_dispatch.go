@@ -12,12 +12,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 )
+
+func init() {
+	channels.RegisteredFrontDeskBootstrapper = func(vaultDir string, now time.Time) (string, error) {
+		if fd, ok := GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ConversationID) != "" {
+			return strings.TrimSpace(fd.ConversationID), nil
+		}
+		modelID := routing.Resolve(vaultDir, routing.Request{ExplicitTier: "routine"}).ModelID
+		out, err := SpawnTask(vaultDir, "channel_inbound:bootstrap", "", "[HQ] Front Desk", "Initialize [HQ] Front Desk and stand by for incoming owner messages.", modelID, false)
+		if err != nil {
+			return "", err
+		}
+		uuid := ExtractUUID(out)
+		if uuid == "" {
+			return "", fmt.Errorf("bootstrap Front Desk returned no session UUID")
+		}
+		_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
+		if sErr := SetFrontDesk(vaultDir, uuid, ""); sErr != nil {
+			return "", sErr
+		}
+		return uuid, nil
+	}
+}
 
 // DeliverMessageToSession injects a user/system message into an existing Antigravity conversation
 // (used for resumable follow-up timers, deferred human-approval continuations, and Front Desk alerts).
@@ -202,6 +225,12 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		ids := batch.EventIDs()
 		head := batchHeadEvent(batch)
 
+		if batch.SessionID == "" && head.Source == "channel_inbound" {
+			if fd, ok := GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ConversationID) != "" {
+				batch.SessionID = strings.TrimSpace(fd.ConversationID)
+			}
+		}
+
 		if batch.SessionID != "" {
 			out, delivErr := DeliverMessageToSession(vaultDir, batch.SessionID, batch.Title, batch.Prompt, dryRun)
 			if delivErr != nil {
@@ -310,6 +339,16 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		if dryRun {
 			_, _ = events.CompleteIDs(vaultDir, ids, now)
 		} else if uuid := ExtractUUID(out); uuid != "" {
+			if head.Source == "channel_inbound" {
+				if !hadPrev {
+					removeTaskBySlug(vaultDir, autoSlug)
+				}
+				_ = os.Remove(filepath.Join(vaultDir, "memory", ".vacated"))
+				_ = SetFrontDesk(vaultDir, uuid, "")
+				_, _ = events.CompleteIDs(vaultDir, ids, now)
+				actions = append(actions, fmt.Sprintf("%s (bootstrapped Front Desk %s)", label, uuid))
+				continue
+			}
 			if hadPrev && prevTask.ConversationID != "" && prevTask.ConversationID != uuid && !prevTask.Pinned {
 				_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
 					ConversationID:  prevTask.ConversationID,
@@ -484,12 +523,18 @@ func DispatchOutboxToFrontDesk(vaultDir string, now time.Time, dryRun bool) (int
 	}
 	fd, ok := GetFrontDesk(vaultDir)
 	if !ok || strings.TrimSpace(fd.ConversationID) == "" {
-		return 0, nil
+		_ = channels.EnqueuePendingInterruptsWhenDeskVacant(vaultDir, now)
+		fRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, dryRun)
+		return fRep.NotificationsSent, nil
 	}
 	delivered, err := outbox.DispatchPendingInterrupts(vaultDir, now, func(it outbox.OutboxItem, formattedCard string) error {
 		title := "[HQ Interrupt] " + it.Title
 		_, dErr := DeliverMessageToSession(vaultDir, fd.ConversationID, title, formattedCard, dryRun)
 		return dErr
 	})
+	if len(delivered) > 0 {
+		_ = channels.EnqueueOutboxInterrupts(vaultDir, fd.ConversationID, delivered, now)
+	}
+	_, _ = channels.SyncAndFlush(context.Background(), vaultDir, now, dryRun)
 	return len(delivered), err
 }

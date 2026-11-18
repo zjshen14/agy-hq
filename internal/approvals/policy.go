@@ -138,7 +138,7 @@ func DefaultRules() []Rule {
 			Description: "Ring-0 self-modification, trust pins, & local console approval API",
 			Mode:        ModeAlways,
 			Commands: []string{
-				`\bhq\s+(?:rsi\s+apply|connector\s+apply-offer|extension\s+apply-trust)\b`,
+				`\bhq\s+(?:rsi\s+apply|connector\s+apply-offer|extension\s+apply-trust|channel\s+apply-config)\b`,
 				`(?:https?://[^\s"']*|127\.0\.0\.1:\d+|localhost:\d+)/api/(?:approve|reject)\b`,
 			},
 			Source: "builtin",

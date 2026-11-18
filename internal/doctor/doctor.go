@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/events"
@@ -582,6 +583,15 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		Status: polStatus,
 		Detail: polDetail,
 	})
+
+	// 19. Check Channel Bridges & Private Destination Configs (RFC-0023)
+	for _, chItem := range channels.DoctorChecks(vaultDir) {
+		results = append(results, CheckResult{
+			Name:   chItem.Name,
+			Status: chItem.Status,
+			Detail: chItem.Detail,
+		})
+	}
 
 	return results
 }

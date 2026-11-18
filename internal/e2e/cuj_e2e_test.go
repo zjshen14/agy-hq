@@ -18,6 +18,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/brief"
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/kernel"
@@ -5461,5 +5462,367 @@ approvals:
 	consoleMD, _ := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
 	if !strings.Contains(string(consoleMD), "Pending Approvals (`0` items)") {
 		t.Fatalf("expected CONSOLE.md to show 0 pending items after reconciliation, got:\n%s", string(consoleMD))
+	}
+}
+
+var (
+	cuj38BridgeOnce sync.Once
+	cuj38BridgeBin  string
+	cuj38BridgeErr  error
+)
+
+func buildCUJ38BridgeBinary(t *testing.T) string {
+	t.Helper()
+	cuj38BridgeOnce.Do(func() {
+		src := `package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	stateDir := os.Getenv("CUJ38_BRIDGE_STATE_DIR")
+	rawIn, _ := io.ReadAll(os.Stdin)
+	var base struct {
+		Op string ` + "`json:\"op\"`" + `
+	}
+	_ = json.Unmarshal(rawIn, &base)
+
+	var fd3 string
+	if f3 := os.NewFile(3, "fd3"); f3 != nil {
+		if b, err := io.ReadAll(f3); err == nil {
+			fd3 = strings.TrimSpace(string(b))
+		}
+		_ = f3.Close()
+	}
+
+	if stateDir != "" {
+		_ = os.MkdirAll(stateDir, 0o700)
+		entry, _ := json.Marshal(map[string]interface{}{
+			"op":      base.Op,
+			"request": json.RawMessage(strings.TrimSpace(string(rawIn))),
+			"fd3":     fd3,
+			"csrf":    os.Getenv("ANTIGRAVITY_CSRF_TOKEN"),
+		})
+		f, _ := os.OpenFile(filepath.Join(stateDir, "calls.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if f != nil {
+			_, _ = f.Write(append(entry, '\n'))
+			_ = f.Close()
+		}
+	}
+
+	switch base.Op {
+	case "bind-desk":
+		var req struct {
+			Desk struct {
+				ConversationID string ` + "`json:\"conversation_id\"`" + `
+			} ` + "`json:\"desk\"`" + `
+		}
+		_ = json.Unmarshal(rawIn, &req)
+		if stateDir != "" {
+			_ = os.WriteFile(filepath.Join(stateDir, "bound_cid.txt"), []byte(req.Desk.ConversationID), 0o600)
+		}
+		fmt.Println(` + "`" + `{"protocol":"hq-channel-bridge/v1","ok":true,"desk_thread":{"external_thread_id":"thr_cuj38_desk","rebound":true}}` + "`" + `)
+	case "notify":
+		var req struct {
+			IdempotencyKey string ` + "`json:\"idempotency_key\"`" + `
+		}
+		_ = json.Unmarshal(rawIn, &req)
+		fmt.Printf("{\"protocol\":\"hq-channel-bridge/v1\",\"ok\":true,\"delivery_id\":%q,\"external_thread_id\":\"thr_cuj38_desk\",\"desk_external_thread_id\":\"thr_cuj38_desk\"}\n", "deliv_"+req.IdempotencyKey)
+	case "status":
+		bound := ""
+		if stateDir != "" {
+			if b, err := os.ReadFile(filepath.Join(stateDir, "bound_cid.txt")); err == nil {
+				bound = strings.TrimSpace(string(b))
+			}
+		}
+		fmt.Printf("{\"protocol\":\"hq-channel-bridge/v1\",\"ok\":true,\"healthy\":true,\"auth_state\":\"authenticated\",\"inbound_tunnel_bound_cid\":%q}\n", bound)
+	}
+}
+`
+		dir, err := os.MkdirTemp("", "cuj38-bridge-*")
+		if err != nil {
+			cuj38BridgeErr = err
+			return
+		}
+		srcPath := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(srcPath, []byte(src), 0o600); err != nil {
+			cuj38BridgeErr = err
+			return
+		}
+		outBin := filepath.Join(dir, "cuj38-chat-bridge")
+		if out, err := exec.Command("go", "build", "-o", outBin, srcPath).CombinedOutput(); err != nil {
+			cuj38BridgeErr = fmt.Errorf("build cuj38 bridge: %w (%s)", err, string(out))
+			return
+		}
+		cuj38BridgeBin = outBin
+	})
+	if cuj38BridgeErr != nil {
+		t.Fatalf("buildCUJ38BridgeBinary: %v", cuj38BridgeErr)
+	}
+	return cuj38BridgeBin
+}
+
+func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
+	env := setupHQEnv(t)
+	bridgeStateDir := filepath.Join(t.TempDir(), "cuj38-bridge-state")
+	_ = os.MkdirAll(bridgeStateDir, 0o700)
+	t.Setenv("CUJ38_BRIDGE_STATE_DIR", bridgeStateDir)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "cuj38-csrf-secret")
+
+	// 1. Package companion extension pack with `channel_bridges`, lint, enable, and pin SHA-256 trust
+	packDir := filepath.Join(env.vaultDir, "packs", "acme-messaging")
+	_ = os.MkdirAll(filepath.Join(packDir, "bin"), 0o755)
+	compiledBin := buildCUJ38BridgeBinary(t)
+	binBytes, err := os.ReadFile(compiledBin)
+	if err != nil {
+		t.Fatalf("read compiledBin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "bin", "cuj38-chat-bridge"), binBytes, 0o755); err != nil {
+		t.Fatalf("stage bridge bin: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(packDir, "plugin.json"), []byte(`{"name":"acme-messaging","version":"1.0.0"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(packDir, "hq-extension.json"), []byte(`{
+  "schema_version": 1,
+  "id": "acme-messaging",
+  "version": "1.0.0",
+  "components": {
+    "channel_bridges": [
+      {
+        "id": "desk-bridge",
+        "protocol": "hq-channel-bridge/v1",
+        "command": ["./bin/cuj38-chat-bridge"],
+        "env_allow": ["CUJ38_BRIDGE_STATE_DIR"],
+        "timeout_ms": 5000,
+        "max_body_runes": 1600,
+        "capabilities": {
+          "desk_binding": true,
+          "item_threads": true,
+          "task_digests": true,
+          "callback_buttons": true
+        }
+      }
+    ]
+  }
+}`), 0o644)
+
+	if out, err := env.run("", "extension", "lint", packDir); err != nil || !strings.Contains(out, "PASSED") {
+		t.Fatalf("hq extension lint failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "extension", "enable", "acme-messaging", "--path="+packDir); err != nil {
+		t.Fatalf("hq extension enable failed: %v (%s)", err, out)
+	}
+	bundle, err := extension.BuildTrustBundle(env.vaultDir, "pack:acme-messaging", packDir)
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	bRaw, _ := json.Marshal(bundle)
+	if err := extension.ApplyTrustBundle(env.vaultDir, bRaw); err != nil {
+		t.Fatalf("ApplyTrustBundle: %v", err)
+	}
+
+	// Configure private destination (`0600`) via `hq channel configure` outside agent session + test connectivity
+	_ = os.MkdirAll(filepath.Join(env.vaultDir, "private", "channels", "credentials"), 0o700)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "private", "channels", "credentials", "bot.tok"), []byte("cuj38-bot-secret"), 0o600)
+	privCfg := `{
+  "schema_version": 1,
+  "bridge_id": "acme-messaging/desk-bridge",
+  "enabled": true,
+  "credential_file": "private/channels/credentials/bot.tok",
+  "destination": { "room_id": "cuj38_private_room_id", "thread_mode": "grouped" },
+  "policy": { "deliver_interrupts": true, "deliver_task_done": false, "deliver_task_blocked": true }
+}`
+	if out, err := env.run(privCfg, "channel", "configure", "acme-messaging/desk-bridge"); err != nil || !strings.Contains(out, "Saved private channel config") {
+		t.Fatalf("hq channel configure failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "channel", "test", "acme-messaging/desk-bridge"); err != nil || !strings.Contains(out, "PASSED") {
+		t.Fatalf("hq channel test failed: %v (%s)", err, out)
+	}
+
+	// 2. Claim Front Desk (`cid1`), rotate (`cid1 -> cid2`), and demote via `hq adopt` (`cid2 -> ""` vacated)
+	cid1 := "00000000-0000-4000-8000-000000003801"
+	cid2 := "00000000-0000-4000-8000-000000003802"
+	if out, err := env.run("", "claim-desk", "--conv="+cid1); err != nil {
+		t.Fatalf("claim-desk cid1: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "channel", "flush"); err != nil {
+		t.Fatalf("channel flush cid1: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "claim-desk", "--conv="+cid2); err != nil {
+		t.Fatalf("claim-desk cid2: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "channel", "flush"); err != nil {
+		t.Fatalf("channel flush cid2: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "adopt", "--conv="+cid2, "--task=demoted-shift", "--title=[Task:ops] Demoted Shift"); err != nil {
+		t.Fatalf("adopt cid2: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "channel", "flush"); err != nil {
+		t.Fatalf("channel flush vacated: %v (%s)", err, out)
+	}
+
+	// Claim fresh active Front Desk (`cid3`) for bidirectional mobile round-trip
+	cid3 := "00000000-0000-4000-8000-000000003803"
+	if out, err := env.run("", "claim-desk", "--conv="+cid3); err != nil {
+		t.Fatalf("claim-desk cid3: %v (%s)", err, out)
+	}
+	_, _ = env.run("", "channel", "flush")
+
+	// 3. Start loopback WebUI handler & verify Bearer daemon_token enforcement on `/api/channels/inbound` + `/api/channels/callback`
+	daemonTok, err := events.EnsureDaemonToken(env.vaultDir)
+	if err != nil {
+		t.Fatalf("EnsureDaemonToken: %v", err)
+	}
+	srv := httptest.NewServer(webui.NewHandler(env.vaultDir))
+	defer srv.Close()
+
+	// Unauthenticated request MUST return 401
+	unauthResp, err := http.Post(srv.URL+"/api/channels/inbound", "application/json", strings.NewReader(`{}`))
+	if err != nil || unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated /api/channels/inbound, got resp=%+v err=%v", unauthResp, err)
+	}
+	_ = unauthResp.Body.Close()
+
+	// Authenticated inbound owner message -> routes to cid3
+	inBody := `{"bridge_id":"acme-messaging/desk-bridge","external_message_id":"tg_9001","external_thread_id":"thr_cuj38_desk","text":"Stage deployment marker"}`
+	inReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/channels/inbound", strings.NewReader(inBody))
+	inReq.Header.Set("Authorization", "Bearer "+daemonTok)
+	inReq.Header.Set("Content-Type", "application/json")
+	inResp, err := http.DefaultClient.Do(inReq)
+	if err != nil || inResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted on /api/channels/inbound, got resp=%+v err=%v", inResp, err)
+	}
+	var inParsed channels.InboundResult
+	_ = json.NewDecoder(inResp.Body).Decode(&inParsed)
+	_ = inResp.Body.Close()
+	if !inParsed.OK || inParsed.TargetConversationID != cid3 {
+		t.Fatalf("expected inbound turn routed to cid3 (%s), got %+v", cid3, inParsed)
+	}
+
+	// Stage a deterministic proposal inside cid3, then invoke `hq hook stop` (`HandleStop` `desk_reply` mirroring)
+	markerFile := filepath.Join(t.TempDir(), "cuj38-button-approved.txt")
+	prop, err := approvals.CreateWithOptions(env.vaultDir, approvals.CreateOptions{
+		ActionType:     "external_action",
+		Summary:        "Create CUJ38 marker",
+		Command:        "cp /etc/hosts " + markerFile,
+		CommandArgv:    []string{"cp", "/etc/hosts", markerFile},
+		ConversationID: cid3,
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions: %v", err)
+	}
+
+	stopJSON, _ := json.Marshal(map[string]interface{}{
+		"conversationId": cid3,
+		"executionNum":   1,
+		"lastResponse":   "Staged marker proposal for 1-tap mobile review.",
+	})
+	if stopOut, err := env.run(string(stopJSON), "hook", "stop"); err != nil || !strings.Contains(stopOut, `"decision":"stop"`) {
+		t.Fatalf("hq hook stop failed: %v (%s)", err, stopOut)
+	}
+	_, _ = env.run("", "channel", "flush")
+
+	// Inspect recorded bridge calls -> verify `desk_reply` carried 36-byte `bca_`/`bcr_` tokens and scrubbed CSRF!
+	callsRaw, err := os.ReadFile(filepath.Join(bridgeStateDir, "calls.jsonl"))
+	if err != nil {
+		t.Fatalf("read bridge calls.jsonl: %v", err)
+	}
+	var approveTok, rejectTok string
+	sawVacated := false
+	for _, ln := range strings.Split(strings.TrimSpace(string(callsRaw)), "\n") {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		var row struct {
+			Op      string          `json:"op"`
+			Request json.RawMessage `json:"request"`
+			FD3     string          `json:"fd3"`
+			CSRF    string          `json:"csrf"`
+		}
+		_ = json.Unmarshal([]byte(ln), &row)
+		if row.CSRF != "" {
+			t.Fatalf("ANTIGRAVITY_CSRF_TOKEN leaked to bridge subprocess: %q", row.CSRF)
+		}
+		if row.FD3 != "cuj38-bot-secret" {
+			t.Fatalf("expected /dev/fd/3 secret delivered to bridge, got %q", row.FD3)
+		}
+		if row.Op == "bind-desk" && strings.Contains(string(row.Request), `"lease_state":"vacated"`) {
+			sawVacated = true
+		}
+		if row.Op == "notify" {
+			var nReq channels.NotifyRequest
+			_ = json.Unmarshal(row.Request, &nReq)
+			if nReq.Notification.Kind == channels.KindDeskReply && len(nReq.Notification.Actions) == 1 {
+				approveTok = nReq.Notification.Actions[0].ApproveCallbackToken
+				rejectTok = nReq.Notification.Actions[0].RejectCallbackToken
+			}
+		}
+	}
+	if !sawVacated {
+		t.Fatalf("expected bind-desk with lease_state=vacated after hq adopt demotion")
+	}
+	if len(approveTok) != 36 || len(rejectTok) != 36 {
+		t.Fatalf("expected 36-byte bca_/bcr_ tokens in desk_reply, got approve=%q reject=%q", approveTok, rejectTok)
+	}
+
+	// 4. Redeem `approveTok` via `/api/channels/callback` -> executes in 0 LLM tokens; replay & sibling reject fail!
+	cbPayload, _ := json.Marshal(channels.CallbackRequest{
+		BridgeID:      "acme-messaging/desk-bridge",
+		CallbackToken: approveTok,
+	})
+	cbReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/channels/callback", bytes.NewReader(cbPayload))
+	cbReq.Header.Set("Authorization", "Bearer "+daemonTok)
+	cbReq.Header.Set("Content-Type", "application/json")
+	cbResp, err := http.DefaultClient.Do(cbReq)
+	if err != nil || cbResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/channels/callback, got resp=%+v err=%v", cbResp, err)
+	}
+	_ = cbResp.Body.Close()
+	if _, err := os.Stat(markerFile); err != nil {
+		t.Fatalf("expected proposal %s approved & markerFile created: %v", prop.ID, err)
+	}
+
+	// Replay of approveTok MUST return 400
+	cbReqReplay, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/channels/callback", bytes.NewReader(cbPayload))
+	cbReqReplay.Header.Set("Authorization", "Bearer "+daemonTok)
+	cbReqReplay.Header.Set("Content-Type", "application/json")
+	cbRespReplay, _ := http.DefaultClient.Do(cbReqReplay)
+	if cbRespReplay.StatusCode == http.StatusOK {
+		t.Fatalf("expected replay of consumed callback token to be rejected")
+	}
+	_ = cbRespReplay.Body.Close()
+
+	// 5. Verify PreToolUse blocks LLM reads/shells on private/{channels,approval_bridge_caps}, writes on memory/channels, and daemon-only CLI/HTTP gateways
+	for _, probe := range []map[string]interface{}{
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "read_file", "args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "private", "channels", "acme-messaging--desk-bridge.json")}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "write_file", "args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "memory", "channels", "channels.jsonl"), "Content": "{}"}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "hq channel inbound"}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "hq channel callback"}}},
+		{"conversationId": cid3, "toolCall": map[string]interface{}{"name": "run_command", "args": map[string]interface{}{"CommandLine": "curl -X POST http://127.0.0.1:4242/api/channels/inbound -d '{}'"}}},
+	} {
+		rawProbe, _ := json.Marshal(probe)
+		preOut, pErr := env.run(string(rawProbe), "hook", "pre-tool")
+		if pErr != nil || !strings.Contains(preOut, `"decision":"deny"`) {
+			t.Fatalf("expected PreToolUse deny on %s, got err=%v out=%s", string(rawProbe), pErr, preOut)
+		}
+	}
+
+	// 6. Verify `hq channel list`, `hq channel audit`, and `hq doctor` report zero raw room IDs or secret tokens
+	listOut, err := env.run("", "channel", "list")
+	if err != nil || strings.Contains(listOut, "cuj38_private_room_id") || !strings.Contains(listOut, "acme-messaging/desk-bridge") {
+		t.Fatalf("unexpected hq channel list output (err=%v):\n%s", err, listOut)
+	}
+	auditOut, err := env.run("", "channel", "audit", "--json")
+	if err != nil || strings.Contains(auditOut, "cuj38_private_room_id") || strings.Contains(auditOut, approveTok) {
+		t.Fatalf("hq channel audit leaked room ID or callback token (err=%v):\n%s", err, auditOut)
+	}
+	docOut, err := env.run("", "doctor", "--json")
+	if err != nil || !strings.Contains(docOut, "Channel Bridge (acme-messaging/desk-bridge)") || strings.Contains(docOut, "cuj38_private_room_id") {
+		t.Fatalf("unexpected hq doctor output (err=%v):\n%s", err, docOut)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gchat"
@@ -56,6 +57,7 @@ type StopPayload struct {
 	TerminationReason string `json:"terminationReason"`
 	Error             string `json:"error"`
 	FullyIdle         bool   `json:"fullyIdle"`
+	LastResponse      string `json:"lastResponse,omitempty"`
 }
 
 // JournalEntry is the immutable per-turn summary written by hq hook stop (0 LLM tokens).
@@ -635,15 +637,18 @@ var (
 		regexp.MustCompile(`(?i)\bhq\s+rsi\s+apply\b`),
 		regexp.MustCompile(`(?i)\bhq\s+connector\s+apply-offer\b`),
 		regexp.MustCompile(`(?i)\bhq\s+extension\s+apply-trust\b`),
+		regexp.MustCompile(`(?i)\bhq\s+channel\s+apply-config\b`),
 		regexp.MustCompile(`(?i)/api/(?:approve|reject)\b`),
 	}
+
+	reHQChannelDaemonOnly = regexp.MustCompile(`(?i)(?:(?:\S+/)?hq\s+channel\s+(?:inbound|callback|flush)\b|/api/channels/(?:inbound|callback|flush)\b)`)
 
 	reDoubleQuotedCmdSubst   = regexp.MustCompile(`--cmd="(?:\\.|[^"\\])*(?:\$\(|` + "`" + `)`)
 	reHQOutboundBodyCmd      = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
 	reDoubleQuotedBodyFlag   = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 	reAllowedQuarantineHQCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:gmail\s+(?:search|read-quarantined|draft|triage-result|attachment-quarantine)|gchat\s+(?:spaces|search|read-quarantined|draft|triage-result)|watch\s+(?:read|query|ack)|offer\s+stage|brief\s+format-quarantined|memory\s+lookup|goals\s+mark-replied|outbox\s+add|propose|status)\b`)
-	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
+	reLocalCredentialShell   = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -1274,8 +1279,8 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 	}()
 
 	protectedPrivateSubs := []string{
-		"gmail", "gchat", "credentials", "connectors", "runtime", "taint", "exec-cache",
-		"trust.json", "approval_asks", "approval_caps", "pii-denylist.txt", "daemon_token",
+		"gmail", "gchat", "credentials", "connectors", "channels", "runtime", "taint", "exec-cache",
+		"trust.json", "approval_asks", "approval_caps", "approval_bridge_caps", "pii-denylist.txt", "daemon_token",
 	}
 	var extraCredTargets []string
 	if rts := hostpaths.Resolve(vaultDir); rts.AppDataDir != "" {
@@ -1291,6 +1296,12 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
 				"reason":   "Blocked by agy-hq integrity policy: direct shell access to .system_generated transcript/log directories is prohibited across all sessions.",
+			})
+		}
+		if reHQChannelDaemonOnly.MatchString(cmdLine) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq Channel Bridge policy: `hq channel inbound`, `hq channel callback`, and `/api/channels/*` are daemon/sidecar-only gateways and may never be invoked by an LLM session.",
 			})
 		}
 		if reHQClaimDesk.MatchString(cmdLine) && (kernel.IsSubagentConversation(vaultDir, payload.ConversationID) || isAutoConversation(vaultDir, payload.ConversationID)) {
@@ -1370,7 +1381,22 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		if credShellHit {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,taint,trust.json,approval_asks,approval_caps,pii-denylist.txt,daemon_token} or roots.json is strictly prohibited across all sessions.",
+				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,channels,taint,trust.json,approval_asks,approval_caps,approval_bridge_caps,pii-denylist.txt,daemon_token} or roots.json is strictly prohibited across all sessions.",
+			})
+		}
+		// Protect memory/channels runtime state & channels.jsonl audit log from direct shell mutation
+		if (strings.Contains(cmdLine, "memory/channels") || (canonVault != "" && strings.Contains(cmdLine, filepath.Join(canonVault, "memory", "channels")))) &&
+			(strings.ContainsAny(cmdLine, ">") ||
+				strings.Contains(cmdLine, "sed ") ||
+				strings.Contains(cmdLine, "tee ") ||
+				strings.Contains(cmdLine, "cp ") ||
+				strings.Contains(cmdLine, "mv ") ||
+				strings.Contains(cmdLine, "rm ") ||
+				strings.Contains(cmdLine, "python") ||
+				strings.Contains(cmdLine, "perl")) {
+			return json.NewEncoder(w).Encode(map[string]interface{}{
+				"decision": "deny",
+				"reason":   "Blocked by agy-hq integrity policy: direct shell mutations to memory/channels state or channels.jsonl audit log are prohibited across all sessions.",
 			})
 		}
 
@@ -1534,6 +1560,7 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 				filepath.Join(canonVault, "memory", "events_archive.jsonl"),
 				filepath.Join(canonVault, "memory", "timers.json"),
 				filepath.Join(canonVault, "memory", "outbox"),
+				filepath.Join(canonVault, "memory", "channels"),
 				filepath.Join(canonVault, "memory", "watcher"),
 				filepath.Join(canonVault, "memory", "watchers"),
 				filepath.Join(canonVault, "memory", "trigger_cursors.json"),
@@ -2186,6 +2213,16 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			_, _ = kernel.CompleteConversationEvents(vaultDir, payload.ConversationID, time.Now())
 			_, _ = approvals.ReconcileAskRejections(vaultDir, payload.ConversationID, payload.TranscriptPath, time.Now())
 			_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
+
+			replyText := strings.TrimSpace(summary)
+			if replyText == "" {
+				replyText = strings.TrimSpace(payload.LastResponse)
+			}
+			if replyText != "" {
+				if enqCount, _ := channels.EnqueueTurnReplyIfCorrelated(vaultDir, payload.ConversationID, execNum, replyText, time.Time{}, time.Now()); enqCount > 0 {
+					channels.BestEffortFlushLoopback(vaultDir, 150*time.Millisecond)
+				}
+			}
 
 			if payload.TranscriptPath != "" {
 				_, _ = obs.ReconcileSubagentAttribution(vaultDir)

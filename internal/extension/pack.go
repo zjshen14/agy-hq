@@ -40,9 +40,10 @@ func init() {
 }
 
 const (
-	PackSchemaVersion     = 1
-	MaxOverlayBytes       = 4096
-	MaxTotalOverlaysBytes = 16384
+	PackSchemaVersion       = 1
+	MaxOverlayBytes         = 4096
+	MaxTotalOverlaysBytes   = 16384
+	ChannelBridgeProtocolV1 = "hq-channel-bridge/v1"
 )
 
 var reValidPackID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
@@ -116,6 +117,59 @@ type PackRoutingDefaults struct {
 	Tiers map[string]PackTierModel `json:"tiers,omitempty"`
 }
 
+// BridgeCapabilitiesSpec declares optional capabilities supported by a channel bridge.
+type BridgeCapabilitiesSpec struct {
+	DeskBinding     bool `json:"desk_binding,omitempty"`
+	ItemThreads     bool `json:"item_threads,omitempty"`
+	TaskDigests     bool `json:"task_digests,omitempty"`
+	NativeAskCards  bool `json:"native_ask_cards,omitempty"`
+	CallbackButtons bool `json:"callback_buttons,omitempty"`
+}
+
+// ChannelBridgeSpec declares a vendor-neutral Front Desk channel bridge in hq-extension.json.
+type ChannelBridgeSpec struct {
+	ID                     string                 `json:"id"`
+	Protocol               string                 `json:"protocol"`
+	Description            string                 `json:"description,omitempty"`
+	Command                []string               `json:"command"`
+	EnvAllow               []string               `json:"env_allow,omitempty"`
+	RequiresDesktopSession bool                   `json:"requires_desktop_session,omitempty"`
+	TimeoutMs              int                    `json:"timeout_ms,omitempty"`
+	MaxBodyRunes           int                    `json:"max_body_runes,omitempty"`
+	Capabilities           BridgeCapabilitiesSpec `json:"capabilities,omitempty"`
+}
+
+var (
+	reValidBridgeEnvKey = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	blockedBridgeEnv    = map[string]bool{
+		"ANTIGRAVITY_CSRF_TOKEN":      true,
+		"ANTIGRAVITY_LS_ADDRESS":      true,
+		"ANTIGRAVITY_AGENTAPI_EXE":    true,
+		"ANTIGRAVITY_CONVERSATION_ID": true,
+		"ANTIGRAVITY_TRAJECTORY_ID":   true,
+		"ANTIGRAVITY_PROJECT_ID":      true,
+		"ANTIGRAVITY_SOURCE_METADATA": true,
+	}
+	blockedBridgeShellBinaries = map[string]bool{
+		"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "csh": true, "tcsh": true, "fish": true,
+		"ssh": true, "env": true, "xargs": true, "sudo": true, "su": true,
+		"python": true, "python2": true, "python3": true,
+		"node": true, "nodejs": true, "deno": true, "bun": true,
+		"perl": true, "ruby": true, "php": true, "lua": true, "awk": true, "gawk": true, "sed": true,
+	}
+)
+
+func isBlockedBridgeCommand0(raw string) bool {
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(strings.TrimSpace(raw)), ".exe"))
+	if base == "" || base == "." || base == ".." {
+		return true
+	}
+	if blockedBridgeShellBinaries[base] {
+		return true
+	}
+	return strings.HasPrefix(base, "python2.") || strings.HasPrefix(base, "python3.")
+}
+
 // PackComponents indexes all hq-mediated surfaces inside a companion extension plugin.
 type PackComponents struct {
 	Connectors        []string                     `json:"connectors,omitempty"`
@@ -128,6 +182,7 @@ type PackComponents struct {
 	ConnectorDefaults map[string]string            `json:"connector_defaults,omitempty"`
 	ApprovalRules     []approvals.Rule             `json:"approval_rules,omitempty"`
 	OwnedRepos        []string                     `json:"owned_repos,omitempty"`
+	ChannelBridges    []ChannelBridgeSpec          `json:"channel_bridges,omitempty"`
 }
 
 // PackManifest represents <plugin>/hq-extension.json.
@@ -330,6 +385,43 @@ func LintPack(packDir string) ([]string, error) {
 		}
 	}
 
+	// 6. Validate channel_bridges schema, protocol, non-shell binary, and env_allow safety
+	seenBridgeIDs := make(map[string]bool)
+	for _, cb := range m.Components.ChannelBridges {
+		bid := strings.TrimSpace(cb.ID)
+		if !reValidPackID.MatchString(bid) {
+			return nil, fmt.Errorf("channel_bridges invalid id %q (expected lowercase kebab-case)", cb.ID)
+		}
+		if seenBridgeIDs[bid] {
+			return nil, fmt.Errorf("duplicate channel_bridges id %q in hq-extension.json", bid)
+		}
+		seenBridgeIDs[bid] = true
+		if strings.TrimSpace(cb.Protocol) != ChannelBridgeProtocolV1 {
+			return nil, fmt.Errorf("channel_bridges %q unsupported protocol %q (expected %q)", bid, cb.Protocol, ChannelBridgeProtocolV1)
+		}
+		if len(cb.Command) == 0 || strings.TrimSpace(cb.Command[0]) == "" {
+			return nil, fmt.Errorf("channel_bridges %q requires non-empty command", bid)
+		}
+		if isBlockedBridgeCommand0(cb.Command[0]) {
+			return nil, fmt.Errorf("channel_bridges %q command[0] %q cannot be a shell or generic interpreter wrapper (must point to a compiled SHA-256-pinnable executable)", bid, cb.Command[0])
+		}
+		if cb.TimeoutMs < 0 || cb.TimeoutMs > 15000 {
+			return nil, fmt.Errorf("channel_bridges %q timeout_ms=%d out of range [0, 15000]", bid, cb.TimeoutMs)
+		}
+		if cb.MaxBodyRunes < 0 || cb.MaxBodyRunes > 4000 {
+			return nil, fmt.Errorf("channel_bridges %q max_body_runes=%d out of range [0, 4000]", bid, cb.MaxBodyRunes)
+		}
+		for _, envKey := range cb.EnvAllow {
+			ek := strings.TrimSpace(envKey)
+			if !reValidBridgeEnvKey.MatchString(ek) {
+				return nil, fmt.Errorf("channel_bridges %q invalid env_allow entry %q", bid, envKey)
+			}
+			if blockedBridgeEnv[ek] {
+				return nil, fmt.Errorf("channel_bridges %q env_allow cannot expose protected host variable %q", bid, ek)
+			}
+		}
+	}
+
 	return warnings, nil
 }
 
@@ -477,6 +569,10 @@ func EnablePack(ctx context.Context, vaultDir, packID, explicitPath string, useP
 		for _, c := range m.Components.Connectors {
 			myConnIDs[connectorBaseID(packDir, c)] = true
 		}
+		myBridgeIDs := make(map[string]bool)
+		for _, cb := range m.Components.ChannelBridges {
+			myBridgeIDs[strings.TrimSpace(cb.ID)] = true
+		}
 		for otherID, act := range st.Packs {
 			if otherID == m.ID || !act.Enabled || strings.TrimSpace(act.Path) == "" {
 				continue
@@ -489,6 +585,12 @@ func EnablePack(ctx context.Context, vaultDir, packID, explicitPath string, useP
 				cid := connectorBaseID(act.Path, oc)
 				if myConnIDs[cid] && strings.TrimSpace(st.WinnerOverrides[cid]) == "" {
 					return fmt.Errorf("unqualified connector ID collision on %q between enabled pack %q and %q (set winner_overrides[%q] in extensions.json)", cid, otherID, m.ID, cid)
+				}
+			}
+			for _, ob := range om.Components.ChannelBridges {
+				bid := strings.TrimSpace(ob.ID)
+				if myBridgeIDs[bid] && strings.TrimSpace(st.WinnerOverrides[bid]) == "" {
+					return fmt.Errorf("unqualified channel_bridges ID collision on %q between enabled pack %q and %q (set winner_overrides[%q] in extensions.json)", bid, otherID, m.ID, bid)
 				}
 			}
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/events"
@@ -95,6 +97,9 @@ func main() {
 
 	case "plugin":
 		runPluginCLI(rootDir, vaultDir, os.Args[2:])
+
+	case "channel":
+		runChannelCLI(rootDir, vaultDir, os.Args[2:])
 
 	case "skill", "skills":
 		runSkillCLI(rootDir, vaultDir, os.Args[2:])
@@ -1821,6 +1826,7 @@ func main() {
 		// Background event-driven wake channel, 15s fast timer/inbox/outbox tick, 30s gatekeeper tick, & 30m full heartbeat loop
 		go func() {
 			_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+			_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), *dryRun)
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fastTicker := time.NewTicker(15 * time.Second)
 			cronTicker := time.NewTicker(30 * time.Second)
@@ -1837,7 +1843,8 @@ func main() {
 						fmt.Fprintf(os.Stderr, "hq daemon wake dispatch error: %v\n", dErr)
 					}
 					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-					if kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 {
+					chRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
+					if kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-fastTicker.C:
@@ -1849,13 +1856,14 @@ func main() {
 						fmt.Fprintf(os.Stderr, "hq daemon fast-tick dispatch error: %v\n", dErr)
 					}
 					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+					chRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
 					var syncedSidebar int
 					if !*dryRun {
 						if rep, sErr := kernel.DrainSidebarSyncQueue(vaultDir, 2*time.Second); sErr == nil && rep != nil {
 							syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
 						}
 					}
-					if len(fired) > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || syncedSidebar > 0 {
+					if len(fired) > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-cronTicker.C:
@@ -1867,6 +1875,7 @@ func main() {
 					}
 				case <-hbTicker.C:
 					_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+					_ = channels.CompactAuditLog(context.Background(), vaultDir)
 					_ = webui.SyncMarkdownConsole(vaultDir)
 				}
 			}
@@ -3883,6 +3892,7 @@ Commands:
   triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
   dispatch resolve <skill>            Resolve active core, Vault skill, or RSI overlay rules
   extension <list|lint|enable|disable|trust|doctor>  Manage companion extension packs & trust hashes
+  channel <list|status|test|pause|resume|audit|configure>  Manage Front Desk channel bridges & SHA-256 audit log
   connector <list|lint|migrate|doctor|test>  Manage modular JSON-RPC/CLI connectors & fixtures
   watch <precheck|read|query|ack>     Proactive watcher precheck, tainted read/query, and event ack
   offer stage --connector=...         Stage taint-safe outbound offers with participant_lock & /dev/fd/3

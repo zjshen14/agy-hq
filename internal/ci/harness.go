@@ -304,7 +304,7 @@ var (
 		"spaces": true, "skill": true, "skills": true, "obs": true, "rsi": true, "ci": true,
 		"watch": true, "offer": true, "brief": true, "dispatch": true,
 		"extension": true, "connector": true, "triggers": true, "sidecar": true,
-		"connector-driver": true,
+		"connector-driver": true, "channel": true,
 		// Prose words that can follow `hq` in descriptive sentences
 		"daemon_gatekeeper": true, "binary": true, "cli": true, "microkernel": true,
 	}
@@ -652,6 +652,26 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 	})
 	if !strings.Contains(credShellOut, `"decision":"deny"`) {
 		return false, "Universal Credential Vault guard failed to deny untainted shell cat on private/gmail/tokens.json"
+	}
+	chanCredOut, _ := runHook(map[string]interface{}{
+		"conversationId": "conv-worker",
+		"toolCall": map[string]interface{}{
+			"name": "read_file",
+			"args": map[string]interface{}{"Path": filepath.Join(vaultDir, "private", "channels", "acme--desk.json")},
+		},
+	})
+	if !strings.Contains(chanCredOut, `"decision":"deny"`) {
+		return false, "Universal Credential Vault guard failed to deny untainted read_file on private/channels/"
+	}
+	chanDaemonOut, _ := runHook(map[string]interface{}{
+		"conversationId": "conv-worker",
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "hq channel inbound"},
+		},
+	})
+	if !strings.Contains(chanDaemonOut, `"decision":"deny"`) {
+		return false, "Channel daemon-only gateway guard failed to deny LLM `hq channel inbound`"
 	}
 	ledgerReadOut, _ := runHook(map[string]interface{}{
 		"conversationId": "conv-worker",

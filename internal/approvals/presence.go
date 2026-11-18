@@ -197,6 +197,43 @@ func CleanupApprovalArtifacts(vaultDir, propID string) {
 	}
 	_ = os.Remove(filepath.Join(approvalAsksDir(vaultDir), propID+".json"))
 	_ = os.Remove(filepath.Join(approvalCapsDir(vaultDir), propID+".json"))
+	cleanupBridgeApprovalCaps(vaultDir, propID)
+}
+
+func cleanupBridgeApprovalCaps(vaultDir, propID string) {
+	if strings.TrimSpace(vaultDir) == "" {
+		return
+	}
+	dir := filepath.Join(vaultDir, "private", "approval_bridge_caps")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		full := filepath.Join(dir, e.Name())
+		raw, rErr := os.ReadFile(full)
+		if rErr != nil {
+			continue
+		}
+		var rec struct {
+			ProposalID string `json:"proposal_id"`
+			ExpiresAt  string `json:"expires_at"`
+		}
+		if json.Unmarshal(raw, &rec) != nil {
+			continue
+		}
+		if rec.ProposalID == propID {
+			_ = os.Remove(full)
+			continue
+		}
+		if exp, pErr := time.Parse(time.RFC3339, rec.ExpiresAt); pErr == nil && now.After(exp) {
+			_ = os.Remove(full)
+		}
+	}
 }
 
 // RecordAsk creates an AskRecord with a fresh 6-char challenge code for propID before ask_question renders.

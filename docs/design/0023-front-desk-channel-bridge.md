@@ -1,6 +1,6 @@
 # RFC-0023: Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling
 
-- **Status:** Proposed (Phase 1 — Awaiting User Review)
+- **Status:** Implemented
 - **Created:** 2026-11-17
 - **Companion Research:** [Research 18: Vendor-Neutral Front Desk Channel Bridge, Rotation Tunneling & Security Boundary Audit](../research/18_channel_bridge_front_desk_audit.md)
 - **Extends / Updates:** [RFC-0004](./0004-heartbeat-and-channels.md), [RFC-0007](./0007-front-desk-initialization-hardening.md), [RFC-0008](./0008-gchat-integration.md), [RFC-0017a](./0017a-connector-protocol-and-watcher-engine.md), [RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md), [RFC-0017d](./0017d-enterprise-extensibility-and-portability.md), [RFC-0020](./0020-proactive-ambient-synthesis-and-mobile-push.md), [RFC-0021](./0021-customizable-approval-policy-and-ux.md)

@@ -456,6 +456,38 @@ func IsSecurityLoosened(vaultDir, sourceID, targetKey, componentSHA string) (boo
 	return true, matchedJust
 }
 
+func pinPackOrSystemBinaryRef(canonPack, rawBin string) (PinnedBinary, error) {
+	rawBin = strings.TrimSpace(rawBin)
+	if rawBin == "" {
+		return PinnedBinary{}, fmt.Errorf("empty binary reference")
+	}
+	if !filepath.IsAbs(rawBin) && (strings.Contains(rawBin, "/") || strings.Contains(rawBin, "\\")) {
+		cleanRel := filepath.ToSlash(filepath.Clean(rawBin))
+		if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, "../") {
+			return PinnedBinary{}, fmt.Errorf("invalid pack-relative binary path %q", rawBin)
+		}
+		full := filepath.Join(canonPack, filepath.FromSlash(cleanRel))
+		canonFull, err := canonicalDir(full)
+		if err != nil {
+			return PinnedBinary{}, fmt.Errorf("resolve pack binary %q: %w", rawBin, err)
+		}
+		chkRel, rErr := filepath.Rel(canonPack, canonFull)
+		if rErr != nil || strings.HasPrefix(chkRel, "..") {
+			return PinnedBinary{}, fmt.Errorf("pack binary %q escapes pack root", rawBin)
+		}
+		sum, hErr := ComputeStatCachedSHA256(canonFull)
+		if hErr != nil {
+			return PinnedBinary{}, hErr
+		}
+		return PinnedBinary{
+			RawRef:       rawBin,
+			ResolvedPath: canonFull,
+			SHA256:       sum,
+		}, nil
+	}
+	return pinBinaryRef(rawBin)
+}
+
 func pinBinaryRef(rawBin string) (PinnedBinary, error) {
 	rawBin = strings.TrimSpace(rawBin)
 	if rawBin == "" {
@@ -674,6 +706,22 @@ func BuildTrustBundle(vaultDir, targetSpec, explicitPath string) (TrustBundle, e
 			}
 			tt.Binaries[sc.Precheck.Argv[0]] = pb
 		}
+	}
+	for _, cb := range manifest.Components.ChannelBridges {
+		if len(cb.Command) == 0 || strings.TrimSpace(cb.Command[0]) == "" {
+			return TrustBundle{}, fmt.Errorf("channel_bridge %q missing command[0]", cb.ID)
+		}
+		rawBin := strings.TrimSpace(cb.Command[0])
+		pb, bErr := pinPackOrSystemBinaryRef(canonPack, rawBin)
+		if bErr != nil {
+			return TrustBundle{}, fmt.Errorf("channel_bridge %q: %w", cb.ID, bErr)
+		}
+		tt.Binaries[rawBin] = pb
+		shaShort := pb.SHA256
+		if len(shaShort) > 12 {
+			shaShort = shaShort[:12]
+		}
+		lines = append(lines, fmt.Sprintf("channel_bridge %s/%s -> %s (sha256:%s)", manifest.ID, cb.ID, pb.ResolvedPath, shaShort))
 	}
 	for _, reqBin := range manifest.Requires.Bins {
 		ref := reqBin.Name
