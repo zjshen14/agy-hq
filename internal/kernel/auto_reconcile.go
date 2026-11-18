@@ -64,7 +64,8 @@ func isAutoTaskReadyToArchive(vaultDir string, t ActiveTask, ackGrace time.Durat
 }
 
 // ReconcileAutoTasks transitions stuck `active` `kind == "auto"` tasks to `archived` (or `completed` when pinned)
-// and enqueues sidebar archive sync when their bound EventIDs have completed/expired/acked without a `Stop` hook firing.
+// and enqueues sidebar archive sync when their bound EventIDs have completed/expired/acked without a `Stop` hook firing,
+// or when the Language Server reports an immediate 2-step CORTEX_STEP_TYPE_ERROR_MESSAGE executor failure.
 func ReconcileAutoTasks(vaultDir string, now time.Time, dryRun bool) ([]string, error) {
 	if now.IsZero() {
 		now = time.Now()
@@ -73,10 +74,24 @@ func ReconcileAutoTasks(vaultDir string, now time.Time, dryRun bool) ([]string, 
 	if err != nil || len(tasks) == 0 {
 		return nil, err
 	}
+	creds, hasLS := discoverLSCredentials(vaultDir)
 	nowISO := now.UTC().Format(time.RFC3339)
 	var reconciled []string
 	for _, t := range tasks {
 		ready, ackedIDs := isAutoTaskReadyToArchive(vaultDir, t, DefaultAutoAckGracePeriod, now)
+		step1ErrMsg := ""
+		sidebarErrReason := "auto_reconciled"
+		if !ready && hasLS && t.EffectiveKind() == "auto" && strings.ToLower(strings.TrimSpace(t.Status)) == "active" {
+			if convID := strings.TrimSpace(t.ConversationID); convID != "" && !hasPendingResumableApprovalForConv(vaultDir, convID) {
+				if traj, supported, tErr := inspectCascadeTrajectory(creds.BaseURL, creds.CSRFToken, convID, 2*time.Second); supported && tErr == nil {
+					if errMsg, failed := isImmediateStep1ExecutorError(traj); failed {
+						ready = true
+						step1ErrMsg = errMsg
+						sidebarErrReason = "auto_step1_error"
+					}
+				}
+			}
+		}
 		if !ready {
 			continue
 		}
@@ -85,7 +100,16 @@ func ReconcileAutoTasks(vaultDir string, now time.Time, dryRun bool) ([]string, 
 			newStatus = "completed"
 		}
 		if !dryRun {
-			if len(ackedIDs) > 0 {
+			if step1ErrMsg != "" {
+				if leasedEvs, lErr := events.ListLeasedByConversation(vaultDir, strings.TrimSpace(t.ConversationID)); lErr == nil && len(leasedEvs) > 0 {
+					leasedIDs := make([]string, 0, len(leasedEvs))
+					for _, ev := range leasedEvs {
+						leasedIDs = append(leasedIDs, ev.ID)
+					}
+					newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, leasedIDs, step1ErrMsg, isQuotaDeferralMessage(step1ErrMsg), now)
+					emitDroppedEventAlerts(vaultDir, newlyDropped, now)
+				}
+			} else if len(ackedIDs) > 0 {
 				_, _ = events.CompleteIDs(vaultDir, ackedIDs, now)
 			}
 			completedAt := t.CompletedAt
@@ -97,7 +121,9 @@ func ReconcileAutoTasks(vaultDir string, now time.Time, dryRun bool) ([]string, 
 				archivedAt = nowISO
 			}
 			summary := t.LastSummary
-			if strings.TrimSpace(summary) == "" {
+			if step1ErrMsg != "" {
+				summary = "Executor error at step 1: " + step1ErrMsg
+			} else if strings.TrimSpace(summary) == "" {
 				summary = "Auto task reconciled after event completion."
 			}
 			_ = RegisterTask(vaultDir, ActiveTask{
@@ -130,7 +156,7 @@ func ReconcileAutoTasks(vaultDir string, now time.Time, dryRun bool) ([]string, 
 					TaskSlug:        t.TaskSlug,
 					DesiredArchived: true,
 					NextRetryAt:     now.Add(3 * time.Second).UTC().Format(time.RFC3339),
-					LastError:       "auto_reconciled",
+					LastError:       sidebarErrReason,
 				}, now)
 			}
 		}

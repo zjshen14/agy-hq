@@ -751,6 +751,12 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 		updated := false
 		for i := range tasks {
 			if (inTask.TaskSlug != "" && tasks[i].TaskSlug == inTask.TaskSlug) || (inTask.ConversationID != "" && tasks[i].ConversationID == inTask.ConversationID) {
+				effKind := strings.ToLower(strings.TrimSpace(inTask.Kind))
+				if effKind == "" {
+					effKind = tasks[i].EffectiveKind()
+				}
+				isAutoReactivation := effKind == "auto" && inTask.Status == "active" &&
+					(tasks[i].Status != "active" || (inTask.ConversationID != "" && inTask.ConversationID != tasks[i].ConversationID))
 				if inTask.TaskSlug == "" {
 					inTask.TaskSlug = tasks[i].TaskSlug
 				}
@@ -779,7 +785,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				if inTask.RepoRoot == "" {
 					inTask.RepoRoot = tasks[i].RepoRoot
 				}
-				if inTask.TurnCount == 0 {
+				if inTask.TurnCount == 0 && !(isAutoReactivation && inTask.ConversationID != "" && inTask.ConversationID != tasks[i].ConversationID) {
 					inTask.TurnCount = tasks[i].TurnCount
 				}
 				if !inTask.Pinned && tasks[i].Pinned {
@@ -812,7 +818,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				if len(inTask.EventIDs) == 0 {
 					inTask.EventIDs = tasks[i].EventIDs
 				}
-				if inTask.LastSummary == "" {
+				if inTask.LastSummary == "" && !isAutoReactivation {
 					inTask.LastSummary = tasks[i].LastSummary
 				}
 				inTask.Title = SanitizeTaskTitle(inTask.Title, inTask.TaskSlug)
@@ -2601,7 +2607,6 @@ func ExtractUUID(s string) string {
 //
 // Verified Antigravity model IDs (`agy models`):
 //   - gemini-4-hydrogen-{low,medium,high,xhigh}
-//   - gemini-3.8-flash-{low,medium,high}
 //   - gemini-4-carbon-{low,medium,high}
 //   - gemini-4-argon-{low,medium,high}
 //   - claude-sonnet-5-5-{low,medium,high}
@@ -3134,7 +3139,7 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 		}
 		return "", "", false, "", fmt.Errorf("spawnTaskViaLS: Language Server credentials unavailable and no verified projectId for workspace %s (refusing unverified agentapi fallback)", workDir)
 	}
-	modelEnum, enumErr := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, modelID)
+	modelEnum, resolvedModelID, fellBack, enumErr := resolveModelEnumLive(vaultDir, creds.BaseURL, creds.CSRFToken, modelID)
 	if enumErr != nil {
 		if canFallbackSafely(true) {
 			return "", "", true, fmt.Sprintf("ResolveModelEnum(%q) failed: %v", modelID, enumErr), nil
@@ -3143,12 +3148,15 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 	}
 
 	usedModel = modelID
+	if fellBack && resolvedModelID != "" {
+		usedModel = resolvedModelID + " (fallback)"
+	}
 	reqBody := buildCascadeRequestBody(modelEnum, "", "", workDir, projectID)
 	cascadeID, err = startCascade(creds.BaseURL, creds.CSRFToken, reqBody)
 	if err != nil {
-		if isQuotaExhaustedError(err.Error()) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
+		if isQuotaExhaustedError(err.Error()) && !strings.Contains(usedModel, "flash") && !strings.Contains(usedModel, "hydrogen") {
 			fallbackModel := resolveRoutineFallbackModel(vaultDir)
-			if fbEnum, fbEnumErr := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, fallbackModel); fbEnumErr == nil {
+			if fbEnum, _, _, fbEnumErr := resolveModelEnumLive(vaultDir, creds.BaseURL, creds.CSRFToken, fallbackModel); fbEnumErr == nil {
 				fbReqBody := buildCascadeRequestBody(fbEnum, "", "", workDir, projectID)
 				if fbCascadeID, fbErr := startCascade(creds.BaseURL, creds.CSRFToken, fbReqBody); fbErr == nil {
 					cascadeID = fbCascadeID
@@ -3182,6 +3190,9 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 		}).UpdateConversationAnnotations(context.Background(), cascadeID, nil, lsConversationPatch{
 			Title: strings.TrimSpace(title),
 		}, 3*time.Second)
+	}
+	if step1Err := checkCascadeStep1Error(creds.BaseURL, creds.CSRFToken, cascadeID); step1Err != nil {
+		return cascadeID, usedModel, false, "", step1Err
 	}
 	return cascadeID, usedModel, false, "", nil
 }
@@ -3946,9 +3957,6 @@ var staticModelEnumMap = map[string]string{
 	"gemini-4-argon-high":      "MODEL_PLACEHOLDER_M417",
 	"gemini-4-argon-medium":    "MODEL_PLACEHOLDER_M418",
 	"gemini-4-argon-low":       "MODEL_PLACEHOLDER_M419",
-	"gemini-3.8-flash-high":    "MODEL_PLACEHOLDER_M318",
-	"gemini-3.8-flash-medium":  "MODEL_PLACEHOLDER_M319",
-	"gemini-3.8-flash-low":     "MODEL_PLACEHOLDER_M320",
 	"claude-opus-5-5-low":      "MODEL_PLACEHOLDER_M400",
 	"claude-opus-5-5-medium":   "MODEL_PLACEHOLDER_M401",
 	"claude-opus-5-5-high":     "MODEL_PLACEHOLDER_M402",
@@ -4424,37 +4432,167 @@ func sendUserCascadeMessage(lsBaseURL, csrfToken, cascadeID, text string, timeou
 	return nil
 }
 
-// ResolveModelEnum maps a human-readable Antigravity model ID (e.g. "claude-opus-5-5-high")
-// to its LanguageServerService Model enum string (e.g. "MODEL_PLACEHOLDER_M402") by querying
-// GetCascadeModelConfigData on the local language server with a static fallback table.
-func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
+type lsModelConfig struct {
+	ModelID      string `json:"modelId"`
+	Label        string `json:"label"`
+	ModelOrAlias struct {
+		Model string `json:"model"`
+	} `json:"modelOrAlias"`
+}
+
+func normalizeModelLabelSlug(label string) string {
+	s := strings.ToLower(strings.TrimSpace(label))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func matchLiveModelConfig(configs []lsModelConfig, candidate string) (lsModelConfig, bool) {
+	candNorm := strings.ToLower(strings.TrimSpace(candidate))
+	candDot := strings.ReplaceAll(candNorm, ".", "-")
+	for _, cfg := range configs {
+		if strings.EqualFold(strings.TrimSpace(cfg.ModelID), candNorm) {
+			return cfg, true
+		}
+	}
+	for _, cfg := range configs {
+		lblSlug := normalizeModelLabelSlug(cfg.Label)
+		if lblSlug != "" && (lblSlug == candNorm || strings.ReplaceAll(lblSlug, ".", "-") == candDot) {
+			return cfg, true
+		}
+	}
+	return lsModelConfig{}, false
+}
+
+func selectLiveFallbackModelConfig(requestedNorm string, customCandidates []string, configs []lsModelConfig, defaultOverrideModel string) (lsModelConfig, bool) {
+	if len(configs) == 0 {
+		return lsModelConfig{}, false
+	}
+	for _, cand := range customCandidates {
+		if cfg, ok := matchLiveModelConfig(configs, cand); ok {
+			return cfg, true
+		}
+	}
+	var candidates []string
+	var familyKeywords []string
+	switch {
+	case strings.Contains(requestedNorm, "carbon") || strings.Contains(requestedNorm, "argon") ||
+		strings.Contains(requestedNorm, "opus") || strings.Contains(requestedNorm, "sonnet") ||
+		strings.Contains(requestedNorm, "pro"):
+		candidates = []string{
+			"gemini-4-carbon-high",
+			"gemini-4-carbon-medium",
+			"gemini-4-argon-high",
+			"claude-opus-5-5-high",
+			"claude-sonnet-5-5-high",
+		}
+		familyKeywords = []string{"carbon", "argon", "opus", "sonnet", "pro"}
+	case strings.Contains(requestedNorm, "lite") || strings.HasSuffix(requestedNorm, "-low") || strings.Contains(requestedNorm, "flash"):
+		candidates = []string{
+			"gemini-4-hydrogen-low",
+			"gemini-4-hydrogen-medium",
+		}
+		familyKeywords = []string{"lite", "flash", "hydrogen"}
+	default:
+		candidates = []string{
+			"gemini-4-hydrogen-high",
+			"gemini-4-hydrogen-medium",
+			"gemini-4-carbon-medium",
+		}
+		familyKeywords = []string{"hydrogen", "flash", "carbon"}
+	}
+	for _, cand := range candidates {
+		if cfg, ok := matchLiveModelConfig(configs, cand); ok {
+			return cfg, true
+		}
+	}
+	for _, kw := range familyKeywords {
+		for _, cfg := range configs {
+			idLower := strings.ToLower(strings.TrimSpace(cfg.ModelID))
+			lblLower := strings.ToLower(strings.TrimSpace(cfg.Label))
+			if strings.Contains(idLower, kw) || strings.Contains(lblLower, kw) {
+				return cfg, true
+			}
+		}
+	}
+	if def := strings.TrimSpace(defaultOverrideModel); def != "" {
+		for _, cfg := range configs {
+			if strings.EqualFold(strings.TrimSpace(cfg.ModelOrAlias.Model), def) {
+				return cfg, true
+			}
+		}
+		var out lsModelConfig
+		out.ModelID = def
+		out.ModelOrAlias.Model = def
+		return out, true
+	}
+	return configs[0], true
+}
+
+func resolveModelEnumLive(vaultDir, lsAddr, csrfToken, modelID string) (modelEnum string, resolvedModelID string, fellBack bool, err error) {
 	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return "", "", false, fmt.Errorf("unknown Antigravity model ID %q", modelID)
+	}
 	if strings.HasPrefix(trimmed, "MODEL_") {
-		return trimmed, nil
+		return trimmed, trimmed, false, nil
 	}
 	normalized := strings.ToLower(trimmed)
 
 	if lsAddr != "" && csrfToken != "" {
-		url := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData", normalizeLSBaseURL(lsAddr))
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
-		if err == nil {
+		endpoint := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData", normalizeLSBaseURL(lsAddr))
+		req, reqErr := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader([]byte("{}")))
+		if reqErr == nil {
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("x-codeium-csrf-token", csrfToken)
 			client := &http.Client{Timeout: 2 * time.Second}
-			if resp, err := client.Do(req); err == nil {
+			if resp, doErr := client.Do(req); doErr == nil {
 				defer resp.Body.Close()
-				var payload struct {
-					ClientModelConfigs []struct {
-						ModelID      string `json:"modelId"`
-						ModelOrAlias struct {
-							Model string `json:"model"`
-						} `json:"modelOrAlias"`
-					} `json:"clientModelConfigs"`
-				}
-				if json.NewDecoder(resp.Body).Decode(&payload) == nil {
-					for _, cfg := range payload.ClientModelConfigs {
-						if strings.EqualFold(cfg.ModelID, normalized) && cfg.ModelOrAlias.Model != "" {
-							return cfg.ModelOrAlias.Model, nil
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					var payload struct {
+						ClientModelConfigs         []lsModelConfig `json:"clientModelConfigs"`
+						DefaultOverrideModelConfig struct {
+							ModelOrAlias struct {
+								Model string `json:"model"`
+							} `json:"modelOrAlias"`
+						} `json:"defaultOverrideModelConfig"`
+					}
+					if json.NewDecoder(resp.Body).Decode(&payload) == nil {
+						var activeConfigs []lsModelConfig
+						for _, cfg := range payload.ClientModelConfigs {
+							if strings.TrimSpace(cfg.ModelOrAlias.Model) != "" {
+								activeConfigs = append(activeConfigs, cfg)
+							}
+						}
+						if len(activeConfigs) > 0 {
+							if matched, ok := matchLiveModelConfig(activeConfigs, normalized); ok {
+								resID := strings.TrimSpace(matched.ModelID)
+								if resID == "" {
+									resID = trimmed
+								}
+								return matched.ModelOrAlias.Model, resID, false, nil
+							}
+							// Never fall back to staticModelEnumMap when live clientModelConfigs is non-empty:
+							// retired MODEL_PLACEHOLDER_* enums cause silent HTTP 200 spawns that fail at Step 1.
+							customCands := routing.CustomFallbackCandidates(vaultDir, normalized)
+							if fb, ok := selectLiveFallbackModelConfig(normalized, customCands, activeConfigs, payload.DefaultOverrideModelConfig.ModelOrAlias.Model); ok {
+								fbID := strings.TrimSpace(fb.ModelID)
+								if fbID == "" {
+									fbID = fb.ModelOrAlias.Model
+								}
+								fmt.Fprintf(os.Stderr, "[hq model] warning: model %q is absent from live Language Server clientModelConfigs; falling back to active model %q (%s)\n", modelID, fbID, fb.ModelOrAlias.Model)
+								return fb.ModelOrAlias.Model, fbID, true, nil
+							}
+							return "", "", false, fmt.Errorf("model %q is not available in live Language Server clientModelConfigs", modelID)
 						}
 					}
 				}
@@ -4463,9 +4601,159 @@ func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
 	}
 
 	if enumVal, ok := staticModelEnumMap[normalized]; ok {
-		return enumVal, nil
+		return enumVal, trimmed, false, nil
 	}
-	return "", fmt.Errorf("unknown Antigravity model ID %q", modelID)
+	return "", "", false, fmt.Errorf("unknown Antigravity model ID %q", modelID)
+}
+
+// ResolveModelEnum maps a human-readable Antigravity model ID (e.g. "claude-opus-5-5-high")
+// to its LanguageServerService Model enum string (e.g. "MODEL_PLACEHOLDER_M402") by querying
+// GetCascadeModelConfigData on the local language server, falling back to an active live config
+// when the LS returns a non-empty list and using staticModelEnumMap only when LS is unreachable.
+func ResolveModelEnum(lsAddr, csrfToken, modelID string) (string, error) {
+	enumVal, _, _, err := resolveModelEnumLive("", lsAddr, csrfToken, modelID)
+	return enumVal, err
+}
+
+type lsCascadeStepError struct {
+	Message          string `json:"message,omitempty"`
+	UserErrorMessage string `json:"userErrorMessage,omitempty"`
+	ShortError       string `json:"shortError,omitempty"`
+	FullError        string `json:"fullError,omitempty"`
+}
+
+func (e *lsCascadeStepError) bestText() string {
+	if e == nil {
+		return ""
+	}
+	for _, s := range []string{e.ShortError, e.UserErrorMessage, e.Message, e.FullError} {
+		if t := strings.TrimSpace(s); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+type lsCascadeStep struct {
+	Type         string `json:"type"`
+	Status       string `json:"status"`
+	ErrorMessage *struct {
+		Message          string              `json:"message,omitempty"`
+		UserErrorMessage string              `json:"userErrorMessage,omitempty"`
+		ShortError       string              `json:"shortError,omitempty"`
+		FullError        string              `json:"fullError,omitempty"`
+		Error            *lsCascadeStepError `json:"error,omitempty"`
+	} `json:"errorMessage,omitempty"`
+	Error *lsCascadeStepError `json:"error,omitempty"`
+}
+
+func (s lsCascadeStep) extractErrorMessage() string {
+	if s.ErrorMessage != nil {
+		if msg := s.ErrorMessage.Error.bestText(); msg != "" {
+			return msg
+		}
+		for _, cand := range []string{s.ErrorMessage.ShortError, s.ErrorMessage.UserErrorMessage, s.ErrorMessage.Message, s.ErrorMessage.FullError} {
+			if t := strings.TrimSpace(cand); t != "" {
+				return t
+			}
+		}
+	}
+	if msg := s.Error.bestText(); msg != "" {
+		return msg
+	}
+	return "CORTEX_STEP_TYPE_ERROR_MESSAGE at step 1"
+}
+
+type lsGetCascadeTrajectoryResponse struct {
+	Status        string `json:"status"`
+	NumTotalSteps int    `json:"numTotalSteps"`
+	Trajectory    struct {
+		Steps []lsCascadeStep `json:"steps"`
+	} `json:"trajectory"`
+}
+
+func inspectCascadeTrajectory(lsBaseURL, csrfToken, cascadeID string, timeout time.Duration) (respData *lsGetCascadeTrajectoryResponse, supported bool, err error) {
+	if strings.TrimSpace(lsBaseURL) == "" || strings.TrimSpace(csrfToken) == "" || strings.TrimSpace(cascadeID) == "" {
+		return nil, false, nil
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	endpoint := fmt.Sprintf("%s/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory", normalizeLSBaseURL(lsBaseURL))
+	bodyBytes, err := json.Marshal(map[string]string{"cascadeId": cascadeID})
+	if err != nil {
+		return nil, false, err
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("x-codeium-csrf-token", csrfToken)
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		return nil, false, nil
+	}
+	rawBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, true, fmt.Errorf("GetCascadeTrajectory HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rawBytes)))
+	}
+	var parsed lsGetCascadeTrajectoryResponse
+	if decErr := json.Unmarshal(rawBytes, &parsed); decErr != nil {
+		return nil, true, decErr
+	}
+	return &parsed, true, nil
+}
+
+func isImmediateStep1ExecutorError(resp *lsGetCascadeTrajectoryResponse) (string, bool) {
+	if resp == nil {
+		return "", false
+	}
+	st := strings.TrimSpace(resp.Status)
+	if st != "" && st != "CASCADE_RUN_STATUS_IDLE" && st != "CASCADE_RUN_STATUS_UNSPECIFIED" {
+		return "", false
+	}
+	steps := resp.Trajectory.Steps
+	if len(steps) != 2 {
+		return "", false
+	}
+	if steps[0].Type != "" && steps[0].Type != "CORTEX_STEP_TYPE_USER_INPUT" {
+		return "", false
+	}
+	if steps[1].Type != "CORTEX_STEP_TYPE_ERROR_MESSAGE" {
+		return "", false
+	}
+	return steps[1].extractErrorMessage(), true
+}
+
+func checkCascadeStep1Error(lsBaseURL, csrfToken, cascadeID string) error {
+	const maxChecks = 4
+	const pollDelay = 120 * time.Millisecond
+	for attempt := 0; attempt < maxChecks; attempt++ {
+		if attempt > 0 {
+			time.Sleep(pollDelay)
+		}
+		traj, supported, err := inspectCascadeTrajectory(lsBaseURL, csrfToken, cascadeID, 2*time.Second)
+		if !supported || err != nil || traj == nil {
+			return nil
+		}
+		if errMsg, failed := isImmediateStep1ExecutorError(traj); failed {
+			return fmt.Errorf("cascade %s failed at step 1: %s", cascadeID, errMsg)
+		}
+		st := strings.TrimSpace(traj.Status)
+		if st == "CASCADE_RUN_STATUS_RUNNING" || len(traj.Trajectory.Steps) >= 2 {
+			return nil
+		}
+	}
+	return nil
 }
 
 // SpawnSubagent launches a nested child subagent conversation under parentConvID on any supported
@@ -4518,9 +4806,12 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		return "", fmt.Errorf("ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN are required to spawn a live subagent")
 	}
 
-	modelEnum, err := ResolveModelEnum(creds.BaseURL, creds.CSRFToken, modelID)
+	modelEnum, resolvedModelID, fellBack, err := resolveModelEnumLive(vaultDir, creds.BaseURL, creds.CSRFToken, modelID)
 	if err != nil {
 		return "", err
+	}
+	if fellBack && resolvedModelID != "" {
+		modelID = resolvedModelID + " (fallback)"
 	}
 
 	candProjID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
@@ -4574,6 +4865,19 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		msgCmd := exec.Command("agentapi", "send-message", "--title=Message from "+parentConvID, cascadeID, fullPrompt)
 		configureSpawnCommandWithTarget(msgCmd, vaultDir, "manual-spawn:subagent", workspaceDir, candProjID)
 		_ = msgCmd.Run()
+	}
+	if step1Err := checkCascadeStep1Error(creds.BaseURL, creds.CSRFToken, cascadeID); step1Err != nil {
+		if isFrontDesk {
+			_ = CancelTasks(vaultDir, []string{cascadeID}, step1Err.Error())
+		}
+		_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
+			ConversationID:  cascadeID,
+			TaskSlug:        slug,
+			DesiredArchived: true,
+			NextRetryAt:     time.Now().Add(3 * time.Second).UTC().Format(time.RFC3339),
+			LastError:       "subagent_step1_error",
+		}, time.Now())
+		return "", step1Err
 	}
 
 	output := fmt.Sprintf("Spawned subagent %s (parent=%s, model=%s, role=%q)", cascadeID, parentConvID, modelID, role)

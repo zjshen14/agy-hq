@@ -79,16 +79,20 @@ func removeTaskBySlug(vaultDir, slug string) {
 	RemoveUnboundTaskBySlug(vaultDir, slug)
 }
 
-func isQuotaDeferralError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
+func isQuotaDeferralMessage(msg string) bool {
+	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "quota") ||
 		strings.Contains(msg, "budget") ||
 		strings.Contains(msg, "circuit breaker") ||
 		strings.Contains(msg, "429") ||
 		strings.Contains(msg, "resource_exhausted")
+}
+
+func isQuotaDeferralError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isQuotaDeferralMessage(err.Error())
 }
 
 func batchHeadEvent(batch events.LeasedBatch) events.Event {
@@ -313,6 +317,17 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		if spawnErr != nil {
 			if !dryRun && !hadPrev && head.Source != "channel_inbound" {
 				removeTaskBySlug(vaultDir, autoSlug)
+			}
+			if !dryRun {
+				if failedConvID := ExtractUUID(out); failedConvID != "" && (!hadPrev || prevTask.ConversationID != failedConvID) {
+					_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
+						ConversationID:  failedConvID,
+						TaskSlug:        autoSlug,
+						DesiredArchived: true,
+						NextRetryAt:     now.Add(3 * time.Second).UTC().Format(time.RFC3339),
+						LastError:       "spawn_step1_error",
+					}, now)
+				}
 			}
 			newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, spawnErr.Error(), isQuotaDeferralError(spawnErr), now)
 			emitDroppedEventAlerts(vaultDir, newlyDropped, now)

@@ -68,4 +68,19 @@ func TestResolvePrecedenceVaultPackAndBuiltin(t *testing.T) {
 	if r3.ModelID != "claude-opus-5-5-high" || r3.Source != "explicit" {
 		t.Fatalf("unexpected explicit override resolution: %+v", r3)
 	}
+
+	// 5. Coarse alias (`flash_lite`, `flash`, `pro`) honors customized Vault/Pack tier overrides,
+	//    and suffixless custom explicit model IDs are preserved verbatim without appending `-high`.
+	rCoarseQuick := Resolve(vaultDir, Request{ExplicitModel: "flash_lite"})
+	if rCoarseQuick.ModelID != "gemini-3.8-flash-low" || rCoarseQuick.Source != "vault" {
+		t.Fatalf("expected flash_lite alias to honor customized vault quick tier, got: %+v", rCoarseQuick)
+	}
+	rCustomVerbatim := Resolve(vaultDir, Request{ExplicitModel: "acme-custom-fast-v2"})
+	if rCustomVerbatim.ModelID != "acme-custom-fast-v2" {
+		t.Fatalf("expected suffixless custom model ID preserved verbatim, got: %+v", rCustomVerbatim)
+	}
+	cands := CustomFallbackCandidates(vaultDir, "retired-low-model")
+	if len(cands) == 0 || cands[0] != "gemini-3.8-flash-low" {
+		t.Fatalf("expected CustomFallbackCandidates to surface customized vault quick model first, got: %v", cands)
+	}
 }

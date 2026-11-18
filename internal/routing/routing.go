@@ -195,29 +195,39 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 		depth = inferredDepth
 	}
 
+	isMultiDepthBase := model == "gemini-4-hydrogen" || model == "gemini-4-carbon"
 	switch model {
 	case "hydrogen":
 		model = "gemini-4-hydrogen"
 		subagentModel = "flash"
+		isMultiDepthBase = true
 	case "flash":
 		model = "gemini-4-hydrogen"
 		subagentModel = "flash"
+		isMultiDepthBase = true
 	case "flash_lite", "flash-lite":
 		model = "gemini-4-hydrogen"
 		depth = "low"
 		subagentModel = "flash_lite"
+		isMultiDepthBase = true
 	case "carbon":
 		model = "gemini-4-carbon"
 		subagentModel = "pro"
+		isMultiDepthBase = true
 	case "argon", "pro":
 		model = "gemini-4-carbon"
 		subagentModel = "pro"
+		isMultiDepthBase = true
 	case "sonnet", "claude-sonnet":
 		model = "claude-sonnet-5-5"
 		subagentModel = "pro"
+		isMultiDepthBase = true
 	case "opus", "claude-opus":
 		model = "claude-opus-5-5"
 		subagentModel = "pro"
+		isMultiDepthBase = true
+	case "gemini-4-argon", "claude-sonnet-5-5", "claude-opus-5-5", "gemini-3.8-flash":
+		isMultiDepthBase = true
 	}
 
 	if strings.HasSuffix(model, "-low") || strings.HasSuffix(model, "-medium") || strings.HasSuffix(model, "-high") || strings.HasSuffix(model, "-xhigh") {
@@ -238,6 +248,10 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 				tier = "standard"
 			}
 		}
+		return model, tier, subagentModel
+	}
+	if !isMultiDepthBase && strings.TrimSpace(explicitDepth) == "" {
+		subagentModel = inferSubagentAlias(model, tier)
 		return model, tier, subagentModel
 	}
 	return fmt.Sprintf("%s-%s", model, depth), tier, subagentModel
@@ -422,8 +436,90 @@ func resolveOptedInPackModel(vaultDir, logical string) (string, string) {
 	return "", ""
 }
 
+func coarseAliasLogicalTier(explicitModel, explicitTier string) (string, bool) {
+	normT := NormalizeLogicalTier(explicitTier)
+	switch strings.ToLower(strings.TrimSpace(explicitModel)) {
+	case "flash_lite", "flash-lite":
+		return "quick", true
+	case "flash":
+		if normT == "routine" || normT == "heavy" || normT == "standard" {
+			return normT, true
+		}
+		return "standard", true
+	case "pro":
+		if normT == "deep_routine" || normT == "deep" {
+			return normT, true
+		}
+		return "deep", true
+	default:
+		return "", false
+	}
+}
+
+// CustomFallbackCandidates returns ordered customized model IDs configured in <vault>/config.yaml
+// and opted-in trusted extension packs (<vault>/extensions.json) for requestedModel so live
+// Language Server fallback prefers user/pack overrides ahead of built-in defaults.
+func CustomFallbackCandidates(vaultDir, requestedModel string) []string {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	vaultCfg, hasVaultCfg := LoadVaultRouting(vaultDir)
+	reqNorm := strings.ToLower(strings.TrimSpace(requestedModel))
+
+	var tierOrder []string
+	switch {
+	case strings.Contains(reqNorm, "carbon") || strings.Contains(reqNorm, "argon") ||
+		strings.Contains(reqNorm, "opus") || strings.Contains(reqNorm, "sonnet") ||
+		strings.Contains(reqNorm, "pro"):
+		tierOrder = []string{"deep", "deep_routine", "standard", "routine", "quick"}
+	case strings.Contains(reqNorm, "lite") || strings.Contains(reqNorm, "-low") || strings.Contains(reqNorm, "flash"):
+		tierOrder = []string{"quick", "routine", "standard"}
+	default:
+		tierOrder = []string{"standard", "routine", "quick", "deep_routine"}
+	}
+
+	seen := make(map[string]bool)
+	var out []string
+	add := func(cand string) {
+		c := strings.TrimSpace(cand)
+		if c == "" || strings.EqualFold(c, reqNorm) {
+			return
+		}
+		k := strings.ToLower(c)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, c)
+	}
+
+	for _, t := range tierOrder {
+		packM, _ := resolveOptedInPackModel(vaultDir, t)
+		if hasVaultCfg {
+			if target, ok := vaultCfg.Tiers[t]; ok && strings.TrimSpace(target.Model) != "" {
+				rawV := strings.TrimSpace(target.Model)
+				if rawV != builtinDefaultModelForLogical(t) {
+					add(rawV)
+				}
+			}
+		}
+		if packM != "" && packM != builtinDefaultModelForLogical(t) {
+			add(packM)
+		}
+	}
+	if hasVaultCfg {
+		if fb := strings.TrimSpace(vaultCfg.FallbackOn429); fb != "" && fb != builtinDefaultModelForLogical("routine") {
+			add(fb)
+		}
+		if fd := strings.TrimSpace(vaultCfg.FrontDeskModel); fd != "" && fd != builtinDefaultModelForLogical("routine") {
+			add(fd)
+		}
+	}
+	return out
+}
+
 // Resolve computes the effective model and tier honoring:
-// 1. Explicit caller model / natural-language prompt model hint
+// 1. Explicit caller model / natural-language prompt model hint (consulting customized Vault/Pack tiers first on coarse aliases flash_lite/flash/pro)
 // 2. Customized <vault>/config.yaml routing.tiers.<logicalTier>
 // 3. Vault-opted-in & trusted extension pack routing_defaults (<vault>/extensions.json)
 // 4. Unmodified template <vault>/config.yaml or built-in ResolveBuiltin fallback
@@ -438,6 +534,41 @@ func Resolve(vaultDir string, req Request) Result {
 
 	vaultCfg, hasVaultCfg := LoadVaultRouting(vaultDir)
 	fallback := vaultCfg.FallbackOn429
+
+	if coarseLogical, isCoarse := coarseAliasLogicalTier(explicitM, req.ExplicitTier); isCoarse {
+		packCoarse, packCoarseName := resolveOptedInPackModel(vaultDir, coarseLogical)
+		if hasVaultCfg {
+			if target, ok := vaultCfg.Tiers[coarseLogical]; ok && strings.TrimSpace(target.Model) != "" {
+				rawVaultModel := strings.TrimSpace(target.Model)
+				if rawVaultModel != builtinDefaultModelForLogical(coarseLogical) {
+					m := applyExplicitDepth(rawVaultModel, req.ExplicitDepth)
+					sub := strings.TrimSpace(target.SubagentModel)
+					if sub == "" {
+						sub = inferSubagentAlias(m, coarseLogical)
+					}
+					return Result{
+						ModelID:       m,
+						CanonicalTier: canonicalBucketForLogical(coarseLogical),
+						LogicalTier:   coarseLogical,
+						SubagentModel: sub,
+						FallbackModel: fallback,
+						Source:        "vault",
+					}
+				}
+			}
+		}
+		if packCoarse != "" {
+			m := applyExplicitDepth(packCoarse, req.ExplicitDepth)
+			return Result{
+				ModelID:       m,
+				CanonicalTier: canonicalBucketForLogical(coarseLogical),
+				LogicalTier:   coarseLogical,
+				SubagentModel: inferSubagentAlias(m, coarseLogical),
+				FallbackModel: fallback,
+				Source:        "pack:" + packCoarseName,
+			}
+		}
+	}
 
 	if hasHint {
 		m, cTier, sub := ResolveBuiltin(req.Prompt, req.ExplicitModel, req.ExplicitDepth, req.ExplicitTier)
