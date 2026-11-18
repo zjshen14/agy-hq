@@ -336,3 +336,33 @@ func TestIndexSkipRedundantRewriteAndDashboardSummaryBounds(t *testing.T) {
 		t.Fatalf("expected TaskBadges scoped to hot tasks + Front Desk (<=5), got %d", len(sum.TaskBadges))
 	}
 }
+
+func TestParseTranscriptStreamingMultiTurn(t *testing.T) {
+	brainDir := t.TempDir()
+	var lines []string
+	for turn := 0; turn < 50; turn++ {
+		tsUser := time.Date(2026, 11, 17, 10, turn, 0, 0, time.UTC).Format(time.RFC3339)
+		tsPlan := time.Date(2026, 11, 17, 10, turn, 2, 0, time.UTC).Format(time.RFC3339)
+		lines = append(lines,
+			fmt.Sprintf(`{"step_index":%d,"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","created_at":%q,"content":"turn %d prompt"}`, turn*2, tsUser, turn),
+			fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","created_at":%q,"token_usage":{"input_tokens":100,"cache_read_tokens":400,"output_tokens":50},"tool_calls":[{"id":"c1","name":"read_file","args":{"Path":"/tmp/a"}}]}`, turn*2+1, tsPlan),
+		)
+	}
+	tPath := writeTranscriptFixture(t, brainDir, "stream-conv-1", lines)
+	cm, err := ParseTranscriptFile("stream-conv-1", tPath, "gemini-4-hydrogen-high", "standard")
+	if err != nil {
+		t.Fatalf("ParseTranscriptFile: %v", err)
+	}
+	if len(cm.Turns) != 50 {
+		t.Fatalf("expected 50 turns, got %d", len(cm.Turns))
+	}
+	if cm.Self.StepCount != 100 || cm.Self.PlannerSteps != 50 {
+		t.Fatalf("unexpected step/planner counts: %+v", cm.Self)
+	}
+	if cm.Self.InputTokens != 5000 || cm.Self.CacheReadTokens != 20000 || cm.Self.OutputTokens != 2500 {
+		t.Fatalf("unexpected token rollup: %+v", cm.Self)
+	}
+	if cm.CurrentContextTokens != 500 {
+		t.Fatalf("expected CurrentContextTokens=500, got %d", cm.CurrentContextTokens)
+	}
+}

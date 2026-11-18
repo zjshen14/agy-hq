@@ -151,23 +151,6 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 	}
 	defer f.Close()
 
-	var steps []rawStep
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 4*1024*1024)
-	for scanner.Scan() {
-		var st rawStep
-		if json.Unmarshal(scanner.Bytes(), &st) != nil {
-			continue
-		}
-		normalizeRawStep(&st)
-		steps = append(steps, st)
-	}
-
-	if len(steps) == 0 {
-		return cm, nil
-	}
-
 	var turns []TurnMetrics
 	var curTurn *TurnMetrics
 	var curToolSet map[string]bool
@@ -226,7 +209,20 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 		curToolSet = make(map[string]bool)
 	}
 
-	for i, st := range steps {
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+	stepCount := 0
+	prevCreatedAt := ""
+	for scanner.Scan() {
+		var st rawStep
+		if json.Unmarshal(scanner.Bytes(), &st) != nil {
+			continue
+		}
+		normalizeRawStep(&st)
+		i := stepCount
+		stepCount++
+
 		if cm.StartedAt == "" && st.CreatedAt != "" {
 			cm.StartedAt = st.CreatedAt
 		}
@@ -246,11 +242,11 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			}
 			startTurn(i, st.CreatedAt, trig, preview)
 		} else if st.Type == "USER_INPUT" && curTurn.PlannerSteps > 0 {
-			finishTurn(i-1, steps[i-1].CreatedAt)
+			finishTurn(i-1, prevCreatedAt)
 			startTurn(i, st.CreatedAt, "user", cleanPromptPreview(st.Content))
 			lastStepTime = time.Time{}
 		} else if st.Type == "SYSTEM_MESSAGE" && st.Source == "SYSTEM" && curTurn.PlannerSteps > 0 {
-			finishTurn(i-1, steps[i-1].CreatedAt)
+			finishTurn(i-1, prevCreatedAt)
 			startTurn(i, st.CreatedAt, classifySystemTrigger(st.Content), cleanPromptPreview(st.Content))
 			lastStepTime = time.Time{}
 		}
@@ -391,14 +387,18 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 		if isStepError(st.Status, st.Content, lastPlannerHadTools, lastPlannerHadRunCmd) {
 			curTurn.ToolErrorCount++
 		}
+		prevCreatedAt = st.CreatedAt
 	}
 
+	if stepCount == 0 {
+		return cm, nil
+	}
 	if curTurn != nil {
-		finishTurn(len(steps)-1, steps[len(steps)-1].CreatedAt)
+		finishTurn(stepCount-1, prevCreatedAt)
 	}
 
 	cm.Turns = turns
-	cm.Self = RollupTurns(turns, len(steps), cm.Model, cm.Tier)
+	cm.Self = RollupTurns(turns, stepCount, cm.Model, cm.Tier)
 	cm.Tree = cm.Self
 	return cm, nil
 }

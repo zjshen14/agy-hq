@@ -663,7 +663,7 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 		}
 		obsMemByV[cleanVault] = mem
 		hasMem = false // force at least one DAG/stat verification pass after disk load
-	} else if !testing.Testing() && now.Sub(mem.lastCheckedAt) < 2*time.Second && mem.metaStamps == metaStamps {
+	} else if !testing.Testing() && now.Sub(mem.lastCheckedAt) < 10*time.Second && mem.metaStamps == metaStamps {
 		return shallowCopyObsIndex(mem.idx), nil
 	}
 

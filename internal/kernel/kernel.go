@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
@@ -2133,6 +2134,19 @@ func parseGenericCronLaunchContent(content string) (taskID, cronExpr, prompt str
 // ReconcileFrontDeskFromTranscript inspects the active Front Desk conversation's transcript.jsonl
 // (if present on disk) to backfill ConsolePinned, harness ArmedTriggers (with TaskIDs), AdHocCrons,
 // and KilledTaskIDs.
+type fdTranscriptStamp struct {
+	transcriptPath string
+	tSize          int64
+	tModNano       int64
+	fdSize         int64
+	fdModNano      int64
+}
+
+var (
+	fdReconcileMu    sync.Mutex
+	fdReconcileCache = make(map[string]fdTranscriptStamp)
+)
+
 func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 	fd, ok := GetFrontDesk(vaultDir)
 	if !ok || fd.ConversationID == "" {
@@ -2142,6 +2156,27 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 		transcriptPath = filepath.Join(fd.ArtifactDir, ".system_generated", "logs", "transcript.jsonl")
 	}
 	if transcriptPath == "" {
+		return false
+	}
+	tInfo, tErr := os.Stat(transcriptPath)
+	if tErr != nil {
+		return false
+	}
+	fdInfo, _ := os.Stat(frontDeskPath(vaultDir))
+	curStamp := fdTranscriptStamp{
+		transcriptPath: transcriptPath,
+		tSize:          tInfo.Size(),
+		tModNano:       tInfo.ModTime().UnixNano(),
+	}
+	if fdInfo != nil {
+		curStamp.fdSize = fdInfo.Size()
+		curStamp.fdModNano = fdInfo.ModTime().UnixNano()
+	}
+	cacheKey := filepath.Clean(vaultDir)
+	fdReconcileMu.Lock()
+	prevStamp, hasPrev := fdReconcileCache[cacheKey]
+	fdReconcileMu.Unlock()
+	if hasPrev && prevStamp == curStamp {
 		return false
 	}
 	f, err := os.Open(transcriptPath)
@@ -2344,7 +2379,14 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 	if changed {
 		fd.UpdatedAt = time.Now().Format(time.RFC3339)
 		_ = saveFrontDeskLease(vaultDir, fd)
+		if fdInfoAfter, err := os.Stat(frontDeskPath(vaultDir)); err == nil {
+			curStamp.fdSize = fdInfoAfter.Size()
+			curStamp.fdModNano = fdInfoAfter.ModTime().UnixNano()
+		}
 	}
+	fdReconcileMu.Lock()
+	fdReconcileCache[cacheKey] = curStamp
+	fdReconcileMu.Unlock()
 	return changed
 }
 

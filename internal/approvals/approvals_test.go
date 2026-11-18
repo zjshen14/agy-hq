@@ -277,3 +277,45 @@ func TestHumanPresenceProofIdempotencySupersedeAndHashV2(t *testing.T) {
 		t.Fatalf("expected HashVersion 2 to detect TargetAccount tampering")
 	}
 }
+
+func TestSanitizedApprovalEnvPreservesPluginShimAndTimesOutHungCmd(t *testing.T) {
+	vaultDir := t.TempDir()
+	shimDir := t.TempDir()
+	t.Setenv("ANTIGRAVITY_PLUGIN_SHIM_DIR", shimDir)
+	t.Setenv("ANTIGRAVITY_CREDENTIAL_SCOPE", "scope-test-123")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "secret-csrf-token")
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:9999")
+
+	envJoined := strings.Join(SanitizedApprovalEnv(vaultDir), "\n")
+	if !strings.Contains(envJoined, "ANTIGRAVITY_PLUGIN_SHIM_DIR="+shimDir) {
+		t.Fatalf("expected SanitizedApprovalEnv to preserve ANTIGRAVITY_PLUGIN_SHIM_DIR, got:\n%s", envJoined)
+	}
+	if !strings.Contains(envJoined, "ANTIGRAVITY_CREDENTIAL_SCOPE=scope-test-123") {
+		t.Fatalf("expected SanitizedApprovalEnv to preserve ANTIGRAVITY_CREDENTIAL_SCOPE, got:\n%s", envJoined)
+	}
+	if strings.Contains(envJoined, "ANTIGRAVITY_CSRF_TOKEN=") || strings.Contains(envJoined, "ANTIGRAVITY_LS_ADDRESS=") {
+		t.Fatalf("SanitizedApprovalEnv leaked sensitive tokens:\n%s", envJoined)
+	}
+
+	origTimeout := defaultApprovalExecTimeout
+	defaultApprovalExecTimeout = 150 * time.Millisecond
+	defer func() { defaultApprovalExecTimeout = origTimeout }()
+
+	pHung, err := CreateWithOptions(vaultDir, CreateOptions{
+		ActionType:  "external_action",
+		Summary:     "Hung command timeout test",
+		CommandArgv: []string{"/bin/sleep", "5"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions: %v", err)
+	}
+	start := time.Now()
+	_, err = ApproveProposal(vaultDir, pHung.ID, pHung.SHA256[:12])
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error from hung command, got err=%v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("expected hung command to be killed promptly, took %s", elapsed)
+	}
+}

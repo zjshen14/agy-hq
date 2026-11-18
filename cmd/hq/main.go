@@ -1719,7 +1719,7 @@ func main() {
 			os.Exit(1)
 		}
 		if strings.TrimSpace(os.Getenv("GOMEMLIMIT")) == "" {
-			debug.SetMemoryLimit(512 << 20)
+			debug.SetMemoryLimit(256 << 20)
 		}
 
 		if err := kernel.RecordDaemonStart(vaultDir, *addr); err != nil {

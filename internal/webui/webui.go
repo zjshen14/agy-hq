@@ -924,7 +924,7 @@ func loadStateCached(vaultDir string) DashboardState {
 		stateCacheMu.Lock()
 		slot.state = computed
 		slot.fingerprint = postFP
-		slot.expiresAt = time.Now().Add(2 * time.Second)
+		slot.expiresAt = time.Now().Add(15 * time.Second)
 		slot.inflight = nil
 		close(ch)
 		stateCacheMu.Unlock()

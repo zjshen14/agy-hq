@@ -2,6 +2,7 @@ package approvals
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -25,6 +26,10 @@ import (
 const DefaultProposalTTL = 24 * time.Hour
 
 const DefaultRejectReason = "Rejected by user"
+
+// defaultApprovalExecTimeout bounds deterministic proposal execution so a stalled
+// external CLI cannot hang `hq approve` indefinitely.
+var defaultApprovalExecTimeout = 120 * time.Second
 
 var (
 	reValidProposalID  = regexp.MustCompile(`^prop-[a-z0-9][a-z0-9\-]{3,63}$`)
@@ -643,6 +648,7 @@ func SanitizedApprovalEnv(vaultDir string) []string {
 		"HQ_GCHAT_MOCK_DIR=",
 		"AGY_ACCOUNT=",
 		"ANTIGRAVITY_CREDENTIAL_SCOPE=",
+		"ANTIGRAVITY_PLUGIN_SHIM_DIR=",
 	}
 	var env []string
 	for _, kv := range os.Environ() {
@@ -786,6 +792,9 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 		}
 	}
 
+	execCtx, cancelExec := context.WithTimeout(context.Background(), defaultApprovalExecTimeout)
+	defer cancelExec()
+
 	var cmd *exec.Cmd
 	var pipeReader *os.File
 	if len(prop.CommandArgv) > 0 && strings.TrimSpace(prop.CommandArgv[0]) != "" {
@@ -805,12 +814,12 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 				argv[i] = strings.ReplaceAll(argv[i], "{{payload_file}}", "/dev/fd/3")
 			}
 		}
-		cmd = exec.Command(argv[0], argv[1:]...)
+		cmd = exec.CommandContext(execCtx, argv[0], argv[1:]...)
 		if pipeReader != nil {
 			cmd.ExtraFiles = []*os.File{pipeReader}
 		}
 	} else {
-		cmd = exec.Command("sh", "-c", prop.Command)
+		cmd = exec.CommandContext(execCtx, "sh", "-c", prop.Command)
 	}
 	if prop.WorkDir != "" {
 		cmd.Dir = prop.WorkDir
@@ -818,6 +827,9 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	cmd.Env = SanitizedApprovalEnv(vaultDir)
 
 	outBytes, execErr := cmd.CombinedOutput()
+	if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+		execErr = fmt.Errorf("command timed out after %s: %w", defaultApprovalExecTimeout, execCtx.Err())
+	}
 	if pipeReader != nil {
 		_ = pipeReader.Close()
 	}
