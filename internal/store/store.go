@@ -21,15 +21,18 @@ import (
 type Rank int
 
 const (
-	RankExtensions Rank = 10 // <vault>/extensions.json & <vault>/private/trust.json
-	RankTriggerCur Rank = 20 // <vault>/memory/trigger_cursors.json
-	RankWatcher    Rank = 30 // <vault>/memory/watchers/<id>/<acct>.json
-	RankTimers     Rank = 35 // <vault>/memory/timers.json (EvaluateDue -> events.Enqueue)
-	RankEvents     Rank = 40 // <vault>/memory/events.json
-	RankGoals      Rank = 50 // <vault>/memory/goals.json
-	RankOutbox     Rank = 60 // <vault>/memory/outbox/items.jsonl
-	RankChannels   Rank = 65 // <vault>/memory/channels/<bridge>.json
-	RankTaint      Rank = 70 // <vault>/private/taint/*.json (leaf store)
+	RankExtensions    Rank = 10 // <vault>/extensions.json & <vault>/private/trust.json
+	RankTriggerCur    Rank = 20 // <vault>/memory/trigger_cursors.json
+	RankWatcher       Rank = 30 // <vault>/memory/watchers/<id>/<acct>.json
+	RankTimers        Rank = 35 // <vault>/memory/timers.json (EvaluateDue -> events.Enqueue)
+	RankEvents        Rank = 40 // <vault>/memory/events.json
+	RankGoals         Rank = 50 // <vault>/memory/goals.json
+	RankOutbox        Rank = 60 // <vault>/memory/outbox/items.jsonl
+	RankChannels      Rank = 65 // <vault>/memory/channels/<bridge>.json
+	RankTaint         Rank = 70 // <vault>/private/taint/*.json
+	RankTasks         Rank = 75 // <vault>/memory/tasks.json & tasks_archive.jsonl
+	RankSubagentQueue Rank = 80 // <vault>/memory/pending_*_subagents.json & nested_conversations.json
+	RankQuota         Rank = 85 // <vault>/memory/quota*.json (leaf store)
 )
 
 // ErrLockOrderViolation is returned (or panicked in tests) when a nested store call

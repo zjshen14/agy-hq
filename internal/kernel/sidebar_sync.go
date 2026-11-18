@@ -1360,7 +1360,7 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 
 	var toArchive []SidebarCandidate
 	var toUnarchive []SidebarCandidate
-	hotMutated := false
+	syncedArchivedByConv := make(map[string]bool)
 	markHotSynced := func(cid string, archived bool) {
 		if opts.DryRun {
 			return
@@ -1369,7 +1369,7 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 			if hotTasks[idx].SidebarArchived != archived || hotTasks[idx].SidebarSyncedAt == "" {
 				hotTasks[idx].SidebarArchived = archived
 				hotTasks[idx].SidebarSyncedAt = nowUTC
-				hotMutated = true
+				syncedArchivedByConv[cid] = archived
 			}
 		}
 	}
@@ -1542,10 +1542,21 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 	applyChunks(toArchive, true)
 	applyChunks(toUnarchive, false)
 
-	if hotMutated {
-		if data, mErr := json.MarshalIndent(hotTasks, "", "  "); mErr == nil {
-			_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
-		}
+	if len(syncedArchivedByConv) > 0 {
+		_ = UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+			changed := false
+			for i := range tasks {
+				cid := normalizeUUID(tasks[i].ConversationID)
+				if archived, ok := syncedArchivedByConv[cid]; ok {
+					if tasks[i].SidebarArchived != archived || tasks[i].SidebarSyncedAt == "" {
+						tasks[i].SidebarArchived = archived
+						tasks[i].SidebarSyncedAt = nowUTC
+						changed = true
+					}
+				}
+			}
+			return tasks, changed, nil
+		})
 	}
 	if queueMutated {
 		sidebarQueueMu.Lock()

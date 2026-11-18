@@ -2,12 +2,14 @@ package kernel
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -463,5 +465,108 @@ func TestProjectRegistryFastPathAndCacheInvalidation(t *testing.T) {
 	writeProjectRegistryFixture(t, cfgDir, "proj-second-2", wsSecond)
 	if resolvedSecond, _, _ := ResolveVerifiedWorkspaceProjectID(vaultDir, wsSecond, ""); resolvedSecond != "proj-second-2" {
 		t.Fatalf("expected cache invalidation on new project file to return proj-second-2, got %q", resolvedSecond)
+	}
+}
+
+func TestSpawnSubagentWorkspaceProjectVerificationAndConcurrentTaskLocking(t *testing.T) {
+	wsParent := t.TempDir()
+	wsUnregistered := t.TempDir()
+	wsRegistered := t.TempDir()
+	vaultDir := filepath.Join(wsParent, "local")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := t.TempDir()
+	t.Setenv("HQ_CONFIG_DIR", cfgDir)
+	writeProjectRegistryFixture(t, cfgDir, "proj-parent-1", wsParent)
+	writeProjectRegistryFixture(t, cfgDir, "proj-child-repo-2", wsRegistered)
+
+	var mu sync.Mutex
+	var capturedStartBodies []map[string]interface{}
+	cascadeSeq := 0
+	lsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/StartCascade"):
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			capturedStartBodies = append(capturedStartBodies, body)
+			cascadeSeq++
+			cid := fmt.Sprintf("00000000-0000-0000-0000-0000000009%02d", cascadeSeq)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]string{"cascadeId": cid})
+		case strings.HasSuffix(r.URL.Path, "/SendUserCascadeMessage"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer lsSrv.Close()
+
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", lsSrv.URL)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-parent-1")
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "00000000-0000-0000-0000-000000000001")
+	_ = SetFrontDesk(vaultDir, "00000000-0000-0000-0000-000000000001", "")
+
+	// 1a. Subagent into unregistered external workspace must NOT inherit parent proj-parent-1; must pass workspaceUris.
+	if _, err := SpawnSubagent(vaultDir, "", "[standard] ext: External Fix", "fix external", "flash", wsUnregistered, false); err != nil {
+		t.Fatalf("SpawnSubagent unregistered workspace: %v", err)
+	}
+	if _, hasProj := capturedStartBodies[0]["projectEnvConfig"]; hasProj {
+		t.Fatalf("expected unregistered target workspace to omit poisoned parent projectEnvConfig, got %+v", capturedStartBodies[0])
+	}
+	if uris, ok := capturedStartBodies[0]["workspaceUris"].([]interface{}); !ok || len(uris) != 1 {
+		t.Fatalf("expected workspaceUris on unregistered target workspace, got %+v", capturedStartBodies[0]["workspaceUris"])
+	}
+
+	// 1b. Subagent into registered secondary workspace must repair proj-parent-1 -> proj-child-repo-2.
+	if _, err := SpawnSubagent(vaultDir, "", "[standard] ext2: Registered Fix", "fix reg", "flash", wsRegistered, false); err != nil {
+		t.Fatalf("SpawnSubagent registered workspace: %v", err)
+	}
+	projCfg, _ := capturedStartBodies[1]["projectEnvConfig"].(map[string]interface{})
+	if gotID, _ := projCfg["projectId"].(string); gotID != "proj-child-repo-2" {
+		t.Fatalf("expected repaired projectId=proj-child-repo-2, got %q (%+v)", gotID, capturedStartBodies[1])
+	}
+
+	// 2. Concurrent RegisterTask + RecordSubagentSpawn must not drop writes under RankTasks / RankQuota.
+	const workers = 12
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slug := fmt.Sprintf("conc-task-%02d", i)
+			cid := fmt.Sprintf("00000000-0000-0000-0000-0000000010%02d", i)
+			if err := RegisterTask(vaultDir, ActiveTask{
+				TaskSlug:       slug,
+				Title:          fmt.Sprintf("[Task:core] Concurrent %02d", i),
+				Kind:           "task",
+				ConversationID: cid,
+				Status:         "active",
+			}); err != nil {
+				t.Errorf("RegisterTask(%s): %v", slug, err)
+			}
+			if err := RecordSubagentSpawn(vaultDir, fmt.Sprintf("[quick] core: Worker %02d", i), "flash_lite", fmt.Sprintf("job %02d", i)); err != nil {
+				t.Errorf("RecordSubagentSpawn(%02d): %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	allTasks, err := ListTasks(vaultDir)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	// 2 subagents from 1a/1b + 12 concurrent tasks = 14
+	if len(allTasks) != workers+2 {
+		t.Fatalf("expected %d tasks without lost concurrent updates, got %d", workers+2, len(allTasks))
+	}
+	q := LoadQuota(vaultDir)
+	if q.SpawnsToday != workers+2 {
+		t.Fatalf("expected SpawnsToday=%d without lost concurrent updates, got %d", workers+2, q.SpawnsToday)
 	}
 }

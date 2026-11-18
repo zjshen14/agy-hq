@@ -1,9 +1,6 @@
 package obs
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -339,10 +336,6 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	tasks, err := kernel.ListTasks(vaultDir)
-	if err != nil || len(tasks) == 0 {
-		return 0, err
-	}
 
 	edgeByChild := make(map[string]SubagentSpawnEdge)
 	for parentID, cm := range idx.Conversations {
@@ -359,54 +352,50 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 	}
 
 	repaired := 0
-	for i := range tasks {
-		cid := strings.ToLower(strings.TrimSpace(tasks[i].ConversationID))
-		edge, ok := edgeByChild[cid]
-		cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
-		cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
-		if !ok || cleanRole == "" {
-			continue
+	err = kernel.UpdateTasks(vaultDir, func(tasks []kernel.ActiveTask) ([]kernel.ActiveTask, bool, error) {
+		if len(tasks) == 0 {
+			return tasks, false, nil
 		}
-		model := tasks[i].Model
-		if cleanModel != "" && cleanModel != "inherit" {
-			model = cleanModel
+		repaired = 0
+		for i := range tasks {
+			cid := strings.ToLower(strings.TrimSpace(tasks[i].ConversationID))
+			edge, ok := edgeByChild[cid]
+			cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
+			cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
+			if !ok || cleanRole == "" {
+				continue
+			}
+			model := tasks[i].Model
+			if cleanModel != "" && cleanModel != "inherit" {
+				model = cleanModel
+			}
+			tier, scope, _, title, slug := kernel.ParseSubagentRole(cleanRole, model)
+			changed := false
+			if tasks[i].Title != title {
+				tasks[i].Title = title
+				changed = true
+			}
+			if tasks[i].TaskSlug != slug {
+				tasks[i].TaskSlug = slug
+				changed = true
+			}
+			if tasks[i].Scope != scope {
+				tasks[i].Scope = scope
+				changed = true
+			}
+			if tasks[i].Tier != tier {
+				tasks[i].Tier = tier
+				changed = true
+			}
+			if tasks[i].ParentConversationID != edge.ParentConversationID {
+				tasks[i].ParentConversationID = edge.ParentConversationID
+				changed = true
+			}
+			if changed {
+				repaired++
+			}
 		}
-		tier, scope, _, title, slug := kernel.ParseSubagentRole(cleanRole, model)
-		changed := false
-		if tasks[i].Title != title {
-			tasks[i].Title = title
-			changed = true
-		}
-		if tasks[i].TaskSlug != slug {
-			tasks[i].TaskSlug = slug
-			changed = true
-		}
-		if tasks[i].Scope != scope {
-			tasks[i].Scope = scope
-			changed = true
-		}
-		if tasks[i].Tier != tier {
-			tasks[i].Tier = tier
-			changed = true
-		}
-		if tasks[i].ParentConversationID != edge.ParentConversationID {
-			tasks[i].ParentConversationID = edge.ParentConversationID
-			changed = true
-		}
-		if changed {
-			repaired++
-		}
-	}
-
-	if repaired > 0 {
-		data, err := json.MarshalIndent(tasks, "", "  ")
-		if err != nil {
-			return repaired, err
-		}
-		p := filepath.Join(vaultDir, "memory", "tasks.json")
-		if err := os.WriteFile(p, data, 0o644); err != nil {
-			return repaired, err
-		}
-	}
-	return repaired, nil
+		return tasks, repaired > 0, nil
+	})
+	return repaired, err
 }

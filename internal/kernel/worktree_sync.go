@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -195,57 +194,68 @@ func AttachWorktreeToTaskWithOptions(vaultDir, targetTaskOrConvID, wtDir, repoRo
 		return "", false
 	}
 
-	tasks, err := ListTasks(vaultDir)
-	if err != nil || len(tasks) == 0 {
-		return "", false
-	}
 	nestedMap, _ := loadNestedConversations(vaultDir)
+	deskConv := ""
+	if fd, ok := GetFrontDesk(vaultDir); ok {
+		deskConv = strings.TrimSpace(fd.ConversationID)
+	}
 
-	matchedIdx := -1
-	visited := make(map[string]bool)
-	for hop := 0; hop < 8 && cur != ""; hop++ {
-		if visited[cur] || IsFrontDeskConversation(vaultDir, cur) {
-			break
+	matchedSlug := ""
+	matched := false
+	_ = UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		if len(tasks) == 0 {
+			return tasks, false, nil
 		}
-		visited[cur] = true
-		for i := range tasks {
-			if tasks[i].TaskSlug == cur || (tasks[i].ConversationID != "" && tasks[i].ConversationID == cur) {
-				matchedIdx = i
+		walkCur := cur
+		matchedIdx := -1
+		visited := make(map[string]bool)
+		for hop := 0; hop < 8 && walkCur != ""; hop++ {
+			if visited[walkCur] || (deskConv != "" && walkCur == deskConv) {
 				break
 			}
-		}
-		if matchedIdx >= 0 {
+			visited[walkCur] = true
+			for i := range tasks {
+				if tasks[i].TaskSlug == walkCur || (tasks[i].ConversationID != "" && tasks[i].ConversationID == walkCur) {
+					matchedIdx = i
+					break
+				}
+			}
+			if matchedIdx >= 0 {
+				break
+			}
+			if nestedMap != nil {
+				if nc, ok := nestedMap[walkCur]; ok && strings.TrimSpace(nc.ParentConversationID) != "" {
+					walkCur = strings.TrimSpace(nc.ParentConversationID)
+					continue
+				}
+			}
 			break
 		}
-		if nestedMap != nil {
-			if nc, ok := nestedMap[cur]; ok && strings.TrimSpace(nc.ParentConversationID) != "" {
-				cur = strings.TrimSpace(nc.ParentConversationID)
-				continue
-			}
+		if matchedIdx < 0 {
+			return tasks, false, nil
 		}
-		break
-	}
-	if matchedIdx < 0 {
+
+		t := &tasks[matchedIdx]
+		changed := t.AddWorktreeDir(wtDir, repoRoot)
+		nowStr := time.Now().Format(time.RFC3339)
+		if opts.ReactivateCompleted && t.EffectiveKind() == "task" && t.Status == "completed" {
+			t.Status = "active"
+			t.CompletedAt = ""
+			t.ArchivedAt = ""
+			t.SidebarArchived = false
+			changed = true
+		}
+		if changed {
+			t.LastUpdatedAt = nowStr
+		}
+		matchedSlug = t.TaskSlug
+		matched = true
+		return tasks, changed, nil
+	})
+	if !matched {
 		return "", false
 	}
-
-	t := &tasks[matchedIdx]
-	changed := t.AddWorktreeDir(wtDir, repoRoot)
-	nowStr := time.Now().Format(time.RFC3339)
-	if opts.ReactivateCompleted && t.EffectiveKind() == "task" && t.Status == "completed" {
-		t.Status = "active"
-		t.CompletedAt = ""
-		t.ArchivedAt = ""
-		t.SidebarArchived = false
-		changed = true
-	}
-	if changed {
-		t.LastUpdatedAt = nowStr
-		if data, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
-			_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
-		}
-	}
-	return t.TaskSlug, true
+	return matchedSlug, true
 }
 
 func worktreeBranchName(wtDir string) string {

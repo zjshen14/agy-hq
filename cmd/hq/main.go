@@ -989,48 +989,7 @@ func main() {
 		fmt.Printf("Archived task %q (worktree cleaned up)\n", target)
 
 	case "reopen":
-		var target string
-		noWorktree := false
-		noSidebar := false
-		for _, arg := range os.Args[2:] {
-			switch arg {
-			case "--no-worktree", "-no-worktree":
-				noWorktree = true
-			case "--no-sidebar", "-no-sidebar":
-				noSidebar = true
-			default:
-				if !strings.HasPrefix(arg, "-") && target == "" {
-					target = arg
-				}
-			}
-		}
-		if target == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq reopen <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]")
-			os.Exit(1)
-		}
-		if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
-			NoWorktree: noWorktree,
-			NoSidebar:  noSidebar,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "hq reopen error: %v\n", err)
-			os.Exit(1)
-		}
-		_ = webui.SyncMarkdownConsole(vaultDir)
-		convID := ""
-		matchedSlug := target
-		if tasks, err := kernel.ListTasks(vaultDir); err == nil {
-			for _, t := range tasks {
-				if t.TaskSlug == target || t.ConversationID == target {
-					convID = t.ConversationID
-					matchedSlug = t.TaskSlug
-					break
-				}
-			}
-		}
-		fmt.Printf("Reopened task %q (status: active, link: conversation://%s)\n", target, convID)
-		if cp, _, found, _ := vault.LoadProgress(vaultDir, matchedSlug); found {
-			fmt.Printf("  Progress checkpoint ready: %s (updated %s)\n", cp.Path, cp.UpdatedAt)
-		}
+		runReopenTaskCLI(vaultDir, "hq reopen", os.Args[2:])
 
 	case "spawn":
 		denyIfCallerTainted(vaultDir, "spawn")
@@ -1056,10 +1015,21 @@ func main() {
 		}
 		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
+		scope := resolveTaskScope(*scopeOverride, *repoSpec, *taskName)
+		if *asSubagent {
+			runSubagentSpawnCLI(rootDir, vaultDir, "hq spawn --subagent", *parentConv, *role, scope, *repoSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
+			return
+		}
 		fullPrompt := *prompt
 		var wtDir string
 		var repoRootPath string
+		wtExistedBefore := false
 		if *repoSpec != "" {
+			prevWTs, _ := worktree.List(vaultDir)
+			prevSet := make(map[string]bool, len(prevWTs))
+			for _, p := range prevWTs {
+				prevSet[filepath.Clean(p)] = true
+			}
 			wtTask := *taskName
 			if wtTask == "" {
 				_, _, _, _, wtTask = kernel.ParseSubagentRole(*role, resolvedModel)
@@ -1070,41 +1040,13 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq spawn worktree error: %v\n", err)
 				os.Exit(1)
 			}
+			wtExistedBefore = prevSet[filepath.Clean(wtDir)]
 			if info, err := os.Stat(*repoSpec); err == nil && info.IsDir() {
 				if abs, err := filepath.Abs(*repoSpec); err == nil {
 					repoRootPath = abs
 				}
 			}
 			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
-		}
-		scope := "general"
-		if *scopeOverride != "" {
-			scope = *scopeOverride
-		} else if *repoSpec != "" {
-			scope = filepath.Base(strings.TrimSuffix(*repoSpec, ".git"))
-		} else if parts := strings.SplitN(*taskName, "-", 2); len(parts) > 0 && parts[0] != "" {
-			scope = parts[0]
-		}
-		if scope == "investment" {
-			scope = "investing"
-		}
-		if *asSubagent {
-			subRole := *role
-			if subRole == "" {
-				subRole = fmt.Sprintf("[%s] %s: %s", resolvedTier, scope, *taskName)
-			}
-			workDir := wtDir
-			if workDir == "" {
-				workDir = resolveDefaultWorkDir(rootDir)
-			}
-			out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun, isForced)
-			_ = webui.SyncMarkdownConsole(vaultDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hq spawn --subagent error: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println(out)
-			return
 		}
 		title := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
 		if *titleOverride != "" {
@@ -1127,7 +1069,8 @@ func main() {
 			Status:        "active",
 		})
 		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun, isForced)
-		if spawnedID := kernel.ExtractUUID(out); spawnedID != "" {
+		spawnedID := kernel.ExtractUUID(out)
+		if spawnedID != "" {
 			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 				TaskSlug:       *taskName,
 				Title:          title,
@@ -1143,6 +1086,11 @@ func main() {
 				LastSummary:    *prompt,
 				Status:         "active",
 			})
+		} else if err != nil {
+			kernel.RemoveUnboundTaskBySlug(vaultDir, *taskName)
+			if wtDir != "" && !wtExistedBefore {
+				_ = worktree.Remove(vaultDir, wtDir)
+			}
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if err != nil {
@@ -1158,6 +1106,7 @@ func main() {
 		parentConv := fs.String("parent", "", "Parent conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
 		taskName := fs.String("task", "", "Optional worktree task slug")
+		scopeOverride := fs.String("scope", "", "Optional custom task scope")
 		prompt := fs.String("prompt", "", "Task instructions for the nested subagent")
 		model := fs.String("model", "", "Optional model override (hydrogen, flash, carbon, sonnet, opus, or full model ID)")
 		depth := fs.String("depth", "", "Optional thinking depth override (low, medium, high, xhigh)")
@@ -1172,32 +1121,8 @@ func main() {
 		}
 		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
-		subRole := *role
-		if subRole == "" {
-			subRole = fmt.Sprintf("[%s] general: %s", resolvedTier, *taskName)
-		}
-		fullPrompt := *prompt
-		workDir := resolveDefaultWorkDir(rootDir)
-		if *repoSpec != "" {
-			wtSlug := *taskName
-			if wtSlug == "" {
-				_, _, _, _, wtSlug = kernel.ParseSubagentRole(subRole, resolvedModel)
-			}
-			wtDir, err := worktree.Add(vaultDir, *repoSpec, wtSlug, "")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hq subagent worktree error: %v\n", err)
-				os.Exit(1)
-			}
-			workDir = wtDir
-			fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, *prompt)
-		}
-		out, err := kernel.SpawnSubagent(vaultDir, *parentConv, subRole, fullPrompt, resolvedModel, workDir, *dryRun, isForced)
-		_ = webui.SyncMarkdownConsole(vaultDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq subagent error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(out)
+		scope := resolveTaskScope(*scopeOverride, *repoSpec, *taskName)
+		runSubagentSpawnCLI(rootDir, vaultDir, "hq subagent", *parentConv, *role, scope, *repoSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
 
 	case "gmail":
 		if len(os.Args) < 3 {
@@ -2452,48 +2377,7 @@ func runTasksCLI(vaultDir string, args []string) {
 			return
 
 		case "reopen":
-			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: hq tasks reopen <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]")
-				os.Exit(1)
-			}
-			var target string
-			noWorktree := false
-			noSidebar := false
-			for _, arg := range args[1:] {
-				switch arg {
-				case "--no-worktree", "-no-worktree":
-					noWorktree = true
-				case "--no-sidebar", "-no-sidebar":
-					noSidebar = true
-				default:
-					if !strings.HasPrefix(arg, "-") && target == "" {
-						target = arg
-					}
-				}
-			}
-			if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
-				NoWorktree: noWorktree,
-				NoSidebar:  noSidebar,
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "hq tasks reopen error: %v\n", err)
-				os.Exit(1)
-			}
-			_ = webui.SyncMarkdownConsole(vaultDir)
-			convID := ""
-			matchedSlug := target
-			if tasks, err := kernel.ListTasks(vaultDir); err == nil {
-				for _, t := range tasks {
-					if t.TaskSlug == target || t.ConversationID == target {
-						convID = t.ConversationID
-						matchedSlug = t.TaskSlug
-						break
-					}
-				}
-			}
-			fmt.Printf("Reopened task %q (status: active, link: conversation://%s)\n", target, convID)
-			if cp, _, found, _ := vault.LoadProgress(vaultDir, matchedSlug); found {
-				fmt.Printf("  Progress checkpoint ready: %s (updated %s)\n", cp.Path, cp.UpdatedAt)
-			}
+			runReopenTaskCLI(vaultDir, "hq tasks reopen", args[1:])
 			return
 		}
 	}
@@ -3473,6 +3357,95 @@ func resolveTemplateDir(rootDir string) string {
 		}
 	}
 	return ""
+}
+
+func resolveTaskScope(scopeOverride, repoSpec, taskName string) string {
+	scope := "general"
+	if scopeOverride != "" {
+		scope = scopeOverride
+	} else if repoSpec != "" {
+		scope = filepath.Base(strings.TrimSuffix(repoSpec, ".git"))
+	} else if parts := strings.SplitN(taskName, "-", 2); len(parts) > 0 && parts[0] != "" {
+		scope = parts[0]
+	}
+	if scope == "investment" {
+		scope = "investing"
+	}
+	return scope
+}
+
+func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, repoSpec, taskName, prompt, resolvedModel, resolvedTier string, dryRun, isForced bool) {
+	subRole := role
+	if subRole == "" {
+		subRole = fmt.Sprintf("[%s] %s: %s", resolvedTier, scope, taskName)
+	}
+	fullPrompt := prompt
+	workDir := resolveDefaultWorkDir(rootDir)
+	if repoSpec != "" {
+		wtSlug := taskName
+		if wtSlug == "" {
+			_, _, _, _, wtSlug = kernel.ParseSubagentRole(subRole, resolvedModel)
+		}
+		wtDir, err := worktree.Add(vaultDir, repoSpec, wtSlug, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s worktree error: %v\n", cmdLabel, err)
+			os.Exit(1)
+		}
+		workDir = wtDir
+		fullPrompt = fmt.Sprintf("Work inside the isolated git worktree at %s.\n\nTask: %s", wtDir, prompt)
+	}
+	out, err := kernel.SpawnSubagent(vaultDir, parentConv, subRole, fullPrompt, resolvedModel, workDir, dryRun, isForced)
+	_ = webui.SyncMarkdownConsole(vaultDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s error: %v\n", cmdLabel, err)
+		os.Exit(1)
+	}
+	fmt.Println(out)
+}
+
+func runReopenTaskCLI(vaultDir, cmdLabel string, args []string) {
+	var target string
+	noWorktree := false
+	noSidebar := false
+	for _, arg := range args {
+		switch arg {
+		case "--no-worktree", "-no-worktree":
+			noWorktree = true
+		case "--no-sidebar", "-no-sidebar":
+			noSidebar = true
+		default:
+			if !strings.HasPrefix(arg, "-") && target == "" {
+				target = arg
+			}
+		}
+	}
+	if target == "" {
+		fmt.Fprintf(os.Stderr, "usage: %s <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]\n", cmdLabel)
+		os.Exit(1)
+	}
+	if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
+		NoWorktree: noWorktree,
+		NoSidebar:  noSidebar,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "%s error: %v\n", cmdLabel, err)
+		os.Exit(1)
+	}
+	_ = webui.SyncMarkdownConsole(vaultDir)
+	convID := ""
+	matchedSlug := target
+	if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+		for _, t := range tasks {
+			if t.TaskSlug == target || t.ConversationID == target {
+				convID = t.ConversationID
+				matchedSlug = t.TaskSlug
+				break
+			}
+		}
+	}
+	fmt.Printf("Reopened task %q (status: active, link: conversation://%s)\n", target, convID)
+	if cp, _, found, _ := vault.LoadProgress(vaultDir, matchedSlug); found {
+		fmt.Printf("  Progress checkpoint ready: %s (updated %s)\n", cp.Path, cp.UpdatedAt)
+	}
 }
 
 func resolveDefaultWorkDir(rootDir string) string {

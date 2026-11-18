@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,28 +56,27 @@ func DeliverMessageToSession(vaultDir, sessionID, title, text string, dryRun boo
 	return outStr, nil
 }
 
-func removeTaskBySlug(vaultDir, slug string) {
+// RemoveUnboundTaskBySlug removes any pre-registered active task matching slug that has not bound a ConversationID yet.
+func RemoveUnboundTaskBySlug(vaultDir, slug string) {
 	if slug == "" {
 		return
 	}
-	tasks, err := ListTasks(vaultDir)
-	if err != nil || len(tasks) == 0 {
-		return
-	}
-	kept := make([]ActiveTask, 0, len(tasks))
-	changed := false
-	for _, t := range tasks {
-		if t.TaskSlug == slug && t.ConversationID == "" {
-			changed = true
-			continue
+	_ = UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		kept := make([]ActiveTask, 0, len(tasks))
+		changed := false
+		for _, t := range tasks {
+			if t.TaskSlug == slug && t.ConversationID == "" {
+				changed = true
+				continue
+			}
+			kept = append(kept, t)
 		}
-		kept = append(kept, t)
-	}
-	if changed {
-		if data, mErr := json.MarshalIndent(kept, "", "  "); mErr == nil {
-			_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
-		}
-	}
+		return kept, changed, nil
+	})
+}
+
+func removeTaskBySlug(vaultDir, slug string) {
+	RemoveUnboundTaskBySlug(vaultDir, slug)
 }
 
 func isQuotaDeferralError(err error) bool {

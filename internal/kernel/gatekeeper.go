@@ -726,9 +726,10 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 	}
 
 	if zeroTokenSaves > 0 {
-		st := LoadQuota(vaultDir)
-		st.GatekeeperSavesToday += zeroTokenSaves
-		_ = SaveQuota(vaultDir, st)
+		_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+			st.GatekeeperSavesToday += zeroTokenSaves
+			return true, nil
+		})
 	}
 	if dispatched, dispErr := DispatchPendingEvents(vaultDir, now, dryRun); dispErr == nil && len(dispatched) > 0 {
 		actions = append(actions, dispatched...)

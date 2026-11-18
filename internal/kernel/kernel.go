@@ -322,8 +322,42 @@ func tasksFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "tasks.json")
 }
 
+func tasksLockPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", ".tasks.lock")
+}
+
 func tasksArchiveFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "tasks_archive.jsonl")
+}
+
+func withTasksLock(vaultDir string, fn func() error) error {
+	return store.With(context.Background(), store.RankTasks, tasksLockPath(vaultDir), func(_ context.Context) error {
+		return fn()
+	})
+}
+
+func saveTasksUnlocked(vaultDir string, tasks []ActiveTask) error {
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return store.WriteAtomic(tasksFilePath(vaultDir), data, 0o644)
+}
+
+// UpdateTasks executes an atomic locked read-modify-write update on local/memory/tasks.json under RankTasks.
+// Callers must keep fn pure (no nested store locks, git subprocesses, or network RPCs).
+func UpdateTasks(vaultDir string, fn func(tasks []ActiveTask) ([]ActiveTask, bool, error)) error {
+	return withTasksLock(vaultDir, func() error {
+		tasks, err := ListTasks(vaultDir)
+		if err != nil {
+			return err
+		}
+		updated, changed, err := fn(tasks)
+		if err != nil || !changed {
+			return err
+		}
+		return saveTasksUnlocked(vaultDir, updated)
+	})
 }
 
 // ListTasks returns all tracked Task Conversations from local/memory/tasks.json.
@@ -426,8 +460,14 @@ func AppendTasksToColdArchive(vaultDir string, toArchive []ActiveTask) error {
 	if len(toArchive) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
+	return withTasksLock(vaultDir, func() error {
+		return appendTasksToColdArchiveUnlocked(vaultDir, toArchive)
+	})
+}
+
+func appendTasksToColdArchiveUnlocked(vaultDir string, toArchive []ActiveTask) error {
+	if len(toArchive) == 0 {
+		return nil
 	}
 	existing, _, _ := ListArchivedTasks(vaultDir, 0)
 	// Reverse existing back to chronological order before merging
@@ -471,7 +511,7 @@ func AppendTasksToColdArchive(vaultDir string, toArchive []ActiveTask) error {
 			b.WriteByte('\n')
 		}
 	}
-	return os.WriteFile(tasksArchiveFilePath(vaultDir), []byte(b.String()), 0o644)
+	return store.WriteAtomic(tasksArchiveFilePath(vaultDir), []byte(b.String()), 0o644)
 }
 
 func statusPriority(effStatus string) int {
@@ -661,32 +701,35 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 	if convID == "" {
 		return ActiveTask{}, false
 	}
-	tasks, err := ListTasks(vaultDir)
-	if err != nil {
+	var matched ActiveTask
+	linked := false
+	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		for i := len(tasks) - 1; i >= 0; i-- {
+			if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
+				// Never allow an interactive session to bind to an event-leased batch;
+				// background batches bind solely via [hq-spawn:<token>] or SpawnTask UUID return.
+				if len(tasks[i].EventIDs) > 0 {
+					continue
+				}
+				tasks[i].ConversationID = convID
+				if model != "" && tasks[i].Model == "" {
+					tasks[i].Model = model
+				}
+				tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+				matched = tasks[i]
+				linked = true
+				return tasks, true, nil
+			}
+		}
+		return tasks, false, nil
+	})
+	if err != nil || !linked {
 		return ActiveTask{}, false
 	}
-	for i := len(tasks) - 1; i >= 0; i-- {
-		if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
-			// Never allow an interactive session to bind to an event-leased batch;
-			// background batches bind solely via [hq-spawn:<token>] or SpawnTask UUID return.
-			if len(tasks[i].EventIDs) > 0 {
-				continue
-			}
-			tasks[i].ConversationID = convID
-			if model != "" && tasks[i].Model == "" {
-				tasks[i].Model = model
-			}
-			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
-			if data, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
-				_ = os.WriteFile(tasksFilePath(vaultDir), data, 0o644)
-			}
-			if isExplicitTopLevelTask(tasks[i]) {
-				_ = RemoveNestedConversation(vaultDir, convID)
-			}
-			return tasks[i], true
-		}
+	if isExplicitTopLevelTask(matched) {
+		_ = RemoveNestedConversation(vaultDir, convID)
 	}
-	return ActiveTask{}, false
+	return matched, true
 }
 
 func isExplicitTopLevelTask(t ActiveTask) bool {
@@ -698,192 +741,186 @@ func isExplicitTopLevelTask(t ActiveTask) bool {
 
 // RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
 func RegisterTask(vaultDir string, task ActiveTask) error {
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
-	}
 	explicitTaskPromotion := strings.EqualFold(strings.TrimSpace(task.Kind), "task") &&
 		!strings.HasPrefix(task.TaskSlug, "subagent-") &&
 		!strings.HasPrefix(task.Title, "[Subagent:")
-	tasks, _ := ListTasks(vaultDir)
-	updated := false
-	for i := range tasks {
-		if (task.TaskSlug != "" && tasks[i].TaskSlug == task.TaskSlug) || (task.ConversationID != "" && tasks[i].ConversationID == task.ConversationID) {
-			if task.TaskSlug == "" {
-				task.TaskSlug = tasks[i].TaskSlug
-			}
-			if task.ConversationID == "" {
-				task.ConversationID = tasks[i].ConversationID
-			}
-			if task.Title == "" {
-				task.Title = tasks[i].Title
-			}
-			if task.Kind == "" {
-				task.Kind = tasks[i].Kind
-			}
-			if task.Scope == "" {
-				task.Scope = tasks[i].Scope
-			}
-			if task.Tier == "" {
-				task.Tier = tasks[i].Tier
-			}
-			if task.Model == "" {
-				task.Model = tasks[i].Model
-			}
-			if task.ParentConversationID == "" && !explicitTaskPromotion {
-				task.ParentConversationID = tasks[i].ParentConversationID
-			}
-			task.WorktreeDir, task.WorktreeDirs = mergeTaskWorktrees(tasks[i], task)
-			if task.RepoRoot == "" {
-				task.RepoRoot = tasks[i].RepoRoot
-			}
-			if task.TurnCount == 0 {
-				task.TurnCount = tasks[i].TurnCount
-			}
-			if !task.Pinned && tasks[i].Pinned {
-				task.Pinned = tasks[i].Pinned
-			}
-			if task.CreatedAt == "" {
-				task.CreatedAt = tasks[i].CreatedAt
-			}
-			if task.Status == "active" {
-				task.ArchivedAt = ""
-				task.CompletedAt = ""
-				task.SidebarArchived = false
-			} else {
-				if task.CompletedAt == "" {
-					task.CompletedAt = tasks[i].CompletedAt
+	var bindEventIDs []string
+	var removeNestedIDs []string
+	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		inTask := task
+		updated := false
+		for i := range tasks {
+			if (inTask.TaskSlug != "" && tasks[i].TaskSlug == inTask.TaskSlug) || (inTask.ConversationID != "" && tasks[i].ConversationID == inTask.ConversationID) {
+				if inTask.TaskSlug == "" {
+					inTask.TaskSlug = tasks[i].TaskSlug
 				}
-				if task.ArchivedAt == "" {
-					task.ArchivedAt = tasks[i].ArchivedAt
+				if inTask.ConversationID == "" {
+					inTask.ConversationID = tasks[i].ConversationID
 				}
-				if !task.SidebarArchived && tasks[i].SidebarArchived {
-					task.SidebarArchived = tasks[i].SidebarArchived
+				if inTask.Title == "" {
+					inTask.Title = tasks[i].Title
 				}
-				if task.SidebarSyncedAt == "" {
-					task.SidebarSyncedAt = tasks[i].SidebarSyncedAt
+				if inTask.Kind == "" {
+					inTask.Kind = tasks[i].Kind
 				}
-			}
-			if task.Status == "" {
-				task.Status = tasks[i].Status
-			}
-			if len(task.EventIDs) == 0 {
-				task.EventIDs = tasks[i].EventIDs
-			}
-			if task.LastSummary == "" {
-				task.LastSummary = tasks[i].LastSummary
-			}
-			task.Title = SanitizeTaskTitle(task.Title, task.TaskSlug)
-			task.Kind = task.EffectiveKind()
-			task.Scope = task.EffectiveScope()
-			if (task.Status == "completed" || task.Status == "cancelled") && task.CompletedAt == "" {
-				task.CompletedAt = task.LastUpdatedAt
-			}
-			tasks[i] = task
-			updated = true
-			break
-		}
-	}
-	if !updated && task.TaskSlug == "" && task.ConversationID != "" {
-		// If a task was just spawned via `hq spawn` with ConversationID=="" and is active, link it to this first Stop hook
-		for i := len(tasks) - 1; i >= 0; i-- {
-			if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
-				tasks[i].ConversationID = task.ConversationID
-				if task.Model != "" {
-					tasks[i].Model = task.Model
+				if inTask.Scope == "" {
+					inTask.Scope = tasks[i].Scope
 				}
-				if task.LastUpdatedAt != "" {
-					tasks[i].LastUpdatedAt = task.LastUpdatedAt
+				if inTask.Tier == "" {
+					inTask.Tier = tasks[i].Tier
 				}
-				if task.LastSummary != "" {
-					tasks[i].LastSummary = task.LastSummary
+				if inTask.Model == "" {
+					inTask.Model = tasks[i].Model
 				}
-				if task.TurnCount > 0 {
-					tasks[i].TurnCount = task.TurnCount
+				if inTask.ParentConversationID == "" && !explicitTaskPromotion {
+					inTask.ParentConversationID = tasks[i].ParentConversationID
 				}
-				tasks[i].Title = SanitizeTaskTitle(tasks[i].Title, tasks[i].TaskSlug)
-				tasks[i].Kind = tasks[i].EffectiveKind()
-				tasks[i].Scope = tasks[i].EffectiveScope()
-				if len(tasks[i].EventIDs) > 0 {
-					_ = events.BindBatchConversation(vaultDir, tasks[i].EventIDs, task.ConversationID, time.Now(), events.DefaultLeaseTTL)
+				inTask.WorktreeDir, inTask.WorktreeDirs = mergeTaskWorktrees(tasks[i], inTask)
+				if inTask.RepoRoot == "" {
+					inTask.RepoRoot = tasks[i].RepoRoot
 				}
+				if inTask.TurnCount == 0 {
+					inTask.TurnCount = tasks[i].TurnCount
+				}
+				if !inTask.Pinned && tasks[i].Pinned {
+					inTask.Pinned = tasks[i].Pinned
+				}
+				if inTask.CreatedAt == "" {
+					inTask.CreatedAt = tasks[i].CreatedAt
+				}
+				if inTask.Status == "active" {
+					inTask.ArchivedAt = ""
+					inTask.CompletedAt = ""
+					inTask.SidebarArchived = false
+				} else {
+					if inTask.CompletedAt == "" {
+						inTask.CompletedAt = tasks[i].CompletedAt
+					}
+					if inTask.ArchivedAt == "" {
+						inTask.ArchivedAt = tasks[i].ArchivedAt
+					}
+					if !inTask.SidebarArchived && tasks[i].SidebarArchived {
+						inTask.SidebarArchived = tasks[i].SidebarArchived
+					}
+					if inTask.SidebarSyncedAt == "" {
+						inTask.SidebarSyncedAt = tasks[i].SidebarSyncedAt
+					}
+				}
+				if inTask.Status == "" {
+					inTask.Status = tasks[i].Status
+				}
+				if len(inTask.EventIDs) == 0 {
+					inTask.EventIDs = tasks[i].EventIDs
+				}
+				if inTask.LastSummary == "" {
+					inTask.LastSummary = tasks[i].LastSummary
+				}
+				inTask.Title = SanitizeTaskTitle(inTask.Title, inTask.TaskSlug)
+				inTask.Kind = inTask.EffectiveKind()
+				inTask.Scope = inTask.EffectiveScope()
+				if (inTask.Status == "completed" || inTask.Status == "cancelled") && inTask.CompletedAt == "" {
+					inTask.CompletedAt = inTask.LastUpdatedAt
+				}
+				tasks[i] = inTask
 				updated = true
 				break
 			}
 		}
-	}
-	if !updated {
-		if task.TaskSlug == "" && task.ConversationID != "" {
-			shortID := task.ConversationID
-			if len(shortID) > 8 {
-				shortID = shortID[:8]
+		if !updated && inTask.TaskSlug == "" && inTask.ConversationID != "" {
+			// If a task was just spawned via `hq spawn` with ConversationID=="" and is active, link it to this first Stop hook
+			for i := len(tasks) - 1; i >= 0; i-- {
+				if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
+					tasks[i].ConversationID = inTask.ConversationID
+					if inTask.Model != "" {
+						tasks[i].Model = inTask.Model
+					}
+					if inTask.LastUpdatedAt != "" {
+						tasks[i].LastUpdatedAt = inTask.LastUpdatedAt
+					}
+					if inTask.LastSummary != "" {
+						tasks[i].LastSummary = inTask.LastSummary
+					}
+					if inTask.TurnCount > 0 {
+						tasks[i].TurnCount = inTask.TurnCount
+					}
+					tasks[i].Title = SanitizeTaskTitle(tasks[i].Title, tasks[i].TaskSlug)
+					tasks[i].Kind = tasks[i].EffectiveKind()
+					tasks[i].Scope = tasks[i].EffectiveScope()
+					if len(tasks[i].EventIDs) > 0 {
+						bindEventIDs = append([]string(nil), tasks[i].EventIDs...)
+					}
+					updated = true
+					break
+				}
 			}
-			task.TaskSlug = "conv-" + shortID
 		}
-		if task.Title == "" {
-			task.Title = "[Task:general] Untitled Task"
+		if !updated {
+			if inTask.TaskSlug == "" && inTask.ConversationID != "" {
+				shortID := inTask.ConversationID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				inTask.TaskSlug = "conv-" + shortID
+			}
+			if inTask.Title == "" {
+				inTask.Title = "[Task:general] Untitled Task"
+			}
+			inTask.Title = SanitizeTaskTitle(inTask.Title, inTask.TaskSlug)
+			inTask.Kind = inTask.EffectiveKind()
+			inTask.Scope = inTask.EffectiveScope()
+			if inTask.Status == "" {
+				inTask.Status = "active"
+			}
+			if inTask.CreatedAt == "" {
+				inTask.CreatedAt = time.Now().Format(time.RFC3339)
+			}
+			if inTask.LastUpdatedAt == "" {
+				inTask.LastUpdatedAt = inTask.CreatedAt
+			}
+			if (inTask.Status == "completed" || inTask.Status == "cancelled") && inTask.CompletedAt == "" {
+				inTask.CompletedAt = inTask.LastUpdatedAt
+			}
+			tasks = append(tasks, inTask)
 		}
-		task.Title = SanitizeTaskTitle(task.Title, task.TaskSlug)
-		task.Kind = task.EffectiveKind()
-		task.Scope = task.EffectiveScope()
-		if task.Status == "" {
-			task.Status = "active"
+		for _, t := range tasks {
+			if t.ConversationID != "" && (t.ConversationID == inTask.ConversationID || (inTask.TaskSlug != "" && t.TaskSlug == inTask.TaskSlug)) && isExplicitTopLevelTask(t) {
+				removeNestedIDs = append(removeNestedIDs, t.ConversationID)
+			}
 		}
-		if task.CreatedAt == "" {
-			task.CreatedAt = time.Now().Format(time.RFC3339)
-		}
-		if task.LastUpdatedAt == "" {
-			task.LastUpdatedAt = task.CreatedAt
-		}
-		if (task.Status == "completed" || task.Status == "cancelled") && task.CompletedAt == "" {
-			task.CompletedAt = task.LastUpdatedAt
-		}
-		tasks = append(tasks, task)
-	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
+		return tasks, true, nil
+	})
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
-		return err
+	if len(bindEventIDs) > 0 && task.ConversationID != "" {
+		_ = events.BindBatchConversation(vaultDir, bindEventIDs, task.ConversationID, time.Now(), events.DefaultLeaseTTL)
 	}
-	for _, t := range tasks {
-		if t.ConversationID != "" && (t.ConversationID == task.ConversationID || (task.TaskSlug != "" && t.TaskSlug == task.TaskSlug)) && isExplicitTopLevelTask(t) {
-			_ = RemoveNestedConversation(vaultDir, t.ConversationID)
-		}
+	for _, cid := range removeNestedIDs {
+		_ = RemoveNestedConversation(vaultDir, cid)
 	}
 	return nil
 }
 
 // CompleteTask marks an existing task in local/memory/tasks.json (matched by TaskSlug or ConversationID) as completed.
 func CompleteTask(vaultDir, slugOrConvID, summary string) error {
-	tasks, err := ListTasks(vaultDir)
-	if err != nil {
-		return err
-	}
-	nowStr := time.Now().Format(time.RFC3339)
-	found := false
 	var completedTask ActiveTask
-	for i := range tasks {
-		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
-			tasks[i].Status = "completed"
-			tasks[i].LastUpdatedAt = nowStr
-			tasks[i].CompletedAt = nowStr
-			if strings.TrimSpace(summary) != "" {
-				tasks[i].LastSummary = strings.TrimSpace(summary)
+	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		nowStr := time.Now().Format(time.RFC3339)
+		for i := range tasks {
+			if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
+				tasks[i].Status = "completed"
+				tasks[i].LastUpdatedAt = nowStr
+				tasks[i].CompletedAt = nowStr
+				if strings.TrimSpace(summary) != "" {
+					tasks[i].LastSummary = strings.TrimSpace(summary)
+				}
+				completedTask = tasks[i]
+				return tasks, true, nil
 			}
-			completedTask = tasks[i]
-			found = true
-			break
 		}
-	}
-	if !found {
-		return fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
-	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
+		return tasks, false, fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
+	})
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
 		return err
 	}
 	if completedTask.EffectiveKind() == "task" && !IsNestedSubagentConversation(vaultDir, completedTask.ConversationID) {
@@ -894,29 +931,19 @@ func CompleteTask(vaultDir, slugOrConvID, summary string) error {
 
 // SetTaskPinned pins or unpins a task in local/memory/tasks.json so it stays anchored at the top of the Active board.
 func SetTaskPinned(vaultDir, slugOrConvID string, pinned bool) error {
-	tasks, err := ListTasks(vaultDir)
-	if err != nil {
-		return err
-	}
-	found := false
 	convID := ""
-	for i := range tasks {
-		if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
-			tasks[i].Pinned = pinned
-			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
-			convID = tasks[i].ConversationID
-			found = true
-			break
+	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		for i := range tasks {
+			if tasks[i].TaskSlug == slugOrConvID || tasks[i].ConversationID == slugOrConvID {
+				tasks[i].Pinned = pinned
+				tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
+				convID = tasks[i].ConversationID
+				return tasks, true, nil
+			}
 		}
-	}
-	if !found {
-		return fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
-	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
+		return tasks, false, fmt.Errorf("task %q not found in local/memory/tasks.json", slugOrConvID)
+	})
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
 		return err
 	}
 	if convID != "" {
@@ -951,48 +978,61 @@ func ArchiveTaskWithOptions(vaultDir, target string, opts ArchiveTaskOptions) (S
 	if err != nil {
 		return SidebarSingleSyncResult{}, err
 	}
-	nowStr := time.Now().Format(time.RFC3339)
-	archivedIdx := -1
+	matchedIdx := -1
 	for i := range tasks {
 		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
-			task := &tasks[i]
-			if task.Pinned && !opts.Force {
-				return SidebarSingleSyncResult{}, fmt.Errorf("refusing to archive %q: task is pinned (unpin first or pass --force)", target)
-			}
-			if err := validateTaskWorktreesForArchive(vaultDir, target, *task, opts.Force); err != nil {
-				return SidebarSingleSyncResult{}, err
-			}
-			if err := removeTaskWorktrees(vaultDir, task, opts.Force, true); err != nil {
-				return SidebarSingleSyncResult{}, err
-			}
-
-			task.Status = "archived"
-			task.LastUpdatedAt = nowStr
-			task.ArchivedAt = nowStr
-			archivedIdx = i
+			matchedIdx = i
 			break
 		}
 	}
-	if archivedIdx < 0 {
+	if matchedIdx < 0 {
 		return SidebarSingleSyncResult{}, fmt.Errorf("task %q not found in local/memory/tasks.json", target)
 	}
-
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
+	cand := tasks[matchedIdx]
+	if cand.Pinned && !opts.Force {
+		return SidebarSingleSyncResult{}, fmt.Errorf("refusing to archive %q: task is pinned (unpin first or pass --force)", target)
+	}
+	if err := validateTaskWorktreesForArchive(vaultDir, target, cand, opts.Force); err != nil {
 		return SidebarSingleSyncResult{}, err
 	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+	if err := removeTaskWorktrees(vaultDir, &cand, opts.Force, true); err != nil {
+		return SidebarSingleSyncResult{}, err
+	}
+
+	nowStr := time.Now().Format(time.RFC3339)
+	var archivedTask ActiveTask
+	if err := UpdateTasks(vaultDir, func(cur []ActiveTask) ([]ActiveTask, bool, error) {
+		for i := range cur {
+			if cur[i].TaskSlug == target || cur[i].ConversationID == target {
+				cur[i].WorktreeDir = cand.WorktreeDir
+				cur[i].WorktreeDirs = cand.WorktreeDirs
+				cur[i].Status = "archived"
+				cur[i].LastUpdatedAt = nowStr
+				cur[i].ArchivedAt = nowStr
+				archivedTask = cur[i]
+				return cur, true, nil
+			}
+		}
+		return cur, false, fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	}); err != nil {
 		return SidebarSingleSyncResult{}, err
 	}
 
 	if opts.NoSidebar {
 		return SidebarSingleSyncResult{SkippedReason: "no_sidebar"}, nil
 	}
-	syncRes := syncSingleTaskArchiveState(context.Background(), vaultDir, &tasks[archivedIdx], true, true, opts.Force, opts.SidebarConfig)
+	syncRes := syncSingleTaskArchiveState(context.Background(), vaultDir, &archivedTask, true, true, opts.Force, opts.SidebarConfig)
 	if syncRes.Synced || syncRes.AlreadySynced {
-		if updatedBytes, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
-			_ = os.WriteFile(tasksFilePath(vaultDir), updatedBytes, 0o644)
-		}
+		_ = UpdateTasks(vaultDir, func(cur []ActiveTask) ([]ActiveTask, bool, error) {
+			for i := range cur {
+				if (archivedTask.ConversationID != "" && cur[i].ConversationID == archivedTask.ConversationID) || cur[i].TaskSlug == archivedTask.TaskSlug {
+					cur[i].SidebarArchived = archivedTask.SidebarArchived
+					cur[i].SidebarSyncedAt = archivedTask.SidebarSyncedAt
+					return cur, true, nil
+				}
+			}
+			return cur, false, nil
+		})
 	}
 	return syncRes, nil
 }
@@ -1036,29 +1076,55 @@ type ReopenTaskOptions struct {
 
 // ReopenTaskWithOptions restores a task back to active status and optionally restores its git worktree and sidebar state.
 func ReopenTaskWithOptions(vaultDir, target string, opts ReopenTaskOptions) (SidebarSingleSyncResult, error) {
-	tasks, err := ListTasks(vaultDir)
+	hotSnap, err := ListTasks(vaultDir)
 	if err != nil {
 		return SidebarSingleSyncResult{}, err
 	}
-	nowStr := time.Now().Format(time.RFC3339)
-	reopenedIdx := -1
-	for i := range tasks {
-		if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
-			if !opts.NoWorktree {
-				if err := restoreWorktreeForReopen(vaultDir, &tasks[i]); err != nil {
-					return SidebarSingleSyncResult{}, err
-				}
-			}
-			tasks[i].Status = "active"
-			tasks[i].ArchivedAt = ""
-			tasks[i].SidebarArchived = false
-			tasks[i].LastUpdatedAt = nowStr
-			reopenedIdx = i
+	var wtTarget *ActiveTask
+	for i := range hotSnap {
+		if hotSnap[i].TaskSlug == target || hotSnap[i].ConversationID == target {
+			cp := hotSnap[i]
+			wtTarget = &cp
 			break
 		}
 	}
-	if reopenedIdx < 0 {
-		// Check cold storage (local/memory/tasks_archive.jsonl)
+	if wtTarget == nil {
+		if archivedSnap, _, archErr := ListArchivedTasks(vaultDir, 0); archErr == nil {
+			for i := len(archivedSnap) - 1; i >= 0; i-- {
+				if archivedSnap[i].TaskSlug == target || archivedSnap[i].ConversationID == target {
+					cp := archivedSnap[i]
+					wtTarget = &cp
+					break
+				}
+			}
+		}
+	}
+	if wtTarget == nil {
+		return SidebarSingleSyncResult{}, fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	}
+	if !opts.NoWorktree {
+		if err := restoreWorktreeForReopen(vaultDir, wtTarget); err != nil {
+			return SidebarSingleSyncResult{}, err
+		}
+	}
+
+	nowStr := time.Now().Format(time.RFC3339)
+	var reopenedTask ActiveTask
+	if err := withTasksLock(vaultDir, func() error {
+		tasks, lErr := ListTasks(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		for i := range tasks {
+			if tasks[i].TaskSlug == target || tasks[i].ConversationID == target {
+				tasks[i].Status = "active"
+				tasks[i].ArchivedAt = ""
+				tasks[i].SidebarArchived = false
+				tasks[i].LastUpdatedAt = nowStr
+				reopenedTask = tasks[i]
+				return saveTasksUnlocked(vaultDir, tasks)
+			}
+		}
 		archived, _, archErr := ListArchivedTasks(vaultDir, 0)
 		if archErr == nil && len(archived) > 0 {
 			var recalled *ActiveTask
@@ -1073,17 +1139,12 @@ func ReopenTaskWithOptions(vaultDir, target string, opts ReopenTaskOptions) (Sid
 				remaining = append(remaining, t)
 			}
 			if recalled != nil {
-				if !opts.NoWorktree {
-					if err := restoreWorktreeForReopen(vaultDir, recalled); err != nil {
-						return SidebarSingleSyncResult{}, err
-					}
-				}
 				recalled.Status = "active"
 				recalled.ArchivedAt = ""
 				recalled.SidebarArchived = false
 				recalled.LastUpdatedAt = nowStr
 				tasks = append(tasks, *recalled)
-				reopenedIdx = len(tasks) - 1
+				reopenedTask = *recalled
 				var b strings.Builder
 				for _, rem := range remaining {
 					if line, mErr := json.Marshal(rem); mErr == nil {
@@ -1091,34 +1152,35 @@ func ReopenTaskWithOptions(vaultDir, target string, opts ReopenTaskOptions) (Sid
 						b.WriteByte('\n')
 					}
 				}
-				_ = os.WriteFile(tasksArchiveFilePath(vaultDir), []byte(b.String()), 0o644)
+				_ = store.WriteAtomic(tasksArchiveFilePath(vaultDir), []byte(b.String()), 0o644)
+				return saveTasksUnlocked(vaultDir, tasks)
 			}
 		}
-	}
-	if reopenedIdx < 0 {
-		return SidebarSingleSyncResult{}, fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+		return fmt.Errorf("task %q not found in local/memory/tasks.json", target)
+	}); err != nil {
+		return SidebarSingleSyncResult{}, err
 	}
 
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
-		return SidebarSingleSyncResult{}, err
-	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
-		return SidebarSingleSyncResult{}, err
-	}
-	if tasks[reopenedIdx].ConversationID != "" && isExplicitTopLevelTask(tasks[reopenedIdx]) {
-		_ = RemoveNestedConversation(vaultDir, tasks[reopenedIdx].ConversationID)
+	if reopenedTask.ConversationID != "" && isExplicitTopLevelTask(reopenedTask) {
+		_ = RemoveNestedConversation(vaultDir, reopenedTask.ConversationID)
 	}
 
 	if opts.NoSidebar {
-		RemoveSidebarSyncQueueItem(vaultDir, tasks[reopenedIdx].ConversationID, time.Now())
+		RemoveSidebarSyncQueueItem(vaultDir, reopenedTask.ConversationID, time.Now())
 		return SidebarSingleSyncResult{SkippedReason: "no_sidebar"}, nil
 	}
-	syncRes := syncSingleTaskArchiveState(context.Background(), vaultDir, &tasks[reopenedIdx], false, false, false, opts.SidebarConfig)
+	syncRes := syncSingleTaskArchiveState(context.Background(), vaultDir, &reopenedTask, false, false, false, opts.SidebarConfig)
 	if syncRes.Synced || syncRes.AlreadySynced {
-		if updatedBytes, mErr := json.MarshalIndent(tasks, "", "  "); mErr == nil {
-			_ = os.WriteFile(tasksFilePath(vaultDir), updatedBytes, 0o644)
-		}
+		_ = UpdateTasks(vaultDir, func(cur []ActiveTask) ([]ActiveTask, bool, error) {
+			for i := range cur {
+				if (reopenedTask.ConversationID != "" && cur[i].ConversationID == reopenedTask.ConversationID) || cur[i].TaskSlug == reopenedTask.TaskSlug {
+					cur[i].SidebarArchived = reopenedTask.SidebarArchived
+					cur[i].SidebarSyncedAt = reopenedTask.SidebarSyncedAt
+					return cur, true, nil
+				}
+			}
+			return cur, false, nil
+		})
 	}
 	return syncRes, nil
 }
@@ -1357,20 +1419,51 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 	}
 
 	rep.HotAfter = len(keptHot)
-	if !opts.DryRun {
-		if len(rotatedCold) > 0 {
-			if err := AppendTasksToColdArchive(vaultDir, rotatedCold); err != nil {
-				return rep, err
+	if !opts.DryRun && (len(rotatedCold) > 0 || len(rep.AutoArchivedSlugs) > 0 || autoPinnedCompleted > 0) {
+		taskIdentity := func(t ActiveTask) string {
+			if t.ConversationID != "" {
+				return "cid:" + t.ConversationID
 			}
+			return "slug:" + t.TaskSlug
 		}
-		if len(rotatedCold) > 0 || len(rep.AutoArchivedSlugs) > 0 || autoPinnedCompleted > 0 {
-			data, err := json.MarshalIndent(keptHot, "", "  ")
+		rotatedKeys := make(map[string]bool, len(rotatedCold))
+		for _, t := range rotatedCold {
+			rotatedKeys[taskIdentity(t)] = true
+		}
+		plannedHotByKey := make(map[string]ActiveTask, len(keptHot))
+		for _, t := range keptHot {
+			plannedHotByKey[taskIdentity(t)] = t
+		}
+		if err := withTasksLock(vaultDir, func() error {
+			if len(rotatedCold) > 0 {
+				if err := appendTasksToColdArchiveUnlocked(vaultDir, rotatedCold); err != nil {
+					return err
+				}
+			}
+			curTasks, err := ListTasks(vaultDir)
 			if err != nil {
-				return rep, err
+				return err
 			}
-			if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
-				return rep, err
+			merged := make([]ActiveTask, 0, len(curTasks))
+			for _, cur := range curTasks {
+				k := taskIdentity(cur)
+				if rotatedKeys[k] {
+					continue
+				}
+				if planned, ok := plannedHotByKey[k]; ok {
+					cur.Status = planned.Status
+					cur.CompletedAt = planned.CompletedAt
+					cur.ArchivedAt = planned.ArchivedAt
+					cur.LastUpdatedAt = planned.LastUpdatedAt
+					cur.WorktreeDir = planned.WorktreeDir
+					cur.WorktreeDirs = planned.WorktreeDirs
+				}
+				merged = append(merged, cur)
 			}
+			rep.HotAfter = len(merged)
+			return saveTasksUnlocked(vaultDir, merged)
+		}); err != nil {
+			return rep, err
 		}
 	}
 	rep.TotalColdAfter = CountColdArchivedTasks(vaultDir)
@@ -1617,66 +1710,44 @@ func CancelTasks(vaultDir string, conversationIDs []string, reason string) error
 	if len(conversationIDs) == 0 {
 		return nil
 	}
-	tasks, err := ListTasks(vaultDir)
-	if err != nil {
-		return err
-	}
-	targetSet := make(map[string]bool)
+	targetSet := make(map[string]bool, len(conversationIDs))
 	for _, id := range conversationIDs {
 		targetSet[id] = true
 	}
-	changed := false
-	for i := range tasks {
-		if targetSet[tasks[i].ConversationID] || targetSet[tasks[i].TaskSlug] {
-			tasks[i].Status = "cancelled"
-			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
-			if strings.TrimSpace(reason) != "" {
-				tasks[i].LastSummary = strings.TrimSpace(reason)
+	return UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		changed := false
+		nowStr := time.Now().Format(time.RFC3339)
+		for i := range tasks {
+			if targetSet[tasks[i].ConversationID] || targetSet[tasks[i].TaskSlug] {
+				tasks[i].Status = "cancelled"
+				tasks[i].LastUpdatedAt = nowStr
+				if strings.TrimSpace(reason) != "" {
+					tasks[i].LastSummary = strings.TrimSpace(reason)
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if !changed {
-		return nil
-	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
-		return err
-	}
-	return nil
+		return tasks, changed, nil
+	})
 }
 
 // CancelAllSubagentTasks marks all active subagent tasks as cancelled.
 func CancelAllSubagentTasks(vaultDir string, reason string) error {
-	tasks, err := ListTasks(vaultDir)
-	if err != nil {
-		return err
-	}
-	changed := false
-	for i := range tasks {
-		if tasks[i].Status == "active" && (strings.HasPrefix(tasks[i].TaskSlug, "subagent-") || strings.HasPrefix(tasks[i].Title, "[Subagent:")) {
-			tasks[i].Status = "cancelled"
-			tasks[i].LastUpdatedAt = time.Now().Format(time.RFC3339)
-			if strings.TrimSpace(reason) != "" {
-				tasks[i].LastSummary = strings.TrimSpace(reason)
+	return UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		changed := false
+		nowStr := time.Now().Format(time.RFC3339)
+		for i := range tasks {
+			if tasks[i].Status == "active" && (strings.HasPrefix(tasks[i].TaskSlug, "subagent-") || strings.HasPrefix(tasks[i].Title, "[Subagent:")) {
+				tasks[i].Status = "cancelled"
+				tasks[i].LastUpdatedAt = nowStr
+				if strings.TrimSpace(reason) != "" {
+					tasks[i].LastSummary = strings.TrimSpace(reason)
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if !changed {
-		return nil
-	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
-		return err
-	}
-	return nil
+		return tasks, changed, nil
+	})
 }
 
 func frontDeskPath(vaultDir string) string {
@@ -2821,54 +2892,78 @@ func LoadQuota(vaultDir string) QuotaState {
 	return state
 }
 
-// SaveQuota persists today's QuotaState to quota-YYYY-MM-DD.json and quota_state.json.
-func SaveQuota(vaultDir string, state QuotaState) error {
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
+func quotaLockPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", ".quota.lock")
+}
+
+func (s *QuotaState) normalizeSpawnCounters() {
+	if s.SpawnsToday > 0 && s.AutoSpawnsToday == 0 && s.InteractiveSpawnsToday == 0 {
+		s.AutoSpawnsToday = s.EffectiveAutoSpawns()
 	}
+}
+
+func saveQuotaUnlocked(vaultDir string, state QuotaState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
 	datedPath := quotaFilePath(vaultDir, time.Now())
-	if err := os.WriteFile(datedPath, data, 0o644); err != nil {
+	if err := store.WriteAtomic(datedPath, data, 0o644); err != nil {
 		return err
 	}
-	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "quota_state.json"), data, 0o644)
+	_ = store.WriteAtomic(filepath.Join(vaultDir, "memory", "quota_state.json"), data, 0o644)
 	return nil
+}
+
+// SaveQuota persists today's QuotaState atomically to quota-YYYY-MM-DD.json and quota_state.json under RankQuota.
+func SaveQuota(vaultDir string, state QuotaState) error {
+	return store.With(context.Background(), store.RankQuota, quotaLockPath(vaultDir), func(_ context.Context) error {
+		return saveQuotaUnlocked(vaultDir, state)
+	})
+}
+
+// UpdateQuota executes an atomic locked read-modify-write update on today's QuotaState under RankQuota.
+func UpdateQuota(vaultDir string, fn func(state *QuotaState) (bool, error)) error {
+	return store.With(context.Background(), store.RankQuota, quotaLockPath(vaultDir), func(_ context.Context) error {
+		st := LoadQuota(vaultDir)
+		changed, err := fn(&st)
+		if err != nil || !changed {
+			return err
+		}
+		return saveQuotaUnlocked(vaultDir, st)
+	})
 }
 
 // RecordSubagentSpawn records an interactive Layer-1 subagent invocation (`InteractiveSpawnsToday` + `SpawnsToday`)
 // without consuming the daemon's automated background spawn budget (`AutoSpawnsToday`).
 func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
-	state := LoadQuota(vaultDir)
 	summary := prompt
 	if runes := []rune(summary); len(runes) > 200 {
 		summary = string(runes[:200]) + "..."
 	}
 	now := time.Now()
-	if n := len(state.Events); n > 0 {
-		last := state.Events[n-1]
-		if last.Trigger == "invoke_subagent" && last.Skill == role && last.Model == model && last.Outcome == summary {
-			if ts, err := time.Parse(time.RFC3339, last.Timestamp); err == nil && now.Sub(ts) >= 0 && now.Sub(ts) < 2*time.Second {
-				return nil
+	return UpdateQuota(vaultDir, func(state *QuotaState) (bool, error) {
+		if n := len(state.Events); n > 0 {
+			last := state.Events[n-1]
+			if last.Trigger == "invoke_subagent" && last.Skill == role && last.Model == model && last.Outcome == summary {
+				if ts, err := time.Parse(time.RFC3339, last.Timestamp); err == nil && now.Sub(ts) >= 0 && now.Sub(ts) < 2*time.Second {
+					return false, nil
+				}
 			}
 		}
-	}
-	if state.SpawnsToday > 0 && state.AutoSpawnsToday == 0 && state.InteractiveSpawnsToday == 0 {
-		state.AutoSpawnsToday = state.EffectiveAutoSpawns()
-	}
-	state.InteractiveSpawnsToday++
-	state.SpawnsToday++
-	state.LastStatus = fmt.Sprintf("Subagent spawned: %s (%s)", role, now.Format("15:04:05"))
-	state.Events = append(state.Events, SpawnEvent{
-		Timestamp: now.Format(time.RFC3339),
-		Trigger:   "invoke_subagent",
-		Skill:     role,
-		Model:     model,
-		Outcome:   summary,
+		state.normalizeSpawnCounters()
+		state.InteractiveSpawnsToday++
+		state.SpawnsToday++
+		state.LastStatus = fmt.Sprintf("Subagent spawned: %s (%s)", role, now.Format("15:04:05"))
+		state.Events = append(state.Events, SpawnEvent{
+			Timestamp: now.Format(time.RFC3339),
+			Trigger:   "invoke_subagent",
+			Skill:     role,
+			Model:     model,
+			Outcome:   summary,
+		})
+		return true, nil
 	})
-	return SaveQuota(vaultDir, state)
 }
 
 func resolveSpawnTarget(vaultDir, trigger string) (workDir, projectID string) {
@@ -2937,6 +3032,10 @@ func resolveSpawnTarget(vaultDir, trigger string) (workDir, projectID string) {
 
 func configureSpawnCommand(cmd *exec.Cmd, vaultDir, trigger string) {
 	workDir, projectID := resolveSpawnTarget(vaultDir, trigger)
+	configureSpawnCommandWithTarget(cmd, vaultDir, trigger, workDir, projectID)
+}
+
+func configureSpawnCommandWithTarget(cmd *exec.Cmd, vaultDir, trigger, workDir, projectID string) {
 	isManual := strings.HasPrefix(trigger, "manual-spawn:")
 	if !isManual && workDir != "" {
 		cmd.Dir = workDir
@@ -3071,6 +3170,7 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 
 	if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, cascadeID, prompt, 10*time.Second); sendErr != nil {
 		msgCmd := exec.Command("agentapi", "send-message", "--title="+title, cascadeID, prompt)
+		configureSpawnCommandWithTarget(msgCmd, vaultDir, "", workDir, projectID)
 		if msgErr := msgCmd.Run(); msgErr != nil {
 			return cascadeID, usedModel, false, "", fmt.Errorf("StartCascade succeeded (%s) but SendUserCascadeMessage failed: %w", cascadeID, sendErr)
 		}
@@ -3096,16 +3196,18 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	}
 	isForced := len(force) > 0 && force[0]
 	isInteractive := isInteractiveSpawnTrigger(trigger)
-	state := LoadQuota(vaultDir)
 	if !isInteractive && !isForced {
+		state := LoadQuota(vaultDir)
 		if state.CircuitOpen {
 			return "", fmt.Errorf("quota circuit breaker is OPEN: %s", state.CircuitReason)
 		}
 		autoUsed := state.EffectiveAutoSpawns()
 		if autoUsed >= state.MaxDailySpawns {
-			state.CircuitOpen = true
-			state.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", autoUsed, state.MaxDailySpawns)
-			_ = SaveQuota(vaultDir, state)
+			_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+				st.CircuitOpen = true
+				st.CircuitReason = fmt.Sprintf("daily spawn budget reached (%d/%d)", autoUsed, st.MaxDailySpawns)
+				return true, nil
+			})
 			return "", fmt.Errorf("daily spawn budget exhausted (%d/%d)", autoUsed, state.MaxDailySpawns)
 		}
 	}
@@ -3122,22 +3224,24 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 				modelID = lsModel
 			}
 			if lsErr != nil {
-				if !isInteractive && isQuotaExhaustedError(lsErr.Error()) {
-					state.CircuitOpen = true
-					state.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from LanguageServerService"
-				}
 				errText := lsErr.Error()
 				if runes := []rune(errText); len(runes) > 240 {
 					errText = string(runes[:240]) + "..."
 				}
-				state.Events = append(state.Events, SpawnEvent{
-					Timestamp: time.Now().Format(time.RFC3339),
-					Trigger:   trigger,
-					Skill:     skill,
-					Model:     modelID,
-					Outcome:   "error: " + errText,
+				_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+					if !isInteractive && isQuotaExhaustedError(lsErr.Error()) {
+						st.CircuitOpen = true
+						st.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from LanguageServerService"
+					}
+					st.Events = append(st.Events, SpawnEvent{
+						Timestamp: time.Now().Format(time.RFC3339),
+						Trigger:   trigger,
+						Skill:     skill,
+						Model:     modelID,
+						Outcome:   "error: " + errText,
+					})
+					return true, nil
 				})
-				_ = SaveQuota(vaultDir, state)
 				return lsOut, lsErr
 			}
 			output = lsOut
@@ -3147,7 +3251,7 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 				fmt.Fprintf(os.Stderr, "[hq spawn] falling back to agentapi (%s)\n", fbReason)
 			}
 			cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
-			configureSpawnCommand(cmd, vaultDir, trigger)
+			configureSpawnCommandWithTarget(cmd, vaultDir, trigger, workDir, projectID)
 			outBytes, err := cmd.CombinedOutput()
 			output = strings.TrimSpace(string(outBytes))
 			if err != nil {
@@ -3155,7 +3259,7 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 				if isQuotaExhaustedError(output) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
 					fallbackModel := resolveRoutineFallbackModel(vaultDir)
 					fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
-					configureSpawnCommand(fbCmd, vaultDir, trigger)
+					configureSpawnCommandWithTarget(fbCmd, vaultDir, trigger, workDir, projectID)
 					if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
 						modelID = fallbackModel + " (fallback)"
 						output = strings.TrimSpace(string(fbBytes))
@@ -3164,37 +3268,29 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 				}
 			}
 			if err != nil {
-				if !isInteractive && isQuotaExhaustedError(output) {
-					state.CircuitOpen = true
-					state.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from agentapi"
-				}
 				errText := err.Error()
 				if runes := []rune(errText); len(runes) > 240 {
 					errText = string(runes[:240]) + "..."
 				}
-				state.Events = append(state.Events, SpawnEvent{
-					Timestamp: time.Now().Format(time.RFC3339),
-					Trigger:   trigger,
-					Skill:     skill,
-					Model:     modelID,
-					Outcome:   "error: " + errText,
+				_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+					if !isInteractive && isQuotaExhaustedError(output) {
+						st.CircuitOpen = true
+						st.CircuitReason = "RESOURCE_EXHAUSTED (429) detected from agentapi"
+					}
+					st.Events = append(st.Events, SpawnEvent{
+						Timestamp: time.Now().Format(time.RFC3339),
+						Trigger:   trigger,
+						Skill:     skill,
+						Model:     modelID,
+						Outcome:   "error: " + errText,
+					})
+					return true, nil
 				})
-				_ = SaveQuota(vaultDir, state)
 				return output, fmt.Errorf("agentapi error: %w (%s)", err, output)
 			}
 		}
 	}
 
-	if state.SpawnsToday > 0 && state.AutoSpawnsToday == 0 && state.InteractiveSpawnsToday == 0 {
-		state.AutoSpawnsToday = state.EffectiveAutoSpawns()
-	}
-	if isInteractive {
-		state.InteractiveSpawnsToday++
-	} else {
-		state.AutoSpawnsToday++
-	}
-	state.SpawnsToday++
-	state.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s [%s])", trigger, skill, modelID)
 	outcome := output
 	if fallbackNote != "" {
 		outcome = fmt.Sprintf("%s [agentapi fallback: %s]", output, fallbackNote)
@@ -3202,14 +3298,24 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 	if runes := []rune(outcome); len(runes) > 240 {
 		outcome = string(runes[:240]) + "..."
 	}
-	state.Events = append(state.Events, SpawnEvent{
-		Timestamp: time.Now().Format(time.RFC3339),
-		Trigger:   trigger,
-		Skill:     skill,
-		Model:     modelID,
-		Outcome:   outcome,
+	_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+		st.normalizeSpawnCounters()
+		if isInteractive {
+			st.InteractiveSpawnsToday++
+		} else {
+			st.AutoSpawnsToday++
+		}
+		st.SpawnsToday++
+		st.LastStatus = fmt.Sprintf("SPAWNED (%s -> /%s [%s])", trigger, skill, modelID)
+		st.Events = append(st.Events, SpawnEvent{
+			Timestamp: time.Now().Format(time.RFC3339),
+			Trigger:   trigger,
+			Skill:     skill,
+			Model:     modelID,
+			Outcome:   outcome,
+		})
+		return true, nil
 	})
-	_ = SaveQuota(vaultDir, state)
 	return output, nil
 }
 
@@ -3369,12 +3475,22 @@ type PendingSubagent struct {
 	CreatedAt            time.Time `json:"createdAt"`
 }
 
+func subagentQueueLockPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", ".subagents.lock")
+}
+
+func withSubagentQueueLock(vaultDir string, fn func() error) error {
+	return store.With(context.Background(), store.RankSubagentQueue, subagentQueueLockPath(vaultDir), func(_ context.Context) error {
+		return fn()
+	})
+}
+
 func pendingSubagentsFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "pending_subagents.json")
 }
 
-func loadPendingSubagents(vaultDir string) ([]PendingSubagent, error) {
-	data, err := os.ReadFile(pendingSubagentsFilePath(vaultDir))
+func loadPendingSubagentFile(filePath string) ([]PendingSubagent, error) {
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -3388,19 +3504,15 @@ func loadPendingSubagents(vaultDir string) ([]PendingSubagent, error) {
 	return items, nil
 }
 
-func savePendingSubagents(vaultDir string, items []PendingSubagent) error {
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
-	}
+func savePendingSubagentFile(filePath string, items []PendingSubagent) error {
 	data, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(pendingSubagentsFilePath(vaultDir), data, 0o644)
+	return store.WriteAtomic(filePath, data, 0o644)
 }
 
-// QueuePendingSubagentWithParent enqueues metadata for an invoked subagent along with its parentConversationId.
-func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt string) (PendingSubagent, error) {
+func queuePendingSubagentFile(vaultDir, filePath, parentConvID, role, model, prompt string) (PendingSubagent, error) {
 	tier, scope, _, title, slug := ParseSubagentRole(role, model)
 	promptPrefix := prompt
 	if runes := []rune(promptPrefix); len(runes) > 200 {
@@ -3418,25 +3530,69 @@ func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt 
 		CreatedAt:            time.Now(),
 	}
 
-	queue, _ := loadPendingSubagents(vaultDir)
-	cutoff := time.Now().Add(-60 * time.Minute)
-	var active []PendingSubagent
-	for _, q := range queue {
-		if q.CreatedAt.After(cutoff) {
-			active = append(active, q)
+	var outItem PendingSubagent
+	err := withSubagentQueueLock(vaultDir, func() error {
+		queue, _ := loadPendingSubagentFile(filePath)
+		cutoff := time.Now().Add(-60 * time.Minute)
+		var active []PendingSubagent
+		for _, q := range queue {
+			if q.CreatedAt.After(cutoff) {
+				active = append(active, q)
+			}
 		}
-	}
-	if n := len(active); n > 0 {
-		last := active[n-1]
-		if last.ParentConversationID == item.ParentConversationID && last.Role == item.Role &&
-			last.Model == item.Model && last.PromptPrefix == item.PromptPrefix &&
-			item.CreatedAt.Sub(last.CreatedAt) >= 0 && item.CreatedAt.Sub(last.CreatedAt) < 2*time.Second {
-			return last, nil
+		if n := len(active); n > 0 {
+			last := active[n-1]
+			if last.ParentConversationID == item.ParentConversationID && last.Role == item.Role &&
+				last.Model == item.Model && last.PromptPrefix == item.PromptPrefix &&
+				item.CreatedAt.Sub(last.CreatedAt) >= 0 && item.CreatedAt.Sub(last.CreatedAt) < 2*time.Second {
+				outItem = last
+				return nil
+			}
 		}
+		active = append(active, item)
+		outItem = item
+		return savePendingSubagentFile(filePath, active)
+	})
+	return outItem, err
+}
+
+func popPendingSubagentFile(vaultDir, filePath, callerConvID, callerPrompt string, maxAge time.Duration) (PendingSubagent, bool) {
+	var matched PendingSubagent
+	found := false
+	_ = withSubagentQueueLock(vaultDir, func() error {
+		queue, err := loadPendingSubagentFile(filePath)
+		if err != nil || len(queue) == 0 {
+			return nil
+		}
+		callerConvID = strings.TrimSpace(callerConvID)
+		cutoff := time.Now().Add(-maxAge)
+		var remaining []PendingSubagent
+		for _, item := range queue {
+			if !item.CreatedAt.After(cutoff) {
+				continue
+			}
+			isSelf := callerConvID != "" && strings.TrimSpace(item.ParentConversationID) == callerConvID
+			if !found && !isSelf && matchesPendingSubagentPrompt(callerPrompt, item.PromptPrefix) {
+				matched = item
+				found = true
+				continue
+			}
+			remaining = append(remaining, item)
+		}
+		if found {
+			_ = savePendingSubagentFile(filePath, remaining)
+		}
+		return nil
+	})
+	if found {
+		return matched, true
 	}
-	active = append(active, item)
-	err := savePendingSubagents(vaultDir, active)
-	return item, err
+	return PendingSubagent{}, false
+}
+
+// QueuePendingSubagentWithParent enqueues metadata for an invoked subagent along with its parentConversationId.
+func QueuePendingSubagentWithParent(vaultDir, parentConvID, role, model, prompt string) (PendingSubagent, error) {
+	return queuePendingSubagentFile(vaultDir, pendingSubagentsFilePath(vaultDir), parentConvID, role, model, prompt)
 }
 
 func normalizeSubagentPromptText(s string) string {
@@ -3460,32 +3616,7 @@ func matchesPendingSubagentPrompt(callerPrompt, itemPrefix string) bool {
 // PopPendingSubagentForCaller pops the oldest matching unclaimed pending subagent within maxAge,
 // rejecting self-parenting (`ParentConversationID == callerConvID`) and mismatched prompts when callerPrompt is known.
 func PopPendingSubagentForCaller(vaultDir, callerConvID, callerPrompt string, maxAge time.Duration) (PendingSubagent, bool) {
-	queue, err := loadPendingSubagents(vaultDir)
-	if err != nil || len(queue) == 0 {
-		return PendingSubagent{}, false
-	}
-	callerConvID = strings.TrimSpace(callerConvID)
-	cutoff := time.Now().Add(-maxAge)
-	var remaining []PendingSubagent
-	var matched PendingSubagent
-	found := false
-	for _, item := range queue {
-		if !item.CreatedAt.After(cutoff) {
-			continue
-		}
-		isSelf := callerConvID != "" && strings.TrimSpace(item.ParentConversationID) == callerConvID
-		if !found && !isSelf && matchesPendingSubagentPrompt(callerPrompt, item.PromptPrefix) {
-			matched = item
-			found = true
-			continue
-		}
-		remaining = append(remaining, item)
-	}
-	if found {
-		_ = savePendingSubagents(vaultDir, remaining)
-		return matched, true
-	}
-	return PendingSubagent{}, false
+	return popPendingSubagentFile(vaultDir, pendingSubagentsFilePath(vaultDir), callerConvID, callerPrompt, maxAge)
 }
 
 // IsFrontDeskConversation returns true if convID matches the currently leased Front Desk conversation ID.
@@ -3506,101 +3637,15 @@ func nestedConversationsFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "nested_conversations.json")
 }
 
-func loadPendingNestedSubagents(vaultDir string) ([]PendingSubagent, error) {
-	data, err := os.ReadFile(pendingNestedSubagentsFilePath(vaultDir))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var items []PendingSubagent
-	if err := json.Unmarshal(data, &items); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-func savePendingNestedSubagents(vaultDir string, items []PendingSubagent) error {
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(items, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(pendingNestedSubagentsFilePath(vaultDir), data, 0o644)
-}
-
 // QueuePendingNestedSubagent enqueues metadata for a nested child subagent invoked from a subagent or secondary task.
 func QueuePendingNestedSubagent(vaultDir, parentConvID, role, model, prompt string) (PendingSubagent, error) {
-	tier, scope, _, title, slug := ParseSubagentRole(role, model)
-	promptPrefix := prompt
-	if runes := []rune(promptPrefix); len(runes) > 200 {
-		promptPrefix = string(runes[:200]) + "..."
-	}
-	item := PendingSubagent{
-		Role:                 role,
-		Model:                model,
-		Tier:                 tier,
-		Scope:                scope,
-		ParentConversationID: strings.TrimSpace(parentConvID),
-		TaskSlug:             slug,
-		Title:                title,
-		PromptPrefix:         promptPrefix,
-		CreatedAt:            time.Now(),
-	}
-
-	queue, _ := loadPendingNestedSubagents(vaultDir)
-	cutoff := time.Now().Add(-60 * time.Minute)
-	var active []PendingSubagent
-	for _, q := range queue {
-		if q.CreatedAt.After(cutoff) {
-			active = append(active, q)
-		}
-	}
-	if n := len(active); n > 0 {
-		last := active[n-1]
-		if last.ParentConversationID == item.ParentConversationID && last.Role == item.Role &&
-			last.Model == item.Model && last.PromptPrefix == item.PromptPrefix &&
-			item.CreatedAt.Sub(last.CreatedAt) >= 0 && item.CreatedAt.Sub(last.CreatedAt) < 2*time.Second {
-			return last, nil
-		}
-	}
-	active = append(active, item)
-	err := savePendingNestedSubagents(vaultDir, active)
-	return item, err
+	return queuePendingSubagentFile(vaultDir, pendingNestedSubagentsFilePath(vaultDir), parentConvID, role, model, prompt)
 }
 
 // PopPendingNestedSubagentForCaller pops the oldest matching pending nested subagent within maxAge,
 // rejecting self-parenting (`ParentConversationID == callerConvID`) and mismatched prompts when callerPrompt is known.
 func PopPendingNestedSubagentForCaller(vaultDir, callerConvID, callerPrompt string, maxAge time.Duration) (PendingSubagent, bool) {
-	queue, err := loadPendingNestedSubagents(vaultDir)
-	if err != nil || len(queue) == 0 {
-		return PendingSubagent{}, false
-	}
-	callerConvID = strings.TrimSpace(callerConvID)
-	cutoff := time.Now().Add(-maxAge)
-	var remaining []PendingSubagent
-	var matched PendingSubagent
-	found := false
-	for _, item := range queue {
-		if !item.CreatedAt.After(cutoff) {
-			continue
-		}
-		isSelf := callerConvID != "" && strings.TrimSpace(item.ParentConversationID) == callerConvID
-		if !found && !isSelf && matchesPendingSubagentPrompt(callerPrompt, item.PromptPrefix) {
-			matched = item
-			found = true
-			continue
-		}
-		remaining = append(remaining, item)
-	}
-	if found {
-		_ = savePendingNestedSubagents(vaultDir, remaining)
-		return matched, true
-	}
-	return PendingSubagent{}, false
+	return popPendingSubagentFile(vaultDir, pendingNestedSubagentsFilePath(vaultDir), callerConvID, callerPrompt, maxAge)
 }
 
 // NestedConversation tracks known descendant subagent conversations spawned by non-Front Desk callers.
@@ -3642,10 +3687,7 @@ func loadNestedConversations(vaultDir string) (map[string]NestedConversation, er
 	return make(map[string]NestedConversation), nil
 }
 
-func saveNestedConversations(vaultDir string, m map[string]NestedConversation) error {
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
-		return err
-	}
+func saveNestedConversationsUnlocked(vaultDir string, m map[string]NestedConversation) error {
 	var list []NestedConversation
 	for _, v := range m {
 		list = append(list, v)
@@ -3657,7 +3699,7 @@ func saveNestedConversations(vaultDir string, m map[string]NestedConversation) e
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(nestedConversationsFilePath(vaultDir), data, 0o644)
+	return store.WriteAtomic(nestedConversationsFilePath(vaultDir), data, 0o644)
 }
 
 // RecordNestedConversation records a conversation ID as a nested descendant subagent.
@@ -3667,16 +3709,18 @@ func RecordNestedConversation(vaultDir, convID, parentConvID string) error {
 	if convID == "" || (parentConvID != "" && convID == parentConvID) {
 		return nil
 	}
-	m, _ := loadNestedConversations(vaultDir)
-	if m == nil {
-		m = make(map[string]NestedConversation)
-	}
-	m[convID] = NestedConversation{
-		ConversationID:       convID,
-		ParentConversationID: parentConvID,
-		CreatedAt:            time.Now().Format(time.RFC3339),
-	}
-	return saveNestedConversations(vaultDir, m)
+	return withSubagentQueueLock(vaultDir, func() error {
+		m, _ := loadNestedConversations(vaultDir)
+		if m == nil {
+			m = make(map[string]NestedConversation)
+		}
+		m[convID] = NestedConversation{
+			ConversationID:       convID,
+			ParentConversationID: parentConvID,
+			CreatedAt:            time.Now().Format(time.RFC3339),
+		}
+		return saveNestedConversationsUnlocked(vaultDir, m)
+	})
 }
 
 // RemoveNestedConversation deletes any stale nested-subagent classification for convID
@@ -3686,15 +3730,17 @@ func RemoveNestedConversation(vaultDir, convID string) error {
 	if convID == "" {
 		return nil
 	}
-	m, err := loadNestedConversations(vaultDir)
-	if err != nil || len(m) == 0 {
-		return nil
-	}
-	if _, exists := m[convID]; !exists {
-		return nil
-	}
-	delete(m, convID)
-	return saveNestedConversations(vaultDir, m)
+	return withSubagentQueueLock(vaultDir, func() error {
+		m, err := loadNestedConversations(vaultDir)
+		if err != nil || len(m) == 0 {
+			return nil
+		}
+		if _, exists := m[convID]; !exists {
+			return nil
+		}
+		delete(m, convID)
+		return saveNestedConversationsUnlocked(vaultDir, m)
+	})
 }
 
 // IsNestedSubagentConversation returns true if convID is a known nested descendant subagent.
@@ -3790,7 +3836,11 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 			explicitTaskIDs[strings.TrimSpace(t.ConversationID)] = true
 		}
 	}
-	if nestedMap, nErr := loadNestedConversations(vaultDir); nErr == nil && len(nestedMap) > 0 {
+	_ = withSubagentQueueLock(vaultDir, func() error {
+		nestedMap, nErr := loadNestedConversations(vaultDir)
+		if nErr != nil || len(nestedMap) == 0 {
+			return nil
+		}
 		scrubbed := false
 		for cid, rec := range nestedMap {
 			if explicitTaskIDs[cid] || (fd.ConversationID != "" && cid == fd.ConversationID) || (rec.ParentConversationID != "" && cid == rec.ParentConversationID) {
@@ -3799,9 +3849,10 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 			}
 		}
 		if scrubbed {
-			_ = saveNestedConversations(vaultDir, nestedMap)
+			return saveNestedConversationsUnlocked(vaultDir, nestedMap)
 		}
-	}
+		return nil
+	})
 
 	// Pre-seed known nested conversations from quota events or journal if any
 	quota := LoadQuota(vaultDir)
@@ -3818,7 +3869,6 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 		}
 	}
 
-	var layer1Tasks []ActiveTask
 	var removedTasks []ActiveTask
 	var removedSlugs []string
 	nowStr := time.Now().Format(time.RFC3339)
@@ -3844,28 +3894,42 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 				_ = RecordNestedConversation(vaultDir, t.ConversationID, t.ParentConversationID)
 			}
 			removedSlugs = append(removedSlugs, t.TaskSlug)
-		} else {
-			layer1Tasks = append(layer1Tasks, t)
 		}
 	}
 
 	if len(removedSlugs) > 0 {
-		if err := AppendTasksToColdArchive(vaultDir, removedTasks); err != nil {
-			return nil, err
+		removedSlugSet := make(map[string]bool, len(removedSlugs))
+		for _, s := range removedSlugs {
+			removedSlugSet[s] = true
 		}
-		data, err := json.MarshalIndent(layer1Tasks, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(tasksFilePath(vaultDir), data, 0o644); err != nil {
+		if err := withTasksLock(vaultDir, func() error {
+			if err := appendTasksToColdArchiveUnlocked(vaultDir, removedTasks); err != nil {
+				return err
+			}
+			curTasks, err := ListTasks(vaultDir)
+			if err != nil {
+				return err
+			}
+			kept := make([]ActiveTask, 0, len(curTasks))
+			for _, cur := range curTasks {
+				if removedSlugSet[cur.TaskSlug] {
+					continue
+				}
+				kept = append(kept, cur)
+			}
+			return saveTasksUnlocked(vaultDir, kept)
+		}); err != nil {
 			return nil, err
 		}
 
 		// Reconcile quota SpawnsToday if nested spawns were previously counted
-		if quota.SpawnsToday >= len(removedSlugs) {
-			quota.SpawnsToday -= len(removedSlugs)
-			_ = SaveQuota(vaultDir, quota)
-		}
+		_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+			if st.SpawnsToday >= len(removedSlugs) {
+				st.SpawnsToday -= len(removedSlugs)
+				return true, nil
+			}
+			return false, nil
+		})
 	}
 
 	return removedSlugs, nil
@@ -4424,7 +4488,6 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 	}
 
 	_ = len(force) // preserved for API compatibility; interactive subagents do not share daemon auto-spawn cap
-	state := LoadQuota(vaultDir)
 	isFrontDesk := IsFrontDeskConversation(vaultDir, parentConvID)
 
 	tier, scope, _, title, slug := ParseSubagentRole(role, modelID)
@@ -4432,20 +4495,20 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 	if dryRun {
 		output := fmt.Sprintf("[dry-run] hq subagent --parent=%s --model=%s --role=%q", parentConvID, modelID, role)
 		if isFrontDesk {
-			if state.SpawnsToday > 0 && state.AutoSpawnsToday == 0 && state.InteractiveSpawnsToday == 0 {
-				state.AutoSpawnsToday = state.EffectiveAutoSpawns()
-			}
-			state.InteractiveSpawnsToday++
-			state.SpawnsToday++
-			state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s])", role, modelID)
-			state.Events = append(state.Events, SpawnEvent{
-				Timestamp: time.Now().Format(time.RFC3339),
-				Trigger:   "hq-subagent:" + slug,
-				Skill:     role,
-				Model:     modelID,
-				Outcome:   output,
+			_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+				st.normalizeSpawnCounters()
+				st.InteractiveSpawnsToday++
+				st.SpawnsToday++
+				st.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s])", role, modelID)
+				st.Events = append(st.Events, SpawnEvent{
+					Timestamp: time.Now().Format(time.RFC3339),
+					Trigger:   "hq-subagent:" + slug,
+					Skill:     role,
+					Model:     modelID,
+					Outcome:   output,
+				})
+				return true, nil
 			})
-			_ = SaveQuota(vaultDir, state)
 		}
 		return output, nil
 	}
@@ -4460,7 +4523,11 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 		return "", err
 	}
 
-	reqBody := buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID")))
+	candProjID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
+	if strings.TrimSpace(workspaceDir) != "" {
+		candProjID, _, _ = ResolveVerifiedWorkspaceProjectID(vaultDir, workspaceDir, candProjID)
+	}
+	reqBody := buildCascadeRequestBody(modelEnum, parentConvID, role, workspaceDir, candProjID)
 	cascadeID, err := startCascade(creds.BaseURL, creds.CSRFToken, reqBody)
 	if err != nil {
 		return "", err
@@ -4505,25 +4572,26 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 	sent := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, cascadeID, fullPrompt, 10*time.Second) == nil
 	if !sent && parentConvID != "" {
 		msgCmd := exec.Command("agentapi", "send-message", "--title=Message from "+parentConvID, cascadeID, fullPrompt)
+		configureSpawnCommandWithTarget(msgCmd, vaultDir, "manual-spawn:subagent", workspaceDir, candProjID)
 		_ = msgCmd.Run()
 	}
 
 	output := fmt.Sprintf("Spawned subagent %s (parent=%s, model=%s, role=%q)", cascadeID, parentConvID, modelID, role)
 	if isFrontDesk {
-		if state.SpawnsToday > 0 && state.AutoSpawnsToday == 0 && state.InteractiveSpawnsToday == 0 {
-			state.AutoSpawnsToday = state.EffectiveAutoSpawns()
-		}
-		state.InteractiveSpawnsToday++
-		state.SpawnsToday++
-		state.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s] -> %s)", role, modelID, cascadeID)
-		state.Events = append(state.Events, SpawnEvent{
-			Timestamp: time.Now().Format(time.RFC3339),
-			Trigger:   "hq-subagent:" + slug,
-			Skill:     role,
-			Model:     modelID,
-			Outcome:   output,
+		_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+			st.normalizeSpawnCounters()
+			st.InteractiveSpawnsToday++
+			st.SpawnsToday++
+			st.LastStatus = fmt.Sprintf("SUBAGENT SPAWNED (%s [%s] -> %s)", role, modelID, cascadeID)
+			st.Events = append(st.Events, SpawnEvent{
+				Timestamp: time.Now().Format(time.RFC3339),
+				Trigger:   "hq-subagent:" + slug,
+				Skill:     role,
+				Model:     modelID,
+				Outcome:   output,
+			})
+			return true, nil
 		})
-		_ = SaveQuota(vaultDir, state)
 	}
 	return output, nil
 }
