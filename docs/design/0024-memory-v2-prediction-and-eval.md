@@ -256,7 +256,7 @@ Deterministic hygiene metrics (`M1`–`M4`) verify memory *plumbing*, but provin
 - Run `hq memory eval --replay --baseline-bin=~/.local/bin/hq --baseline-vault=/tmp/vault-v1` across historical untainted `local/memory/journal/` turns (`~170` real prompts/workspaces) in **0 LLM tokens** to quantify exact before/after `SessionStart` byte reduction, `0%` Zone-2 starvation in `lean_auto`, and scope-matching accuracy on real user history before merging.
 
 ### 7.2 Layer 2 — Offline 20–30 Task Blinded `v1` vs. `v2` A/B Quality Benchmark (Pre-Merge Ship Gate, `~5–10m`)
-- Executed strictly **offline on the PR branch** against the cloned `/tmp/vault-v1` vs. `/tmp/vault-v2` snapshots (`0` mutation to live `local/` Vault; `0` waiting on production traffic):
+- Executed strictly **offline on the PR branch** via [`scripts/eval_memory_ab.py`](../../scripts/eval_memory_ab.py) against cloned `/tmp` Vault snapshots (`0` mutation to live `local/` Vault; `0` waiting on production traffic; supports `--custom-suite=<vault>/memory/eval_suite.jsonl` and `--synthetic-only`):
   - **5 Balanced Task Categories (`20–30` curated prompts; private personal eval file in `<vault>/memory/eval_suite.jsonl` + PII-free synthetic set in `internal/vault/testdata/`):**
     1. *Constraint & Negative-Guardrail Adherence* (e.g., social reply style, opening-bell trading guard, counterparty preferences);
     2. *Scoped Engineering Recall (`lean_auto` Subagent)* (does `## Active Playbook` + scoped facts cut failed commands and tool steps?);
