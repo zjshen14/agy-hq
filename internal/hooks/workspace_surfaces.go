@@ -96,14 +96,16 @@ func workspaceWriteLeaseDenial(vaultDir, convID, pathArg string) string {
 	}
 	caller := "does not resolve to a tracked Layer-1 task"
 	toSlug := "<your-task-slug>"
+	findSlug := " Run `hq tasks` to find the task slug linked to this conversation (match its conversation ID); a conversation spawned moments ago may not be linked yet, so retry once before handing off."
 	if resolved && slug != "" {
 		caller = fmt.Sprintf("belongs to task `%s`", hookInline(slug, 128))
 		toSlug = hookInline(slug, 128)
+		findSlug = ""
 	}
 	writerDisp := hookInline(writer, 128)
 	return fmt.Sprintf(
-		"Blocked by agy-hq workspace single-writer lease (RFC-0025 W1): `%s` is inside workspace `%s`, whose writer lease is held by task `%s`, and this conversation %s. Only the writer task may edit files in this workspace. To take over, transfer the lease with `hq workspace handoff %s --to=%s`; otherwise route the edit to task `%s`.",
-		hookInline(target, 300), keyDisp, writerDisp, caller, keyDisp, toSlug, writerDisp)
+		"Blocked by agy-hq workspace single-writer lease (RFC-0025 W1): `%s` is inside workspace `%s`, whose writer lease is held by task `%s`, and this conversation %s. Only the writer task may edit files in this workspace.%s To take over, transfer the lease with `hq workspace handoff %s --to=%s`; otherwise route the edit to task `%s`.",
+		hookInline(target, 300), keyDisp, writerDisp, caller, findSlug, keyDisp, toSlug, writerDisp)
 }
 
 // isProviderWorkspacePath reports whether the absolute path p lies inside a provider workspace: a ledger entry

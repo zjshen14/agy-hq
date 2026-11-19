@@ -17,11 +17,16 @@ import (
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
-// Spawn seams: tests substitute these to simulate spawn failures without a language server.
+// Spawn seams: tests substitute these to simulate spawn outcomes without a language server.
 var (
-	spawnTaskFn     = kernel.SpawnTask
-	spawnSubagentFn = kernel.SpawnSubagent
-	syncConsoleFn   = webui.SyncMarkdownConsole
+	// spawnTaskFn, when non-nil, replaces the `hq spawn --workspace` conversation spawn with SpawnTask's signature.
+	// It has no cascade-created hook, so the task is linked to its conversation only after it returns.
+	spawnTaskFn func(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error)
+	// spawnTaskWithOptionsFn is the production spawn: runWorkspaceSpawn links the pre-registered task to the new
+	// conversation from OnCascadeCreated, before the conversation receives its first prompt.
+	spawnTaskWithOptionsFn = kernel.SpawnTaskWithOptions
+	spawnSubagentFn        = kernel.SpawnSubagent
+	syncConsoleFn          = webui.SyncMarkdownConsole
 )
 
 const workspaceUsage = `usage: hq workspace <subcommand> [flags]
@@ -721,7 +726,9 @@ func workspaceSpawnPrompt(acq kernel.WorkspaceAcquireResult, prompt string) stri
 // runWorkspaceSpawn implements `hq spawn --workspace=<fqid>[:<id>]`: it creates (owned) or attaches the workspace,
 // pre-registers the task with its primary binding before SpawnTask (the RFC-0007 race fix), and on spawn failure
 // rolls back the binding and removes only a workspace this call created. The conversation still starts in the
-// verified Vault project (resolveSpawnTarget is unchanged).
+// verified Vault project (resolveSpawnTarget is unchanged). On the Language Server path the task is linked to the
+// new conversation before its first prompt is delivered, so the child's first write already resolves to the W1
+// writer task; the agentapi fallback creates and prompts in one step and is linked when the spawn returns.
 func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stderr io.Writer) int {
 	slug := strings.TrimSpace(req.TaskSlug)
 	if slug == "" {
@@ -769,9 +776,7 @@ func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stder
 		Ephemeral:     req.Ephemeral,
 		Workspaces:    bindings,
 	})
-	out, err := spawnTaskFn(vaultDir, "manual-spawn:"+slug, "swe-pulse", req.Title, fullPrompt, req.Model, req.DryRun, req.Force)
-	spawnedID := kernel.ExtractUUID(out)
-	if spawnedID != "" {
+	linkConversation := func(convID string) {
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:       slug,
 			Title:          req.Title,
@@ -779,13 +784,28 @@ func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stder
 			Scope:          req.Scope,
 			Tier:           req.Tier,
 			Model:          req.Model,
-			ConversationID: spawnedID,
+			ConversationID: convID,
 			CreatedAt:      createdAt,
 			LastUpdatedAt:  time.Now().Format(time.RFC3339),
 			LastSummary:    req.Prompt,
 			Status:         "active",
+			Ephemeral:      req.Ephemeral,
 			Workspaces:     bindings,
 		})
+	}
+	trigger := "manual-spawn:" + slug
+	var out string
+	if spawnTaskFn != nil {
+		out, err = spawnTaskFn(vaultDir, trigger, "swe-pulse", req.Title, fullPrompt, req.Model, req.DryRun, req.Force)
+	} else {
+		out, err = spawnTaskWithOptionsFn(vaultDir, trigger, "swe-pulse", req.Title, fullPrompt, req.Model, req.DryRun, kernel.SpawnTaskOptions{
+			Force:            req.Force,
+			OnCascadeCreated: linkConversation,
+		})
+	}
+	spawnedID := kernel.ExtractUUID(out)
+	if spawnedID != "" {
+		linkConversation(spawnedID)
 	} else if err != nil {
 		kernel.RemoveUnboundTaskBySlug(vaultDir, slug)
 		if rbErr := kernel.RollbackAcquiredWorkspace(vaultDir, acq, slug); rbErr != nil {
@@ -820,6 +840,11 @@ type workspaceSubagentRequest struct {
 // runs in the default workspace project). A Front Desk parent makes the new Layer-1 subagent task the writer and
 // primary binder; a task parent makes its owning Layer-1 task the writer with a secondary binding. Bindings are
 // recorded after SpawnSubagent registers the task; a failed spawn rolls the workspace back.
+//
+// The W1 lease is already in force when the child receives its first prompt: AcquireWorkspace records writer_task
+// and lease_enforced before the spawn, and SpawnSubagent registers the Layer-1 subagent task with its conversation
+// ID (Front Desk parent) or records the nested parent edge (task parent) before it sends the prompt, so the child's
+// first write resolves to the writer task. The parent passed to SpawnSubagent is the one the owner was derived from.
 func runWorkspaceSubagentSpawn(vaultDir string, req workspaceSubagentRequest, stdout, stderr io.Writer) int {
 	fqid, id, err := kernel.ParseWorkspaceSpec(req.Spec)
 	if err != nil {
@@ -868,7 +893,7 @@ func runWorkspaceSubagentSpawn(vaultDir string, req workspaceSubagentRequest, st
 	}
 	promptRole := workspace.RolePrimary
 	fullPrompt := kernel.WorkspacePromptPreamble(acq.Entry.Provider, acq.Entry.WorkspaceID, promptRole, acq.Entry.WorkDir, acq.Skill) + "\n\nTask: " + req.Prompt
-	out, err := spawnSubagentFn(vaultDir, req.ParentConv, req.Role, fullPrompt, req.Model, req.WorkDir, req.DryRun, req.Force)
+	out, err := spawnSubagentFn(vaultDir, parent, req.Role, fullPrompt, req.Model, req.WorkDir, req.DryRun, req.Force)
 	if err != nil {
 		if rbErr := kernel.RollbackAcquiredWorkspace(vaultDir, acq, ownerSlug); rbErr != nil {
 			fmt.Fprintf(stderr, "warning: workspace rollback incomplete: %v\n", rbErr)

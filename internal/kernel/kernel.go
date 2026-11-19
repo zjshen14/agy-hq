@@ -3334,7 +3334,7 @@ func resolveRoutineFallbackModel(vaultDir string) string {
 	return fallbackModel
 }
 
-func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string) (cascadeID string, usedModel string, fallbackToAgentAPI bool, fallbackReason string, err error) {
+func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string, onCascadeCreated func(cascadeID string)) (cascadeID string, usedModel string, fallbackToAgentAPI bool, fallbackReason string, err error) {
 	_, regAvail := ValidateProjectMatchesWorkspace(vaultDir, projectID, workDir)
 	canFallbackSafely := func(requireVerifiedProj bool) bool {
 		if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
@@ -3393,6 +3393,11 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 		}
 	}
 
+	// The conversation exists but has not received its first prompt yet: let the caller link it to pre-registered
+	// Vault state (e.g. the task's ConversationID) before the child's first turn can act on that state.
+	if onCascadeCreated != nil {
+		onCascadeCreated(cascadeID)
+	}
 	if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, cascadeID, prompt, 10*time.Second); sendErr != nil {
 		msgCmd := exec.Command("agentapi", "send-message", "--title="+title, cascadeID, prompt)
 		configureSpawnCommandWithTarget(msgCmd, vaultDir, "", workDir, projectID)
@@ -3419,10 +3424,27 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string)
 // enforcing the daily spawn budget, auto-downgrading to routine tier if a higher-tier model hits 429,
 // and tripping the circuit breaker only if Hydrogen/Flash is also exhausted.
 func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
+	return SpawnTaskWithOptions(vaultDir, trigger, skill, title, prompt, modelID, dryRun, SpawnTaskOptions{Force: len(force) > 0 && force[0]})
+}
+
+// SpawnTaskOptions configures SpawnTaskWithOptions.
+type SpawnTaskOptions struct {
+	// Force bypasses the daily auto-spawn budget and circuit breaker (SpawnTask's variadic force flag).
+	Force bool
+	// OnCascadeCreated, when set, receives the new conversation ID on the Language Server path after StartCascade
+	// succeeds and before the first prompt is delivered (SendUserCascadeMessage), so the caller can link the ID to
+	// pre-registered Vault state before the child's first turn can act on it. It runs synchronously, at most once,
+	// and never on dry runs or on the agentapi fallback, which creates and prompts the conversation in one step
+	// (callers must still record the ID from the returned output there).
+	OnCascadeCreated func(cascadeID string)
+}
+
+// SpawnTaskWithOptions is SpawnTask with explicit options (see SpawnTaskOptions).
+func SpawnTaskWithOptions(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, opts SpawnTaskOptions) (string, error) {
 	if modelID == "" {
 		modelID, _, _ = ResolveVaultModel(vaultDir, prompt, "", "", "")
 	}
-	isForced := len(force) > 0 && force[0]
+	isForced := opts.Force
 	isInteractive := isInteractiveSpawnTrigger(trigger)
 	if !isInteractive && !isForced {
 		state := LoadQuota(vaultDir)
@@ -3446,7 +3468,7 @@ func SpawnTask(vaultDir, trigger, skill, title, prompt, modelID string, dryRun b
 		output = fmt.Sprintf("[dry-run] agentapi new-conversation --model=%s --title=%q (skill=%s)", modelID, title, skill)
 	} else {
 		workDir, projectID := resolveSpawnTarget(vaultDir, trigger)
-		lsOut, lsModel, useAgentAPI, fbReason, lsErr := spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID)
+		lsOut, lsModel, useAgentAPI, fbReason, lsErr := spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID, opts.OnCascadeCreated)
 		if !useAgentAPI {
 			if lsModel != "" {
 				modelID = lsModel
