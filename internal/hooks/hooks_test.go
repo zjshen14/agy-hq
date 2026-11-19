@@ -1794,3 +1794,87 @@ func TestHooksPreventWorkflowAgentAPIAndNestedAutoAdoption(t *testing.T) {
 		t.Fatalf("expected run_workflow child %s to stay off tasks.json on vacant vault", wfChildID)
 	}
 }
+
+func TestHandleStopFallsBackToPersistedLSWhenHookEnvUnreachable(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	fdID := "dddddddd-0001-0001-0001-000000000001"
+	parentTaskID := "dddddddd-0002-0002-0002-000000000002"
+	wfChildID := "dddddddd-0003-0003-0003-000000000003"
+	if err := kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID)); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	liveSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectory") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "CASCADE_RUN_STATUS_IDLE",
+				"trajectory": map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"rootConversationId": parentTaskID,
+						"sourceMetadata": map[string]interface{}{
+							"hideFromConversationList": true,
+							"tool": map[string]interface{}{
+								"conversationId": parentTaskID,
+								"toolCall":       map[string]interface{}{"name": "run_workflow"},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer liveSrv.Close()
+
+	// Persist healthy LS session from an interactive session.
+	liveURL, _ := url.Parse(liveSrv.URL)
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", liveURL.Host)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-live")
+	if err := kernel.RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession: %v", err)
+	}
+
+	// Simulate a hook subprocess receiving a connection-refused LS port in its ambient env.
+	deadSrv := httptest.NewServer(http.NewServeMux())
+	deadAddr := strings.TrimPrefix(deadSrv.URL, "http://")
+	deadSrv.Close()
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", deadAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-dead")
+
+	logDir := filepath.Join(brainDir, wfChildID, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	tPath := filepath.Join(logDir, "transcript.jsonl")
+	_ = os.WriteFile(tPath, []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"workflow worker prompt"}`+"\n"), 0o644)
+
+	startBytes, _ := json.Marshal(map[string]interface{}{
+		"conversationId":        wfChildID,
+		"transcriptPath":        tPath,
+		"artifactDirectoryPath": filepath.Join(brainDir, wfChildID),
+		"lastUserInput":         "workflow worker prompt",
+		"modelName":             "gemini-4-hydrogen-medium",
+	})
+	var startOut bytes.Buffer
+	if err := HandleSessionStart(bytes.NewReader(startBytes), &startOut, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart: %v", err)
+	}
+	var stopOut bytes.Buffer
+	if err := HandleStop(bytes.NewReader(startBytes), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop: %v", err)
+	}
+
+	if !kernel.IsNestedSubagentConversation(vaultDir, wfChildID) {
+		t.Fatalf("expected wfChildID to be recorded as nested via persisted LS fallback despite dead hook env")
+	}
+	if _, found := kernel.FindTaskByConversationID(vaultDir, wfChildID); found {
+		t.Fatalf("expected wfChildID to stay off tasks.json despite dead hook env")
+	}
+	if diag := kernel.DiagnoseLSSession(vaultDir); !diag.PersistedReachable || diag.EffectiveSource != "persisted" {
+		t.Fatalf("expected dead hook env NOT to clobber healthy persisted LS session, got %+v", diag)
+	}
+}

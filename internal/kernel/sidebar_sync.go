@@ -318,12 +318,23 @@ func (c *SidebarSyncClient) getAllCascadeTrajectoriesWithFilter(ctx context.Cont
 // GetJetboxTrajectorySummaries reads the initial snapshot burst from LanguageServerService/JetboxSubscribeToSummaries
 // (Connect streaming protocol `application/connect+json`), which includes historical unloaded conversations persisted
 // on disk across Antigravity restarts that are omitted by in-memory GetAllCascadeTrajectories.
-// Nested subtrajectories (parentConversationId != "" or nestingDepth > 0) are filtered out.
+// Nested subtrajectories (parentConversationId != "" or nestingDepth > 0 or hideFromConversationList) are filtered out.
 func (c *SidebarSyncClient) GetJetboxTrajectorySummaries(ctx context.Context) (map[string]LSTrajectorySummary, error) {
+	return c.getJetboxTrajectorySummariesWithFilter(ctx, true, DefaultSidebarBatchTimeout)
+}
+
+// GetJetboxTrajectorySummariesIncludeSubtrajectories streams all Jetbox trajectory summaries including nested
+// subagents and workflow children so Layer-1 lineage classification and `hq tasks clean-nested` avoid the slow
+// full-memory `GetAllCascadeTrajectories(excludeSubtrajectories=false)` RPC.
+func (c *SidebarSyncClient) GetJetboxTrajectorySummariesIncludeSubtrajectories(ctx context.Context) (map[string]LSTrajectorySummary, error) {
+	return c.getJetboxTrajectorySummariesWithFilter(ctx, false, 10*time.Second)
+}
+
+func (c *SidebarSyncClient) getJetboxTrajectorySummariesWithFilter(ctx context.Context, excludeSubtrajectories bool, defaultMaxTimeout time.Duration) (map[string]LSTrajectorySummary, error) {
 	const (
 		jetboxSnapshotChunkSize = 100
 		maxConnectFrameBytes    = 32 * 1024 * 1024
-		jetboxIdleCutoff        = 120 * time.Millisecond
+		jetboxIdleCutoff        = 250 * time.Millisecond
 	)
 	if !c.Available() {
 		return nil, &sidebarRPCError{Method: "JetboxSubscribeToSummaries", Err: errors.New("LanguageServerService credentials unavailable")}
@@ -333,8 +344,11 @@ func (c *SidebarSyncClient) GetJetboxTrajectorySummaries(ctx context.Context) (m
 	}
 	boundedCtx := ctx
 	var boundCancel context.CancelFunc
-	if deadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(deadline) > DefaultSidebarBatchTimeout {
-		boundedCtx, boundCancel = context.WithTimeout(ctx, DefaultSidebarBatchTimeout)
+	if defaultMaxTimeout <= 0 {
+		defaultMaxTimeout = DefaultSidebarBatchTimeout
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		boundedCtx, boundCancel = context.WithTimeout(ctx, defaultMaxTimeout)
 		defer boundCancel()
 	}
 	streamCtx, streamCancel := context.WithCancel(boundedCtx)
@@ -412,9 +426,9 @@ func (c *SidebarSyncClient) GetJetboxTrajectorySummaries(ctx context.Context) (m
 		}
 		framesRead++
 		for k, v := range frame.Updates {
-			if strings.TrimSpace(v.TrajectoryMetadata.ParentConversationID) != "" ||
+			if excludeSubtrajectories && (strings.TrimSpace(v.TrajectoryMetadata.ParentConversationID) != "" ||
 				v.TrajectoryMetadata.NestingDepth > 0 ||
-				(v.TrajectoryMetadata.SourceMetadata != nil && v.TrajectoryMetadata.SourceMetadata.HideFromConversationList) {
+				(v.TrajectoryMetadata.SourceMetadata != nil && v.TrajectoryMetadata.SourceMetadata.HideFromConversationList)) {
 				continue
 			}
 			out[normalizeUUID(k)] = v
@@ -832,6 +846,13 @@ type SidebarSingleSyncResult struct {
 }
 
 func newSidebarSyncClientForVault(vaultDir string, cfg SidebarSyncConfig) *SidebarSyncClient {
+	if strings.TrimSpace(cfg.BaseURL) == "" && strings.TrimSpace(cfg.CSRFToken) == "" && strings.TrimSpace(vaultDir) != "" {
+		if creds, ok := discoverLSCredentials(vaultDir); ok {
+			cfg.BaseURL = creds.BaseURL
+			cfg.CSRFToken = creds.CSRFToken
+			return NewSidebarSyncClient(cfg)
+		}
+	}
 	client := NewSidebarSyncClient(cfg)
 	if !client.Available() && strings.TrimSpace(vaultDir) != "" {
 		if creds, ok := discoverLSCredentials(vaultDir); ok {

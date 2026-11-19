@@ -551,6 +551,24 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		Detail: fmt.Sprintf("quick=%s (%s), routine=%s, deep=%s · appData=%s", rQuick.ModelID, rQuick.Source, rRoutine.ModelID, rDeep.ModelID, roots.AppDataDir),
 	})
 
+	lsDiag := kernel.DiagnoseLSSession(vaultDir)
+	lsStatus := "PASS"
+	lsDetail := fmt.Sprintf("source=%s · env=%t(reachable=%t) · persisted=%s", lsDiag.EffectiveSource, lsDiag.EnvConfigured, lsDiag.EnvReachable, lsDiag.PersistedReason)
+	if lsDiag.PersistedUpdatedAt != "" {
+		lsDetail += fmt.Sprintf(" (updated=%s)", lsDiag.PersistedUpdatedAt)
+	}
+	if lsDiag.EffectiveSource == "none" {
+		lsStatus = "WARN"
+	} else if !lsDiag.PersistedReachable {
+		lsStatus = "WARN"
+		lsDetail += " — hooks without live LS env cannot query lineage"
+	}
+	results = append(results, CheckResult{
+		Name:   "Language Server Session",
+		Status: lsStatus,
+		Detail: lsDetail,
+	})
+
 	// 16. Check Companion Extension Packs, Trust Pins & Connector Account Drift (RFC-0017a / RFC-0017d)
 	for _, pItem := range extension.DoctorPacks(vaultDir) {
 		results = append(results, CheckResult{

@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1394,5 +1395,187 @@ func TestFrontDeskRotationPreservesLayer1SubagentsAndAvoidsBatchFallback(t *test
 	}
 	if batchCalls != 0 {
 		t.Fatalf("expected 0 GetAllCascadeTrajectories fallback calls on HTTP 200 GetCascadeTrajectory, got %d", batchCalls)
+	}
+}
+
+func TestLSSessionReachabilityGuardAndFallback(t *testing.T) {
+	vaultDir := t.TempDir()
+	fdID := "bbbbbbbb-0001-0001-0001-000000000001"
+	wfChildID := "bbbbbbbb-0002-0002-0002-000000000002"
+	parentTaskID := "bbbbbbbb-0003-0003-0003-000000000003"
+	if err := SetFrontDesk(vaultDir, fdID, ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	// Start a live mock LS server.
+	liveSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectory") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "CASCADE_RUN_STATUS_IDLE",
+				"trajectory": map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"rootConversationId": parentTaskID,
+						"sourceMetadata": map[string]interface{}{
+							"hideFromConversationList": true,
+							"tool": map[string]interface{}{
+								"conversationId": parentTaskID,
+								"toolCall":       map[string]interface{}{"name": "run_workflow"},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer liveSrv.Close()
+
+	// Create and immediately close a second server to obtain a guaranteed connection-refused address.
+	deadSrv := httptest.NewServer(http.NewServeMux())
+	deadAddr := strings.TrimPrefix(deadSrv.URL, "http://")
+	deadSrv.Close()
+
+	// 1. Recording an unreachable LS address into a fresh vault must be a no-op (never persist dead ports).
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", deadAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-dead")
+	if err := RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession(dead fresh): %v", err)
+	}
+	if diag := DiagnoseLSSession(vaultDir); diag.PersistedExists {
+		t.Fatalf("expected unreachable LS address NOT to be persisted on fresh vault, got %+v", diag)
+	}
+
+	// 2. Record the live LS session.
+	liveAddr := strings.TrimPrefix(liveSrv.URL, "http://")
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", liveAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-live")
+	if err := RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession(live): %v", err)
+	}
+	if diag := DiagnoseLSSession(vaultDir); !diag.PersistedReachable || diag.EffectiveSource != "env" {
+		t.Fatalf("expected live persisted LS session, got %+v", diag)
+	}
+
+	// 3. A subsequent hook with a connection-refused LS address must NOT clobber the healthy persisted session,
+	// and discoverLSCredentials + InspectLSConversationLineage must fall back to the healthy persisted LS!
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", deadAddr)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-dead")
+	if err := RecordLiveLSSession(vaultDir); err != nil {
+		t.Fatalf("RecordLiveLSSession(dead clobber attempt): %v", err)
+	}
+	diag := DiagnoseLSSession(vaultDir)
+	if !diag.PersistedReachable || diag.EnvReachable || diag.EffectiveSource != "persisted" {
+		t.Fatalf("expected dead env to fall back to healthy persisted LS without clobbering, got %+v", diag)
+	}
+	lin, ok := InspectLSConversationLineage(vaultDir, wfChildID)
+	if !ok || !lin.IsNestedDescendant || !lin.IsWorkflowChild || lin.DirectParentID != parentTaskID {
+		t.Fatalf("expected InspectLSConversationLineage to succeed via persisted LS fallback, got ok=%v %+v", ok, lin)
+	}
+}
+
+func TestFetchAllLSLineagePrefersJetboxAndCleanNestedSurvivesGetAllFailure(t *testing.T) {
+	vaultDir := t.TempDir()
+	fdID := "cccc0001-0001-0001-0001-000000000001"
+	parentTaskID := "cccc0002-0002-0002-0002-000000000002"
+	wfChildID := "cccc0003-0003-0003-0003-000000000003"
+	nestedSubID := "cccc0004-0004-0004-0004-000000000004"
+	standaloneID := "cccc0005-0005-0005-0005-000000000005"
+	if err := SetFrontDesk(vaultDir, fdID, ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	var getAllCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/GetAllCascadeTrajectories") {
+			getAllCalls++
+			http.Error(w, "simulated GetAllCascadeTrajectories timeout/failure", http.StatusGatewayTimeout)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/JetboxSubscribeToSummaries") {
+			w.Header().Set("Content-Type", "application/connect+json")
+			framePayload, _ := json.Marshal(map[string]interface{}{
+				"updates": map[string]interface{}{
+					wfChildID: map[string]interface{}{
+						"status": "CASCADE_RUN_STATUS_IDLE",
+						"trajectoryMetadata": map[string]interface{}{
+							"rootConversationId": parentTaskID,
+							"sourceMetadata": map[string]interface{}{
+								"hideFromConversationList": true,
+								"tool": map[string]interface{}{
+									"conversationId": parentTaskID,
+									"toolCall":       map[string]interface{}{"name": "run_workflow"},
+								},
+							},
+						},
+					},
+					nestedSubID: map[string]interface{}{
+						"status": "CASCADE_RUN_STATUS_IDLE",
+						"trajectoryMetadata": map[string]interface{}{
+							"parentConversationId": parentTaskID,
+							"rootConversationId":   parentTaskID,
+							"nestingDepth":         2,
+						},
+					},
+					standaloneID: map[string]interface{}{
+						"status":             "CASCADE_RUN_STATUS_IDLE",
+						"trajectoryMetadata": map[string]interface{}{"nestingDepth": 0},
+					},
+				},
+			})
+			hdr := make([]byte, 5)
+			hdr[0] = 0x00
+			hdr[1] = byte(len(framePayload) >> 24)
+			hdr[2] = byte(len(framePayload) >> 16)
+			hdr[3] = byte(len(framePayload) >> 8)
+			hdr[4] = byte(len(framePayload))
+			_, _ = w.Write(hdr)
+			_, _ = w.Write(framePayload)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-jetbox")
+
+	// Verify top-level Jetbox still filters subtrajectories while IncludeSubtrajectories keeps them.
+	client := NewSidebarSyncClient(SidebarSyncConfig{BaseURL: srv.URL, CSRFToken: "csrf-jetbox"})
+	topOnly, err := client.GetJetboxTrajectorySummaries(context.Background())
+	if err != nil {
+		t.Fatalf("GetJetboxTrajectorySummaries: %v", err)
+	}
+	if len(topOnly) != 1 || topOnly[standaloneID].Status == "" {
+		t.Fatalf("expected top-level Jetbox to keep only standaloneID, got %+v", topOnly)
+	}
+	withSub, err := client.GetJetboxTrajectorySummariesIncludeSubtrajectories(context.Background())
+	if err != nil {
+		t.Fatalf("GetJetboxTrajectorySummariesIncludeSubtrajectories: %v", err)
+	}
+	if len(withSub) != 3 {
+		t.Fatalf("expected IncludeSubtrajectories Jetbox to return 3 trajectories, got %d", len(withSub))
+	}
+
+	// Register auto-adopted leaked workflow child, nested subagent, and standalone conversation.
+	_ = RegisterTask(vaultDir, ActiveTask{TaskSlug: "conv-cccc0003", Title: "[Task:general] Workflow child", Kind: "task", ConversationID: wfChildID, Status: "active"})
+	_ = RegisterTask(vaultDir, ActiveTask{TaskSlug: "conv-cccc0004", Title: "[Task:general] Nested sub", Kind: "task", ConversationID: nestedSubID, Status: "active"})
+	_ = RegisterTask(vaultDir, ActiveTask{TaskSlug: "conv-cccc0005", Title: "[Task:general] Standalone", Kind: "task", ConversationID: standaloneID, Status: "active"})
+
+	removed, err := CleanNestedTasks(vaultDir)
+	if err != nil {
+		t.Fatalf("CleanNestedTasks: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Fatalf("expected 2 leaked entries pruned via Jetbox even when GetAllCascadeTrajectories fails, got %d (%v)", len(removed), removed)
+	}
+	if getAllCalls != 0 {
+		t.Fatalf("expected 0 GetAllCascadeTrajectories calls when Jetbox succeeds, got %d", getAllCalls)
+	}
+	remaining, _ := ListTasks(vaultDir)
+	if len(remaining) != 1 || remaining[0].ConversationID != standaloneID {
+		t.Fatalf("expected only standalone conversation to remain, got %+v", remaining)
 	}
 }

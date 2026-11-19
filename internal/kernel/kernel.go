@@ -3623,6 +3623,9 @@ func RunHeartbeatWithOptions(vaultDir string, now time.Time, dryRun bool, opts H
 	}
 
 	_, _ = ReconcileAutoTasks(vaultDir, now, dryRun)
+	if !dryRun && HasReachableLSSession(vaultDir) {
+		_, _ = CleanNestedTasks(vaultDir)
+	}
 
 	if !dryRun && !opts.SkipWorkspaceMaintenance {
 		// RFC-0025 provider workspace maintenance (probe drain, cadence-gated status refresh, landed notices).
@@ -4371,14 +4374,33 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 	}
 
 	// Pre-seed from live Language Server trajectory metadata if online (catches run_workflow & subtrajectories).
-	lsLineageByID, hasLS := FetchAllLSConversationLineage(vaultDir)
+	lsLineageByID, hasLS := fetchAllLSConversationLineageWithTimeout(vaultDir, 10*time.Second)
+	var fallbackCreds lsCredentials
+	hasFallbackCreds := false
+	if hasLS {
+		fallbackCreds, hasFallbackCreds = discoverLSCredentials(vaultDir)
+	}
+	missingProbes := 0
+	const maxMissingLineageProbes = 16
 	if hasLS {
 		for _, t := range tasks {
 			cid := normalizeUUID(t.ConversationID)
 			if cid == "" || explicitTaskIDs[cid] {
 				continue
 			}
-			if lin, ok := lsLineageByID[cid]; ok && lin.IsNestedDescendant {
+			lin, ok := lsLineageByID[cid]
+			if !ok && hasFallbackCreds && missingProbes < maxMissingLineageProbes && strings.HasPrefix(t.TaskSlug, "conv-") {
+				missingProbes++
+				if resp, supported, tErr := inspectCascadeTrajectory(fallbackCreds.BaseURL, fallbackCreds.CSRFToken, t.ConversationID, DefaultSidebarUnaryTimeout); tErr == nil && supported && resp != nil {
+					var meta LSTrajectoryMetadata
+					if resp.Trajectory.Metadata != nil {
+						meta = *resp.Trajectory.Metadata
+					}
+					lin = evaluateLSTrajectoryLineageWithMaps(fdID, knownFDs, nestedMap, parentByConv, cid, meta)
+					ok = true
+				}
+			}
+			if ok && lin.IsNestedDescendant {
 				if _, exists := nestedMap[cid]; !exists {
 					nestedMap[cid] = NestedConversation{ConversationID: t.ConversationID, ParentConversationID: lin.DirectParentID}
 					toRecordNested = append(toRecordNested, nestedPendingRec{convID: t.ConversationID, parentID: lin.DirectParentID})
@@ -4612,9 +4634,13 @@ func normalizeLSBaseURL(addr string) string {
 }
 
 func isTCPReachable(baseURL string) bool {
+	return classifyTCPDialError(baseURL) == ""
+}
+
+func classifyTCPDialError(baseURL string) string {
 	trimmed := strings.TrimSpace(baseURL)
 	if trimmed == "" {
-		return false
+		return "empty"
 	}
 	u, err := url.Parse(trimmed)
 	hostPort := ""
@@ -4626,7 +4652,7 @@ func isTCPReachable(baseURL string) bool {
 		hostPort, _ = normalizeLSAddress(trimmed)
 	}
 	if hostPort == "" {
-		return false
+		return "empty_host"
 	}
 	if _, _, splitErr := net.SplitHostPort(hostPort); splitErr != nil {
 		if strings.EqualFold(scheme, "https") {
@@ -4637,10 +4663,20 @@ func isTCPReachable(baseURL string) bool {
 	}
 	conn, dialErr := net.DialTimeout("tcp", hostPort, 250*time.Millisecond)
 	if dialErr != nil {
-		return false
+		msg := strings.ToLower(dialErr.Error())
+		switch {
+		case strings.Contains(msg, "refused"):
+			return "refused"
+		case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline"):
+			return "timeout"
+		case strings.Contains(msg, "no such host"):
+			return "dns"
+		default:
+			return "other"
+		}
 	}
 	_ = conn.Close()
-	return true
+	return ""
 }
 
 // RecordLiveLSSession persists live Language Server session coordinates from the current
@@ -4715,7 +4751,7 @@ func RecordLiveLSSession(vaultDir string) error {
 	}
 
 	if rawAddrEnv == "" || csrfEnv == "" {
-		if hasExisting && existing.BaseURL != "" && existing.CSRFToken != "" {
+		if hasExisting && existing.BaseURL != "" && existing.CSRFToken != "" && isTCPReachable(existing.BaseURL) {
 			updated := existing
 			changed := projRepaired
 			if agentExeEnv != "" && existing.AgentAPIExe != agentExeEnv {
@@ -4760,6 +4796,10 @@ func RecordLiveLSSession(vaultDir string) error {
 
 	normRaw, normBase := normalizeLSAddress(rawAddrEnv)
 	if normBase == "" {
+		return nil
+	}
+	// Never persist an unreachable LS address or clobber a healthy persisted session with a dead/refused hook env port.
+	if !isTCPReachable(normBase) {
 		return nil
 	}
 	creds := lsCredentials{
@@ -4840,27 +4880,108 @@ func HasReachableLSSession(vaultDir string) bool {
 	return isTCPReachable(creds.BaseURL)
 }
 
+// LSSessionDiagnostics reports non-secret Language Server credential discovery status for `hq doctor`.
+type LSSessionDiagnostics struct {
+	EnvConfigured       bool   `json:"envConfigured"`
+	EnvReachable        bool   `json:"envReachable"`
+	PersistedExists     bool   `json:"persistedExists"`
+	PersistedReachable  bool   `json:"persistedReachable"`
+	PersistedMatchesEnv bool   `json:"persistedMatchesEnv"`
+	PersistedScheme     string `json:"persistedScheme,omitempty"`
+	PersistedUpdatedAt  string `json:"persistedUpdatedAt,omitempty"`
+	PersistedReason     string `json:"persistedReason,omitempty"`
+	EffectiveSource     string `json:"effectiveSource"` // env | persisted | daemon_hub | none
+}
+
+// DiagnoseLSSession inspects LS credential availability across env, persisted runtime state,
+// and daemon hub files without exposing addresses or CSRF tokens.
+func DiagnoseLSSession(vaultDir string) LSSessionDiagnostics {
+	var diag LSSessionDiagnostics
+	envAddr := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
+	envCSRF := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
+	diag.EnvConfigured = envAddr != "" && envCSRF != ""
+	_, envBase := normalizeLSAddress(envAddr)
+	if envBase != "" {
+		diag.EnvReachable = isTCPReachable(envBase)
+	}
+
+	if strings.TrimSpace(vaultDir) != "" {
+		p := lsSessionFilePath(vaultDir)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				diag.PersistedReason = "missing"
+			} else {
+				diag.PersistedReason = fmt.Sprintf("read_error: %v", err)
+			}
+		} else {
+			diag.PersistedExists = true
+			var creds lsCredentials
+			if uErr := json.Unmarshal(raw, &creds); uErr != nil {
+				diag.PersistedReason = fmt.Sprintf("json_error: %v", uErr)
+			} else {
+				diag.PersistedUpdatedAt = strings.TrimSpace(creds.UpdatedAt)
+				if creds.BaseURL == "" && creds.RawAddress != "" {
+					creds.RawAddress, creds.BaseURL = normalizeLSAddress(creds.RawAddress)
+				}
+				if u, uErr := url.Parse(strings.TrimSpace(creds.BaseURL)); uErr == nil {
+					diag.PersistedScheme = u.Scheme
+				}
+				diag.PersistedMatchesEnv = envBase != "" && strings.EqualFold(strings.TrimSpace(creds.BaseURL), strings.TrimSpace(envBase))
+				switch {
+				case strings.TrimSpace(creds.BaseURL) == "":
+					diag.PersistedReason = "empty_address"
+				case strings.TrimSpace(creds.CSRFToken) == "":
+					diag.PersistedReason = "empty_csrf"
+				case !isTCPReachable(creds.BaseURL):
+					// Capture non-secret dial error class (e.g. connection refused vs timeout vs dns)
+					diag.PersistedReason = "tcp_unreachable:" + classifyTCPDialError(creds.BaseURL)
+				default:
+					diag.PersistedReachable = true
+					diag.PersistedReason = "ok"
+				}
+			}
+		}
+	}
+
+	switch {
+	case diag.EnvConfigured && diag.EnvReachable:
+		diag.EffectiveSource = "env"
+	case diag.PersistedReachable:
+		diag.EffectiveSource = "persisted"
+	default:
+		if _, ok := discoverLSCredentials(vaultDir); ok {
+			diag.EffectiveSource = "daemon_hub"
+		} else {
+			diag.EffectiveSource = "none"
+		}
+	}
+	return diag
+}
+
 func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
 	if addr, csrf := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN")); addr != "" && csrf != "" {
 		rawAddr, baseURL := normalizeLSAddress(addr)
-		creds := lsCredentials{
-			RawAddress:  rawAddr,
-			BaseURL:     baseURL,
-			CSRFToken:   csrf,
-			AgentAPIExe: strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")),
-		}
-		if sess, ok := loadReachableLSSession(vaultDir); ok {
-			if creds.AgentAPIExe == "" {
-				creds.AgentAPIExe = sess.AgentAPIExe
+		if baseURL != "" && isTCPReachable(baseURL) {
+			creds := lsCredentials{
+				RawAddress:  rawAddr,
+				BaseURL:     baseURL,
+				CSRFToken:   csrf,
+				AgentAPIExe: strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")),
 			}
-			creds.PluginShimDir = sess.PluginShimDir
-			creds.CredentialScope = sess.CredentialScope
-			creds.AppDataDir = sess.AppDataDir
-			creds.GeminiDir = sess.GeminiDir
-			creds.ConfigRelDir = sess.ConfigRelDir
-			creds.ProjectID = sess.ProjectID
+			if sess, ok := loadReachableLSSession(vaultDir); ok {
+				if creds.AgentAPIExe == "" {
+					creds.AgentAPIExe = sess.AgentAPIExe
+				}
+				creds.PluginShimDir = sess.PluginShimDir
+				creds.CredentialScope = sess.CredentialScope
+				creds.AppDataDir = sess.AppDataDir
+				creds.GeminiDir = sess.GeminiDir
+				creds.ConfigRelDir = sess.ConfigRelDir
+				creds.ProjectID = sess.ProjectID
+			}
+			return creds, true
 		}
-		return creds, true
 	}
 	if creds, ok := loadReachableLSSession(vaultDir); ok {
 		return creds, true
@@ -5428,7 +5549,7 @@ func InspectLSConversationLineage(vaultDir, convID string) (LSConversationLineag
 		lin := EvaluateLSTrajectoryLineage(vaultDir, convID, meta)
 		return lin, true
 	}
-	// Fallback to GetAllCascadeTrajectoriesIncludeSubtrajectories only when GetCascadeTrajectory failed or was unsupported (404/405/501).
+	// Fallback to JetboxSubscribeToSummaries / GetAllCascadeTrajectoriesIncludeSubtrajectories only when GetCascadeTrajectory failed or was unsupported (404/405/501).
 	all, ok := FetchAllLSConversationLineage(vaultDir)
 	if !ok {
 		return LSConversationLineage{}, false
@@ -5439,19 +5560,33 @@ func InspectLSConversationLineage(vaultDir, convID string) (LSConversationLineag
 
 // FetchAllLSConversationLineage fetches all trajectories (including subtrajectories) from LS and evaluates lineage by UUID.
 func FetchAllLSConversationLineage(vaultDir string) (map[string]LSConversationLineage, bool) {
+	return fetchAllLSConversationLineageWithTimeout(vaultDir, DefaultSidebarBatchTimeout)
+}
+
+func fetchAllLSConversationLineageWithTimeout(vaultDir string, timeout time.Duration) (map[string]LSConversationLineage, bool) {
 	creds, ok := discoverLSCredentials(vaultDir)
 	if !ok {
 		return nil, false
+	}
+	if timeout <= 0 {
+		timeout = DefaultSidebarBatchTimeout
 	}
 	client := NewSidebarSyncClient(SidebarSyncConfig{
 		BaseURL:   creds.BaseURL,
 		CSRFToken: creds.CSRFToken,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultSidebarBatchTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	summaries, err := client.GetAllCascadeTrajectoriesIncludeSubtrajectories(ctx)
+	// Prefer JetboxSubscribeToSummaries (streaming, sub-second even with thousands of subtrajectories)
+	// and fall back to GetAllCascadeTrajectoriesIncludeSubtrajectories only if Jetbox is unsupported or fails.
+	summaries, err := client.GetJetboxTrajectorySummariesIncludeSubtrajectories(ctx)
 	if err != nil || len(summaries) == 0 {
-		return nil, false
+		fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), DefaultSidebarBatchTimeout)
+		defer fallbackCancel()
+		summaries, err = client.GetAllCascadeTrajectoriesIncludeSubtrajectories(fallbackCtx)
+		if err != nil || len(summaries) == 0 {
+			return nil, false
+		}
 	}
 	fdID, knownFDs, nestedMap, parentByConv := buildAncestryMaps(vaultDir)
 	out := make(map[string]LSConversationLineage, len(summaries))
