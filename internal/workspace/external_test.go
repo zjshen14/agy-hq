@@ -207,7 +207,7 @@ func buildFakeProvider(t *testing.T) string {
 			return
 		}
 		out := filepath.Join(dir, "acme-ws")
-		cmd := exec.Command(goBin, "build", "-o", out, ".")
+		cmd := exec.Command(goBin, "build", "-buildvcs=false", "-o", out, ".")
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local")
 		if b, err := cmd.CombinedOutput(); err != nil {

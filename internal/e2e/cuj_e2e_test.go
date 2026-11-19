@@ -6022,7 +6022,7 @@ func buildCUJ41ProviderBinary(t *testing.T) string {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "acme-ws")
-	cmd := exec.Command("go", "build", "-o", out, ".")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, ".")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local")
 	if b, err := cmd.CombinedOutput(); err != nil {
