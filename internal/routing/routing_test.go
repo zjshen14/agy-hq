@@ -84,3 +84,98 @@ func TestResolvePrecedenceVaultPackAndBuiltin(t *testing.T) {
 		t.Fatalf("expected CustomFallbackCandidates to surface customized vault quick model first, got: %v", cands)
 	}
 }
+
+func TestNeonDefaultsAndExplicitResolution(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	tierCases := []struct {
+		tier      string
+		wantModel string
+		wantCanon string
+		wantSub   string
+	}{
+		{"quick", "gemini-4-hydrogen-low", "quick", "flash_lite"},
+		{"routine", "gemini-4-hydrogen-medium", "standard", "flash"},
+		{"standard", "gemini-4-neon-medium", "standard", "flash"},
+		{"heavy", "gemini-4-neon-high", "standard", "flash"},
+		{"deep_routine", "gemini-4-neon-high", "deep", "pro"},
+		{"deep-medium", "gemini-4-neon-high", "deep", "pro"},
+		{"deep", "gemini-4-carbon-high", "deep", "pro"},
+	}
+	for _, tc := range tierCases {
+		res := Resolve(vaultDir, Request{ExplicitTier: tc.tier})
+		if res.ModelID != tc.wantModel || res.CanonicalTier != tc.wantCanon || res.SubagentModel != tc.wantSub {
+			t.Fatalf("Resolve(tier=%q) = %+v, want model=%q tier=%q sub=%q", tc.tier, res, tc.wantModel, tc.wantCanon, tc.wantSub)
+		}
+	}
+
+	explicitCases := []struct {
+		req       Request
+		wantModel string
+		wantCanon string
+		wantSub   string
+	}{
+		{Request{ExplicitModel: "neon"}, "gemini-4-neon-medium", "standard", "flash"},
+		{Request{ExplicitModel: "neon", ExplicitDepth: "low"}, "gemini-4-neon-low", "standard", "flash_lite"},
+		{Request{ExplicitModel: "neon", ExplicitDepth: "medium"}, "gemini-4-neon-medium", "standard", "flash"},
+		{Request{ExplicitModel: "neon", ExplicitDepth: "high"}, "gemini-4-neon-high", "standard", "flash"},
+		{Request{ExplicitModel: "neon", ExplicitDepth: "xhigh"}, "gemini-4-neon-xhigh", "standard", "flash"},
+		{Request{ExplicitModel: "neon", ExplicitTier: "deep"}, "gemini-4-neon-high", "deep", "pro"},
+		{Request{ExplicitModel: "gemini-4-neon-low"}, "gemini-4-neon-low", "quick", "flash_lite"},
+		{Request{ExplicitModel: "gemini-4-neon-medium"}, "gemini-4-neon-medium", "standard", "flash"},
+		{Request{ExplicitModel: "gemini-4-neon-high"}, "gemini-4-neon-high", "standard", "flash"},
+		{Request{ExplicitModel: "gemini-4-neon-xhigh"}, "gemini-4-neon-xhigh", "standard", "flash"},
+		{Request{Prompt: "Use neon to debug the parser"}, "gemini-4-neon-medium", "standard", "flash"},
+		{Request{Prompt: "Use neon to consolidate memory", ExplicitTier: "deep-medium"}, "gemini-4-neon-high", "deep", "pro"},
+	}
+	for _, tc := range explicitCases {
+		res := Resolve(vaultDir, tc.req)
+		if res.ModelID != tc.wantModel || res.CanonicalTier != tc.wantCanon || res.SubagentModel != tc.wantSub {
+			t.Fatalf("Resolve(%+v) = %+v, want model=%q tier=%q sub=%q", tc.req, res, tc.wantModel, tc.wantCanon, tc.wantSub)
+		}
+	}
+
+	// Unmodified template config.yaml defaults match builtinDefaultModelForLogical so pack routing still applies.
+	tplCfg := `routing:
+  front_desk_model: gemini-4-hydrogen-medium
+  tiers:
+    quick:
+      model: gemini-4-hydrogen-low
+      subagent_model: flash_lite
+    routine:
+      model: gemini-4-hydrogen-medium
+      subagent_model: flash
+    standard:
+      model: gemini-4-neon-medium
+      subagent_model: flash
+    heavy:
+      model: gemini-4-neon-high
+      subagent_model: flash
+    deep_routine:
+      model: gemini-4-neon-high
+      subagent_model: pro
+    deep:
+      model: gemini-4-carbon-high
+      subagent_model: pro
+  fallback_on_429: gemini-4-hydrogen-medium
+`
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(tplCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := extension.UpdateVaultState(context.Background(), vaultDir, func(st *extension.VaultState) error {
+		st.Packs["neon-pack"] = extension.PackActivation{
+			Enabled:        true,
+			UsePackRouting: true,
+			RoutingTiers: map[string]string{
+				"standard": "gemini-4-neon-high",
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rPack := Resolve(vaultDir, Request{ExplicitTier: "standard"})
+	if rPack.ModelID != "gemini-4-neon-high" || rPack.Source != "pack:neon-pack" {
+		t.Fatalf("expected pack override over unmodified template defaults, got %+v", rPack)
+	}
+}

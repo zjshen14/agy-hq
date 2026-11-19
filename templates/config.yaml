@@ -27,13 +27,13 @@ routing:
       model: gemini-4-hydrogen-medium
       subagent_model: flash
     standard:
-      model: gemini-4-hydrogen-high
+      model: gemini-4-neon-medium
       subagent_model: flash
     heavy:
-      model: gemini-4-hydrogen-xhigh
+      model: gemini-4-neon-high
       subagent_model: flash
     deep_routine:
-      model: gemini-4-carbon-medium
+      model: gemini-4-neon-high
       subagent_model: pro
     deep:
       model: gemini-4-carbon-high

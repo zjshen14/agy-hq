@@ -2729,12 +2729,13 @@ func ExtractUUID(s string) string {
 // Supported routing profiles (canonical tier returned is quick|standard|deep):
 //   - quick (gemini-4-hydrogen-low, flash_lite): high-frequency polling, simple lookups, status summaries
 //   - routine / synthesis / medium (gemini-4-hydrogen-medium, flash): structured crons (morning-brief, edgar-close-watch), filing extraction
-//   - standard (gemini-4-hydrogen-high, flash): feature coding, unit tests, bug fixes, doc searches
-//   - heavy / sweep / xhigh (gemini-4-hydrogen-xhigh, flash): exhaustive multi-file refactors, hard E2E/test debugging
-//   - deep-medium / consolidation (gemini-4-carbon-medium, pro): nightly sleep consolidation, deep research memos
+//   - standard (gemini-4-neon-medium, flash): feature coding, unit tests, bug fixes, doc searches
+//   - heavy / sweep / xhigh (gemini-4-neon-high, flash): exhaustive multi-file refactors, hard E2E/test debugging
+//   - deep-medium / consolidation (gemini-4-neon-high, pro): nightly sleep consolidation, deep research memos
 //   - deep (gemini-4-carbon-high, pro): Phase 1 Architecture/RFC design, security/concurrency audits, thesis falsification
 //
 // Verified Antigravity model IDs (`agy models`):
+//   - gemini-4-neon-{low,medium,high,xhigh}
 //   - gemini-4-hydrogen-{low,medium,high,xhigh}
 //   - gemini-4-carbon-{low,medium,high}
 //   - gemini-4-argon-{low,medium,high}
@@ -4418,6 +4419,10 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 }
 
 var staticModelEnumMap = map[string]string{
+	"gemini-4-neon-xhigh":      "MODEL_PLACEHOLDER_M535",
+	"gemini-4-neon-high":       "MODEL_PLACEHOLDER_M532",
+	"gemini-4-neon-medium":     "MODEL_PLACEHOLDER_M533",
+	"gemini-4-neon-low":        "MODEL_PLACEHOLDER_M534",
 	"gemini-4-hydrogen-xhigh":  "MODEL_PLACEHOLDER_M528",
 	"gemini-4-hydrogen-high":   "MODEL_PLACEHOLDER_M525",
 	"gemini-4-hydrogen-medium": "MODEL_PLACEHOLDER_M526",
@@ -4962,11 +4967,35 @@ func selectLiveFallbackModelConfig(requestedNorm string, customCandidates []stri
 		candidates = []string{
 			"gemini-4-carbon-high",
 			"gemini-4-carbon-medium",
+			"gemini-4-neon-high",
 			"gemini-4-argon-high",
 			"claude-opus-5-5-high",
 			"claude-sonnet-5-5-high",
 		}
-		familyKeywords = []string{"carbon", "argon", "opus", "sonnet", "pro"}
+		familyKeywords = []string{"carbon", "argon", "opus", "sonnet", "pro", "neon"}
+	case strings.Contains(requestedNorm, "neon"):
+		if strings.HasSuffix(requestedNorm, "-low") {
+			candidates = []string{
+				"gemini-4-neon-medium",
+				"gemini-4-hydrogen-low",
+				"gemini-4-hydrogen-medium",
+			}
+		} else if strings.HasSuffix(requestedNorm, "-high") || strings.HasSuffix(requestedNorm, "-xhigh") {
+			candidates = []string{
+				"gemini-4-neon-high",
+				"gemini-4-neon-medium",
+				"gemini-4-hydrogen-high",
+				"gemini-4-carbon-medium",
+			}
+		} else {
+			candidates = []string{
+				"gemini-4-neon-medium",
+				"gemini-4-neon-high",
+				"gemini-4-hydrogen-high",
+				"gemini-4-hydrogen-medium",
+			}
+		}
+		familyKeywords = []string{"neon", "hydrogen", "flash", "carbon"}
 	case strings.Contains(requestedNorm, "lite") || strings.HasSuffix(requestedNorm, "-low") || strings.Contains(requestedNorm, "flash"):
 		candidates = []string{
 			"gemini-4-hydrogen-low",
@@ -4975,11 +5004,13 @@ func selectLiveFallbackModelConfig(requestedNorm string, customCandidates []stri
 		familyKeywords = []string{"lite", "flash", "hydrogen"}
 	default:
 		candidates = []string{
+			"gemini-4-neon-medium",
+			"gemini-4-neon-high",
 			"gemini-4-hydrogen-high",
 			"gemini-4-hydrogen-medium",
 			"gemini-4-carbon-medium",
 		}
-		familyKeywords = []string{"hydrogen", "flash", "carbon"}
+		familyKeywords = []string{"neon", "hydrogen", "flash", "carbon"}
 	}
 	for _, cand := range candidates {
 		if cfg, ok := matchLiveModelConfig(configs, cand); ok {

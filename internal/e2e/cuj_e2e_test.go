@@ -525,19 +525,19 @@ func TestCUJ4_SmartModelRoutingAndQuotaFallback(t *testing.T) {
 		},
 		{
 			prompt:    "Add unit tests for the new CLI flag",
-			wantModel: "gemini-4-hydrogen-high",
+			wantModel: "gemini-4-neon-medium",
 			wantTier:  "standard",
 			wantSub:   "flash",
 		},
 		{
 			prompt:    "Exhaustive multi-file refactor and hard E2E test debugging",
-			wantModel: "gemini-4-hydrogen-xhigh",
+			wantModel: "gemini-4-neon-high",
 			wantTier:  "standard",
 			wantSub:   "flash",
 		},
 		{
 			prompt:    "Nightly sleep consolidation and deep research memo",
-			wantModel: "gemini-4-carbon-medium",
+			wantModel: "gemini-4-neon-high",
 			wantTier:  "deep",
 			wantSub:   "pro",
 		},
@@ -552,6 +552,20 @@ func TestCUJ4_SmartModelRoutingAndQuotaFallback(t *testing.T) {
 			wantModel: "claude-opus-5-5-high",
 			wantTier:  "standard",
 			wantSub:   "pro",
+		},
+		{
+			prompt:    "Please use neon to review this PR",
+			wantModel: "gemini-4-neon-medium",
+			wantTier:  "standard",
+			wantSub:   "flash",
+		},
+		{
+			prompt:    "Implement feature",
+			modelFlag: "neon",
+			depthFlag: "xhigh",
+			wantModel: "gemini-4-neon-xhigh",
+			wantTier:  "standard",
+			wantSub:   "flash",
 		},
 		{
 			prompt:    "Implement feature",

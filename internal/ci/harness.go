@@ -736,11 +736,12 @@ func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {
 	}{
 		{"Summarize inbox status", "", "", "", "gemini-4-hydrogen-low", "quick", "flash_lite"},
 		{"Morning brief and multi-source summary", "", "", "", "gemini-4-hydrogen-medium", "standard", "flash"},
-		{"Fix unit test in parser", "", "", "", "gemini-4-hydrogen-high", "standard", "flash"},
-		{"Exhaustive multi-file refactor sweep", "", "", "", "gemini-4-hydrogen-xhigh", "standard", "flash"},
-		{"Nightly sleep consolidation and deep research memo", "", "", "", "gemini-4-carbon-medium", "deep", "pro"},
+		{"Fix unit test in parser", "", "", "", "gemini-4-neon-medium", "standard", "flash"},
+		{"Exhaustive multi-file refactor sweep", "", "", "", "gemini-4-neon-high", "standard", "flash"},
+		{"Nightly sleep consolidation and deep research memo", "", "", "", "gemini-4-neon-high", "deep", "pro"},
 		{"Architecture design and security audit", "", "", "", "gemini-4-carbon-high", "deep", "pro"},
 		{"Use opus to review concurrency bug", "", "", "", "claude-opus-5-5-high", "standard", "pro"},
+		{"Use neon to inspect PR", "", "", "", "gemini-4-neon-medium", "standard", "flash"},
 		{"Investigate issue", "sonnet", "medium", "deep", "claude-sonnet-5-5-medium", "deep", "pro"},
 	}
 	for _, tc := range routingCases {

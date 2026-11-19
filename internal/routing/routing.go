@@ -18,7 +18,7 @@ var (
 	reHeavySweepTask   = regexp.MustCompile(`(?i)\b(exhaustive|multi[- ]?file\s+refactor\w*|hard\s+e2e|e2e\s+debug\w*|test\s+debug\w*|sweep)\b`)
 	reRoutineTask      = regexp.MustCompile(`(?i)\b(morning[- ]?brief|edgar[- ]?close[- ]?watch|close\s+watch|filing\s+extract\w*|multi[- ]?source\s+summar\w*|brief)\b`)
 	reQuickTask        = regexp.MustCompile(`(?i)\b(triage|status|summary|summarize|list|format|lint|typo|quick|hiive|poll\w*|lookup)\b`)
-	rePromptModelHint  = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|hydrogen|flash_lite|flash-lite|flash)\b`)
+	rePromptModelHint  = regexp.MustCompile(`(?i)\b(?:use|with|on)\s+(opus|sonnet|carbon|argon|hydrogen|neon|flash_lite|flash-lite|flash)\b`)
 )
 
 // TierTarget holds the concrete model ID and subagent coarse alias for a logical tier.
@@ -90,7 +90,7 @@ func inferSubagentAlias(modelID, logicalTier string) string {
 	switch {
 	case strings.Contains(m, "carbon") || strings.Contains(m, "argon") || strings.Contains(m, "opus") || strings.Contains(m, "sonnet") || strings.Contains(m, "-pro"):
 		return "pro"
-	case strings.HasSuffix(m, "-low") && (strings.Contains(m, "hydrogen") || strings.Contains(m, "flash")):
+	case strings.HasSuffix(m, "-low") && (strings.Contains(m, "hydrogen") || strings.Contains(m, "neon") || strings.Contains(m, "flash")):
 		return "flash_lite"
 	case logicalTier == "quick":
 		return "flash_lite"
@@ -165,16 +165,20 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 		subagentModel = "flash"
 	case "heavy", "sweep", "xhigh", "standard-xhigh":
 		tier = "standard"
-		inferredDepth = "xhigh"
+		inferredDepth = "high"
 		if model == "" {
-			model = "gemini-4-hydrogen"
+			model = "gemini-4-neon"
+		} else if model == "hydrogen" || model == "gemini-4-hydrogen" {
+			inferredDepth = "xhigh"
 		}
 		subagentModel = "flash"
 	case "deep-medium", "deep_medium", "deep-routine", "deep_routine", "consolidation", "research":
 		tier = "deep"
-		inferredDepth = "medium"
+		inferredDepth = "high"
 		if model == "" {
-			model = "gemini-4-carbon"
+			model = "gemini-4-neon"
+		} else if model != "neon" && model != "gemini-4-neon" {
+			inferredDepth = "medium"
 		}
 		subagentModel = "pro"
 	case "deep":
@@ -185,9 +189,11 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 		subagentModel = "pro"
 	default:
 		tier = "standard"
-		inferredDepth = "high"
+		inferredDepth = "medium"
 		if model == "" {
-			model = "gemini-4-hydrogen"
+			model = "gemini-4-neon"
+		} else if model != "neon" && model != "gemini-4-neon" {
+			inferredDepth = "high"
 		}
 		subagentModel = "flash"
 	}
@@ -195,8 +201,18 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 		depth = inferredDepth
 	}
 
-	isMultiDepthBase := model == "gemini-4-hydrogen" || model == "gemini-4-carbon"
+	isMultiDepthBase := model == "gemini-4-hydrogen" || model == "gemini-4-carbon" || model == "gemini-4-neon"
 	switch model {
+	case "neon", "gemini-4-neon":
+		model = "gemini-4-neon"
+		if tier == "deep" {
+			subagentModel = "pro"
+		} else if depth == "low" || tier == "quick" {
+			subagentModel = "flash_lite"
+		} else {
+			subagentModel = "flash"
+		}
+		isMultiDepthBase = true
 	case "hydrogen":
 		model = "gemini-4-hydrogen"
 		subagentModel = "flash"
@@ -236,6 +252,20 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 			subagentModel = "pro"
 			if strings.TrimSpace(explicitTier) == "" && (strings.HasPrefix(model, "gemini-4-carbon-") || strings.HasPrefix(model, "gemini-4-argon-")) {
 				tier = "deep"
+			}
+		} else if strings.HasPrefix(model, "gemini-4-neon-") {
+			if strings.HasSuffix(model, "-low") {
+				subagentModel = "flash_lite"
+				if strings.TrimSpace(explicitTier) == "" {
+					tier = "quick"
+				}
+			} else if tier == "deep" {
+				subagentModel = "pro"
+			} else {
+				subagentModel = "flash"
+				if strings.TrimSpace(explicitTier) == "" {
+					tier = "standard"
+				}
 			}
 		} else if strings.HasPrefix(model, "gemini-4-hydrogen-low") || strings.HasPrefix(model, "gemini-3.8-flash-low") {
 			subagentModel = "flash_lite"
@@ -401,13 +431,13 @@ func builtinDefaultModelForLogical(logical string) string {
 	case "routine":
 		return "gemini-4-hydrogen-medium"
 	case "heavy":
-		return "gemini-4-hydrogen-xhigh"
+		return "gemini-4-neon-high"
 	case "deep_routine":
-		return "gemini-4-carbon-medium"
+		return "gemini-4-neon-high"
 	case "deep":
 		return "gemini-4-carbon-high"
 	default:
-		return "gemini-4-hydrogen-high"
+		return "gemini-4-neon-medium"
 	}
 }
 

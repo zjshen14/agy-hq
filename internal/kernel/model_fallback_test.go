@@ -176,6 +176,10 @@ func TestStaticModelEnumMapRetiredModelsRemoved(t *testing.T) {
 
 	// Active public Antigravity models resolve offline when LS is unavailable.
 	activeCases := map[string]string{
+		"gemini-4-neon-low":        "MODEL_PLACEHOLDER_M534",
+		"gemini-4-neon-medium":     "MODEL_PLACEHOLDER_M533",
+		"gemini-4-neon-high":       "MODEL_PLACEHOLDER_M532",
+		"gemini-4-neon-xhigh":      "MODEL_PLACEHOLDER_M535",
 		"gemini-4-hydrogen-low":    "MODEL_PLACEHOLDER_M527",
 		"gemini-4-hydrogen-medium": "MODEL_PLACEHOLDER_M526",
 		"gemini-4-hydrogen-high":   "MODEL_PLACEHOLDER_M525",
@@ -202,6 +206,56 @@ func TestStaticModelEnumMapRetiredModelsRemoved(t *testing.T) {
 	}
 	if got, err := ResolveModelEnum(emptySrv.URL, "csrf", "gemini-3.8-flash-low"); err == nil {
 		t.Fatalf("expected error for retired model on empty live list, got %q", got)
+	}
+}
+
+func TestResolveModelEnumNeonLiveAndFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"clientModelConfigs": []map[string]interface{}{
+				{
+					"modelId": "gemini-4-neon-medium",
+					"label":   "Gemini 4 Neon (Medium)",
+					"modelOrAlias": map[string]interface{}{
+						"model": "MODEL_PLACEHOLDER_M533",
+					},
+				},
+				{
+					"modelId": "gemini-4-neon-high",
+					"label":   "Gemini 4 Neon (High)",
+					"modelOrAlias": map[string]interface{}{
+						"model": "MODEL_PLACEHOLDER_M532",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	var gotEnum string
+	var gotErr error
+	stderrExact := captureStderr(t, func() {
+		gotEnum, gotErr = ResolveModelEnum(srv.URL, "csrf-neon", "gemini-4-neon-medium")
+	})
+	if gotErr != nil || gotEnum != "MODEL_PLACEHOLDER_M533" || stderrExact != "" {
+		t.Fatalf("expected direct live match MODEL_PLACEHOLDER_M533 with no warning, got enum=%q err=%v stderr=%q", gotEnum, gotErr, stderrExact)
+	}
+
+	// Omitted gemini-4-neon-xhigh falls back to active neon high rather than stale static M535.
+	var fbEnum string
+	var fbErr error
+	stderrFB := captureStderr(t, func() {
+		fbEnum, fbErr = ResolveModelEnum(srv.URL, "csrf-neon", "gemini-4-neon-xhigh")
+	})
+	if fbErr != nil || fbEnum != "MODEL_PLACEHOLDER_M532" {
+		t.Fatalf("expected live fallback MODEL_PLACEHOLDER_M532 for omitted gemini-4-neon-xhigh, got %q (%v)", fbEnum, fbErr)
+	}
+	if !strings.Contains(stderrFB, "gemini-4-neon-xhigh") || !strings.Contains(stderrFB, "gemini-4-neon-high") {
+		t.Fatalf("expected fallback warning mentioning requested and fallback neon models, got %q", stderrFB)
 	}
 }
 

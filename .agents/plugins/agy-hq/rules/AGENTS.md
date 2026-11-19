@@ -36,9 +36,9 @@
 
 - **User Override First:** Always honor explicit user model/depth requests:
   - Coarse Gemini subagent aliases (`inherit`, `flash_lite`, `flash`, `pro`): `invoke_subagent(Model=...)`.
-  - Exact thinking depth or cross-family nested subagent (`hydrogen`, `carbon`, `claude-sonnet-5-5-high`, `claude-opus-5-5-high`, `--depth=low|medium|high|xhigh`): `hq subagent --model=<model> --depth=<depth> --role="[<tier>] <scope>: <role>" --prompt="..."`.
+  - Exact thinking depth or cross-family nested subagent (`neon`, `hydrogen`, `carbon`, `claude-sonnet-5-5-high`, `claude-opus-5-5-high`, `--depth=low|medium|high|xhigh`): `hq subagent --model=<model> --depth=<depth> --role="[<tier>] <scope>: <role>" --prompt="..."`.
   - Dedicated sidebar Task Conversation: `hq spawn --task=<slug> --model=... --depth=... --prompt="..."`.
-- **Default Complexity Matrix:** `quick` (`gemini-4-hydrogen-low` / `flash_lite`) for polling/lookups; `routine` (`gemini-4-hydrogen-medium`) for Front Desk, Morning Brief, & routine filing checks; `standard` (`gemini-4-hydrogen-high` / `flash`) for feature coding, bug fixes, & unit tests; `heavy` (`gemini-4-hydrogen-xhigh`) for exhaustive multi-file debugging/refactors; `deep-medium` (`gemini-4-carbon-medium`) for nightly sleep consolidation & research memos; `deep` (`gemini-4-carbon-high` / `pro`) for Phase 1 RFCs, security/concurrency audits, & thesis falsification (`KC-1` breaches).
+- **Default Complexity Matrix:** `quick` (`gemini-4-hydrogen-low` / `flash_lite`) for polling/lookups; `routine` (`gemini-4-hydrogen-medium`) for Front Desk, Morning Brief, & routine filing checks; `standard` (`gemini-4-neon-medium` / `flash`) for feature coding, bug fixes, & unit tests; `heavy` (`gemini-4-neon-high` / `flash`) for exhaustive multi-file debugging/refactors; `deep-medium` (`gemini-4-neon-high` / `pro`) for nightly sleep consolidation & research memos; `deep` (`gemini-4-carbon-high` / `pro`) for Phase 1 RFCs, security/concurrency audits, & thesis falsification (`KC-1` breaches).
 
 ## 4. Approval-Bound Outbound Execution (`hq propose` + `ask_question`)
 

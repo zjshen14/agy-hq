@@ -75,13 +75,13 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	if m, tier, sub := ResolveModel("[Auto] EDGAR Close Watch: Activate the thesis-check skill to monitor new after-close 8-K filings", "", "", ""); m != "gemini-4-hydrogen-medium" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected edgar-close-watch medium routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
-	if m, tier, sub := ResolveModel("Implement the CSV parser for bank statements", "", "", ""); m != "gemini-4-hydrogen-high" || tier != "standard" || sub != "flash" {
+	if m, tier, sub := ResolveModel("Implement the CSV parser for bank statements", "", "", ""); m != "gemini-4-neon-medium" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected standard tier routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
-	if m, tier, sub := ResolveModel("Exhaustive multi-file refactor of kernel handlers", "", "", ""); m != "gemini-4-hydrogen-xhigh" || tier != "standard" || sub != "flash" {
+	if m, tier, sub := ResolveModel("Exhaustive multi-file refactor of kernel handlers", "", "", ""); m != "gemini-4-neon-high" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected heavy xhigh sweep routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
-	if m, tier, sub := ResolveModel("Nightly sleep consolidation and memory dreaming", "", "", ""); m != "gemini-4-carbon-medium" || tier != "deep" || sub != "pro" {
+	if m, tier, sub := ResolveModel("Nightly sleep consolidation and memory dreaming", "", "", ""); m != "gemini-4-neon-high" || tier != "deep" || sub != "pro" {
 		t.Fatalf("unexpected deep-medium consolidation routing: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, tier, sub := ResolveModel("Perform a security audit and architecture review", "", "", ""); m != "gemini-4-carbon-high" || tier != "deep" || sub != "pro" {
@@ -92,6 +92,15 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	}
 	if m, _, _ := ResolveModel("Fix a bug", "opus", "medium", ""); m != "claude-opus-5-5-medium" {
 		t.Fatalf("unexpected explicit user override: got %s", m)
+	}
+	if m, tier, sub := ResolveModel("Fix a bug", "neon", "", ""); m != "gemini-4-neon-medium" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected neon override: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Fix a bug", "neon", "xhigh", ""); m != "gemini-4-neon-xhigh" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected neon xhigh override: model=%s tier=%s sub=%s", m, tier, sub)
+	}
+	if m, tier, sub := ResolveModel("Use neon to review this PR", "", "", ""); m != "gemini-4-neon-medium" || tier != "standard" || sub != "flash" {
+		t.Fatalf("unexpected prompt neon hint: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, _, _ := ResolveModel("Fix a bug", "hydrogen", "xhigh", ""); m != "gemini-4-hydrogen-xhigh" {
 		t.Fatalf("unexpected hydrogen override: got %s", m)
@@ -105,10 +114,10 @@ func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
 	if m, _, _ := ResolveModel("Architecture design", "carbon", "high", ""); m != "gemini-4-carbon-high" {
 		t.Fatalf("unexpected carbon override: got %s", m)
 	}
-	if m, tier, sub := ResolveModel("Consolidate memory", "", "", "deep-medium"); m != "gemini-4-carbon-medium" || tier != "deep" || sub != "pro" {
+	if m, tier, sub := ResolveModel("Consolidate memory", "", "", "deep-medium"); m != "gemini-4-neon-high" || tier != "deep" || sub != "pro" {
 		t.Fatalf("unexpected deep-medium tier override: model=%s tier=%s sub=%s", m, tier, sub)
 	}
-	if m, tier, sub := ResolveModel("Refactor", "", "", "heavy"); m != "gemini-4-hydrogen-xhigh" || tier != "standard" || sub != "flash" {
+	if m, tier, sub := ResolveModel("Refactor", "", "", "heavy"); m != "gemini-4-neon-high" || tier != "standard" || sub != "flash" {
 		t.Fatalf("unexpected heavy tier override: model=%s tier=%s sub=%s", m, tier, sub)
 	}
 	if m, tier, sub := ResolveModel("Digest", "", "", "routine"); m != "gemini-4-hydrogen-medium" || tier != "standard" || sub != "flash" {
@@ -218,6 +227,16 @@ func TestResolveModelEnumAndSpawnSubagent(t *testing.T) {
 	}
 	if hVal, hErr := ResolveModelEnum("", "", "gemini-4-hydrogen-high"); hErr != nil || hVal != "MODEL_PLACEHOLDER_M525" {
 		t.Fatalf("expected MODEL_PLACEHOLDER_M525 for gemini-4-hydrogen-high, got %q (%v)", hVal, hErr)
+	}
+	for id, want := range map[string]string{
+		"gemini-4-neon-low":    "MODEL_PLACEHOLDER_M534",
+		"gemini-4-neon-medium": "MODEL_PLACEHOLDER_M533",
+		"gemini-4-neon-high":   "MODEL_PLACEHOLDER_M532",
+		"gemini-4-neon-xhigh":  "MODEL_PLACEHOLDER_M535",
+	} {
+		if nVal, nErr := ResolveModelEnum("", "", id); nErr != nil || nVal != want {
+			t.Fatalf("expected %s for %s, got %q (%v)", want, id, nVal, nErr)
+		}
 	}
 
 	// 2. Mock LanguageServerService Connect JSON endpoints
