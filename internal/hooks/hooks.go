@@ -2158,11 +2158,13 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 				filepath.Join(canonVault, "memory", "trigger_cursors.json"),
 				filepath.Join(canonVault, "memory", "front_desk.json"),
 				filepath.Join(canonVault, "memory", "tasks.json"),
+				filepath.Join(canonVault, "memory", "workspaces.json"),
+				filepath.Join(canonVault, "memory", ".workspaces.lock"),
 			} {
 				if canonPath == protectedSub || strings.HasPrefix(canonPath, protectedSub+string(filepath.Separator)) {
 					return json.NewEncoder(w).Encode(map[string]interface{}{
 						"decision": "deny",
-						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, extension state, RSI hypotheses, durable event/timer/outbox/watcher stores, or intervention audit logs are prohibited.",
+						"reason":   "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, extension state, RSI hypotheses, durable event/timer/outbox/watcher stores, task/workspace ledgers, or intervention audit logs are prohibited.",
 					})
 				}
 			}

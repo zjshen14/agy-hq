@@ -3,6 +3,8 @@ package extension
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,6 +37,22 @@ func init() {
 				Rules:      dp.Manifest.Components.ApprovalRules,
 			})
 		}
+		// RFC-0025 W4: every workspace provider's destructive_commands become one always-gated approval rule.
+		// They are appended after all pack-declared rules so no pack can weaken them by reusing the synthetic
+		// rule ID (packs can add gates, never remove them; only the user's Vault config.yaml may override).
+		for _, dp := range packs {
+			var wsRules []approvals.Rule
+			for _, wp := range dp.Manifest.Components.WorkspaceProviders {
+				rule, ok := WorkspaceProviderApprovalRule(dp.ID, wp)
+				if !ok || approvals.ValidateRule(rule, false) != nil {
+					continue
+				}
+				wsRules = append(wsRules, rule)
+			}
+			if len(wsRules) > 0 {
+				out = append(out, approvals.ExtensionPackRules{PackID: dp.ID, Rules: wsRules})
+			}
+		}
 		return out
 	}
 }
@@ -44,9 +62,24 @@ const (
 	MaxOverlayBytes         = 4096
 	MaxTotalOverlaysBytes   = 16384
 	ChannelBridgeProtocolV1 = "hq-channel-bridge/v1"
+
+	// WorkspaceProviderProtocolV1 is the frozen JSON-over-stdio protocol for pack workspace providers (RFC-0025 §6).
+	WorkspaceProviderProtocolV1 = "hq-workspace-provider/v1"
+	// MaxWorkspaceProviderTimeoutMs caps a provider's per-call timeout_ms (workspace creation can take tens of seconds).
+	MaxWorkspaceProviderTimeoutMs = 60000
+	// MinWorkspaceStatusRefreshSeconds and MaxWorkspaceStatusRefreshSeconds bound a non-zero status_refresh_seconds.
+	MinWorkspaceStatusRefreshSeconds = 120
+	MaxWorkspaceStatusRefreshSeconds = 86400
+	// WorkspaceDestructiveRulePrefix prefixes the synthetic approval rule IDs generated from destructive_commands.
+	// Pack-declared approval_rules may not use it.
+	WorkspaceDestructiveRulePrefix = "wsd-"
 )
 
-var reValidPackID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+var (
+	reValidPackID          = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	reValidPackSkillDir    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	reValidWorkspaceSubdir = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,255}$`)
+)
 
 // RequiredBin describes an external CLI binary prerequisite declared in hq-extension.json.
 type RequiredBin struct {
@@ -175,19 +208,52 @@ func isBlockedBridgeCommand0(raw string) bool {
 	return strings.HasPrefix(base, "python2.") || strings.HasPrefix(base, "python3.")
 }
 
+// IsBlockedComponentCommand0 reports whether raw (a pack component's command[0]) is a shell, generic interpreter,
+// or the hq binary itself. Runtime executors re-check it before every invocation as defense in depth.
+func IsBlockedComponentCommand0(raw string) bool {
+	return isBlockedBridgeCommand0(raw)
+}
+
+// WorkspaceProviderCapabilitiesSpec declares the optional verbs a workspace provider supports (RFC-0025 §5.1).
+type WorkspaceProviderCapabilitiesSpec struct {
+	Create           bool `json:"create,omitempty"`
+	Remove           bool `json:"remove,omitempty"`
+	Changes          bool `json:"changes,omitempty"`
+	SharedHistory    bool `json:"shared_history,omitempty"`
+	ForeignPlacement bool `json:"foreign_placement,omitempty"` // deferred in v1; LintPack rejects true
+}
+
+// WorkspaceProviderSpec declares a vendor-neutral workspace provider in hq-extension.json (RFC-0025 §5.1).
+// Its runtime FQID is "<pack>/<id>"; command[0] is SHA-256 pinned and executed exactly like a channel bridge.
+type WorkspaceProviderSpec struct {
+	ID                   string                            `json:"id"`
+	Protocol             string                            `json:"protocol"`
+	Description          string                            `json:"description,omitempty"`
+	Command              []string                          `json:"command"`
+	EnvAllow             []string                          `json:"env_allow,omitempty"`
+	TimeoutMs            int                               `json:"timeout_ms,omitempty"`
+	RootPatterns         []string                          `json:"root_patterns,omitempty"`
+	WorkSubdir           string                            `json:"work_subdir,omitempty"`
+	Capabilities         WorkspaceProviderCapabilitiesSpec `json:"capabilities,omitempty"`
+	StatusRefreshSeconds int                               `json:"status_refresh_seconds,omitempty"`
+	DestructiveCommands  []string                          `json:"destructive_commands,omitempty"`
+	Skill                string                            `json:"skill,omitempty"`
+}
+
 // PackComponents indexes all hq-mediated surfaces inside a companion extension plugin.
 type PackComponents struct {
-	Connectors        []string                     `json:"connectors,omitempty"`
-	BriefExtensions   []string                     `json:"brief_extensions,omitempty"`
-	Schedules         []PackSchedule               `json:"schedules,omitempty"`
-	InboxRules        []PackInboxRule              `json:"inbox_rules,omitempty"`
-	SkillOverrides    map[string]SkillOverrideSpec `json:"skill_overrides,omitempty"`
-	FrontDeskOverlays []OverlaySpec                `json:"front_desk_overlays,omitempty"`
-	RoutingDefaults   *PackRoutingDefaults         `json:"routing_defaults,omitempty"`
-	ConnectorDefaults map[string]string            `json:"connector_defaults,omitempty"`
-	ApprovalRules     []approvals.Rule             `json:"approval_rules,omitempty"`
-	OwnedRepos        []string                     `json:"owned_repos,omitempty"`
-	ChannelBridges    []ChannelBridgeSpec          `json:"channel_bridges,omitempty"`
+	Connectors         []string                     `json:"connectors,omitempty"`
+	BriefExtensions    []string                     `json:"brief_extensions,omitempty"`
+	Schedules          []PackSchedule               `json:"schedules,omitempty"`
+	InboxRules         []PackInboxRule              `json:"inbox_rules,omitempty"`
+	SkillOverrides     map[string]SkillOverrideSpec `json:"skill_overrides,omitempty"`
+	FrontDeskOverlays  []OverlaySpec                `json:"front_desk_overlays,omitempty"`
+	RoutingDefaults    *PackRoutingDefaults         `json:"routing_defaults,omitempty"`
+	ConnectorDefaults  map[string]string            `json:"connector_defaults,omitempty"`
+	ApprovalRules      []approvals.Rule             `json:"approval_rules,omitempty"`
+	OwnedRepos         []string                     `json:"owned_repos,omitempty"`
+	ChannelBridges     []ChannelBridgeSpec          `json:"channel_bridges,omitempty"`
+	WorkspaceProviders []WorkspaceProviderSpec      `json:"workspace_providers,omitempty"`
 }
 
 // PackManifest represents <plugin>/hq-extension.json.
@@ -427,7 +493,226 @@ func LintPack(packDir string) ([]string, error) {
 		}
 	}
 
+	// 7. Validate workspace_providers (RFC-0025 §5.2): id, protocol, non-shell pinned binary, env_allow,
+	// timeouts, root_patterns territory, destructive_commands approval rules, and the optional pack skill guide.
+	for _, ar := range m.Components.ApprovalRules {
+		if strings.HasPrefix(strings.TrimSpace(ar.ID), WorkspaceDestructiveRulePrefix) {
+			return nil, fmt.Errorf("approval_rules id %q uses the %q prefix reserved for workspace_providers destructive_commands", ar.ID, WorkspaceDestructiveRulePrefix)
+		}
+	}
+	seenWorkspaceProviderIDs := make(map[string]bool)
+	for _, wp := range m.Components.WorkspaceProviders {
+		if err := ValidateWorkspaceProviderSpec(m.ID, wp); err != nil {
+			return nil, err
+		}
+		if seenWorkspaceProviderIDs[wp.ID] {
+			return nil, fmt.Errorf("duplicate workspace_providers id %q in hq-extension.json", wp.ID)
+		}
+		seenWorkspaceProviderIDs[wp.ID] = true
+		if skill := wp.Skill; skill != "" {
+			rel := filepath.Join("skills", skill, "SKILL.md")
+			if st, sErr := os.Stat(filepath.Join(packDir, rel)); sErr != nil || !st.Mode().IsRegular() {
+				return nil, fmt.Errorf("workspace_providers %q skill %q must resolve to %s inside the pack", wp.ID, skill, filepath.ToSlash(rel))
+			}
+		}
+	}
+
 	return warnings, nil
+}
+
+// ValidateWorkspaceProviderSpec checks a single workspace_providers entry against RFC-0025 §5.2 rules 1-8
+// (except pack-level id uniqueness and the skill file's existence, which LintPack checks against the pack
+// directory). Runtime registries re-run it on every load, so a manifest that was re-trusted without being
+// re-linted still fails closed.
+func ValidateWorkspaceProviderSpec(packID string, wp WorkspaceProviderSpec) error {
+	pid := wp.ID
+	if pid != strings.TrimSpace(pid) || !reValidPackID.MatchString(pid) {
+		return fmt.Errorf("workspace_providers invalid id %q (expected lowercase kebab-case)", wp.ID)
+	}
+	if pid == "core" {
+		return fmt.Errorf("workspace_providers id %q is reserved", pid)
+	}
+	if strings.TrimSpace(wp.Protocol) != WorkspaceProviderProtocolV1 {
+		return fmt.Errorf("workspace_providers %q unsupported protocol %q (expected %q)", pid, wp.Protocol, WorkspaceProviderProtocolV1)
+	}
+	if len(wp.Command) == 0 || strings.TrimSpace(wp.Command[0]) == "" {
+		return fmt.Errorf("workspace_providers %q requires non-empty command", pid)
+	}
+	if isBlockedBridgeCommand0(wp.Command[0]) {
+		return fmt.Errorf("workspace_providers %q command[0] %q cannot be a shell, generic interpreter wrapper, or hq itself (must point to a compiled SHA-256-pinnable executable)", pid, wp.Command[0])
+	}
+	for _, envKey := range wp.EnvAllow {
+		ek := strings.TrimSpace(envKey)
+		if !reValidBridgeEnvKey.MatchString(ek) {
+			return fmt.Errorf("workspace_providers %q invalid env_allow entry %q", pid, envKey)
+		}
+		if blockedBridgeEnv[ek] {
+			return fmt.Errorf("workspace_providers %q env_allow cannot expose protected host variable %q", pid, ek)
+		}
+	}
+	if wp.TimeoutMs < 0 || wp.TimeoutMs > MaxWorkspaceProviderTimeoutMs {
+		return fmt.Errorf("workspace_providers %q timeout_ms=%d out of range [0, %d]", pid, wp.TimeoutMs, MaxWorkspaceProviderTimeoutMs)
+	}
+	if wp.StatusRefreshSeconds != 0 && (wp.StatusRefreshSeconds < MinWorkspaceStatusRefreshSeconds || wp.StatusRefreshSeconds > MaxWorkspaceStatusRefreshSeconds) {
+		return fmt.Errorf("workspace_providers %q status_refresh_seconds=%d out of range (expected 0 or [%d, %d])", pid, wp.StatusRefreshSeconds, MinWorkspaceStatusRefreshSeconds, MaxWorkspaceStatusRefreshSeconds)
+	}
+	guardDirs := workspaceRootGuardDirs()
+	for _, pat := range wp.RootPatterns {
+		if err := validateWorkspaceRootPattern(pat, guardDirs); err != nil {
+			return fmt.Errorf("workspace_providers %q root_patterns entry %q %v", pid, pat, err)
+		}
+	}
+	if sub := wp.WorkSubdir; sub != "" {
+		clean := filepath.ToSlash(filepath.Clean(sub))
+		if !reValidWorkspaceSubdir.MatchString(sub) || filepath.IsAbs(sub) || clean != sub || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("workspace_providers %q work_subdir %q must be a clean relative path inside the workspace root", pid, sub)
+		}
+	}
+	if wp.Capabilities.ForeignPlacement {
+		return fmt.Errorf("workspace_providers %q sets capabilities.foreign_placement=true, but Foreign placement is deferred in v1 (RFC-0025 §16.5; only Home placement ships)", pid)
+	}
+	for _, pat := range wp.DestructiveCommands {
+		if strings.TrimSpace(pat) == "" {
+			return fmt.Errorf("workspace_providers %q destructive_commands contains an empty pattern", pid)
+		}
+	}
+	if rule, ok := WorkspaceProviderApprovalRule(packID, wp); ok {
+		if err := approvals.ValidateRule(rule, false); err != nil {
+			return fmt.Errorf("workspace_providers %q destructive_commands: %w", pid, err)
+		}
+	}
+	if skill := wp.Skill; skill != "" && !reValidPackSkillDir.MatchString(skill) {
+		return fmt.Errorf("workspace_providers %q skill %q must be a plain skill directory name under skills/", pid, skill)
+	}
+	return nil
+}
+
+// WorkspaceDestructiveRuleID returns the synthetic approval rule ID that gates a workspace provider's
+// destructive_commands: "wsd-<pack>-<id>", shortened with a stable hash suffix when it would exceed the
+// 63-character approval rule ID limit.
+func WorkspaceDestructiveRuleID(packID, providerID string) string {
+	packID = strings.ToLower(strings.TrimSpace(packID))
+	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	id := WorkspaceDestructiveRulePrefix + packID + "-" + providerID
+	if len(id) <= 63 {
+		return id
+	}
+	sum := sha256.Sum256([]byte(packID + "/" + providerID))
+	return id[:54] + "-" + hex.EncodeToString(sum[:4])
+}
+
+// WorkspaceProviderApprovalRule converts a provider's destructive_commands into an always-gated approval rule.
+// It returns false when the provider declares no destructive commands.
+func WorkspaceProviderApprovalRule(packID string, wp WorkspaceProviderSpec) (approvals.Rule, bool) {
+	var cmds []string
+	for _, c := range wp.DestructiveCommands {
+		if s := strings.TrimSpace(c); s != "" {
+			cmds = append(cmds, s)
+		}
+	}
+	if len(cmds) == 0 {
+		return approvals.Rule{}, false
+	}
+	fqid := strings.TrimSpace(packID) + "/" + strings.TrimSpace(wp.ID)
+	return approvals.Rule{
+		ID:          WorkspaceDestructiveRuleID(packID, wp.ID),
+		Description: "Destructive workspace commands declared by workspace provider " + fqid,
+		Mode:        approvals.ModeAlways,
+		Commands:    cmds,
+	}, true
+}
+
+// workspaceRootGuardDirs returns the directories root_patterns may never match, contain, or sit under:
+// the user's home directory (literal and symlink-resolved). The Vault normally lives under it; runtime path
+// matching additionally ignores the Vault wherever it lives.
+func workspaceRootGuardDirs() []string {
+	var dirs []string
+	add := func(d string) {
+		d = filepath.Clean(strings.TrimSpace(d))
+		if d == "" || d == "." || d == string(filepath.Separator) || !filepath.IsAbs(d) {
+			return
+		}
+		for _, existing := range dirs {
+			if existing == d {
+				return
+			}
+		}
+		dirs = append(dirs, d)
+	}
+	if home, err := hostpaths.ResolveHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		add(home)
+		if resolved, rErr := filepath.EvalSymlinks(home); rErr == nil {
+			add(resolved)
+		}
+	}
+	return dirs
+}
+
+// validateWorkspaceRootPattern enforces RFC-0025 §5.2 rule 6 on one root_patterns entry.
+func validateWorkspaceRootPattern(pat string, guardDirs []string) error {
+	if pat == "" || pat != strings.TrimSpace(pat) {
+		return fmt.Errorf("must be a non-empty pattern without surrounding whitespace")
+	}
+	for _, r := range pat {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("must not contain control characters")
+		}
+	}
+	if !filepath.IsAbs(pat) {
+		return fmt.Errorf("must be an absolute path pattern")
+	}
+	for _, seg := range strings.Split(pat, "/") {
+		if seg == ".." {
+			return fmt.Errorf("must not contain '..'")
+		}
+	}
+	if filepath.Clean(pat) != pat {
+		return fmt.Errorf("must be a clean path pattern (no '.', '//' or trailing '/')")
+	}
+	if _, err := filepath.Match(pat, "/"); err != nil {
+		return fmt.Errorf("has invalid glob syntax: %v", err)
+	}
+	if pat == "/" || pat == "/*" {
+		return fmt.Errorf("must not claim the filesystem root")
+	}
+	if ok, _ := filepath.Match(pat, "/"); ok {
+		return fmt.Errorf("must not match the filesystem root")
+	}
+	for _, dir := range guardDirs {
+		if workspacePatternOverlapsDir(pat, dir) {
+			return fmt.Errorf("must not match, contain, or sit under the user's home directory %s", dir)
+		}
+	}
+	return nil
+}
+
+// workspacePatternOverlapsDir reports whether pattern could match dir, one of dir's ancestors, or any path
+// beneath dir (every segment the two have in common matches).
+func workspacePatternOverlapsDir(pattern, dir string) bool {
+	pSegs := splitAbsPathSegments(pattern)
+	dSegs := splitAbsPathSegments(dir)
+	if len(dSegs) == 0 {
+		return true
+	}
+	n := len(pSegs)
+	if len(dSegs) < n {
+		n = len(dSegs)
+	}
+	for i := 0; i < n; i++ {
+		ok, err := filepath.Match(pSegs[i], dSegs[i])
+		if err != nil || !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func splitAbsPathSegments(p string) []string {
+	trimmed := strings.Trim(filepath.ToSlash(p), "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
 }
 
 // ResolvePackDirectory finds the filesystem directory for packID via explicitPath, VaultState, or host plugin roots.

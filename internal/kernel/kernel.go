@@ -28,6 +28,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/timers"
+	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
@@ -217,6 +218,48 @@ type ActiveTask struct {
 	EventIDs             []string `json:"eventIds,omitempty"`
 	LastSummary          string   `json:"lastSummary,omitempty"`
 	Status               string   `json:"status"` // active, idle, completed, archived, cancelled
+	// Workspaces holds RFC-0025 provider workspace bindings (pack providers only; git worktrees stay in
+	// WorktreeDir/WorktreeDirs). RegisterTask unions it by Key, so field-by-field rebuilds never drop bindings.
+	Workspaces []workspace.Binding `json:"workspaces,omitempty"`
+}
+
+// AllWorkspaceBindings returns every workspace bound to t: read-only core/git-worktree bindings synthesized from
+// the legacy WorktreeDir (role primary) and WorktreeDirs (role secondary) fields, keyed
+// "core/git-worktree:<canonical path>", followed by the provider bindings stored in t.Workspaces.
+func (t ActiveTask) AllWorkspaceBindings() []workspace.Binding {
+	var out []workspace.Binding
+	seen := make(map[string]bool)
+	primary := strings.TrimSpace(t.WorktreeDir)
+	for _, dir := range t.AllWorktreeDirs() {
+		root := canonicalCleanDir(dir)
+		if root == "" {
+			continue
+		}
+		key := workspace.LedgerKey(workspace.CoreGitProviderID, root)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		role := workspace.RoleSecondary
+		if primary != "" && sameCleanPath(dir, primary) {
+			role = workspace.RolePrimary
+		}
+		out = append(out, workspace.Binding{
+			Key:      key,
+			Provider: workspace.CoreGitProviderID,
+			Root:     root,
+			WorkDir:  root,
+			Role:     role,
+		})
+	}
+	for _, b := range t.Workspaces {
+		if b.Key == "" || seen[b.Key] {
+			continue
+		}
+		seen[b.Key] = true
+		out = append(out, b)
+	}
+	return out
 }
 
 // EffectiveKind returns "task", "subagent", or "auto", inferring from TaskSlug/Title when Kind is empty.
@@ -841,6 +884,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 					inTask.ParentConversationID = tasks[i].ParentConversationID
 				}
 				inTask.WorktreeDir, inTask.WorktreeDirs = mergeTaskWorktrees(tasks[i], inTask)
+				// Union provider bindings by key (incoming wins per key): callers such as the Stop hook rebuild
+				// ActiveTask field by field and must never silently drop workspace bindings.
+				inTask.Workspaces = workspace.MergeBindings(tasks[i].Workspaces, inTask.Workspaces)
 				if inTask.RepoRoot == "" {
 					inTask.RepoRoot = tasks[i].RepoRoot
 				}
@@ -907,6 +953,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 					}
 					if inTask.TurnCount > 0 {
 						tasks[i].TurnCount = inTask.TurnCount
+					}
+					if len(inTask.Workspaces) > 0 {
+						tasks[i].Workspaces = workspace.MergeBindings(tasks[i].Workspaces, inTask.Workspaces)
 					}
 					tasks[i].Title = SanitizeTaskTitle(tasks[i].Title, tasks[i].TaskSlug)
 					tasks[i].Kind = tasks[i].EffectiveKind()

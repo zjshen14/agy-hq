@@ -723,6 +723,27 @@ func BuildTrustBundle(vaultDir, targetSpec, explicitPath string) (TrustBundle, e
 		}
 		lines = append(lines, fmt.Sprintf("channel_bridge %s/%s -> %s (sha256:%s)", manifest.ID, cb.ID, pb.ResolvedPath, shaShort))
 	}
+	for _, wp := range manifest.Components.WorkspaceProviders {
+		if len(wp.Command) == 0 || strings.TrimSpace(wp.Command[0]) == "" {
+			return TrustBundle{}, fmt.Errorf("workspace_provider %q missing command[0]", wp.ID)
+		}
+		rawBin := strings.TrimSpace(wp.Command[0])
+		pb, bErr := pinPackOrSystemBinaryRef(canonPack, rawBin)
+		if bErr != nil {
+			return TrustBundle{}, fmt.Errorf("workspace_provider %q: %w", wp.ID, bErr)
+		}
+		tt.Binaries[rawBin] = pb
+		shaShort := pb.SHA256
+		if len(shaShort) > 12 {
+			shaShort = shaShort[:12]
+		}
+		lines = append(lines, fmt.Sprintf("workspace_provider %s/%s -> %s (sha256:%s)", manifest.ID, wp.ID, pb.ResolvedPath, shaShort))
+		if skill := strings.TrimSpace(wp.Skill); skill != "" {
+			if _, err := pinRel(filepath.ToSlash(filepath.Join("skills", skill, "SKILL.md"))); err != nil {
+				return TrustBundle{}, fmt.Errorf("workspace_provider %q skill: %w", wp.ID, err)
+			}
+		}
+	}
 	for _, reqBin := range manifest.Requires.Bins {
 		ref := reqBin.Name
 		if len(reqBin.ProbeArgv) > 0 && strings.TrimSpace(reqBin.ProbeArgv[0]) != "" {

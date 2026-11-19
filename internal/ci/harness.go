@@ -293,7 +293,7 @@ var (
 		"init": true, "console": true, "migrate": true, "upgrade": true,
 		"doctor": true, "status": true, "hook": true,
 		"propose": true, "approve": true, "reject": true,
-		"worktree": true, "heartbeat": true,
+		"worktree": true, "workspace": true, "heartbeat": true,
 		"claim-desk": true, "release-desk": true, "adopt": true,
 		"complete": true, "archive": true, "reopen": true,
 		"spawn": true, "subagent": true,
