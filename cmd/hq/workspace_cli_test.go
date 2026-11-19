@@ -174,9 +174,12 @@ func newCLIWorkspaceEnv(t *testing.T) *cliWorkspaceEnv {
 	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "")
 	t.Setenv("ANTIGRAVITY_SOURCE_METADATA", "")
 	prevSync := syncConsoleFn
+	prevVerify := verifyWorkspaceExecApprovalFn
 	syncConsoleFn = func(string) error { return nil }
+	verifyWorkspaceExecApprovalFn = func(string, string, string) error { return nil }
 	t.Cleanup(func() {
 		syncConsoleFn = prevSync
+		verifyWorkspaceExecApprovalFn = prevVerify
 		cliFakeStates.Lock()
 		delete(cliFakeStates.byVault, filepath.Clean(env.vaultDir))
 		cliFakeStates.Unlock()
@@ -588,18 +591,19 @@ func TestP0ForceOwnObfuscationAndBinaryCapEnforcement(t *testing.T) {
 		t.Fatal("P0-1: provider remove must not be called on rejected ---force")
 	}
 
-	// P0-1 Layer 3: under HQ_FORCE_CAP_CHECK=1 (live Vault / Antigravity session), direct CLI invocation
-	// of `remove --force` and `own` is blocked at the binary level without ApproveProposal's exec cap.
-	t.Setenv("HQ_FORCE_CAP_CHECK", "1")
+	// P0-1 Layer 3: restore the real binary verifier and confirm direct CLI invocation of `remove --force`
+	// and `own` is unconditionally blocked without ApproveProposal's exec cap (even with HQ_FORCE_CAP_CHECK unset).
+	verifyWorkspaceExecApprovalFn = approvals.VerifyAndConsumeWorkspaceExecApproval
+	t.Setenv("HQ_FORCE_CAP_CHECK", "")
 	if code, _, errOut := env.run("remove", key, "--force"); code != 1 || !strings.Contains(errOut, "denied") {
-		t.Fatalf("P0-1 Layer 3: direct remove --force must fail closed under cap check: code=%d err=%s", code, errOut)
+		t.Fatalf("P0-1 Layer 3: direct remove --force must fail closed unconditionally: code=%d err=%s", code, errOut)
 	}
 	env.fake.preexisting["attached-ws"] = true
 	if code, _, errOut := env.run("create", cliFakeProviderID, "attached-ws"); code != 0 {
 		t.Fatalf("create attached-ws: %s", errOut)
 	}
 	if code, _, errOut := env.run("own", cliKey("attached-ws")); code != 1 || !strings.Contains(errOut, "denied") {
-		t.Fatalf("P0-1 Layer 3: direct own must fail closed under cap check: code=%d err=%s", code, errOut)
+		t.Fatalf("P0-1 Layer 3: direct own must fail closed unconditionally: code=%d err=%s", code, errOut)
 	}
 	if e, ok := workspace.GetEntry(env.vaultDir, cliKey("attached-ws")); !ok || e.Ownership != workspace.OwnershipAttached {
 		t.Fatalf("P0-1 Layer 3: attached-ws must remain attached after denied own: %+v", e)

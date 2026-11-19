@@ -154,19 +154,14 @@ func normalizeWorkspaceRole(role string) (string, error) {
 	}
 }
 
-// wsPathWithin reports whether path equals root or sits beneath it (whole path segments, cleaned inputs).
+// wsPathWithin reports whether path equals root or sits beneath it (whole path segments, cleaned inputs,
+// case-folding on case-insensitive host OSes via workspace.PathWithin).
 func wsPathWithin(path, root string) bool {
 	path, root = filepath.Clean(path), filepath.Clean(root)
 	if path == "" || root == "" || path == "." || root == "." {
 		return false
 	}
-	if path == root {
-		return true
-	}
-	if root == string(filepath.Separator) {
-		return strings.HasPrefix(path, root)
-	}
-	return strings.HasPrefix(path, root+string(filepath.Separator))
+	return workspace.PathWithin(path, root)
 }
 
 func wsPathsOverlap(a, b string) bool {
@@ -1590,7 +1585,7 @@ func WorkspaceInventory(vaultDir string, opts WorkspaceInventoryOptions) ([]Work
 				infos, next, lErr := p.List(ctx, workspace.ListRequest{Cursor: cursor})
 				cancel()
 				if lErr != nil {
-					warnings = append(warnings, fmt.Sprintf("%s list: %s", ps.FQID, clipWorkspaceText(lErr.Error(), 200)))
+					warnings = append(warnings, fmt.Sprintf("%s list: %s", ps.FQID, WorkspaceSafeErrorSummary(lErr)))
 					break
 				}
 				for _, info := range infos {

@@ -1079,7 +1079,7 @@ func assembleSessionMessage(header string, sections []string, maxBytes int) stri
 
 var (
 	reHQPropose    = regexp.MustCompile(`(?i)(?:^|&&|;)\s*(?:\S+/)?hq\s+propose\b`)
-	reCmdFlagValue = regexp.MustCompile(`--cmd=(?:"(?:\\.|[^"\\])*"|'[^']*'|\S+)`)
+	reCmdFlagValue = regexp.MustCompile(`--cmd=(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|$` + "`" + `<>()#'"]+)`)
 
 	reChannelAPIRoute = regexp.MustCompile(`(?i)/api/channels(?:/|%2f|%5c|$|[\s"'])`)
 
@@ -1087,7 +1087,7 @@ var (
 	reHQOutboundBodyCmd    = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
 	reDoubleQuotedBodyFlag = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly   = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
-	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/(?:channels|workspaces\.json|\.workspaces\.lock))(?:[\s"'/]|$)`)
+	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/(?:channels|workspaces\.json|\.workspaces\.lock))|workspaces\.json|\.workspaces\.lock|workspaces\.jso\S*)(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -1400,8 +1400,9 @@ func extractProposeCmdForValidation(cmdLine string) (hasCmd bool, cmdVal string,
 }
 
 // hasUnquotedShellChainingOrSubst reports whether s contains any shell chaining/piping operator outside quotes
-// (;, &, |, newline) or any shell command substitution ($(...) or backtick) outside single quotes, or an
-// unclosed quote (fail-closed).
+// (;, &, |, newline), process substitution (<(...), >(...)), command substitution ($(...) or backtick) outside
+// single quotes, bash ANSI-C/locale quoting ($'...', $"..."), unquoted '#' comments (which can mask quote
+// desynchronization), or an unclosed quote / trailing escape (fail-closed).
 func hasUnquotedShellChainingOrSubst(s string) bool {
 	inSingle := false
 	inDouble := false
@@ -1439,10 +1440,14 @@ func hasUnquotedShellChainingOrSubst(s string) bool {
 			inSingle = true
 		case '"':
 			inDouble = true
-		case ';', '&', '|', '\n', '\r', '`':
+		case ';', '&', '|', '\n', '\r', '`', '#':
 			return true
-		case '$':
+		case '<', '>':
 			if i+1 < len(s) && s[i+1] == '(' {
+				return true
+			}
+		case '$':
+			if i+1 < len(s) && (s[i+1] == '(' || s[i+1] == '\'' || s[i+1] == '"') {
 				return true
 			}
 		}
@@ -1450,8 +1455,117 @@ func hasUnquotedShellChainingOrSubst(s string) bool {
 	return inSingle || inDouble || escaped
 }
 
+// stripSafeProposeCmdFlag replaces `--cmd=<val>` with `--cmd=""` only when `<val>` is cleanly bounded
+// (single-quoted, double-quoted without command substitution, or unquoted without shell metacharacters)
+// and immediately followed by whitespace or end-of-string. Anything suspicious (e.g. `--cmd=hq;evil` or
+// `--cmd=$(evil)`) is left unstripped so EvaluateCommand inspects and blocks it fail-closed.
+func stripSafeProposeCmdFlag(cmdLine string) string {
+	var out strings.Builder
+	out.Grow(len(cmdLine))
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(cmdLine); {
+		ch := cmdLine[i]
+		if escaped {
+			out.WriteByte(ch)
+			escaped = false
+			i++
+			continue
+		}
+		if inSingle {
+			out.WriteByte(ch)
+			if ch == '\'' {
+				inSingle = false
+			}
+			i++
+			continue
+		}
+		if inDouble {
+			out.WriteByte(ch)
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inDouble = false
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(cmdLine[i:], "--cmd=") && (i == 0 || cmdLine[i-1] == ' ' || cmdLine[i-1] == '\t') {
+			valStart := i + len("--cmd=")
+			if valStart < len(cmdLine) {
+				switch cmdLine[valStart] {
+				case '\'':
+					end := strings.IndexByte(cmdLine[valStart+1:], '\'')
+					if end >= 0 {
+						after := valStart + 1 + end + 1
+						if after == len(cmdLine) || cmdLine[after] == ' ' || cmdLine[after] == '\t' {
+							out.WriteString(`--cmd=""`)
+							i = after
+							continue
+						}
+					}
+				case '"':
+					j := valStart + 1
+					safe := true
+					closed := false
+					for j < len(cmdLine) {
+						c := cmdLine[j]
+						if c == '\\' && j+1 < len(cmdLine) {
+							j += 2
+							continue
+						}
+						if c == '`' || (c == '$' && j+1 < len(cmdLine) && cmdLine[j+1] == '(') {
+							safe = false
+							break
+						}
+						if c == '"' {
+							closed = true
+							j++
+							break
+						}
+						j++
+					}
+					if safe && closed && (j == len(cmdLine) || cmdLine[j] == ' ' || cmdLine[j] == '\t') {
+						out.WriteString(`--cmd=""`)
+						i = j
+						continue
+					}
+				default:
+					j := valStart
+					safe := true
+					for j < len(cmdLine) && cmdLine[j] != ' ' && cmdLine[j] != '\t' {
+						c := cmdLine[j]
+						if strings.ContainsRune(";&|$`<>()#'\"\\\n\r", rune(c)) {
+							safe = false
+							break
+						}
+						j++
+					}
+					if safe && j > valStart && (j == len(cmdLine) || cmdLine[j] == ' ' || cmdLine[j] == '\t') {
+						out.WriteString(`--cmd=""`)
+						i = j
+						continue
+					}
+				}
+			}
+		}
+		switch ch {
+		case '\\':
+			escaped = true
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		}
+		out.WriteByte(ch)
+		i++
+	}
+	return out.String()
+}
+
 func stripProposeInnerCommand(cmdLine string) string {
-	stripped := reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)
+	stripped := stripSafeProposeCmdFlag(cmdLine)
 	if idx := strings.Index(stripped, " -- "); idx >= 0 {
 		prefix := stripped[:idx]
 		tail := stripped[idx+4:]

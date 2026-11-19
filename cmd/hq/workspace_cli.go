@@ -25,9 +25,10 @@ var (
 	spawnTaskFn func(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error)
 	// spawnTaskWithOptionsFn is the production spawn: runWorkspaceSpawn links the pre-registered task to the new
 	// conversation from OnCascadeCreated, before the conversation receives its first prompt.
-	spawnTaskWithOptionsFn = kernel.SpawnTaskWithOptions
-	spawnSubagentFn        = kernel.SpawnSubagent
-	syncConsoleFn          = webui.SyncMarkdownConsole
+	spawnTaskWithOptionsFn        = kernel.SpawnTaskWithOptions
+	spawnSubagentFn               = kernel.SpawnSubagent
+	syncConsoleFn                 = webui.SyncMarkdownConsole
+	verifyWorkspaceExecApprovalFn = approvals.VerifyAndConsumeWorkspaceExecApproval
 )
 
 const workspaceUsage = `usage: hq workspace <subcommand> [flags]
@@ -617,7 +618,7 @@ func runWorkspaceRemove(rootDir, vaultDir string, args []string, stdout, stderr 
 		return 2
 	}
 	if a.bools["force"] {
-		if capErr := approvals.VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_remove", key); capErr != nil {
+		if capErr := verifyWorkspaceExecApprovalFn(vaultDir, "workspace_remove", key); capErr != nil {
 			fmt.Fprintf(stderr, "hq workspace remove --force denied: %v\n", capErr)
 			fmt.Fprintln(stderr, "Stage it with:")
 			fmt.Fprintf(stderr, "  %s\n", kernel.WorkspaceRemoveProposal(displayHQCmd(rootDir), key, "forced removal"))
@@ -661,7 +662,7 @@ func runWorkspaceOwn(rootDir, vaultDir string, args []string, stdout, stderr io.
 		fmt.Fprintf(stderr, "hq workspace own: invalid key %q (expected <provider-fqid>:<workspace-id>)\n", key)
 		return 2
 	}
-	if capErr := approvals.VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_own", key); capErr != nil {
+	if capErr := verifyWorkspaceExecApprovalFn(vaultDir, "workspace_own", key); capErr != nil {
 		fmt.Fprintf(stderr, "hq workspace own denied: %v\n", capErr)
 		fmt.Fprintln(stderr, "Stage it with:")
 		fmt.Fprintf(stderr, "  %s\n", workspaceOwnProposal(displayHQCmd(rootDir), key))

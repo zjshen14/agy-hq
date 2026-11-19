@@ -54,9 +54,13 @@ func cleanAbsPath(p string) string {
 	return filepath.Clean(p)
 }
 
-// pathWithin reports whether path equals root or sits beneath it, comparing whole path segments so that
+// PathWithin reports whether path equals root or sits beneath it, comparing whole path segments so that
 // "/a/b" never matches "/a/bc". Both arguments must already be cleaned absolute paths. On case-insensitive
 // host OSes (macOS/Windows) comparison is case-folding so case-variant paths cannot bypass workspace leases.
+func PathWithin(path, root string) bool {
+	return pathWithin(path, root)
+}
+
 func pathWithin(path, root string) bool {
 	return pathWithinCase(path, root, runtime.GOOS == "darwin" || runtime.GOOS == "windows")
 }

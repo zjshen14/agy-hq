@@ -30,6 +30,16 @@ func TestWorkspaceCoreRulesGateDestructiveVerbs(t *testing.T) {
 		`hq workspace \o\w\n acme-monorepo/client:ledger-fix`:                     "workspace_own",
 		`echo $(hq workspace 'own' acme-monorepo/client:ledger-fix)`:              "workspace_own",
 		`echo "$(hq workspace "remove" acme-monorepo/client:ledger-fix --force)"`: "workspace_remove",
+		// Verifier P0-1 bypass repros: ANSI-C $'...', locale $"...", \\\n continuation, trailing slash, argv[0] spoof
+		`hq workspace $'own' acme-monorepo/client:ledger-fix`:                                        "workspace_own",
+		`hq workspace $'remove' acme-monorepo/client:ledger-fix --force`:                             "workspace_remove",
+		`hq workspace remove acme-monorepo/client:ledger-fix $'-\x2dforce'`:                          "workspace_remove",
+		`hq $'workspace' own acme-monorepo/client:ledger-fix`:                                        "workspace_own",
+		`hq $"workspace" own acme-monorepo/client:ledger-fix`:                                        "workspace_own",
+		"hq work\\\nspace own acme-monorepo/client:ledger-fix":                                       "workspace_own",
+		"go run ./cmd/hq/ workspace own acme-monorepo/client:ledger-fix":                             "workspace_own",
+		"/tmp/hq.test workspace own acme-monorepo/client:ledger-fix":                                 "workspace_own",
+		`bash -c 'exec -a hq.test "$(command -v hq)" workspace own acme-monorepo/client:ledger-fix'`: "workspace_own",
 	}
 	for cmd, rule := range gated {
 		for _, auto := range []bool{false, true} {
@@ -102,16 +112,40 @@ func TestWorkspaceCoreRulesCannotBeWeakenedByPacks(t *testing.T) {
 
 func TestWorkspaceExecApprovalCapEnforcement(t *testing.T) {
 	vaultDir := t.TempDir()
-	t.Setenv("HQ_FORCE_CAP_CHECK", "1")
+	// Unconditional enforcement: even WITHOUT HQ_FORCE_CAP_CHECK, in a temp Vault, inside go test,
+	// VerifyAndConsumeWorkspaceExecApproval must refuse missing tokens (zero argv[0]/TMPDIR bypass).
+	t.Setenv("HQ_FORCE_CAP_CHECK", "")
 	t.Setenv("HQ_APPROVAL_EXEC_ID", "")
 	t.Setenv("HQ_APPROVAL_EXEC_TOKEN", "")
 
 	key := "acme-monorepo/client:victim"
 	if err := VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_remove", key); err == nil {
-		t.Fatal("expected direct workspace_remove without exec token to fail under HQ_FORCE_CAP_CHECK=1")
+		t.Fatal("expected direct workspace_remove without exec token to fail unconditionally")
 	}
 	if err := VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_own", key); err == nil {
-		t.Fatal("expected direct workspace_own without exec token to fail under HQ_FORCE_CAP_CHECK=1")
+		t.Fatal("expected direct workspace_own without exec token to fail unconditionally")
+	}
+
+	// Benign proposal mentioning "workspace own <key>" inside a quoted argument must NOT mint or match a cap.
+	benign := Proposal{
+		ID:         "prop-1700000099-abcdef123456",
+		ActionType: "ops",
+		Command:    `git commit -m "document hq workspace own ` + key + `"`,
+	}
+	if shouldMintWorkspaceExecCap(benign) {
+		t.Fatal("benign non-workspace proposal must never mint a workspace exec cap")
+	}
+	if workspaceExecCommandMatches(WorkspaceExecCapRecord{
+		ActionType: "workspace_own",
+		Command:    `git commit -m "hq workspace own ` + key + `"`,
+	}, "workspace_own", key) {
+		t.Fatal("quoted string argument must never satisfy workspaceExecCommandMatches")
+	}
+	if workspaceExecCommandMatches(WorkspaceExecCapRecord{
+		ActionType: "workspace_remove",
+		Command:    "hq workspace own " + key,
+	}, "workspace_own", key) {
+		t.Fatal("mismatched ActionType must never satisfy workspaceExecCommandMatches")
 	}
 
 	// Mint a valid exec cap for workspace_own on key.
@@ -120,7 +154,7 @@ func TestWorkspaceExecApprovalCapEnforcement(t *testing.T) {
 		ActionType: "workspace_own",
 		Command:    "hq workspace own " + key,
 	}
-	execID, rawTok, capPath, err := mintWorkspaceExecCap(vaultDir, prop, 60)
+	execID, rawTok, capPath, err := mintWorkspaceExecCap(vaultDir, prop, 60e9)
 	if err != nil {
 		t.Fatalf("mintWorkspaceExecCap: %v", err)
 	}
@@ -165,5 +199,22 @@ func TestWorkspaceExecApprovalCapEnforcement(t *testing.T) {
 	t.Setenv("HQ_APPROVAL_EXEC_TOKEN", rawTok3)
 	if err := VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_remove", key); err != nil {
 		t.Fatalf("expected valid workspace_remove exec token to succeed: %v", err)
+	}
+
+	// P1-5: workspace_auto_guard gates [Auto] workspace mutations in PreToolUse regardless of env vars.
+	pol := DefaultPolicyConfig()
+	for _, cmd := range []string{
+		"env -u ANTIGRAVITY_CONVERSATION_ID hq workspace create acme/client foo",
+		"env -u ANTIGRAVITY_CONVERSATION_ID hq workspace prune",
+		"hq spawn --workspace=acme/client --task=foo --prompt=bar",
+		"hq subagent --workspace=acme/client --role=ops --prompt=bar",
+		"hq archive some-task",
+	} {
+		if d := EvaluateCommand(pol, cmd, true, ""); !d.Gated || d.RuleID != "workspace_auto_guard" {
+			t.Fatalf("P1-5: expected [Auto] EvaluateCommand(%q) gated by workspace_auto_guard, got %+v", cmd, d)
+		}
+		if d := EvaluateCommand(pol, cmd, false, ""); d.Gated {
+			t.Fatalf("P1-5: interactive EvaluateCommand(%q) must not be gated by workspace_auto_guard, got %+v", cmd, d)
+		}
 	}
 }

@@ -960,6 +960,10 @@ func main() {
 		fmt.Printf("Marked task %q as completed\n", target)
 
 	case "archive":
+		denyIfCallerTainted(vaultDir, "archive")
+		if workspaceCallerBlockedAsAuto(vaultDir, "archive", os.Stderr) {
+			os.Exit(1)
+		}
 		var target string
 		force := false
 		noSidebar := false

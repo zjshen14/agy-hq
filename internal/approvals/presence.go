@@ -540,14 +540,7 @@ type WorkspaceExecCapRecord struct {
 var reValidExecCapID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{3,95}$`)
 
 func shouldMintWorkspaceExecCap(prop Proposal) bool {
-	if prop.ActionType == "workspace_remove" || prop.ActionType == "workspace_own" {
-		return true
-	}
-	if len(prop.CommandArgv) >= 3 && strings.Contains(strings.ToLower(filepath.Base(prop.CommandArgv[0])), "hq") && prop.CommandArgv[1] == "workspace" {
-		return prop.CommandArgv[2] == "remove" || prop.CommandArgv[2] == "own"
-	}
-	norm := normalizeCommandForRuleMatch(prop.Command)
-	return strings.Contains(norm, "workspace remove ") || strings.Contains(norm, "workspace own ")
+	return prop.ActionType == "workspace_remove" || prop.ActionType == "workspace_own"
 }
 
 func mintWorkspaceExecCap(vaultDir string, prop Proposal, ttl time.Duration) (execID, rawTok, capPath string, err error) {
@@ -597,21 +590,16 @@ func mintWorkspaceExecCap(vaultDir string, prop Proposal, ttl time.Duration) (ex
 	return execID, rawTok, capPath, nil
 }
 
-// VerifyAndConsumeWorkspaceExecApproval enforces binary-level human-approval proof for destructive workspace
-// mutations (`workspace_remove` with `--force`, and `workspace_own`). In live Vaults or whenever
-// HQ_FORCE_CAP_CHECK=1 or ANTIGRAVITY_CONVERSATION_ID is set, the command must be running inside
-// ApproveProposal with a matching one-shot exec capability token minted for this exact action and key.
+// VerifyAndConsumeWorkspaceExecApproval unconditionally enforces binary-level human-approval proof for destructive
+// workspace mutations (`workspace_remove` with `--force`, and `workspace_own`). There is no temp-path or argv[0]
+// bypass: the command must be running inside ApproveProposal with a matching one-shot exec capability token minted
+// under <vault>/private/approval_caps/ for this exact Vault, actionType, and workspace key.
 func VerifyAndConsumeWorkspaceExecApproval(vaultDir, actionType, key string) error {
 	actionType = strings.TrimSpace(actionType)
 	key = strings.TrimSpace(key)
 	execID := strings.TrimSpace(os.Getenv("HQ_APPROVAL_EXEC_ID"))
 	execTok := strings.TrimSpace(os.Getenv("HQ_APPROVAL_EXEC_TOKEN"))
 	if execID == "" || execTok == "" {
-		allowCaplessTest := os.Getenv("HQ_FORCE_CAP_CHECK") == "" &&
-			(store.InGoTest() || (strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) == "" && hostpaths.IsTempPath(vaultDir)))
-		if allowCaplessTest {
-			return nil
-		}
 		return fmt.Errorf("human-approved execution token is required for %s on %s; stage it with `hq propose --type=%s` and execute via `hq approve`", actionType, key, actionType)
 	}
 	if !reValidExecCapID.MatchString(execID) {
@@ -647,6 +635,9 @@ func VerifyAndConsumeWorkspaceExecApproval(vaultDir, actionType, key string) err
 	if rec.VaultCanon != canonicalVaultPath(vaultDir) {
 		return fmt.Errorf("approval execution token vault mismatch")
 	}
+	if rec.ActionType != actionType {
+		return fmt.Errorf("approval execution token action mismatch (%s != %s)", rec.ActionType, actionType)
+	}
 	if !workspaceExecCommandMatches(rec, actionType, key) {
 		return fmt.Errorf("approval execution token does not authorize %s on %s", actionType, key)
 	}
@@ -654,46 +645,72 @@ func VerifyAndConsumeWorkspaceExecApproval(vaultDir, actionType, key string) err
 }
 
 func workspaceExecCommandMatches(rec WorkspaceExecCapRecord, actionType, key string) bool {
-	if key == "" {
+	if key == "" || rec.ActionType != actionType {
 		return false
 	}
 	var segments [][]string
-	if len(rec.CommandArgv) > 0 {
+	if len(rec.CommandArgv) > 0 && strings.TrimSpace(rec.CommandArgv[0]) != "" {
 		segments = [][]string{rec.CommandArgv}
-	} else if norm := normalizeCommandForRuleMatch(rec.Command); norm != "" {
-		for _, seg := range strings.Split(norm, " ; ") {
-			if f := strings.Fields(seg); len(f) > 0 {
-				segments = append(segments, f)
+	} else {
+		rawSegs, _ := splitShellSegmentsQuoteAware(stripShellLineContinuationsAndIFS(rec.Command))
+		for _, seg := range rawSegs {
+			if toks := shellTokensSimple(seg); len(toks) > 0 {
+				segments = append(segments, toks)
 			}
 		}
 	}
 	for _, toks := range segments {
-		for i := 0; i+2 < len(toks); i++ {
-			if toks[i] != "workspace" {
+		// Strip leading VAR=val assignments and `env`.
+		for len(toks) > 0 {
+			if toks[0] == "env" {
+				toks = toks[1:]
 				continue
 			}
-			verb := toks[i+1]
-			rest := toks[i+2:]
-			switch actionType {
-			case "workspace_own":
-				if verb == "own" && len(rest) == 1 && rest[0] == key {
-					return true
+			if eq := strings.IndexByte(toks[0], '='); eq > 0 && !strings.Contains(toks[0][:eq], "/") {
+				toks = toks[1:]
+				continue
+			}
+			break
+		}
+		if len(toks) < 4 {
+			continue
+		}
+		// Require `hq workspace ...` or `go run ./cmd/hq workspace ...` at actual command position
+		// (never inside a quoted argument to another command).
+		wsIdx := -1
+		base := strings.ToLower(filepath.Base(toks[0]))
+		if base == "hq" || base == "hq.exe" {
+			wsIdx = 1
+		} else if base == "go" && len(toks) >= 6 && toks[1] == "run" {
+			pkg := strings.TrimRight(filepath.ToSlash(toks[2]), "/")
+			if pkg == "./cmd/hq" || pkg == "cmd/hq" || strings.HasSuffix(pkg, "/cmd/hq") {
+				wsIdx = 3
+			}
+		}
+		if wsIdx < 0 || wsIdx+2 >= len(toks) || toks[wsIdx] != "workspace" {
+			continue
+		}
+		verb := toks[wsIdx+1]
+		rest := toks[wsIdx+2:]
+		switch actionType {
+		case "workspace_own":
+			if verb == "own" && len(rest) == 1 && rest[0] == key {
+				return true
+			}
+		case "workspace_remove":
+			if verb != "remove" || len(rest) != 2 {
+				continue
+			}
+			hasKey, hasForce := false, false
+			for _, arg := range rest {
+				if arg == key {
+					hasKey = true
+				} else if arg == "--force" || arg == "-force" || arg == "--force=true" || arg == "-force=true" || arg == "--force=1" || arg == "-force=1" {
+					hasForce = true
 				}
-			case "workspace_remove":
-				if verb != "remove" || len(rest) != 2 {
-					continue
-				}
-				hasKey, hasForce := false, false
-				for _, arg := range rest {
-					if arg == key {
-						hasKey = true
-					} else if arg == "--force" || arg == "-force" || arg == "--force=true" || arg == "-force=true" || arg == "--force=1" || arg == "-force=1" {
-						hasForce = true
-					}
-				}
-				if hasKey && hasForce {
-					return true
-				}
+			}
+			if hasKey && hasForce {
+				return true
 			}
 		}
 	}

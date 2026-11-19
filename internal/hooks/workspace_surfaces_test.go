@@ -659,15 +659,38 @@ func TestP0ProposeDashDashChainingAndWorkspaceLedgerShellGuard(t *testing.T) {
 		"hq propose --type=x --summary=y -- $(hq workspace own " + key + ")",
 		`hq propose --type=x --summary=y -- "$(hq workspace remove ` + key + ` --force)"`,
 		"hq propose --type=x --summary=y -- `hq workspace own " + key + "`",
-		// P2-8b regression: direct shell tampering of workspaces.json or .workspaces.lock must be blocked.
+		// Verifier P0-2 bypass repros: process substitution, unquoted --cmd with metachars/${IFS}, ANSI-C $'\'' + #
+		"hq propose --type=x --summary=y -- hq status <(gh pr merge 42)",
+		"hq propose --type=x --summary=y -- hq status <(hq workspace own " + key + ")",
+		"hq propose --type=x --summary=y --cmd=hq;gh${IFS}pr${IFS}merge${IFS}42",
+		"hq propose --type=x --summary=y --cmd=$(gh${IFS}pr${IFS}merge${IFS}42)",
+		`hq propose --type=x --summary=y -- hq $'\'' ; gh pr merge 42 # '`,
+		`hq propose --type=x --summary=y -- hq $'\'' ; hq workspace own ` + key + ` # '`,
+		// P2-8b regression: direct, relative, and globbed shell tampering of workspaces.json or .workspaces.lock
 		"sed -i 's/attached/owned/' local/memory/workspaces.json",
 		"sed -i 's/attached/owned/' " + filepath.Join(vaultDir, "memory", "workspaces.json"),
+		"cd local/memory && sed -i 's/attached/owned/' workspaces.json",
+		"sed -i 's/attached/owned/' local/memory/workspaces.jso*",
 		"rm -f " + filepath.Join(vaultDir, "memory", ".workspaces.lock"),
 		"cat local/memory/.workspaces.lock",
 	}
 	for _, cmd := range blocked {
 		if d, r := preToolRunCmd(t, vaultDir, wsOtherConv, cmd); d != "deny" {
 			t.Fatalf("expected PreToolUse to DENY %q, got %s (%s)", cmd, d, r)
+		}
+	}
+
+	// P1-5 regression: [Auto] PreToolUse denies workspace mutations even when env -u ANTIGRAVITY_CONVERSATION_ID is used.
+	autoConv := "00000000-0000-0000-0000-00000000c0aa"
+	registerWorkspaceTestTask(t, vaultDir, kernel.ActiveTask{TaskSlug: "auto-guard", Title: "[Auto] Guard", Kind: "auto", ConversationID: autoConv, Status: "active"})
+	for _, cmd := range []string{
+		"env -u ANTIGRAVITY_CONVERSATION_ID hq workspace create acme-monorepo/client auto-x",
+		"env -u ANTIGRAVITY_CONVERSATION_ID hq workspace prune",
+		"env -u ANTIGRAVITY_CONVERSATION_ID hq spawn --workspace=acme-monorepo/client --task=t --prompt=p",
+		"env -u ANTIGRAVITY_CONVERSATION_ID hq archive some-task",
+	} {
+		if d, r := preToolRunCmd(t, vaultDir, autoConv, cmd); d != "deny" {
+			t.Fatalf("P1-5: expected [Auto] PreToolUse to DENY %q, got %s (%s)", cmd, d, r)
 		}
 	}
 

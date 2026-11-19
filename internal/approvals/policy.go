@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,11 +37,12 @@ var (
 // CoreNonDisableablePackRules lists core security rule IDs that companion extension packs
 // may tighten or extend, but may never weaken below their built-in mode (only user <vault>/config.yaml may override).
 var CoreNonDisableablePackRules = map[string]bool{
-	"messaging":        true,
-	"release_publish":  true,
-	"rsi_apply":        true,
-	"workspace_remove": true,
-	"workspace_own":    true,
+	"messaging":            true,
+	"release_publish":      true,
+	"rsi_apply":            true,
+	"workspace_remove":     true,
+	"workspace_own":        true,
+	"workspace_auto_guard": true,
 }
 
 // Rule defines a single uniform outbound approval category in config.yaml or hq-extension.json.
@@ -152,7 +154,8 @@ func DefaultRules() []Rule {
 			Description: "Force-removing an hq-owned workspace that may hold uncommitted work or open changes",
 			Mode:        ModeAlways,
 			Commands: []string{
-				`\bhq\s+workspace\s+remove\b[^;&|\n]*?[\s"']-{1,}force\b`,
+				`(?:\bhq\S*|\bcmd/hq/?)\s+workspace\s+remove\b[^;&|\n]*?[\s"']-{1,}force\b`,
+				`\bexec\s+-a\s+\S+[^;&|\n]*\bworkspace\s+remove\b[^;&|\n]*?[\s"']-{1,}force\b`,
 			},
 			Source: "builtin",
 		},
@@ -162,9 +165,25 @@ func DefaultRules() []Rule {
 			Description: "Promoting an attached workspace to hq-owned (makes it removable by hq)",
 			Mode:        ModeAlways,
 			Commands: []string{
-				`\bhq\s+workspace\s+own\b`,
+				`(?:\bhq\S*|\bcmd/hq/?)\s+workspace\s+own\b`,
+				`\bexec\s+-a\s+\S+[^;&|\n]*\bworkspace\s+own\b`,
 			},
 			Source: "builtin",
+		},
+		{
+			// RFC-0025 §5.3: unattended [Auto] workers may never create, remove, prune, spawn --workspace,
+			// or archive workspaces directly (enforced in PreToolUse so env -u ANTIGRAVITY_CONVERSATION_ID cannot bypass).
+			ID:          "workspace_auto_guard",
+			Description: "Unattended [Auto] workspace mutations (create, remove, prune, spawn --workspace, archive)",
+			Mode:        ModeAutoOnly,
+			Commands: []string{
+				`(?:\bhq\S*|\bcmd/hq/?)\s+workspace\s+(?:create|remove|own|prune)\b`,
+				`(?:\bhq\S*|\bcmd/hq/?)\s+(?:spawn|subagent)\b[^;&|\n]*?[\s"']-{1,}workspace(?:=|\s|$)`,
+				`(?:\bhq\S*|\bcmd/hq/?)\s+archive\b`,
+				`\bexec\s+-a\s+\S+[^;&|\n]*\b(?:workspace\s+(?:create|remove|own|prune)|archive)\b`,
+			},
+			AutoCategories: []string{"workspace_mutate"},
+			Source:         "builtin",
 		},
 	}
 	for i := range rules {
@@ -1082,11 +1101,101 @@ func hasNonLoopbackExternalURL(cmdLine string) bool {
 	return false
 }
 
+// stripShellLineContinuationsAndIFS removes bash backslash-newline line continuations outside single quotes
+// and expands unquoted ${IFS}/$IFS word separators to spaces so obfuscations like `work\\\nspace` or
+// `gh${IFS}pr${IFS}merge` normalize cleanly before rule matching.
+func stripShellLineContinuationsAndIFS(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inSingle {
+			b.WriteByte(ch)
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if ch == '\\' {
+			if i+1 < len(s) && s[i+1] == '\n' {
+				i++
+				continue
+			}
+			if i+2 < len(s) && s[i+1] == '\r' && s[i+2] == '\n' {
+				i += 2
+				continue
+			}
+			b.WriteByte(ch)
+			if i+1 < len(s) {
+				i++
+				b.WriteByte(s[i])
+			}
+			continue
+		}
+		if inDouble {
+			b.WriteByte(ch)
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if ch == '\'' {
+			inSingle = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '$' {
+			if strings.HasPrefix(s[i:], "${IFS}") {
+				b.WriteByte(' ')
+				i += len("${IFS}") - 1
+				continue
+			}
+			if strings.HasPrefix(s[i:], "$IFS") {
+				end := i + len("$IFS")
+				if end >= len(s) || !((s[end] >= 'A' && s[end] <= 'Z') || (s[end] >= 'a' && s[end] <= 'z') || (s[end] >= '0' && s[end] <= '9') || s[end] == '_') {
+					b.WriteByte(' ')
+					i = end - 1
+					continue
+				}
+			}
+			// Do not enter raw single-quote state for bash ANSI-C quoting $'...': let shellTokensSimple decode escapes.
+			if i+1 < len(s) && s[i+1] == '\'' {
+				b.WriteByte('$')
+				b.WriteByte('\'')
+				i += 2
+				for ; i < len(s); i++ {
+					c2 := s[i]
+					b.WriteByte(c2)
+					if c2 == '\\' && i+1 < len(s) {
+						i++
+						b.WriteByte(s[i])
+						continue
+					}
+					if c2 == '\'' {
+						break
+					}
+				}
+				continue
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
 // normalizeCommandForRuleMatch splits a shell command line into quote-aware segments (breaking on unquoted
-// separators and command substitutions, including $(...) and backticks inside double quotes) and dequotes
-// each segment's tokens with shellTokensSimple. Matching approval regexes against both the raw line and this
-// normalized form closes quote/backslash obfuscation bypasses such as `hq "workspace" 'own' K` or `--""force`.
+// separators, process substitutions <(...)/(>...), and command substitutions, including $(...) and backticks
+// inside double quotes) and dequotes each segment's tokens with shellTokensSimple (including bash $'...'
+// ANSI-C quoting, $"..." locale quoting, \\\n continuations, and ${IFS} separators).
 func normalizeCommandForRuleMatch(cmdLine string) string {
+	cmdLine = stripShellLineContinuationsAndIFS(cmdLine)
 	var segs []string
 	var cur strings.Builder
 	flush := func() {
@@ -1101,6 +1210,7 @@ func normalizeCommandForRuleMatch(cmdLine string) string {
 		}
 	}
 	inSingle := false
+	inANSISingle := false
 	inDouble := false
 	escaped := false
 	for i := 0; i < len(cmdLine); i++ {
@@ -1108,6 +1218,15 @@ func normalizeCommandForRuleMatch(cmdLine string) string {
 		if escaped {
 			cur.WriteByte(ch)
 			escaped = false
+			continue
+		}
+		if inANSISingle {
+			cur.WriteByte(ch)
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '\'' {
+				inANSISingle = false
+			}
 			continue
 		}
 		if inSingle {
@@ -1152,11 +1271,27 @@ func normalizeCommandForRuleMatch(cmdLine string) string {
 			cur.WriteByte(ch)
 		case ';', '\n', '|', '&', '(', ')', '`':
 			flush()
-		case '$':
+		case '<', '>':
 			if i+1 < len(cmdLine) && cmdLine[i+1] == '(' {
 				flush()
 				i++
 				continue
+			}
+			cur.WriteByte(ch)
+		case '$':
+			if i+1 < len(cmdLine) {
+				if cmdLine[i+1] == '(' {
+					flush()
+					i++
+					continue
+				}
+				if cmdLine[i+1] == '\'' {
+					inANSISingle = true
+					cur.WriteByte('$')
+					cur.WriteByte('\'')
+					i++
+					continue
+				}
 			}
 			cur.WriteByte(ch)
 		default:
@@ -1335,6 +1470,91 @@ func splitShellSegmentsQuoteAware(s string) (segments []string, hasRedirectOrPip
 	return segments, hasRedirectOrPipe
 }
 
+func decodeANSICQuote(seg string, start int) (string, int) {
+	var b strings.Builder
+	for i := start; i < len(seg); i++ {
+		ch := seg[i]
+		if ch == '\'' {
+			return b.String(), i
+		}
+		if ch != '\\' || i+1 >= len(seg) {
+			b.WriteByte(ch)
+			continue
+		}
+		i++
+		esc := seg[i]
+		switch esc {
+		case 'a':
+			b.WriteByte('\a')
+		case 'b':
+			b.WriteByte('\b')
+		case 'e', 'E':
+			b.WriteByte(0x1b)
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case '\\', '\'', '"', '?':
+			b.WriteByte(esc)
+		case 'x':
+			j := i + 1
+			for j < len(seg) && j < i+3 && isHexDigit(seg[j]) {
+				j++
+			}
+			if j > i+1 {
+				if v, err := strconv.ParseUint(seg[i+1:j], 16, 8); err == nil {
+					b.WriteByte(byte(v))
+					i = j - 1
+					continue
+				}
+			}
+			b.WriteByte('x')
+		case 'u', 'U':
+			maxDig := 4
+			if esc == 'U' {
+				maxDig = 8
+			}
+			j := i + 1
+			for j < len(seg) && j < i+1+maxDig && isHexDigit(seg[j]) {
+				j++
+			}
+			if j > i+1 {
+				if v, err := strconv.ParseUint(seg[i+1:j], 16, 32); err == nil {
+					b.WriteRune(rune(v))
+					i = j - 1
+					continue
+				}
+			}
+			b.WriteByte(esc)
+		default:
+			if esc >= '0' && esc <= '7' {
+				j := i + 1
+				for j < len(seg) && j < i+3 && seg[j] >= '0' && seg[j] <= '7' {
+					j++
+				}
+				if v, err := strconv.ParseUint(seg[i:j], 8, 8); err == nil {
+					b.WriteByte(byte(v))
+					i = j - 1
+					continue
+				}
+			}
+			b.WriteByte('\\')
+			b.WriteByte(esc)
+		}
+	}
+	return b.String(), len(seg) - 1
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 func shellTokensSimple(seg string) []string {
 	var out []string
 	var cur strings.Builder
@@ -1385,6 +1605,22 @@ func shellTokensSimple(seg string) []string {
 			inToken = true
 		case '"':
 			inDouble = true
+			inToken = true
+		case '$':
+			if i+1 < len(seg) && seg[i+1] == '\'' {
+				decoded, endIdx := decodeANSICQuote(seg, i+2)
+				cur.WriteString(decoded)
+				i = endIdx
+				inToken = true
+				continue
+			}
+			if i+1 < len(seg) && seg[i+1] == '"' {
+				inDouble = true
+				inToken = true
+				i++
+				continue
+			}
+			cur.WriteByte(ch)
 			inToken = true
 		default:
 			cur.WriteByte(ch)

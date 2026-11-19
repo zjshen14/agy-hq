@@ -137,7 +137,13 @@ func drainWorkspaceProbeCandidates(ctx context.Context, vaultDir string, now tim
 				callCtx, cancel := workspaceProviderContextFrom(ctx)
 				info, owned, pErr := p.Probe(callCtx, c.Path)
 				cancel()
-				if pErr != nil || !owned {
+				if pErr != nil {
+					if ctx.Err() != nil {
+						_ = workspace.RecordProbeCandidate(vaultDir, c.Path, c.TaskSlug)
+					}
+					return
+				}
+				if !owned {
 					return
 				}
 				info.Provider = fqid

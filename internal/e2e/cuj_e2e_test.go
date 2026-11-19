@@ -6529,13 +6529,15 @@ printf '00000000-0000-4000-8000-%%012d\n' "$n"
 	if err != nil || !staged || !exists(filepath.Join(wsRoot, "review-wait")) {
 		t.Fatalf("expected a staged (not executed) workspace_remove proposal: err=%v pending=%+v", err, pending)
 	}
-	// Binary-level exec approval enforcement: direct `remove --force` and `own` fail closed under HQ_FORCE_CAP_CHECK=1,
+	// Binary-level exec approval enforcement: direct `remove --force` and `own` fail closed unconditionally
+	// (even with HQ_FORCE_CAP_CHECK unset, ANTIGRAVITY_CONVERSATION_ID empty, and TMPDIR pointed at the Vault),
 	// while executing an approved proposal via ApproveProposal mints the one-shot exec cap and succeeds.
-	if out, err := env.runWithEnv("", append(wsEnv, "HQ_FORCE_CAP_CHECK=1"), "workspace", "remove", key3, "--force"); err == nil || !strings.Contains(out, "denied") {
-		t.Fatalf("direct `hq workspace remove --force` must fail closed at binary level: err=%v out=%s", err, out)
+	spoofEnv := append(append([]string(nil), wsEnv...), "HQ_FORCE_CAP_CHECK=", "ANTIGRAVITY_CONVERSATION_ID=", "TMPDIR="+env.vaultDir)
+	if out, err := env.runWithEnv("", spoofEnv, "workspace", "remove", key3, "--force"); err == nil || !strings.Contains(out, "denied") {
+		t.Fatalf("direct `hq workspace remove --force` must fail closed unconditionally at binary level: err=%v out=%s", err, out)
 	}
-	if out, err := env.runWithEnv("", append(wsEnv, "HQ_FORCE_CAP_CHECK=1"), "workspace", "own", keyShared); err == nil || !strings.Contains(out, "denied") {
-		t.Fatalf("direct `hq workspace own` must fail closed at binary level: err=%v out=%s", err, out)
+	if out, err := env.runWithEnv("", spoofEnv, "workspace", "own", keyShared); err == nil || !strings.Contains(out, "denied") {
+		t.Fatalf("direct `hq workspace own` must fail closed unconditionally at binary level: err=%v out=%s", err, out)
 	}
 	ownProp, err := approvals.CreateWithOptions(env.vaultDir, approvals.CreateOptions{
 		ActionType:  "workspace_own",

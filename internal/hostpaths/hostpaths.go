@@ -23,38 +23,57 @@ type Roots struct {
 	FromPersisted bool   `json:"-"`
 }
 
-// IsTempPath reports whether p resides under os.TempDir() (resolving macOS /private/var symlinks).
+// IsTempPath reports whether p resolves (after symlink evaluation) inside a real OS temporary directory
+// (/tmp, /private/tmp, /var/tmp, /var/folders, etc.). It intentionally ignores caller-controlled TMPDIR
+// overrides pointing at non-temp locations so an untrusted process cannot spoof temp-vault status.
 func IsTempPath(p string) bool {
 	if strings.TrimSpace(p) == "" {
 		return false
 	}
 	cleanP := filepath.Clean(p)
-	tmp := filepath.Clean(os.TempDir())
-	if strings.HasPrefix(cleanP, tmp+string(filepath.Separator)) || cleanP == tmp ||
-		strings.HasPrefix(cleanP, "/private"+tmp) ||
-		strings.HasPrefix(cleanP, "/tmp/") || cleanP == "/tmp" ||
-		strings.HasPrefix(cleanP, "/private/tmp/") || cleanP == "/private/tmp" {
-		return true
-	}
-	if evalP, err := filepath.EvalSymlinks(cleanP); err == nil && evalP != "" {
-		cleanEvalP := filepath.Clean(evalP)
-		if strings.HasPrefix(cleanEvalP, "/tmp/") || strings.HasPrefix(cleanEvalP, "/private/tmp/") {
-			return true
-		}
-		if evalTmp, tErr := filepath.EvalSymlinks(tmp); tErr == nil && evalTmp != "" {
-			cleanEvalTmp := filepath.Clean(evalTmp)
-			if cleanEvalP == cleanEvalTmp || strings.HasPrefix(cleanEvalP, cleanEvalTmp+string(filepath.Separator)) {
-				return true
-			}
+	if !filepath.IsAbs(cleanP) {
+		if abs, err := filepath.Abs(cleanP); err == nil {
+			cleanP = filepath.Clean(abs)
 		}
 	}
-	if evalTmp, err := filepath.EvalSymlinks(tmp); err == nil && evalTmp != "" {
-		cleanEvalTmp := filepath.Clean(evalTmp)
-		if cleanP == cleanEvalTmp || strings.HasPrefix(cleanP, cleanEvalTmp+string(filepath.Separator)) {
+	resolved := evalExistingAncestor(cleanP)
+	sysRoots := []string{
+		"/tmp",
+		"/private/tmp",
+		"/var/tmp",
+		"/private/var/tmp",
+		"/var/folders",
+		"/private/var/folders",
+	}
+	for _, root := range sysRoots {
+		if resolved == root || strings.HasPrefix(resolved, root+string(filepath.Separator)) {
 			return true
 		}
 	}
 	return false
+}
+
+func evalExistingAncestor(p string) string {
+	if realP, err := filepath.EvalSymlinks(p); err == nil && realP != "" {
+		return filepath.Clean(realP)
+	}
+	var tail []string
+	cur := p
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = append(tail, filepath.Base(cur))
+		if realParent, err := filepath.EvalSymlinks(parent); err == nil && realParent != "" {
+			out := filepath.Clean(realParent)
+			for i := len(tail) - 1; i >= 0; i-- {
+				out = filepath.Join(out, tail[i])
+			}
+			return out
+		}
+		cur = parent
+	}
 }
 
 // ResolveHomeDir resolves the effective user home directory honoring HQ_HOME_DIR first.

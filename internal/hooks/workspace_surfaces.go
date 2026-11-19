@@ -180,7 +180,7 @@ func autoBindWorkspacesFromStop(vaultDir, convID string, written []string) {
 			continue
 		}
 		e := po.Entry
-		if e.LeaseEnforced && strings.TrimSpace(e.WriterTask) != "" && !isTaskWriter(owner, e.WriterTask) {
+		if e.LeaseEnforced && strings.TrimSpace(e.WriterTask) != "" && !isTaskWriter(owner, e.WriterTask) && kernel.IsLiveWorkspaceWriter(vaultDir, e.WriterTask) {
 			continue
 		}
 		bindings = append(bindings, workspace.Binding{

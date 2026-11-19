@@ -67,3 +67,16 @@ func TestResolveHermeticAndEnterpriseRelocation(t *testing.T) {
 		t.Fatalf("expected persisted PluginsDir, got %q", r2.PluginsDir)
 	}
 }
+
+func TestIsTempPathCannotBeSpoofedByTMPDIR(t *testing.T) {
+	realTmp := t.TempDir()
+	// A real non-temp path must return false even when TMPDIR is pointed directly at it.
+	nonTemp := "/srv/real-vault-not-temp/local"
+	t.Setenv("TMPDIR", nonTemp)
+	if IsTempPath(nonTemp) {
+		t.Fatalf("IsTempPath(%q) returned true when TMPDIR was spoofed", nonTemp)
+	}
+	if !IsTempPath(realTmp) {
+		t.Fatal("expected t.TempDir() to be recognized as a temp path")
+	}
+}
