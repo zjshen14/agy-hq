@@ -24,6 +24,7 @@ Work across any number of local or remote GitHub repositories in parallel from i
      ```
 2. **Parallel Subagent & Task Delegation:**
    - When spawning a dedicated task conversation or delegating to a subagent for multi-file edits or test runs, always pass `--repo=<path-or-name>` so work runs inside an isolated git worktree under `local/worktrees/<repo>-<task>/`.
+   - For repositories served by a trusted workspace provider pack (non-git workspace systems; see `hq workspace providers`), pass `--workspace=<provider-fqid>` instead (or `<provider-fqid>:<workspace-id>` to attach an existing one); the task prompt then starts with an `[hq-workspace ...]` header naming the work directory. Track them with `hq workspace list`, and stage forced removals through `hq propose` (never run them directly).
 3. **Verification & Clean Worktree Gate:**
    - Inside the target worktree, run the repository's configured build, lint, and test checks until green and verify `git status -s` is clean before concluding.
 4. **CI & PR Triage:**

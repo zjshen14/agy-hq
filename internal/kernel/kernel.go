@@ -1071,6 +1071,9 @@ type ArchiveTaskOptions struct {
 	Force         bool
 	NoSidebar     bool
 	SidebarConfig SidebarSyncConfig
+	// WorkspaceNote, when set, receives one human-readable line per provider workspace decision (removed, kept
+	// with open changes plus the `hq propose --type=workspace_remove` command to stage, unbound, ...).
+	WorkspaceNote func(note string)
 }
 
 // ArchiveTask archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID)
@@ -1087,6 +1090,11 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 //   - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if opts.Force is true).
 //
 // Sets task status to "archived", saves tasks.json locally first, and then syncs with Antigravity's sidebar unless NoSidebar is true.
+//
+// Provider workspace bindings (RFC-0025 §8) are decided with a fresh provider status before anything is removed:
+// a dirty binding refuses the archive unless opts.Force; owned workspaces with no open changes are removed (both
+// preconditions re-checked by the provider); owned workspaces with open changes are kept, unbound, and marked
+// orphaned_open_changes (never force-deleted); attached workspaces are only unbound.
 func ArchiveTaskWithOptions(vaultDir, target string, opts ArchiveTaskOptions) (SidebarSingleSyncResult, error) {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil {
@@ -1109,8 +1117,17 @@ func ArchiveTaskWithOptions(vaultDir, target string, opts ArchiveTaskOptions) (S
 	if err := validateTaskWorktreesForArchive(vaultDir, target, cand, opts.Force); err != nil {
 		return SidebarSingleSyncResult{}, err
 	}
+	wsSteps, err := planTaskWorkspaceArchive(vaultDir, target, cand, opts.Force, time.Now())
+	if err != nil {
+		return SidebarSingleSyncResult{}, err
+	}
 	if err := removeTaskWorktrees(vaultDir, &cand, opts.Force, true); err != nil {
 		return SidebarSingleSyncResult{}, err
+	}
+	for _, note := range executeTaskWorkspaceArchive(vaultDir, cand.TaskSlug, wsSteps) {
+		if opts.WorkspaceNote != nil {
+			opts.WorkspaceNote(note)
+		}
 	}
 
 	nowStr := time.Now().Format(time.RFC3339)
@@ -1186,6 +1203,9 @@ type ReopenTaskOptions struct {
 	NoWorktree    bool
 	NoSidebar     bool
 	SidebarConfig SidebarSyncConfig
+	// WorkspaceNote, when set, receives one human-readable line per provider workspace binding that could not be
+	// rebound as-is (re-created, dropped, or rebound without a fresh status).
+	WorkspaceNote func(note string)
 }
 
 // ReopenTaskWithOptions restores a task back to active status and optionally restores its git worktree and sidebar state.
@@ -1279,6 +1299,12 @@ func ReopenTaskWithOptions(vaultDir, target string, opts ReopenTaskOptions) (Sid
 		_ = RemoveNestedConversation(vaultDir, reopenedTask.ConversationID)
 	}
 
+	for _, note := range restoreTaskWorkspaces(vaultDir, reopenedTask, opts.NoWorktree, time.Now()) {
+		if opts.WorkspaceNote != nil {
+			opts.WorkspaceNote(note)
+		}
+	}
+
 	if opts.NoSidebar {
 		RemoveSidebarSyncQueueItem(vaultDir, reopenedTask.ConversationID, time.Now())
 		return SidebarSingleSyncResult{SkippedReason: "no_sidebar"}, nil
@@ -1320,6 +1346,7 @@ type CompactTasksReport struct {
 	AutoArchivedSlugs   []string `json:"autoArchivedSlugs,omitempty"`
 	RotatedColdSlugs    []string `json:"rotatedColdSlugs,omitempty"`
 	PrunedWorktrees     []string `json:"prunedWorktrees,omitempty"`
+	PrunedWorkspaces    []string `json:"prunedWorkspaces,omitempty"`
 	TotalColdAfter      int      `json:"totalColdAfter"`
 	SidebarSyncedCount  int      `json:"sidebarSyncedCount,omitempty"`
 	SidebarQueuedCount  int      `json:"sidebarQueuedCount,omitempty"`
@@ -1389,6 +1416,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 					rep.PrunedWorktrees = pRep.Pruned
 				}
 			}
+			rep.PrunedWorkspaces = pruneOrphanWorkspacesForCompaction(vaultDir, opts)
 		}
 		if !opts.NoSidebar && HasPendingSidebarSyncQueue(vaultDir) {
 			if sRep, _ := SyncSidebar(vaultDir, SyncSidebarOptions{
@@ -1422,6 +1450,9 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 
 	// Step 1: Auto-archive eligible completed (>24h) or dormant (>48h) top-level tasks with clean worktrees,
 	// and reconcile stuck active `[Auto]` workers whose bound events have already finished or been acked.
+	// Provider workspace bindings (RFC-0025 §8) are judged from the daemon-refreshed status cache only and fail
+	// closed on a stale, errored, or never-refreshed cache.
+	wsCompaction := &workspaceCompaction{vaultDir: vaultDir, now: opts.Now}
 	autoPinnedCompleted := 0
 	for i := range tasks {
 		t := &tasks[i]
@@ -1433,9 +1464,9 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		}
 		st := strings.ToLower(strings.TrimSpace(t.Status))
 		shouldArchive := false
-		if kind == "task" && (st == "completed" || st == "cancelled") && !t.Pinned && age >= opts.TaskAutoArchiveAfter && areAllTaskWorktreesCleanOrAbsent(vaultDir, *t) {
+		if kind == "task" && (st == "completed" || st == "cancelled") && !t.Pinned && age >= opts.TaskAutoArchiveAfter && areAllTaskWorktreesCleanOrAbsent(vaultDir, *t) && wsCompaction.eligible(*t, false) {
 			shouldArchive = true
-		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && areAllTaskWorktreesMergedAndClean(vaultDir, *t) {
+		} else if kind == "task" && (st == "active" || st == "idle") && !t.Pinned && age >= opts.IdleDormantArchiveAfter && areAllTaskWorktreesMergedAndClean(vaultDir, *t) && wsCompaction.eligible(*t, true) {
 			shouldArchive = true
 		} else if kind == "auto" && st == "active" {
 			if ready, ackedIDs := isAutoTaskReadyToArchive(vaultDir, *t, DefaultAutoAckGracePeriod, opts.Now); ready {
@@ -1457,6 +1488,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		if shouldArchive {
 			if !opts.DryRun {
 				_ = removeTaskWorktrees(vaultDir, t, false, false)
+				_ = wsCompaction.release(*t)
 			}
 			t.Status = "archived"
 			if t.CompletedAt == "" {
@@ -1518,6 +1550,11 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 		if rotate {
 			if !opts.DryRun && areAllTaskWorktreesCleanOrAbsent(vaultDir, t) {
 				_ = removeTaskWorktrees(vaultDir, &t, false, false)
+			}
+			if !opts.DryRun && st != "archived" {
+				// Completed subagents/auto workers rotate cold without passing through archive: release their
+				// provider workspaces from the cache (kept and unbound unless clean and fully landed).
+				_ = wsCompaction.release(t)
 			}
 			rotatedCold = append(rotatedCold, t)
 			rep.RotatedColdSlugs = append(rep.RotatedColdSlugs, t.TaskSlug)
@@ -1597,6 +1634,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 				rep.PrunedWorktrees = pRep.Pruned
 			}
 		}
+		rep.PrunedWorkspaces = pruneOrphanWorkspacesForCompaction(vaultDir, opts)
 	}
 
 	if !opts.NoSidebar && (len(explicitSidebarIDs) > 0 || HasPendingSidebarSyncQueue(vaultDir)) {
@@ -3551,6 +3589,12 @@ func RunHeartbeatAt(vaultDir string, now time.Time, dryRun bool) (string, error)
 	}
 
 	_, _ = ReconcileAutoTasks(vaultDir, now, dryRun)
+
+	if !dryRun {
+		// RFC-0025 provider workspace maintenance (probe drain, cadence-gated status refresh, landed notices).
+		// It is a no-op without a workspace ledger.
+		_, _ = RunWorkspaceMaintenance(vaultDir, now)
+	}
 
 	if !dryRun && HasPendingSidebarSyncQueue(vaultDir) {
 		_, _ = DrainSidebarSyncQueue(vaultDir, DefaultSidebarBatchTimeout)

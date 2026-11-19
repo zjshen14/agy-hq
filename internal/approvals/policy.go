@@ -36,9 +36,11 @@ var (
 // CoreNonDisableablePackRules lists core security rule IDs that companion extension packs
 // may tighten or extend, but may never weaken below their built-in mode (only user <vault>/config.yaml may override).
 var CoreNonDisableablePackRules = map[string]bool{
-	"messaging":       true,
-	"release_publish": true,
-	"rsi_apply":       true,
+	"messaging":        true,
+	"release_publish":  true,
+	"rsi_apply":        true,
+	"workspace_remove": true,
+	"workspace_own":    true,
 }
 
 // Rule defines a single uniform outbound approval category in config.yaml or hq-extension.json.
@@ -140,6 +142,27 @@ func DefaultRules() []Rule {
 			Commands: []string{
 				`\bhq\s+(?:rsi\s+apply|connector\s+apply-offer|extension\s+apply-trust|channel\s+apply-config)\b`,
 				`(?:https?://[^\s"']*|127\.0\.0\.1:\d+|localhost:\d+)/api/(?:approve|reject)\b`,
+			},
+			Source: "builtin",
+		},
+		{
+			// RFC-0025 §10.1 / §16.9: `hq workspace remove <key> --force` deletes an hq-owned provider workspace even
+			// when it is dirty or holds open changes. It runs only through `hq propose` + human `hq approve`.
+			ID:          "workspace_remove",
+			Description: "Force-removing an hq-owned workspace that may hold uncommitted work or open changes",
+			Mode:        ModeAlways,
+			Commands: []string{
+				`\bhq\s+workspace\s+remove\b[^;&|\n]*?[\s"']-{1,2}force\b`,
+			},
+			Source: "builtin",
+		},
+		{
+			// RFC-0025 §7.1: promoting an attached workspace to owned makes it removable by hq.
+			ID:          "workspace_own",
+			Description: "Promoting an attached workspace to hq-owned (makes it removable by hq)",
+			Mode:        ModeAlways,
+			Commands: []string{
+				`\bhq\s+workspace\s+own\b`,
 			},
 			Source: "builtin",
 		},

@@ -356,6 +356,9 @@ func main() {
 			fmt.Printf("Vault:            %s\n", vaultDir)
 			fmt.Printf("Pending Actions:  %d\n", len(pending))
 			fmt.Printf("Active Worktrees: %d\n", len(wts))
+			if wsSummary, ok := kernel.SummarizeWorkspaces(vaultDir, len(wts)); ok {
+				fmt.Println(wsSummary.StatusLine())
+			}
 			if len(bridges) > 0 {
 				fmt.Printf("Channel Bridges:  %d\n", len(bridges))
 				for _, b := range bridges {
@@ -978,6 +981,9 @@ func main() {
 		syncRes, err := kernel.ArchiveTaskWithOptions(vaultDir, target, kernel.ArchiveTaskOptions{
 			Force:     force,
 			NoSidebar: noSidebar,
+			WorkspaceNote: func(note string) {
+				fmt.Printf("  workspace: %s\n", note)
+			},
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq archive error: %v\n", err)
@@ -993,10 +999,16 @@ func main() {
 	case "reopen":
 		runReopenTaskCLI(vaultDir, "hq reopen", os.Args[2:])
 
+	case "workspace":
+		if code := runWorkspaceCLI(rootDir, vaultDir, os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			os.Exit(code)
+		}
+
 	case "spawn":
 		denyIfCallerTainted(vaultDir, "spawn")
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
+		workspaceSpec := fs.String("workspace", "", "Optional workspace provider FQID, optionally :<existing-workspace-id>, to create or attach an isolated provider workspace (mutually exclusive with --repo)")
 		taskName := fs.String("task", "", "Short task slug for worktree and conversation title")
 		role := fs.String("role", "", "Optional subagent role when --subagent is set")
 		parentConv := fs.String("parent", "", "Optional parent conversation ID when --subagent is set (defaults to ANTIGRAVITY_CONVERSATION_ID)")
@@ -1013,14 +1025,39 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*taskName == "" && *role == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo>] [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--force] [--ignore-budget] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo> | --workspace=<provider-fqid>[:<id>]] [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--force] [--ignore-budget] --prompt=\"...\"")
+			os.Exit(1)
+		}
+		if strings.TrimSpace(*workspaceSpec) != "" && strings.TrimSpace(*repoSpec) != "" {
+			fmt.Fprintln(os.Stderr, "hq spawn: --workspace and --repo are mutually exclusive (--repo is the git worktree path)")
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
 		scope := resolveTaskScope(*scopeOverride, *repoSpec, *taskName)
 		if *asSubagent {
-			runSubagentSpawnCLI(rootDir, vaultDir, "hq spawn --subagent", *parentConv, *role, scope, *repoSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
+			runSubagentSpawnCLI(rootDir, vaultDir, "hq spawn --subagent", *parentConv, *role, scope, *repoSpec, *workspaceSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
+			return
+		}
+		if strings.TrimSpace(*workspaceSpec) != "" {
+			wsTitle := fmt.Sprintf("[Task:%s] %s (%s/%s)", scope, *taskName, resolvedTier, resolvedModel)
+			if *titleOverride != "" {
+				wsTitle = *titleOverride
+			}
+			if code := runWorkspaceSpawn(vaultDir, workspaceSpawnRequest{
+				Spec:      *workspaceSpec,
+				TaskSlug:  *taskName,
+				Title:     wsTitle,
+				Scope:     scope,
+				Tier:      resolvedTier,
+				Model:     resolvedModel,
+				Prompt:    *prompt,
+				Ephemeral: *ephemeral,
+				DryRun:    *dryRun,
+				Force:     isForced,
+			}, os.Stdout, os.Stderr); code != 0 {
+				os.Exit(code)
+			}
 			return
 		}
 		fullPrompt := *prompt
@@ -1109,6 +1146,7 @@ func main() {
 		role := fs.String("role", "", "Subagent role title, e.g. \"[deep] rfc-0005: Opus 5.5 Reviewer\"")
 		parentConv := fs.String("parent", "", "Parent conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
+		workspaceSpec := fs.String("workspace", "", "Optional workspace provider FQID, optionally :<existing-workspace-id>, to create or attach an isolated provider workspace (mutually exclusive with --repo)")
 		taskName := fs.String("task", "", "Optional worktree task slug")
 		scopeOverride := fs.String("scope", "", "Optional custom task scope")
 		prompt := fs.String("prompt", "", "Task instructions for the nested subagent")
@@ -1120,13 +1158,13 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "Simulate subagent spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*role == "" && *taskName == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--parent=<conv-id>] [--repo=<repo>] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--parent=<conv-id>] [--repo=<repo> | --workspace=<provider-fqid>[:<id>]] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
 		scope := resolveTaskScope(*scopeOverride, *repoSpec, *taskName)
-		runSubagentSpawnCLI(rootDir, vaultDir, "hq subagent", *parentConv, *role, scope, *repoSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
+		runSubagentSpawnCLI(rootDir, vaultDir, "hq subagent", *parentConv, *role, scope, *repoSpec, *workspaceSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
 
 	case "gmail":
 		if len(os.Args) < 3 {
@@ -1812,7 +1850,14 @@ func main() {
 					now := time.Now()
 					gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
 					acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-					if len(gkActs) > 0 || kernel.HasMaterialDispatchActions(acts) {
+					wsChanged := false
+					if !*dryRun {
+						// RFC-0025: probe drain + cadence-gated workspace status refresh (no-op without a ledger).
+						if wsRep, wsErr := kernel.RunWorkspaceMaintenance(vaultDir, now); wsErr == nil && wsRep.Changed() {
+							wsChanged = true
+						}
+					}
+					if len(gkActs) > 0 || kernel.HasMaterialDispatchActions(acts) || wsChanged {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-hbTicker.C:
@@ -2599,6 +2644,9 @@ func runTasksCLI(vaultDir string, args []string) {
 				prefix, res.HotBefore, res.HotAfter, len(res.AutoArchivedSlugs), len(res.RotatedColdSlugs), res.TotalColdAfter)
 			if len(res.PrunedWorktrees) > 0 {
 				fmt.Printf("  worktree prune: %d orphan worktree(s) (%s)\n", len(res.PrunedWorktrees), strings.Join(res.PrunedWorktrees, ", "))
+			}
+			if len(res.PrunedWorkspaces) > 0 {
+				fmt.Printf("  workspace prune: %d orphan provider workspace(s) (%s)\n", len(res.PrunedWorkspaces), strings.Join(res.PrunedWorkspaces, ", "))
 			}
 			if res.SidebarSyncedCount > 0 || res.SidebarQueuedCount > 0 || res.SidebarSkippedCount > 0 {
 				fmt.Printf("  sidebar sync: synced=%d, queued=%d, skipped=%d\n",
@@ -3723,10 +3771,31 @@ func resolveTaskScope(scopeOverride, repoSpec, taskName string) string {
 	return scope
 }
 
-func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, repoSpec, taskName, prompt, resolvedModel, resolvedTier string, dryRun, isForced bool) {
+func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, repoSpec, workspaceSpec, taskName, prompt, resolvedModel, resolvedTier string, dryRun, isForced bool) {
 	subRole := role
 	if subRole == "" {
 		subRole = fmt.Sprintf("[%s] %s: %s", resolvedTier, scope, taskName)
+	}
+	if strings.TrimSpace(workspaceSpec) != "" {
+		if strings.TrimSpace(repoSpec) != "" {
+			fmt.Fprintf(os.Stderr, "%s: --workspace and --repo are mutually exclusive (--repo is the git worktree path)\n", cmdLabel)
+			os.Exit(1)
+		}
+		if code := runWorkspaceSubagentSpawn(vaultDir, workspaceSubagentRequest{
+			CmdLabel:   cmdLabel,
+			Spec:       workspaceSpec,
+			ParentConv: parentConv,
+			Role:       subRole,
+			TaskName:   taskName,
+			Prompt:     prompt,
+			Model:      resolvedModel,
+			WorkDir:    resolveDefaultWorkDir(rootDir),
+			DryRun:     dryRun,
+			Force:      isForced,
+		}, os.Stdout, os.Stderr); code != 0 {
+			os.Exit(code)
+		}
+		return
 	}
 	fullPrompt := prompt
 	workDir := resolveDefaultWorkDir(rootDir)
@@ -3775,6 +3844,9 @@ func runReopenTaskCLI(vaultDir, cmdLabel string, args []string) {
 	if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
 		NoWorktree: noWorktree,
 		NoSidebar:  noSidebar,
+		WorkspaceNote: func(note string) {
+			fmt.Printf("  workspace: %s\n", note)
+		},
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "%s error: %v\n", cmdLabel, err)
 		os.Exit(1)
@@ -4247,6 +4319,7 @@ Commands:
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal
   reject <id> [--reason=...]          Reject a pending proposal
   worktree <add|list|attach|remove|prune>  Manage isolated git worktrees & prune merged orphans in <vault>/worktrees/
+  workspace <providers|list|create|adopt|status|handoff|unbind|remove|own|prune>  Manage pluggable provider workspaces (RFC-0025)
   gmail <init|status|list|read|draft|forward|triage>  Layer 1 Gmail primitives & sidecar precheck
   gchat <init|spaces|search|read|draft|triage> Layer 1 Google Chat primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
