@@ -3,6 +3,7 @@ package obs
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
 )
@@ -104,23 +105,43 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 		}
 	}
 
+	knownFDs := kernel.GetKnownFrontDeskIDSet(vaultDir)
 	for parentID, cm := range idx.Conversations {
+		if cm.TaskSlug != "" && strings.HasPrefix(cm.TaskSlug, "headquarter-front-desk-") {
+			knownFDs[strings.ToLower(strings.TrimSpace(parentID))] = true
+		}
+	}
+	for _, t := range taskByConv {
+		if strings.HasPrefix(t.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(t.ConversationID) != "" {
+			knownFDs[strings.ToLower(strings.TrimSpace(t.ConversationID))] = true
+		}
+	}
+
+	parentIDs := make([]string, 0, len(idx.Conversations))
+	for pid := range idx.Conversations {
+		parentIDs = append(parentIDs, pid)
+	}
+	sort.Strings(parentIDs)
+
+	for _, parentID := range parentIDs {
+		cm := idx.Conversations[parentID]
 		for _, edge := range cm.SpawnEdges {
 			cID := strings.ToLower(strings.TrimSpace(edge.ChildConversationID))
-			if cID == "" {
+			if cID == "" || cID == parentID {
 				continue
 			}
+			cand := edge
+			cand.ParentConversationID = parentID
 			prev, exists := edgeByChild[cID]
-			if !exists || (prev.Role == "" && edge.Role != "") {
-				edge.ParentConversationID = parentID
-				edgeByChild[cID] = edge
+			if !exists || preferSpawnEdge(cand, prev) {
+				edgeByChild[cID] = cand
 			}
-			addChildLink(parentID, cID)
 		}
 	}
 
 	// 2. Enrich each conversation's metadata (Ground-truth SpawnEdge > tasks.json > transcript fallback)
-	for cid, cm := range idx.Conversations {
+	for _, cid := range parentIDs {
+		cm := idx.Conversations[cid]
 		origTitle := cm.Title
 		origSlug := cm.TaskSlug
 		origKind := cm.Kind
@@ -162,9 +183,10 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			// Ground-truth spawn edge overrides FIFO-drifted subagent role/parent
 			if edge, hasEdge := edgeByChild[cid]; hasEdge {
 				cm.ParentConversationID = edge.ParentConversationID
+				isHiddenWorker := edge.TypeName == "run_workflow" || edge.TypeName == "agentapi"
 				cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
 				cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
-				if cleanRole != "" {
+				if cleanRole != "" && !isHiddenWorker {
 					eModel := cleanModel
 					if eModel == "" || eModel == "inherit" {
 						eModel = cm.Model
@@ -177,14 +199,19 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 					if cm.Model == "" && cleanModel != "" && cleanModel != "inherit" {
 						cm.Model = cleanModel
 					}
+				} else if cleanRole != "" && cm.Title == "" {
+					cm.Title = cleanRole
 				}
-				if fdID != "" && edge.ParentConversationID != fdID {
+				if isHiddenWorker || (edge.ParentConversationID != "" && len(knownFDs) > 0 && !knownFDs[edge.ParentConversationID]) {
 					cm.Kind = "nested_subagent"
 				} else if cm.Kind != "task" || cleanRole != "" {
 					cm.Kind = "subagent"
 				}
 			} else if kernel.IsNestedSubagentConversation(vaultDir, cid) {
 				cm.Kind = "nested_subagent"
+				if cm.ParentConversationID == "" {
+					cm.ParentConversationID = strings.ToLower(strings.TrimSpace(kernel.GetNestedConversationParent(vaultDir, cid)))
+				}
 			}
 
 			if cm.ParentConversationID != "" {
@@ -195,7 +222,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 		// Fallbacks for untracked conversations
 		if cm.Kind == "" {
 			if cm.ParentConversationID != "" {
-				if fdID != "" && cm.ParentConversationID != fdID {
+				if fdID != "" && !knownFDs[cm.ParentConversationID] && (len(knownFDs) > 0) {
 					cm.Kind = "nested_subagent"
 				} else {
 					cm.Kind = "subagent"
@@ -328,22 +355,92 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	return changed
 }
 
-// ReconcileSubagentAttribution repairs any FIFO-drifted subagent Title, TaskSlug, Scope, Tier,
-// and ParentConversationID in local/memory/tasks.json using ground-truth invoke_subagent edges
-// extracted from parent transcripts.
+func spawnEdgePriority(typeName string) int {
+	switch strings.ToLower(strings.TrimSpace(typeName)) {
+	case "agentapi":
+		return 1
+	case "run_workflow":
+		return 2
+	default:
+		return 3 // ground-truth invoke_subagent / typed subagent
+	}
+}
+
+func preferSpawnEdge(cand, prev SubagentSpawnEdge) bool {
+	cr := spawnEdgePriority(cand.TypeName)
+	pr := spawnEdgePriority(prev.TypeName)
+	if cr != pr {
+		return cr > pr
+	}
+	if prev.Role == "" && cand.Role != "" {
+		return true
+	}
+	if cand.Role == "" && prev.Role != "" {
+		return false
+	}
+	if cand.CreatedAt != "" && prev.CreatedAt != "" && cand.CreatedAt != prev.CreatedAt {
+		return cand.CreatedAt < prev.CreatedAt
+	}
+	return cand.ParentConversationID < prev.ParentConversationID
+}
+
+// ReconcileSubagentAttribution repairs FIFO-drifted subagent metadata in local/memory/tasks.json
+// using ground-truth invoke_subagent, run_workflow, and agentapi spawn edges extracted from parent transcripts.
+// Subagents linked to non-Front-Desk parents, run_workflow children, and raw agentapi children are
+// downgraded to Kind="subagent", moved to cold archive + nested_conversations.json, and removed from tasks.json.
+// Direct Front-Desk subagents misclassified as Kind="task" have Kind repaired to "subagent".
 func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 	idx, err := LoadOrRefreshIndex(vaultDir)
 	if err != nil {
 		return 0, err
 	}
 
+	knownFDs := kernel.GetKnownFrontDeskIDSet(vaultDir)
+	if archived, _, aErr := kernel.ListArchivedTasks(vaultDir, 0); aErr == nil {
+		for _, at := range archived {
+			if strings.HasPrefix(at.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(at.ConversationID) != "" {
+				knownFDs[strings.ToLower(strings.TrimSpace(at.ConversationID))] = true
+			}
+		}
+	}
+
+	parentIDs := make([]string, 0, len(idx.Conversations))
+	for rawParentID, cm := range idx.Conversations {
+		parentIDs = append(parentIDs, rawParentID)
+		if strings.HasPrefix(cm.TaskSlug, "headquarter-front-desk-") {
+			knownFDs[strings.ToLower(strings.TrimSpace(rawParentID))] = true
+		}
+	}
+	sort.Strings(parentIDs)
+
 	edgeByChild := make(map[string]SubagentSpawnEdge)
-	for parentID, cm := range idx.Conversations {
+	parentOf := make(map[string]string)
+
+	// Pass 1: seed from persisted ParentConversationID in deterministic sorted order.
+	for _, rawParentID := range parentIDs {
+		cm := idx.Conversations[rawParentID]
+		if cm.ParentConversationID != "" {
+			cid := strings.ToLower(strings.TrimSpace(cm.ConversationID))
+			pid := strings.ToLower(strings.TrimSpace(cm.ParentConversationID))
+			if cid != "" && pid != "" && cid != pid {
+				parentOf[cid] = pid
+			}
+		}
+	}
+	// Pass 2: collect winning ground-truth SpawnEdges in priority + sorted order, overriding stale parentOf.
+	for _, rawParentID := range parentIDs {
+		cm := idx.Conversations[rawParentID]
+		parentID := strings.ToLower(strings.TrimSpace(rawParentID))
 		for _, edge := range cm.SpawnEdges {
 			cID := strings.ToLower(strings.TrimSpace(edge.ChildConversationID))
-			if cID != "" && edge.Role != "" {
-				edge.ParentConversationID = parentID
-				edgeByChild[cID] = edge
+			if cID == "" || cID == parentID {
+				continue
+			}
+			cand := edge
+			cand.ParentConversationID = parentID
+			if prev, exists := edgeByChild[cID]; !exists || preferSpawnEdge(cand, prev) {
+				edgeByChild[cID] = cand
+				parentOf[cID] = parentID
 			}
 		}
 	}
@@ -351,51 +448,117 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 		return 0, nil
 	}
 
+	hasNonFrontDeskAncestor := func(cid, immediateParent string) bool {
+		cur := strings.ToLower(strings.TrimSpace(immediateParent))
+		if cur == "" {
+			cur = parentOf[cid]
+		}
+		seen := map[string]bool{cid: true}
+		for cur != "" && !seen[cur] {
+			seen[cur] = true
+			if knownFDs[cur] {
+				return false
+			}
+			next, hasParent := parentOf[cur]
+			if !hasParent || next == "" {
+				return true
+			}
+			cur = next
+		}
+		return false
+	}
+
+	type nestedRecord struct {
+		convID   string
+		parentID string
+	}
+	var nestedToRecord []nestedRecord
 	repaired := 0
-	err = kernel.UpdateTasks(vaultDir, func(tasks []kernel.ActiveTask) ([]kernel.ActiveTask, bool, error) {
+	nowStr := time.Now().Format(time.RFC3339)
+
+	err = kernel.ApplyTaskReconciliation(vaultDir, func(tasks []kernel.ActiveTask) ([]kernel.ActiveTask, []kernel.ActiveTask, bool, error) {
 		if len(tasks) == 0 {
-			return tasks, false, nil
+			return tasks, nil, false, nil
 		}
 		repaired = 0
-		for i := range tasks {
-			cid := strings.ToLower(strings.TrimSpace(tasks[i].ConversationID))
-			edge, ok := edgeByChild[cid]
-			cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
-			cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
-			if !ok || cleanRole == "" {
-				continue
+		nestedToRecord = nil
+		var nestedToArchive []kernel.ActiveTask
+		kept := make([]kernel.ActiveTask, 0, len(tasks))
+
+		for _, t := range tasks {
+			cid := strings.ToLower(strings.TrimSpace(t.ConversationID))
+			edge, hasEdge := edgeByChild[cid]
+			isExplicitTask := kernel.IsExplicitTopLevelTask(t)
+
+			if hasEdge && !isExplicitTask {
+				isHiddenWorker := edge.TypeName == "run_workflow" || edge.TypeName == "agentapi"
+				cleanRole := strings.Trim(strings.TrimSpace(edge.Role), "\"'")
+				cleanModel := strings.Trim(strings.TrimSpace(edge.Model), "\"'")
+
+				isNested := isHiddenWorker ||
+					(edge.ParentConversationID != "" && len(knownFDs) > 0 && !knownFDs[edge.ParentConversationID]) ||
+					hasNonFrontDeskAncestor(cid, edge.ParentConversationID)
+
+				changed := false
+				if cleanRole != "" && !isHiddenWorker {
+					model := t.Model
+					if cleanModel != "" && cleanModel != "inherit" {
+						model = cleanModel
+					}
+					tier, scope, _, title, slug := kernel.ParseSubagentRole(cleanRole, model)
+					if t.Title != title {
+						t.Title = title
+						changed = true
+					}
+					if t.TaskSlug != slug {
+						t.TaskSlug = slug
+						changed = true
+					}
+					if t.Scope != scope {
+						t.Scope = scope
+						changed = true
+					}
+					if t.Tier != tier {
+						t.Tier = tier
+						changed = true
+					}
+				}
+				if edge.ParentConversationID != "" && t.ParentConversationID != edge.ParentConversationID {
+					t.ParentConversationID = edge.ParentConversationID
+					changed = true
+				}
+				if isNested {
+					if !strings.EqualFold(strings.TrimSpace(t.Kind), "subagent") {
+						t.Kind = "subagent"
+					}
+					t.Status = "archived"
+					t.ArchivedAt = nowStr
+					nestedToArchive = append(nestedToArchive, t)
+					nestedToRecord = append(nestedToRecord, nestedRecord{
+						convID:   t.ConversationID,
+						parentID: edge.ParentConversationID,
+					})
+					repaired++
+					continue
+				}
+				// Direct Front-Desk subagent: ensure Kind is "subagent" rather than leaked "task".
+				if !strings.EqualFold(strings.TrimSpace(t.Kind), "subagent") {
+					t.Kind = "subagent"
+					changed = true
+				}
+				if changed {
+					repaired++
+				}
 			}
-			model := tasks[i].Model
-			if cleanModel != "" && cleanModel != "inherit" {
-				model = cleanModel
-			}
-			tier, scope, _, title, slug := kernel.ParseSubagentRole(cleanRole, model)
-			changed := false
-			if tasks[i].Title != title {
-				tasks[i].Title = title
-				changed = true
-			}
-			if tasks[i].TaskSlug != slug {
-				tasks[i].TaskSlug = slug
-				changed = true
-			}
-			if tasks[i].Scope != scope {
-				tasks[i].Scope = scope
-				changed = true
-			}
-			if tasks[i].Tier != tier {
-				tasks[i].Tier = tier
-				changed = true
-			}
-			if tasks[i].ParentConversationID != edge.ParentConversationID {
-				tasks[i].ParentConversationID = edge.ParentConversationID
-				changed = true
-			}
-			if changed {
-				repaired++
-			}
+			kept = append(kept, t)
 		}
-		return tasks, repaired > 0, nil
+		return kept, nestedToArchive, repaired > 0, nil
 	})
-	return repaired, err
+	if err != nil {
+		return 0, err
+	}
+	for _, rec := range nestedToRecord {
+		_ = kernel.RecordNestedConversation(vaultDir, rec.convID, rec.parentID)
+	}
+	return repaired, nil
 }

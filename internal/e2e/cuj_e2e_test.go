@@ -5978,3 +5978,191 @@ func TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval(t *testing.T) {
 		t.Fatalf("expected unified `hq memory compact` output, got err=%v out=%s", err, compactOut)
 	}
 }
+
+// CUJ-40: Real CLI E2E verification of Layer-1 Task Board boundary across hooks, adopt, and clean-nested
+func TestCUJ40_Layer1TaskBoardIsolationCLI(t *testing.T) {
+	env := setupHQEnv(t)
+	if _, err := env.run("", "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	brainDir := filepath.Join(t.TempDir(), "brain")
+	fdID := "39393939-0000-4000-8000-000000000001"
+	topTaskID := "39393939-0000-4000-8000-000000000002"
+	wfChildID := "39393939-0000-4000-8000-000000000003"
+	nestedSubID := "39393939-0000-4000-8000-000000000004"
+	rawAgentChildID := "39393939-0000-4000-8000-000000000005"
+	forkedTaskID := "39393939-0000-4000-8000-000000000006"
+	standaloneID := "39393939-0000-4000-8000-000000000007"
+	fdHelperSubID := "39393939-0000-4000-8000-000000000008"
+
+	_ = kernel.SetFrontDesk(env.vaultDir, fdID, filepath.Join(brainDir, fdID))
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "core-parent-task",
+		Title:          "[Task:core] Parent Task",
+		Kind:           "task",
+		ConversationID: topTaskID,
+		Status:         "active",
+	})
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:             "subagent-core-fork-helper",
+		Title:                "[Subagent:core] Fork Helper [standard]",
+		Kind:                 "subagent",
+		ParentConversationID: fdID,
+		ConversationID:       fdHelperSubID,
+		Status:               "active",
+	})
+
+	// Parent transcripts on disk for raw agentapi vs explicit [Task:...] fork
+	topTPath := filepath.Join(brainDir, topTaskID, ".system_generated", "logs", "transcript.jsonl")
+	_ = os.MkdirAll(filepath.Dir(topTPath), 0o755)
+	_ = os.WriteFile(topTPath, []byte(strings.Join([]string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Run raw worker"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","tool_calls":[{"id":"a1","name":"run_command","args":{"CommandLine":"agentapi new-conversation --json \"ephemeral helper\""}}]}`,
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","source":"SYSTEM","content":"{\"conversationId\":\"%s\"}"}`, rawAgentChildID),
+	}, "\n")+"\n"), 0o644)
+
+	helperTPath := filepath.Join(brainDir, fdHelperSubID, ".system_generated", "logs", "transcript.jsonl")
+	_ = os.MkdirAll(filepath.Dir(helperTPath), 0o755)
+	_ = os.WriteFile(helperTPath, []byte(strings.Join([]string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Fork top-level task"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","tool_calls":[{"id":"f1","name":"run_command","args":{"CommandLine":"agentapi new-conversation --title=\"[Task:core] Forked Task\" \"handoff\""}}]}`,
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","source":"SYSTEM","content":"{\"conversationId\":\"%s\"}"}`, forkedTaskID),
+	}, "\n")+"\n"), 0o644)
+
+	lsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != "cuj39-csrf" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectory") {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			cid := strings.ToLower(strings.TrimSpace(req["cascadeId"]))
+			meta := map[string]interface{}{"rootConversationId": cid, "nestingDepth": 0}
+			switch cid {
+			case wfChildID:
+				meta = map[string]interface{}{
+					"rootConversationId": topTaskID,
+					"nestingDepth":       0,
+					"sourceMetadata": map[string]interface{}{
+						"hideFromConversationList": true,
+						"tool": map[string]interface{}{
+							"conversationId": topTaskID,
+							"toolCall":       map[string]interface{}{"name": "run_workflow"},
+						},
+					},
+				}
+			case nestedSubID:
+				meta = map[string]interface{}{
+					"parentConversationId": topTaskID,
+					"rootConversationId":   topTaskID,
+					"nestingDepth":         1,
+					"subagentSpec":         map[string]interface{}{"role": "[quick] core: Deep Worker", "model": "flash_lite"},
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":     "CASCADE_RUN_STATUS_IDLE",
+				"trajectory": map[string]interface{}{"metadata": meta},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer lsSrv.Close()
+
+	lsEnv := []string{
+		"HQ_BRAIN_DIR=" + brainDir,
+		"ANTIGRAVITY_LS_ADDRESS=" + strings.TrimPrefix(lsSrv.URL, "http://"),
+		"ANTIGRAVITY_CSRF_TOKEN=cuj39-csrf",
+	}
+
+	// 1. PreToolUse records topTaskID's raw agentapi spawn, while helper's --title="[Task:..." is exempt
+	preRaw, _ := json.Marshal(map[string]interface{}{
+		"conversationId": topTaskID,
+		"transcriptPath": topTPath,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": `agentapi new-conversation --json "ephemeral helper"`},
+		},
+	})
+	if out, err := env.runWithEnv(string(preRaw), lsEnv, "hook", "pre-tool"); err != nil || !strings.Contains(out, `"allow"`) {
+		t.Fatalf("hook pre-tool raw agentapi failed: err=%v out=%s", err, out)
+	}
+
+	// 2. Run real CLI session-start + stop hooks on workflow child, nested subagent, raw agentapi child, and standalone chat
+	runHookLifecycle := func(cid, prompt, summary string) {
+		tPath := filepath.Join(brainDir, cid, ".system_generated", "logs", "transcript.jsonl")
+		_ = os.MkdirAll(filepath.Dir(tPath), 0o755)
+		_ = os.WriteFile(tPath, []byte(fmt.Sprintf(
+			`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":%q}`+"\n"+
+				`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","content":%q}`+"\n",
+			prompt, summary,
+		)), 0o644)
+		for _, hk := range []string{"session-start", "stop"} {
+			pl, _ := json.Marshal(map[string]interface{}{
+				"conversationId": cid,
+				"transcriptPath": tPath,
+				"lastUserInput":  prompt,
+				"modelName":      "gemini-4-hydrogen-high",
+			})
+			if out, err := env.runWithEnv(string(pl), lsEnv, "hook", hk); err != nil {
+				t.Fatalf("hq hook %s (%s) failed: %v (%s)", hk, cid, err, out)
+			}
+		}
+	}
+
+	runHookLifecycle(wfChildID, "Workflow child", "Done")
+	runHookLifecycle(nestedSubID, "Unmatched nested subagent", "Done")
+	runHookLifecycle(rawAgentChildID, "ephemeral helper", "Done")
+	runHookLifecycle(standaloneID, "Standalone user question", "Done")
+
+	// 3. Helper forks forkedTaskID and runs `hq adopt` (simulating delegated sidebar task creation)
+	runHookLifecycle(forkedTaskID, "Forked handoff", "Forked ready")
+	if out, err := env.runWithEnv("", lsEnv, "adopt", "--conv="+forkedTaskID, "--task=core-forked-task", "--title=[Task:core] Forked Task"); err != nil {
+		t.Fatalf("hq adopt forkedTaskID failed: %v (%s)", err, out)
+	}
+
+	// 4. Inject a legacy leaked Kind:"task" entry and run `hq tasks clean-nested --json`
+	legacyLeakID := "39393939-0000-4000-8000-000000000009"
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:             "subagent-core-legacy-leak",
+		Title:                "[Subagent:core] Legacy Leak [quick]",
+		Kind:                 "task",
+		ParentConversationID: topTaskID,
+		ConversationID:       legacyLeakID,
+		Status:               "completed",
+	})
+	cleanOut, err := env.runWithEnv("", lsEnv, "tasks", "clean-nested", "--json")
+	if err != nil {
+		t.Fatalf("hq tasks clean-nested failed: %v (%s)", err, cleanOut)
+	}
+	var cleanRes map[string]interface{}
+	if err := json.Unmarshal([]byte(cleanOut), &cleanRes); err != nil {
+		t.Fatalf("decode clean-nested json: %v (%s)", err, cleanOut)
+	}
+	if int(cleanRes["cleanedCount"].(float64)) != 1 {
+		t.Fatalf("expected 1 legacy leak cleaned, got %s", cleanOut)
+	}
+
+	// 5. Verify final Task Board contains ONLY Layer-1 items (parent task, FD helper, standalone user chat, forked [Task:...])
+	tasks, _ := kernel.ListTasks(env.vaultDir)
+	byCID := make(map[string]kernel.ActiveTask)
+	for _, tk := range tasks {
+		byCID[tk.ConversationID] = tk
+	}
+	for _, mustStay := range []string{topTaskID, fdHelperSubID, standaloneID, forkedTaskID} {
+		if _, ok := byCID[mustStay]; !ok {
+			t.Fatalf("expected Layer-1 conversation %s to remain on tasks.json, got %+v", mustStay, tasks)
+		}
+	}
+	for _, mustStayOff := range []string{wfChildID, nestedSubID, rawAgentChildID, legacyLeakID} {
+		if _, ok := byCID[mustStayOff]; ok {
+			t.Fatalf("expected leaked child %s to stay off tasks.json, got %+v", mustStayOff, byCID[mustStayOff])
+		}
+		if !kernel.IsNestedSubagentConversation(env.vaultDir, mustStayOff) {
+			t.Fatalf("expected %s to be recorded in nested_conversations.json", mustStayOff)
+		}
+	}
+}

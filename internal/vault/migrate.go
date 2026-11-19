@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 10
+const CurrentSchemaVersion = 11
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -188,6 +189,13 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	if prev.Version < 10 {
 		v10Summary := migrateV10MemoryV2(vaultDir)
 		recordStep("v10_memory_v2_orthogonal_vault", v10Summary)
+	}
+
+	// Migration v10 -> v11: Reconcile subagent/workflow/agentapi parent attribution & clean leaked nested tasks
+	if prev.Version < 11 {
+		reconciled, _ := obs.ReconcileSubagentAttribution(vaultDir)
+		removedSlugs, _ := kernel.CleanNestedTasks(vaultDir)
+		recordStep("v11_layer1_taskboard_cleanup", fmt.Sprintf("Reconciled %d subagent/worker attribution(s) and cleaned %d leaked nested/workflow entry(s) from tasks.json", reconciled, len(removedSlugs)))
 	}
 
 	// 3. Synchronize unedited installed starter templates (dpkg-style, preserving RSI rule blocks)

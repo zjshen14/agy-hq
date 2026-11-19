@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1578,5 +1581,216 @@ func TestMemoryV2_SessionStartScopesPlaybooksAndBudgets(t *testing.T) {
 		[]byte(`{"conversationId":"conv-archived-fd","stepCount":321}`+"\n"), 0o600)
 	if got := priorJournalStepCountWithDate(vaultDir, "conv-archived-fd", "2026-11-18", 2); got != 321 {
 		t.Fatalf("expected priorJournalStepCountWithDate archive fallback=321, got %d", got)
+	}
+}
+
+func TestHooksPreventWorkflowAgentAPIAndNestedAutoAdoption(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "22222222-2222-2222-2222-222222222201"
+	topTaskID := "22222222-2222-2222-2222-222222222202"
+	wfChildID := "22222222-2222-2222-2222-222222222203"
+	nestedSubID := "22222222-2222-2222-2222-222222222204"
+	agentapiChildID := "22222222-2222-2222-2222-222222222205"
+	directSubID := "22222222-2222-2222-2222-222222222206"
+	standaloneID := "22222222-2222-2222-2222-222222222207"
+
+	// Set Front Desk (later also test vacant Front Desk protection on a second vault)
+	_ = kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID))
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "core-main-task",
+		Title:          "[Task:core] Main Task",
+		Kind:           "task",
+		ConversationID: topTaskID,
+		Status:         "active",
+	})
+
+	// Setup parent transcript for topTaskID running run_workflow and raw agentapi new-conversation
+	topTranscript := filepath.Join(brainDir, topTaskID, ".system_generated", "logs", "transcript.jsonl")
+	_ = os.MkdirAll(filepath.Dir(topTranscript), 0o755)
+	_ = os.WriteFile(topTranscript, []byte(strings.Join([]string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Run workers"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","tool_calls":[{"id":"a1","name":"run_command","args":{"CommandLine":"agentapi new-conversation --json \"child job\""}}]}`,
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","source":"SYSTEM","content":"{\"conversationId\":\"%s\"}"}`, agentapiChildID),
+	}, "\n")+"\n"), 0o644)
+
+	// 1. HandlePreToolUse records run_workflow & raw agentapi spawners in active_spawners.json
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+	}{
+		{name: "run_workflow", args: map[string]interface{}{"Description": "Fanout", "Script": "parallel(...)"}},
+		{name: "run_command", args: map[string]interface{}{"CommandLine": "agentapi new-conversation --json \"child job\""}},
+	} {
+		var out bytes.Buffer
+		pBytes, _ := json.Marshal(map[string]interface{}{
+			"conversationId": topTaskID,
+			"transcriptPath": topTranscript,
+			"toolCall": map[string]interface{}{
+				"name": tc.name,
+				"args": tc.args,
+			},
+		})
+		if err := HandlePreToolUse(bytes.NewReader(pBytes), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse %s: %v", tc.name, err)
+		}
+		if !strings.Contains(out.String(), `"decision":"allow"`) {
+			t.Fatalf("expected allow for %s, got %s", tc.name, out.String())
+		}
+	}
+	spawners := kernel.ListActiveSpawners(vaultDir, time.Hour)
+	kinds := make(map[string]bool)
+	for _, sp := range spawners {
+		if sp.ConversationID == topTaskID {
+			kinds[sp.Kind] = true
+		}
+	}
+	if !kinds["run_workflow"] || !kinds["agentapi"] {
+		t.Fatalf("expected active_spawners to record both run_workflow and agentapi for %s, got %+v", topTaskID, spawners)
+	}
+
+	// Setup mock LS server covering wfChildID, nestedSubID, directSubID, and standaloneID
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != "csrf-hook-test" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectory") {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			cid := strings.ToLower(strings.TrimSpace(req["cascadeId"]))
+			var meta *kernel.LSTrajectoryMetadata
+			switch cid {
+			case wfChildID:
+				meta = &kernel.LSTrajectoryMetadata{
+					RootConversationID: topTaskID,
+					NestingDepth:       0,
+					SourceMetadata: &kernel.LSSourceMetadata{
+						HideFromConversationList: true,
+						Tool: &kernel.LSSourceMetadataTool{
+							ConversationID: topTaskID,
+							ToolCall:       &kernel.LSSourceMetadataToolCall{Name: "run_workflow"},
+						},
+					},
+				}
+			case nestedSubID:
+				meta = &kernel.LSTrajectoryMetadata{
+					ParentConversationID: topTaskID,
+					RootConversationID:   topTaskID,
+					NestingDepth:         1,
+					SubagentSpec:         &kernel.LSSubagentSpec{Role: "[quick] core: Nested Sub", Model: "flash_lite"},
+				}
+			case directSubID:
+				meta = &kernel.LSTrajectoryMetadata{
+					ParentConversationID: fdID,
+					RootConversationID:   fdID,
+					NestingDepth:         1,
+					SubagentSpec:         &kernel.LSSubagentSpec{Role: "[standard] core: Direct Sub", Model: "flash"},
+				}
+			case standaloneID:
+				meta = &kernel.LSTrajectoryMetadata{
+					RootConversationID: standaloneID,
+					NestingDepth:       0,
+				}
+			}
+			if meta != nil {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"status": "CASCADE_RUN_STATUS_IDLE",
+					"trajectory": map[string]interface{}{
+						"metadata": meta,
+					},
+				})
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-hook-test")
+
+	runSessionStartAndStop := func(cid, prompt, summary string) {
+		tPath := filepath.Join(brainDir, cid, ".system_generated", "logs", "transcript.jsonl")
+		_ = os.MkdirAll(filepath.Dir(tPath), 0o755)
+		_ = os.WriteFile(tPath, []byte(fmt.Sprintf(
+			`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":%q}`+"\n"+
+				`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","content":%q}`+"\n",
+			prompt, summary,
+		)), 0o644)
+
+		var startOut, stopOut bytes.Buffer
+		startBytes, _ := json.Marshal(map[string]interface{}{
+			"conversationId": cid,
+			"transcriptPath": tPath,
+			"lastUserInput":  prompt,
+			"modelName":      "gemini-4-hydrogen-high",
+		})
+		if err := HandleSessionStart(bytes.NewReader(startBytes), &startOut, vaultDir); err != nil {
+			t.Fatalf("HandleSessionStart %s: %v", cid, err)
+		}
+		stopBytes, _ := json.Marshal(map[string]interface{}{
+			"conversationId": cid,
+			"transcriptPath": tPath,
+			"lastUserInput":  prompt,
+			"modelName":      "gemini-4-hydrogen-high",
+		})
+		if err := HandleStop(bytes.NewReader(stopBytes), &stopOut, vaultDir); err != nil {
+			t.Fatalf("HandleStop %s: %v", cid, err)
+		}
+	}
+
+	// 2. run_workflow child, nested LS subagent (missed prompt match), and raw agentapi child must stay OFF tasks.json
+	runSessionStartAndStop(wfChildID, "Workflow child task", "Finished workflow slice")
+	runSessionStartAndStop(nestedSubID, "Unmatched nested subagent prompt", "Finished nested work")
+	runSessionStartAndStop(agentapiChildID, "child job", "Finished agentapi worker")
+
+	for _, nestedID := range []string{wfChildID, nestedSubID, agentapiChildID} {
+		if _, found := kernel.FindTaskByConversationID(vaultDir, nestedID); found {
+			t.Fatalf("expected child %s to NOT be auto-adopted into tasks.json", nestedID)
+		}
+		if !kernel.IsNestedSubagentConversation(vaultDir, nestedID) {
+			t.Fatalf("expected child %s to be recorded in nested_conversations.json", nestedID)
+		}
+	}
+
+	// 3. Direct FD subagent missing prompt match still registers cleanly as Kind:"subagent" via LS metadata
+	runSessionStartAndStop(directSubID, "Prompt that missed pending queue", "Direct subagent finished")
+	subTask, foundSub := kernel.FindTaskByConversationID(vaultDir, directSubID)
+	if !foundSub || subTask.Kind != "subagent" || subTask.ParentConversationID != fdID {
+		t.Fatalf("expected directSubID to register as Kind=subagent under %s, got found=%v %+v", fdID, foundSub, subTask)
+	}
+
+	// 4. Genuine standalone user sidebar conversation (nestingDepth==0) cleanly auto-adopts as Kind:"task"
+	runSessionStartAndStop(standaloneID, "Standalone user sidebar question", "Answered standalone question")
+	standaloneTask, foundStandalone := kernel.FindTaskByConversationID(vaultDir, standaloneID)
+	if !foundStandalone || standaloneTask.Kind != "task" {
+		t.Fatalf("expected standaloneID to auto-adopt as Kind=task, got found=%v %+v", foundStandalone, standaloneTask)
+	}
+
+	// 5. Even on a fresh vacant-Front-Desk vault, a run_workflow child must never claim Front Desk
+	vacantVault := filepath.Join(tmp, "vacant-local")
+	tPathWF := filepath.Join(brainDir, wfChildID, ".system_generated", "logs", "transcript.jsonl")
+	stopWFBytes, _ := json.Marshal(map[string]interface{}{
+		"conversationId":        wfChildID,
+		"transcriptPath":        tPathWF,
+		"artifactDirectoryPath": filepath.Join(brainDir, wfChildID),
+		"lastUserInput":         "Workflow child",
+		"modelName":             "gemini-4-hydrogen-high",
+	})
+	var vacantOut bytes.Buffer
+	if err := HandleStop(bytes.NewReader(stopWFBytes), &vacantOut, vacantVault); err != nil {
+		t.Fatalf("HandleStop on vacant vault: %v", err)
+	}
+	if fd, ok := kernel.GetFrontDesk(vacantVault); ok && fd.ConversationID == wfChildID {
+		t.Fatalf("expected run_workflow child %s to never claim vacant Front Desk", wfChildID)
+	}
+	if _, found := kernel.FindTaskByConversationID(vacantVault, wfChildID); found {
+		t.Fatalf("expected run_workflow child %s to stay off tasks.json on vacant vault", wfChildID)
 	}
 }

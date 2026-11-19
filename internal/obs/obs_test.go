@@ -366,3 +366,210 @@ func TestParseTranscriptStreamingMultiTurn(t *testing.T) {
 		t.Fatalf("expected CurrentContextTokens=500, got %d", cm.CurrentContextTokens)
 	}
 }
+
+func TestParseWorkflowAndAgentAPIEdgesAndReconcileCleanup(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "11111111-1111-1111-1111-111111111101"
+	taskID := "11111111-1111-1111-1111-111111111102"
+	directSubID := "11111111-1111-1111-1111-111111111103"
+	nestedSubID := "11111111-1111-1111-1111-111111111104"
+	wfChild1 := "11111111-1111-1111-1111-111111111105"
+	wfChild2 := "11111111-1111-1111-1111-111111111106"
+	agentapiChild := "11111111-1111-1111-1111-111111111107"
+	hqSpawnTask := "11111111-1111-1111-1111-111111111108"
+
+	_ = kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID))
+
+	// Write truncated run_workflow output file in sibling steps/2/output.txt for taskID
+	wfOutPath := filepath.Join(brainDir, taskID, ".system_generated", "steps", "2", "output.txt")
+	if err := os.MkdirAll(filepath.Dir(wfOutPath), 0o755); err != nil {
+		t.Fatalf("mkdir steps dir: %v", err)
+	}
+	_ = os.WriteFile(wfOutPath, []byte(fmt.Sprintf(`{"results":[{"conversation_id":%q},{"conversationId":%q}]}`, wfChild1, wfChild2)), 0o644)
+
+	// Front Desk transcript spawns directSubID via invoke_subagent, and spawns hqSpawnTask via `hq spawn` (must NOT emit agentapi edge).
+	writeTranscriptFixture(t, brainDir, fdID, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-18T10:00:00Z","content":"Run direct subagent"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-18T10:00:01Z","tool_calls":[{"id":"s1","name":"invoke_subagent","args":{"Role":"[standard] core: Direct Repair","Model":"flash","Prompt":"Do direct work"}}]}`,
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-18T10:00:02Z","content":"Created the following subagent:\n{\n  \"conversationId\": \"%s\"\n}"}`, directSubID),
+		`{"step_index":3,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-18T10:00:03Z","tool_calls":[{"id":"h1","name":"run_command","args":{"CommandLine":"hq spawn --task=top-task --prompt=hello"}}]}`,
+		fmt.Sprintf(`{"step_index":4,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-18T10:00:04Z","content":"{\"conversationId\":\"%s\"}"}`, hqSpawnTask),
+	})
+
+	// Secondary task transcript spawns nestedSubID (invoke_subagent), wfChild1/wfChild2 (async run_workflow), and agentapiChild (raw agentapi new-conversation).
+	writeTranscriptFixture(t, brainDir, taskID, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-18T10:01:00Z","content":"Fan out work"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-18T10:01:01Z","tool_calls":[{"id":"n1","name":"invoke_subagent","args":{"Role":"[quick] core: Nested Editor","Model":"flash_lite","Prompt":"Edit file"}}]}`,
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-18T10:01:02Z","content":"Created the following subagent:\n{\n  \"conversationId\": \"%s\"\n}"}`, nestedSubID),
+		`{"step_index":3,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-18T10:01:03Z","tool_calls":[{"id":"w1","name":"run_workflow","args":{"Description":"Fanout batch","Script":"parallel(...)"}}]}`,
+		fmt.Sprintf(`{"step_index":4,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-18T10:01:04Z","content":"Tool is running as a background task with task id: %s/task-1"}`, taskID),
+		fmt.Sprintf(`{"step_index":5,"type":"SYSTEM_MESSAGE","source":"SYSTEM","created_at":"2026-11-18T10:01:10Z","content":"Task id \"%s/task-1\" finished with result: Workflow \"Fanout batch\" completed. Output saved to file:///tmp/.system_generated/steps/2/output.txt"}`, taskID),
+		`{"step_index":6,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-18T10:01:11Z","tool_calls":[{"id":"a1","name":"run_command","args":{"CommandLine":"agentapi new-conversation --json \"helper task\""}}]}`,
+		fmt.Sprintf(`{"step_index":7,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-18T10:01:12Z","content":"Command exited with code 0.\n{\"conversationId\":\"%s\"}"}`, agentapiChild),
+	})
+
+	for _, cid := range []string{directSubID, nestedSubID, wfChild1, wfChild2, agentapiChild, hqSpawnTask} {
+		writeTranscriptFixture(t, brainDir, cid, []string{
+			`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-18T10:02:00Z","content":"worker step"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-18T10:02:01Z","input_tokens":100,"cache_read_tokens":0,"output_tokens":50,"content":"done"}`,
+		})
+	}
+
+	// Register leaked Kind:"task" entries in tasks.json
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "core-main-task",
+		Title:          "[Task:core] Main Task",
+		Kind:           "task",
+		ConversationID: taskID,
+		Status:         "active",
+	})
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "core-hq-spawn-task",
+		Title:          "[Task:core] Spawned Task",
+		Kind:           "task",
+		ConversationID: hqSpawnTask,
+		Status:         "active",
+	})
+	// Direct FD subagent leaked as Kind:"task" with wrong conv-* slug
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "conv-11111103",
+		Title:          "[Task:general] Auto-adopted Direct Subagent",
+		Kind:           "task",
+		ConversationID: directSubID,
+		Status:         "completed",
+	})
+	// Nested invoke_subagent leaked as Kind:"task" even after earlier attribution repaired slug/parent
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:             "subagent-core-nested-editor",
+		Title:                "[Subagent:core] Nested Editor [quick]",
+		Kind:                 "task",
+		ParentConversationID: taskID,
+		ConversationID:       nestedSubID,
+		Status:               "completed",
+	})
+	// run_workflow & agentapi children leaked as Kind:"task"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "conv-11111105",
+		Title:          "Workflow step worker 1",
+		Kind:           "task",
+		ConversationID: wfChild1,
+		Status:         "idle",
+	})
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "conv-11111107",
+		Title:          "helper task",
+		Kind:           "task",
+		ConversationID: agentapiChild,
+		Status:         "idle",
+	})
+
+	// Check DAG classification first
+	idx, err := LoadOrRefreshIndex(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadOrRefreshIndex: %v", err)
+	}
+	if idx.Conversations[wfChild1].Kind != "nested_subagent" || idx.Conversations[wfChild2].Kind != "nested_subagent" {
+		t.Fatalf("expected workflow children to classify as nested_subagent, got %q / %q", idx.Conversations[wfChild1].Kind, idx.Conversations[wfChild2].Kind)
+	}
+	if idx.Conversations[agentapiChild].Kind != "nested_subagent" {
+		t.Fatalf("expected agentapiChild to classify as nested_subagent, got %q", idx.Conversations[agentapiChild].Kind)
+	}
+	if idx.Conversations[hqSpawnTask].ParentConversationID != "" {
+		t.Fatalf("expected hq spawn to NOT create an agentapi spawn edge, got parent %q", idx.Conversations[hqSpawnTask].ParentConversationID)
+	}
+
+	repaired, err := ReconcileSubagentAttribution(vaultDir)
+	if err != nil {
+		t.Fatalf("ReconcileSubagentAttribution: %v", err)
+	}
+	if repaired != 4 {
+		t.Fatalf("expected 4 repaired/pruned tasks (1 direct Kind=subagent + 3 nested/workflow/agentapi removed), got %d", repaired)
+	}
+
+	remaining, _ := kernel.ListTasks(vaultDir)
+	if len(remaining) != 3 {
+		t.Fatalf("expected 3 tasks left (taskID, hqSpawnTask, directSubID), got %d: %+v", len(remaining), remaining)
+	}
+	for _, r := range remaining {
+		if r.ConversationID == directSubID {
+			if r.Kind != "subagent" || r.ParentConversationID != fdID || r.Title != "[Subagent:core] Direct Repair [standard]" {
+				t.Fatalf("expected directSubID repaired to Kind=subagent under fdID, got %+v", r)
+			}
+		}
+		if r.ConversationID == nestedSubID || r.ConversationID == wfChild1 || r.ConversationID == agentapiChild {
+			t.Fatalf("nested/workflow/agentapi leak survived ReconcileSubagentAttribution: %+v", r)
+		}
+	}
+	for _, nid := range []string{nestedSubID, wfChild1, agentapiChild} {
+		if !kernel.IsNestedSubagentConversation(vaultDir, nid) {
+			t.Fatalf("expected %s recorded in nested_conversations.json", nid)
+		}
+	}
+
+	// Explicit [Task:...] created via `agentapi new-conversation --title="[Task:...]` or adopted with an FD ParentConversationID
+	// (including across Front Desk rotation) must NOT emit an agentapi edge and must survive Reconcile + CleanNestedTasks.
+	if IsRawAgentAPINewConversationCommand(`env -u ANTIGRAVITY_SOURCE_METADATA agentapi new-conversation --model=auto --title="[Task:core] Delegated Feature" "handoff prompt"`) {
+		t.Fatalf("expected explicit --title=\"[Task:...]\" agentapi new-conversation to NOT be classified as hidden worker")
+	}
+	if !IsRawAgentAPINewConversationCommand(`agentapi new-conversation --json "background helper worker"`) {
+		t.Fatalf("expected raw unnamed agentapi new-conversation to be classified as hidden worker")
+	}
+	forkedTaskID := "11111111-1111-1111-1111-111111111109"
+	oldFD := "11111111-1111-1111-1111-111111111199"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:             "core-delegated-feature",
+		Title:                "[Task:core] Delegated Feature",
+		Kind:                 "task",
+		ParentConversationID: oldFD,
+		ConversationID:       forkedTaskID,
+		Status:               "active",
+	})
+	if cleaned, cErr := kernel.CleanNestedTasks(vaultDir); cErr != nil || len(cleaned) != 0 {
+		t.Fatalf("expected CleanNestedTasks to preserve explicit [Task:...] across rotated FD, got err=%v cleaned=%v", cErr, cleaned)
+	}
+	if layer1 := kernel.FilterLayer1Tasks(vaultDir, []kernel.ActiveTask{{
+		TaskSlug:             "core-delegated-feature",
+		Title:                "[Task:core] Delegated Feature",
+		Kind:                 "task",
+		ParentConversationID: oldFD,
+		ConversationID:       forkedTaskID,
+		Status:               "active",
+	}}); len(layer1) != 1 {
+		t.Fatalf("expected explicit [Task:...] to remain Layer-1 across Front Desk rotation, got %+v", layer1)
+	}
+
+	// Quote-aware command matching & per-turn pending cleanup:
+	// 1. Quoted commit/echo strings mentioning agentapi new-conversation must NOT match.
+	// 2. An unconsumed agentapi command in turn 1 must NOT hijack hq tasks --json in turn 2.
+	for _, nonWorkerCmd := range []string{
+		`git commit -m "fix agentapi new-conversation bug"`,
+		`echo 'agentapi new-conversation --json "hi"'`,
+		`env -u VAR agentapi new-conversation --title="[Task:core] Explicit" "prompt"`,
+		`agentapi new-conversation "worker" && ./bin/hq adopt --conv=123 --task=foo`,
+	} {
+		if IsRawAgentAPINewConversationCommand(nonWorkerCmd) {
+			t.Fatalf("expected non-worker command %q to return false", nonWorkerCmd)
+		}
+	}
+	isolatedParent := "22222222-1111-1111-1111-111111111101"
+	innocentTask := "22222222-1111-1111-1111-111111111102"
+	isoPath := writeTranscriptFixture(t, brainDir, isolatedParent, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Turn 1 denied"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","tool_calls":[{"id":"c1","name":"run_command","args":{"CommandLine":"agentapi new-conversation \"denied\""}}]}`,
+		`{"step_index":2,"type":"GENERIC","source":"SYSTEM","status":"ERROR","content":"tool call denied"}`,
+		`{"step_index":3,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Turn 2 list tasks"}`,
+		`{"step_index":4,"type":"PLANNER_RESPONSE","source":"MODEL","tool_calls":[{"id":"c2","name":"run_command","args":{"CommandLine":"hq tasks --json"}}]}`,
+		fmt.Sprintf(`{"step_index":5,"type":"GENERIC","source":"SYSTEM","content":"Command exited with code 0.\n[{\"conversationId\":\"%s\",\"taskSlug\":\"innocent\"}]"}`, innocentTask),
+	})
+	isoCM, err := ParseTranscriptFile(isolatedParent, isoPath, "", "")
+	if err != nil {
+		t.Fatalf("ParseTranscriptFile isolatedParent: %v", err)
+	}
+	if len(isoCM.SpawnEdges) != 0 {
+		t.Fatalf("expected unconsumed turn-1 agentapi call NOT to hijack turn-2 hq tasks --json, got %+v", isoCM.SpawnEdges)
+	}
+}

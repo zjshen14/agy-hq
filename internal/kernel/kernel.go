@@ -361,6 +361,27 @@ func UpdateTasks(vaultDir string, fn func(tasks []ActiveTask) ([]ActiveTask, boo
 	})
 }
 
+// ApplyTaskReconciliation atomically archives removed rows and updates local/memory/tasks.json
+// under a single RankTasks lock acquisition.
+func ApplyTaskReconciliation(vaultDir string, fn func(tasks []ActiveTask) (kept []ActiveTask, toArchive []ActiveTask, changed bool, err error)) error {
+	return withTasksLock(vaultDir, func() error {
+		tasks, err := ListTasks(vaultDir)
+		if err != nil {
+			return err
+		}
+		kept, toArchive, changed, err := fn(tasks)
+		if err != nil || !changed {
+			return err
+		}
+		if len(toArchive) > 0 {
+			if err := appendTasksToColdArchiveUnlocked(vaultDir, toArchive); err != nil {
+				return err
+			}
+		}
+		return saveTasksUnlocked(vaultDir, kept)
+	})
+}
+
 // ListTasks returns all tracked Task Conversations from local/memory/tasks.json.
 func ListTasks(vaultDir string) ([]ActiveTask, error) {
 	data, err := os.ReadFile(tasksFilePath(vaultDir))
@@ -733,18 +754,55 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 	return matched, true
 }
 
-func isExplicitTopLevelTask(t ActiveTask) bool {
-	if strings.HasPrefix(t.TaskSlug, "subagent-") || strings.HasPrefix(t.Title, "[Subagent:") {
+func isHexSlugSuffix(s string) bool {
+	hexCount := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			hexCount++
+			continue
+		}
+		if c == '-' {
+			continue
+		}
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(t.Kind), "task") || t.EffectiveKind() == "task"
+	return hexCount >= 6
+}
+
+func isAutoConvSlug(slug, convID string) bool {
+	if !strings.HasPrefix(slug, "conv-") {
+		return false
+	}
+	suffix := strings.ToLower(strings.TrimPrefix(slug, "conv-"))
+	cid := normalizeUUID(convID)
+	return cid == "" || strings.HasPrefix(cid, suffix) || strings.HasPrefix(suffix, cid) || isHexSlugSuffix(suffix)
+}
+
+// IsExplicitTopLevelTask reports whether t is an explicitly created or adopted Layer-1 Task
+// (Kind=="task", non-auto-adopted conv- slug, non-subagent slug/title, and either an explicit
+// [Task:...] title or empty ParentConversationID). Explicitly adopted [Task:...] conversations
+// remain Layer-1 even if they carry a Front Desk ParentConversationID or Front Desk rotates.
+func IsExplicitTopLevelTask(t ActiveTask) bool {
+	if !strings.EqualFold(strings.TrimSpace(t.Kind), "task") && t.EffectiveKind() != "task" {
+		return false
+	}
+	if strings.HasPrefix(t.TaskSlug, "subagent-") || isAutoConvSlug(t.TaskSlug, t.ConversationID) {
+		return false
+	}
+	if strings.HasPrefix(t.Title, "[Subagent:") {
+		return false
+	}
+	return strings.HasPrefix(t.Title, "[Task:") || strings.TrimSpace(t.ParentConversationID) == ""
+}
+
+func isExplicitTopLevelTask(t ActiveTask) bool {
+	return IsExplicitTopLevelTask(t)
 }
 
 // RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
 func RegisterTask(vaultDir string, task ActiveTask) error {
-	explicitTaskPromotion := strings.EqualFold(strings.TrimSpace(task.Kind), "task") &&
-		!strings.HasPrefix(task.TaskSlug, "subagent-") &&
-		!strings.HasPrefix(task.Title, "[Subagent:")
+	explicitTaskPromotion := IsExplicitTopLevelTask(task) && strings.EqualFold(strings.TrimSpace(task.Kind), "task")
 	var bindEventIDs []string
 	var removeNestedIDs []string
 	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
@@ -1587,6 +1645,7 @@ func FilterTasks(vaultDir string, activeOnly, archiveOnly, includeAllHot, includ
 		}
 	}
 
+	combined = FilterLayer1Tasks(vaultDir, combined)
 	sorted := SortTasksForBoard(combined, now)
 	kindFilter = strings.ToLower(strings.TrimSpace(kindFilter))
 	scopeFilter = strings.ToLower(strings.TrimSpace(scopeFilter))
@@ -1761,6 +1820,66 @@ func frontDeskPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "front_desk.json")
 }
 
+func frontDeskHistoryPath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "front_desk_history.json")
+}
+
+func recordHistoricalFrontDeskID(vaultDir, convID string) {
+	cid := normalizeUUID(convID)
+	if vaultDir == "" || cid == "" {
+		return
+	}
+	var hist []string
+	if data, err := os.ReadFile(frontDeskHistoryPath(vaultDir)); err == nil {
+		_ = json.Unmarshal(data, &hist)
+	}
+	seen := make(map[string]bool, len(hist)+1)
+	out := make([]string, 0, len(hist)+1)
+	for _, h := range hist {
+		nh := normalizeUUID(h)
+		if nh != "" && nh != cid && !seen[nh] {
+			seen[nh] = true
+			out = append(out, nh)
+		}
+	}
+	out = append(out, cid)
+	if len(out) > 32 {
+		out = out[len(out)-32:]
+	}
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
+	if b, err := json.MarshalIndent(out, "", "  "); err == nil {
+		_ = store.WriteAtomic(frontDeskHistoryPath(vaultDir), append(b, '\n'), 0o644)
+	}
+}
+
+// GetKnownFrontDeskIDSet returns all normalized conversation IDs that currently hold
+// or previously held the Front Desk lease (preventing Front Desk rotation or temporary
+// vacancy from stripping historical Layer-1 subagents).
+func GetKnownFrontDeskIDSet(vaultDir string) map[string]bool {
+	out := make(map[string]bool)
+	if fd, ok := GetFrontDesk(vaultDir); ok && strings.TrimSpace(fd.ConversationID) != "" {
+		out[normalizeUUID(fd.ConversationID)] = true
+	}
+	if data, err := os.ReadFile(frontDeskHistoryPath(vaultDir)); err == nil {
+		var hist []string
+		if json.Unmarshal(data, &hist) == nil {
+			for _, h := range hist {
+				if nh := normalizeUUID(h); nh != "" {
+					out[nh] = true
+				}
+			}
+		}
+	}
+	if tasks, err := ListTasks(vaultDir); err == nil {
+		for _, t := range tasks {
+			if strings.HasPrefix(t.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(t.ConversationID) != "" {
+				out[normalizeUUID(t.ConversationID)] = true
+			}
+		}
+	}
+	return out
+}
+
 // GetFrontDesk reads the currently active Front Desk conversation lease.
 func GetFrontDesk(vaultDir string) (FrontDeskLease, bool) {
 	var lease FrontDeskLease
@@ -1857,6 +1976,10 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	if err := saveFrontDeskLease(vaultDir, lease); err != nil {
 		return err
 	}
+	if hasPrev && strings.TrimSpace(prev.ConversationID) != "" && normalizeUUID(prev.ConversationID) != normalizeUUID(convID) {
+		recordHistoricalFrontDeskID(vaultDir, prev.ConversationID)
+	}
+	recordHistoricalFrontDeskID(vaultDir, convID)
 	ReconcileFrontDeskFromTranscript(vaultDir, "")
 	return nil
 }
@@ -2567,11 +2690,16 @@ func ClearArmedTrigger(vaultDir, scheduleID string) error {
 // ReleaseFrontDesk clears local/memory/front_desk.json so the next new conversation
 // automatically claims the Front Desk intake lease on SessionStart.
 func ReleaseFrontDesk(vaultDir string) error {
-	if prev, ok := GetFrontDesk(vaultDir); ok && prev.ArtifactDir != "" {
-		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md"))
-		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md.metadata.json"))
-		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
-		_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
+	if prev, ok := GetFrontDesk(vaultDir); ok {
+		if strings.TrimSpace(prev.ConversationID) != "" {
+			recordHistoricalFrontDeskID(vaultDir, prev.ConversationID)
+		}
+		if prev.ArtifactDir != "" {
+			_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md"))
+			_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console.md.metadata.json"))
+			_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md"))
+			_ = os.Remove(filepath.Join(prev.ArtifactDir, "hq_console_mobile.md.metadata.json"))
+		}
 	}
 	_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
 	_ = os.Remove(filepath.Join(vaultDir, "memory", "active_artifact_dir.txt"))
@@ -3755,9 +3883,112 @@ func RemoveNestedConversation(vaultDir, convID string) error {
 	})
 }
 
+// GetNestedConversationParent returns the recorded parentConversationId for a nested conversation, if any.
+func GetNestedConversationParent(vaultDir, convID string) string {
+	convID = normalizeUUID(convID)
+	if convID == "" {
+		return ""
+	}
+	m, err := loadNestedConversations(vaultDir)
+	if err != nil || m == nil {
+		return ""
+	}
+	if rec, ok := m[convID]; ok {
+		return strings.TrimSpace(rec.ParentConversationID)
+	}
+	for k, rec := range m {
+		if normalizeUUID(k) == convID {
+			return strings.TrimSpace(rec.ParentConversationID)
+		}
+	}
+	return ""
+}
+
+// ActiveSpawner tracks a conversation that recently launched child workers via run_workflow or raw agentapi
+// so HandleSessionStart / HandleStop can check its transcript before auto-adopting unknown child conversations.
+type ActiveSpawner struct {
+	ConversationID string `json:"conversationId"`
+	TranscriptPath string `json:"transcriptPath,omitempty"`
+	Kind           string `json:"kind"` // "agentapi" | "run_workflow"
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+func activeSpawnersFilePath(vaultDir string) string {
+	return filepath.Join(vaultDir, "memory", "active_spawners.json")
+}
+
+// RecordActiveSpawner registers convID as a recent spawner of agentapi or run_workflow child workers.
+func RecordActiveSpawner(vaultDir, convID, transcriptPath, kind string) error {
+	convID = normalizeUUID(convID)
+	transcriptPath = strings.TrimSpace(transcriptPath)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if convID == "" || kind == "" {
+		return nil
+	}
+	return withSubagentQueueLock(vaultDir, func() error {
+		var items []ActiveSpawner
+		if data, err := os.ReadFile(activeSpawnersFilePath(vaultDir)); err == nil {
+			_ = json.Unmarshal(data, &items)
+		}
+		cutoff := time.Now().Add(-24 * time.Hour)
+		nowISO := time.Now().Format(time.RFC3339)
+		kept := make([]ActiveSpawner, 0, len(items)+1)
+		for _, it := range items {
+			if normalizeUUID(it.ConversationID) == convID && it.Kind == kind {
+				continue
+			}
+			if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(it.UpdatedAt)); err == nil && ts.Before(cutoff) {
+				continue
+			}
+			kept = append(kept, it)
+		}
+		kept = append(kept, ActiveSpawner{
+			ConversationID: convID,
+			TranscriptPath: transcriptPath,
+			Kind:           kind,
+			UpdatedAt:      nowISO,
+		})
+		if len(kept) > 100 {
+			kept = kept[len(kept)-100:]
+		}
+		data, err := json.MarshalIndent(kept, "", "  ")
+		if err != nil {
+			return err
+		}
+		return store.WriteAtomic(activeSpawnersFilePath(vaultDir), data, 0o644)
+	})
+}
+
+// ListActiveSpawners returns recent active spawners within maxAge (newest first).
+func ListActiveSpawners(vaultDir string, maxAge time.Duration) []ActiveSpawner {
+	data, err := os.ReadFile(activeSpawnersFilePath(vaultDir))
+	if err != nil {
+		return nil
+	}
+	var items []ActiveSpawner
+	if json.Unmarshal(data, &items) != nil {
+		return nil
+	}
+	cutoff := time.Time{}
+	if maxAge > 0 {
+		cutoff = time.Now().Add(-maxAge)
+	}
+	var out []ActiveSpawner
+	for i := len(items) - 1; i >= 0; i-- {
+		it := items[i]
+		if !cutoff.IsZero() {
+			if ts, tErr := time.Parse(time.RFC3339, strings.TrimSpace(it.UpdatedAt)); tErr == nil && ts.Before(cutoff) {
+				continue
+			}
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
 // IsNestedSubagentConversation returns true if convID is a known nested descendant subagent.
 func IsNestedSubagentConversation(vaultDir, convID string) bool {
-	convID = strings.TrimSpace(convID)
+	convID = normalizeUUID(convID)
 	if convID == "" {
 		return false
 	}
@@ -3766,8 +3997,89 @@ func IsNestedSubagentConversation(vaultDir, convID string) bool {
 		if _, ok := m[convID]; ok {
 			return true
 		}
+		for k := range m {
+			if normalizeUUID(k) == convID {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+func buildAncestryMaps(vaultDir string) (fdID string, knownFDs map[string]bool, nestedMap map[string]NestedConversation, parentByConv map[string]string) {
+	if fd, hasFD := GetFrontDesk(vaultDir); hasFD {
+		fdID = normalizeUUID(fd.ConversationID)
+	}
+	knownFDs = GetKnownFrontDeskIDSet(vaultDir)
+	parentByConv = make(map[string]string)
+	if m, err := loadNestedConversations(vaultDir); err == nil && m != nil {
+		nestedMap = m
+		for k, rec := range m {
+			nk := normalizeUUID(k)
+			np := normalizeUUID(rec.ParentConversationID)
+			if nk != "" && np != "" && nk != np {
+				parentByConv[nk] = np
+			}
+		}
+	} else {
+		nestedMap = make(map[string]NestedConversation)
+	}
+	if tasks, err := ListTasks(vaultDir); err == nil {
+		for _, t := range tasks {
+			tcid := normalizeUUID(t.ConversationID)
+			tpid := normalizeUUID(t.ParentConversationID)
+			if tcid != "" && tpid != "" && tcid != tpid {
+				if _, exists := parentByConv[tcid]; !exists {
+					parentByConv[tcid] = tpid
+				}
+			}
+		}
+	}
+	return fdID, knownFDs, nestedMap, parentByConv
+}
+
+func hasNonFrontDeskAncestryWithMaps(knownFDs map[string]bool, nestedMap map[string]NestedConversation, parentByConv map[string]string, cid, immediateParentID string) (bool, string) {
+	cid = normalizeUUID(cid)
+	if cid != "" && knownFDs[cid] {
+		return false, ""
+	}
+	if cid != "" {
+		if rec, ok := nestedMap[cid]; ok {
+			return true, strings.TrimSpace(rec.ParentConversationID)
+		}
+	}
+	cur := normalizeUUID(immediateParentID)
+	if cur == "" && cid != "" {
+		cur = parentByConv[cid]
+	}
+	if cur == "" || cur == cid {
+		return false, ""
+	}
+	seen := map[string]bool{cid: true}
+	firstParent := cur
+	for cur != "" {
+		if knownFDs[cur] {
+			return false, cur
+		}
+		if len(knownFDs) == 0 {
+			return true, firstParent
+		}
+		next, hasParent := parentByConv[cur]
+		if !hasParent || next == "" || seen[next] {
+			// Reached a root parent that is NOT any known Front Desk conversation.
+			return true, firstParent
+		}
+		seen[cur] = true
+		cur = next
+	}
+	return false, firstParent
+}
+
+// HasNonFrontDeskAncestry returns true if convID (or its immediateParentID) is a nested descendant
+// or has a transitive parent chain whose root is not a known Front Desk conversation.
+func HasNonFrontDeskAncestry(vaultDir, convID, immediateParentID string) (bool, string) {
+	_, knownFDs, nestedMap, parentByConv := buildAncestryMaps(vaultDir)
+	return hasNonFrontDeskAncestryWithMaps(knownFDs, nestedMap, parentByConv, convID, immediateParentID)
 }
 
 // IsSubagentConversation returns true if convID belongs to an ephemeral child subagent
@@ -3793,89 +4105,153 @@ func IsSubagentConversation(vaultDir, convID string) bool {
 	return IsNestedSubagentConversation(vaultDir, convID)
 }
 
-// IsLayer1Task returns true if task is a Layer-1 task orchestrated by the Front Desk:
-// 1. Top-level task conversation (EffectiveKind == "task").
-// 2. Automated daemon trigger (EffectiveKind == "auto").
-// 3. Direct subagent of the Front Desk (EffectiveKind == "subagent"), where:
-//   - ParentConversationID matches frontDeskConvID, OR
-//   - ParentConversationID is empty (legacy subagents created from Front Desk).
-//
-// Returns false if Kind is "subagent" and ParentConversationID points to another task/subagent (not Front Desk).
+// IsLayer1Task returns true if task is a Layer-1 task orchestrated by the Front Desk.
 func IsLayer1Task(task ActiveTask, frontDeskConvID string) bool {
-	kind := task.EffectiveKind()
-	if kind == "task" || kind == "auto" {
+	knownFDs := make(map[string]bool)
+	if nid := normalizeUUID(frontDeskConvID); nid != "" {
+		knownFDs[nid] = true
+	}
+	return isLayer1TaskWithFDSet(task, knownFDs, true)
+}
+
+func isLayer1TaskWithFDSet(task ActiveTask, knownFDs map[string]bool, strictWhenNoFD bool) bool {
+	if IsExplicitTopLevelTask(task) {
 		return true
 	}
-	if kind == "subagent" {
-		frontDeskConvID = strings.TrimSpace(frontDeskConvID)
-		parentID := strings.TrimSpace(task.ParentConversationID)
-		if parentID != "" && frontDeskConvID != "" && parentID != frontDeskConvID {
+	parentID := normalizeUUID(task.ParentConversationID)
+	hasSubagentMarkers := strings.HasPrefix(task.TaskSlug, "subagent-") || strings.HasPrefix(task.Title, "[Subagent:")
+
+	if parentID != "" {
+		if knownFDs[parentID] {
+			return true
+		}
+		if len(knownFDs) > 0 || strictWhenNoFD {
 			return false
 		}
+		// Vacant Front Desk with no recorded history yet: keep Kind=="subagent" entries unless
+		// nested ancestry proves non-FD parentage; reject Kind=="task" with non-empty ParentConversationID.
+		return strings.EqualFold(strings.TrimSpace(task.Kind), "subagent")
+	}
+	// Reject Kind=="task" entries carrying subagent markers without a Front Desk parent.
+	if strings.EqualFold(strings.TrimSpace(task.Kind), "task") && hasSubagentMarkers {
+		return false
+	}
+	if hasSubagentMarkers {
+		return true
+	}
+	kind := task.EffectiveKind()
+	if kind == "task" || kind == "auto" || kind == "subagent" {
 		return true
 	}
 	return true
 }
 
-// FilterLayer1Tasks filters tasks to strictly include Layer-1 tasks.
+// FilterLayer1Tasks filters tasks to strictly include Layer-1 tasks in O(N) single disk load.
 func FilterLayer1Tasks(vaultDir string, tasks []ActiveTask) []ActiveTask {
-	fd, _ := GetFrontDesk(vaultDir)
+	_, knownFDs, nestedMap, parentByConv := buildAncestryMaps(vaultDir)
 	var out []ActiveTask
 	for _, t := range tasks {
-		if !isExplicitTopLevelTask(t) && t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
-			continue
+		if !IsExplicitTopLevelTask(t) && t.ConversationID != "" {
+			cid := normalizeUUID(t.ConversationID)
+			if _, isNested := nestedMap[cid]; isNested {
+				continue
+			}
+			if hasAnc, _ := hasNonFrontDeskAncestryWithMaps(knownFDs, nestedMap, parentByConv, cid, t.ParentConversationID); hasAnc {
+				continue
+			}
 		}
-		if IsLayer1Task(t, fd.ConversationID) {
+		if isLayer1TaskWithFDSet(t, knownFDs, len(knownFDs) > 0) {
 			out = append(out, t)
 		}
 	}
 	return out
 }
 
-// CleanNestedTasks archives or removes nested child subagents from local/memory/tasks.json,
-// moving them to tasks_archive.jsonl, scrubbing poisoned top-level task/self-parented IDs from
-// nested_conversations.json, and adjusting quota so that only Layer-1 tasks are tracked.
+// CleanNestedTasks archives or removes nested child subagents, workflow workers, and agentapi child spawns
+// from local/memory/tasks.json, moving them to tasks_archive.jsonl, scrubbing poisoned top-level task/self-parented IDs
+// from nested_conversations.json, and adjusting quota so that only Layer-1 tasks are tracked.
 func CleanNestedTasks(vaultDir string) ([]string, error) {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil {
 		return nil, err
 	}
-	fd, _ := GetFrontDesk(vaultDir)
+	fdID, knownFDs, nestedMap, parentByConv := buildAncestryMaps(vaultDir)
+	// Also backfill known historical Front Desks from archived headquarter-front-desk-* records.
+	if archived, _, aErr := ListArchivedTasks(vaultDir, 0); aErr == nil {
+		for _, at := range archived {
+			if strings.HasPrefix(at.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(at.ConversationID) != "" {
+				cid := normalizeUUID(at.ConversationID)
+				if !knownFDs[cid] {
+					knownFDs[cid] = true
+					recordHistoricalFrontDeskID(vaultDir, cid)
+				}
+			}
+		}
+	}
 
 	explicitTaskIDs := make(map[string]bool)
 	for _, t := range tasks {
-		if t.ConversationID != "" && isExplicitTopLevelTask(t) {
-			explicitTaskIDs[strings.TrimSpace(t.ConversationID)] = true
+		if t.ConversationID != "" && IsExplicitTopLevelTask(t) {
+			explicitTaskIDs[normalizeUUID(t.ConversationID)] = true
 		}
 	}
 	_ = withSubagentQueueLock(vaultDir, func() error {
-		nestedMap, nErr := loadNestedConversations(vaultDir)
-		if nErr != nil || len(nestedMap) == 0 {
+		curNested, nErr := loadNestedConversations(vaultDir)
+		if nErr != nil || len(curNested) == 0 {
 			return nil
 		}
 		scrubbed := false
-		for cid, rec := range nestedMap {
-			if explicitTaskIDs[cid] || (fd.ConversationID != "" && cid == fd.ConversationID) || (rec.ParentConversationID != "" && cid == rec.ParentConversationID) {
-				delete(nestedMap, cid)
+		for cid, rec := range curNested {
+			ncid := normalizeUUID(cid)
+			npid := normalizeUUID(rec.ParentConversationID)
+			if explicitTaskIDs[ncid] || knownFDs[ncid] || (npid != "" && ncid == npid) {
+				delete(curNested, cid)
+				delete(nestedMap, ncid)
 				scrubbed = true
 			}
 		}
 		if scrubbed {
-			return saveNestedConversationsUnlocked(vaultDir, nestedMap)
+			return saveNestedConversationsUnlocked(vaultDir, curNested)
 		}
 		return nil
 	})
 
-	// Pre-seed known nested conversations from quota events or journal if any
+	// Pre-seed known nested conversations from quota events
+	type nestedPendingRec struct {
+		convID   string
+		parentID string
+	}
+	var toRecordNested []nestedPendingRec
+
 	quota := LoadQuota(vaultDir)
 	re := regexp.MustCompile(`Spawned subagent ([0-9a-fA-F-]+) \(parent=([0-9a-fA-F-]+)`)
 	for _, ev := range quota.Events {
 		if strings.Contains(ev.Outcome, "parent=") {
 			if m := re.FindStringSubmatch(ev.Outcome); len(m) == 3 {
-				cid := m[1]
-				pid := m[2]
-				if fd.ConversationID != "" && pid != fd.ConversationID && !explicitTaskIDs[cid] {
-					_ = RecordNestedConversation(vaultDir, cid, pid)
+				cid := normalizeUUID(m[1])
+				pid := normalizeUUID(m[2])
+				if pid != "" && !knownFDs[pid] && len(knownFDs) > 0 && !explicitTaskIDs[cid] {
+					if _, exists := nestedMap[cid]; !exists {
+						nestedMap[cid] = NestedConversation{ConversationID: cid, ParentConversationID: pid}
+						toRecordNested = append(toRecordNested, nestedPendingRec{convID: cid, parentID: pid})
+					}
+				}
+			}
+		}
+	}
+
+	// Pre-seed from live Language Server trajectory metadata if online (catches run_workflow & subtrajectories).
+	lsLineageByID, hasLS := FetchAllLSConversationLineage(vaultDir)
+	if hasLS {
+		for _, t := range tasks {
+			cid := normalizeUUID(t.ConversationID)
+			if cid == "" || explicitTaskIDs[cid] {
+				continue
+			}
+			if lin, ok := lsLineageByID[cid]; ok && lin.IsNestedDescendant {
+				if _, exists := nestedMap[cid]; !exists {
+					nestedMap[cid] = NestedConversation{ConversationID: t.ConversationID, ParentConversationID: lin.DirectParentID}
+					toRecordNested = append(toRecordNested, nestedPendingRec{convID: t.ConversationID, parentID: lin.DirectParentID})
 				}
 			}
 		}
@@ -3883,65 +4259,159 @@ func CleanNestedTasks(vaultDir string) ([]string, error) {
 
 	var removedTasks []ActiveTask
 	var removedSlugs []string
-	nowStr := time.Now().Format(time.RFC3339)
+	var removedKeys []string
+	removedTodaySubagentCount := 0
+	now := time.Now()
+	nowStr := now.Format(time.RFC3339)
+	todayLocal := now.In(time.Local).Format("2006-01-02")
+
+	taskIdentity := func(t ActiveTask) string {
+		if cid := normalizeUUID(t.ConversationID); cid != "" {
+			return "cid:" + cid
+		}
+		return "slug:" + t.TaskSlug
+	}
+
+	isCreatedToday := func(createdAt string) bool {
+		raw := strings.TrimSpace(createdAt)
+		if raw == "" {
+			return true
+		}
+		if ts, pErr := time.Parse(time.RFC3339Nano, raw); pErr == nil {
+			return ts.In(time.Local).Format("2006-01-02") == todayLocal
+		}
+		if ts, pErr := time.Parse(time.RFC3339, raw); pErr == nil {
+			return ts.In(time.Local).Format("2006-01-02") == todayLocal
+		}
+		return false
+	}
 
 	for _, t := range tasks {
 		isNested := false
-		if !isExplicitTopLevelTask(t) && t.EffectiveKind() == "subagent" {
-			if t.ConversationID != "" && IsNestedSubagentConversation(vaultDir, t.ConversationID) {
+		discoveredParent := strings.TrimSpace(t.ParentConversationID)
+		cid := normalizeUUID(t.ConversationID)
+
+		if !IsExplicitTopLevelTask(t) {
+			if rec, ok := nestedMap[cid]; ok && cid != "" {
 				isNested = true
-			} else {
-				parentID := strings.TrimSpace(t.ParentConversationID)
-				if parentID != "" && fd.ConversationID != "" && parentID != fd.ConversationID {
+				if discoveredParent == "" {
+					discoveredParent = strings.TrimSpace(rec.ParentConversationID)
+				}
+			} else if hasLS {
+				if lin, ok := lsLineageByID[cid]; ok && lin.IsNestedDescendant {
 					isNested = true
+					if discoveredParent == "" {
+						discoveredParent = lin.DirectParentID
+					}
+				}
+			}
+			if !isNested {
+				parentID := normalizeUUID(t.ParentConversationID)
+				if parentID != "" && !knownFDs[parentID] && (len(knownFDs) > 0 || !strings.EqualFold(strings.TrimSpace(t.Kind), "subagent")) {
+					isNested = true
+				} else if !isLayer1TaskWithFDSet(t, knownFDs, len(knownFDs) > 0) {
+					isNested = true
+				} else if hasAnc, ancParent := hasNonFrontDeskAncestryWithMaps(knownFDs, nestedMap, parentByConv, cid, parentID); hasAnc {
+					isNested = true
+					if discoveredParent == "" {
+						discoveredParent = ancParent
+					}
 				}
 			}
 		}
 
 		if isNested {
+			if strings.EqualFold(strings.TrimSpace(t.Kind), "subagent") && isCreatedToday(t.CreatedAt) {
+				removedTodaySubagentCount++
+			}
+			if strings.EqualFold(strings.TrimSpace(t.Kind), "task") || t.Kind == "" {
+				t.Kind = "subagent"
+			}
+			if t.ParentConversationID == "" && discoveredParent != "" {
+				t.ParentConversationID = discoveredParent
+			}
 			t.Status = "archived"
 			t.ArchivedAt = nowStr
 			removedTasks = append(removedTasks, t)
 			if t.ConversationID != "" {
-				_ = RecordNestedConversation(vaultDir, t.ConversationID, t.ParentConversationID)
+				toRecordNested = append(toRecordNested, nestedPendingRec{convID: t.ConversationID, parentID: discoveredParent})
 			}
 			removedSlugs = append(removedSlugs, t.TaskSlug)
+			removedKeys = append(removedKeys, taskIdentity(t))
 		}
 	}
 
-	if len(removedSlugs) > 0 {
-		removedSlugSet := make(map[string]bool, len(removedSlugs))
-		for _, s := range removedSlugs {
-			removedSlugSet[s] = true
+	_ = fdID // captured via knownFDs
+
+	if len(removedTasks) > 0 {
+		removedKeySet := make(map[string]bool, len(removedKeys))
+		for _, k := range removedKeys {
+			removedKeySet[k] = true
 		}
+		var verifiedSlugs []string
 		if err := withTasksLock(vaultDir, func() error {
-			if err := appendTasksToColdArchiveUnlocked(vaultDir, removedTasks); err != nil {
-				return err
-			}
 			curTasks, err := ListTasks(vaultDir)
 			if err != nil {
 				return err
 			}
 			kept := make([]ActiveTask, 0, len(curTasks))
+			stillRemovedKeys := make(map[string]bool, len(removedKeySet))
 			for _, cur := range curTasks {
-				if removedSlugSet[cur.TaskSlug] {
+				key := taskIdentity(cur)
+				// Re-check IsExplicitTopLevelTask under lock in case hq adopt promoted cur concurrently.
+				if removedKeySet[key] && !IsExplicitTopLevelTask(cur) {
+					stillRemovedKeys[key] = true
+					verifiedSlugs = append(verifiedSlugs, cur.TaskSlug)
 					continue
 				}
 				kept = append(kept, cur)
 			}
+			if len(stillRemovedKeys) == 0 {
+				removedSlugs = nil
+				return nil
+			}
+			var confirmedArchive []ActiveTask
+			for _, rt := range removedTasks {
+				if stillRemovedKeys[taskIdentity(rt)] {
+					confirmedArchive = append(confirmedArchive, rt)
+				}
+			}
+			if err := appendTasksToColdArchiveUnlocked(vaultDir, confirmedArchive); err != nil {
+				return err
+			}
+			removedSlugs = verifiedSlugs
 			return saveTasksUnlocked(vaultDir, kept)
 		}); err != nil {
 			return nil, err
 		}
 
-		// Reconcile quota SpawnsToday if nested spawns were previously counted
-		_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
-			if st.SpawnsToday >= len(removedSlugs) {
-				st.SpawnsToday -= len(removedSlugs)
-				return true, nil
+		for _, rec := range toRecordNested {
+			cidNorm := normalizeUUID(rec.convID)
+			if explicitTaskIDs[cidNorm] {
+				continue
 			}
-			return false, nil
-		})
+			_ = RecordNestedConversation(vaultDir, rec.convID, rec.parentID)
+		}
+
+		if removedTodaySubagentCount > 0 && len(removedSlugs) > 0 {
+			_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
+				st.normalizeSpawnCounters()
+				changed := false
+				if st.SpawnsToday >= removedTodaySubagentCount {
+					st.SpawnsToday -= removedTodaySubagentCount
+					changed = true
+				}
+				if st.InteractiveSpawnsToday >= removedTodaySubagentCount {
+					st.InteractiveSpawnsToday -= removedTodaySubagentCount
+					changed = true
+				}
+				return changed, nil
+			})
+		}
+	} else {
+		for _, rec := range toRecordNested {
+			_ = RecordNestedConversation(vaultDir, rec.convID, rec.parentID)
+		}
 	}
 
 	return removedSlugs, nil
@@ -4669,8 +5139,170 @@ type lsGetCascadeTrajectoryResponse struct {
 	Status        string `json:"status"`
 	NumTotalSteps int    `json:"numTotalSteps"`
 	Trajectory    struct {
-		Steps []lsCascadeStep `json:"steps"`
+		Metadata *LSTrajectoryMetadata `json:"metadata,omitempty"`
+		Steps    []lsCascadeStep       `json:"steps"`
 	} `json:"trajectory"`
+}
+
+// LSConversationLineage captures Layer-1 vs nested classification derived from Language Server trajectory metadata.
+type LSConversationLineage struct {
+	Found                     bool
+	ParentConvID              string
+	RootConvID                string
+	NestingDepth              int
+	IsWorkflowChild           bool
+	HasSubagentSpec           bool
+	SubagentRole              string
+	SubagentModel             string
+	SourceTitle               string
+	DirectParentID            string
+	IsNestedDescendant        bool
+	IsDirectFrontDeskSubagent bool
+}
+
+// EvaluateLSTrajectoryLineage classifies a conversation using LS trajectory metadata and Front Desk / Vault ancestry.
+func EvaluateLSTrajectoryLineage(vaultDir, convID string, meta LSTrajectoryMetadata) LSConversationLineage {
+	fdID, knownFDs, nestedMap, parentByConv := buildAncestryMaps(vaultDir)
+	return evaluateLSTrajectoryLineageWithMaps(fdID, knownFDs, nestedMap, parentByConv, convID, meta)
+}
+
+func evaluateLSTrajectoryLineageWithMaps(fdID string, knownFDs map[string]bool, nestedMap map[string]NestedConversation, parentByConv map[string]string, convID string, meta LSTrajectoryMetadata) LSConversationLineage {
+	cid := normalizeUUID(convID)
+
+	parentID := normalizeUUID(meta.ParentConversationID)
+	rootID := normalizeUUID(meta.RootConversationID)
+	var toolCallerID string
+	var toolName string
+	var sourceTitle string
+	var hideFromList bool
+	if meta.SourceMetadata != nil {
+		hideFromList = meta.SourceMetadata.HideFromConversationList
+		if meta.SourceMetadata.Tool != nil {
+			toolCallerID = normalizeUUID(meta.SourceMetadata.Tool.ConversationID)
+			sourceTitle = strings.TrimSpace(meta.SourceMetadata.Tool.Title)
+			if meta.SourceMetadata.Tool.ToolCall != nil {
+				toolName = strings.TrimSpace(meta.SourceMetadata.Tool.ToolCall.Name)
+			}
+		}
+	}
+	isExplicitTitledSource := strings.HasPrefix(sourceTitle, "[Task:") || strings.HasPrefix(sourceTitle, "[Auto]")
+	isWorkflowChild := hideFromList ||
+		strings.EqualFold(toolName, "run_workflow") ||
+		(strings.EqualFold(toolName, "run_command") && !isExplicitTitledSource)
+
+	hasSubagentSpec := meta.SubagentSpec != nil
+	var subRole, subModel string
+	if meta.SubagentSpec != nil {
+		subRole = strings.TrimSpace(meta.SubagentSpec.Role)
+		subModel = strings.TrimSpace(meta.SubagentSpec.Model)
+	}
+
+	directParent := parentID
+	if directParent == "" {
+		directParent = toolCallerID
+	}
+	if directParent == "" && rootID != "" && rootID != cid {
+		directParent = rootID
+	}
+	if directParent == cid {
+		directParent = ""
+	}
+
+	lin := LSConversationLineage{
+		Found:           true,
+		ParentConvID:    parentID,
+		RootConvID:      rootID,
+		NestingDepth:    meta.NestingDepth,
+		IsWorkflowChild: isWorkflowChild,
+		HasSubagentSpec: hasSubagentSpec,
+		SubagentRole:    subRole,
+		SubagentModel:   subModel,
+		SourceTitle:     sourceTitle,
+		DirectParentID:  directParent,
+	}
+
+	if cid != "" && knownFDs[cid] {
+		return lin
+	}
+
+	hasAncestry := false
+	if directParent != "" {
+		if !knownFDs[directParent] {
+			hasAncestry = true
+		} else if hasAnc, _ := hasNonFrontDeskAncestryWithMaps(knownFDs, nestedMap, parentByConv, cid, directParent); hasAnc {
+			hasAncestry = true
+		}
+	}
+
+	if isWorkflowChild ||
+		meta.NestingDepth > 1 ||
+		(rootID != "" && cid != "" && rootID != cid && !knownFDs[rootID]) ||
+		hasAncestry {
+		lin.IsNestedDescendant = true
+		return lin
+	}
+
+	if fdID != "" && knownFDs[directParent] && (hasSubagentSpec || meta.NestingDepth == 1) {
+		lin.IsDirectFrontDeskSubagent = true
+	}
+	return lin
+}
+
+// InspectLSConversationLineage queries the Language Server for convID's trajectory metadata and classifies its lineage.
+// Evaluates omitted proto3 metadata directly on HTTP 200 responses without falling back to a full trajectory dump;
+// fails open (returns Found=false) when LS credentials are absent or unreachable.
+func InspectLSConversationLineage(vaultDir, convID string) (LSConversationLineage, bool) {
+	cid := normalizeUUID(convID)
+	if cid == "" {
+		return LSConversationLineage{}, false
+	}
+	creds, ok := discoverLSCredentials(vaultDir)
+	if !ok {
+		return LSConversationLineage{}, false
+	}
+	if resp, supported, err := inspectCascadeTrajectory(creds.BaseURL, creds.CSRFToken, convID, DefaultSidebarUnaryTimeout); err == nil && supported && resp != nil {
+		var meta LSTrajectoryMetadata
+		if resp.Trajectory.Metadata != nil {
+			meta = *resp.Trajectory.Metadata
+		}
+		lin := EvaluateLSTrajectoryLineage(vaultDir, convID, meta)
+		return lin, true
+	}
+	// Fallback to GetAllCascadeTrajectoriesIncludeSubtrajectories only when GetCascadeTrajectory failed or was unsupported (404/405/501).
+	all, ok := FetchAllLSConversationLineage(vaultDir)
+	if !ok {
+		return LSConversationLineage{}, false
+	}
+	lin, exists := all[cid]
+	return lin, exists
+}
+
+// FetchAllLSConversationLineage fetches all trajectories (including subtrajectories) from LS and evaluates lineage by UUID.
+func FetchAllLSConversationLineage(vaultDir string) (map[string]LSConversationLineage, bool) {
+	creds, ok := discoverLSCredentials(vaultDir)
+	if !ok {
+		return nil, false
+	}
+	client := NewSidebarSyncClient(SidebarSyncConfig{
+		BaseURL:   creds.BaseURL,
+		CSRFToken: creds.CSRFToken,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultSidebarBatchTimeout)
+	defer cancel()
+	summaries, err := client.GetAllCascadeTrajectoriesIncludeSubtrajectories(ctx)
+	if err != nil || len(summaries) == 0 {
+		return nil, false
+	}
+	fdID, knownFDs, nestedMap, parentByConv := buildAncestryMaps(vaultDir)
+	out := make(map[string]LSConversationLineage, len(summaries))
+	for rawID, sum := range summaries {
+		cid := normalizeUUID(rawID)
+		if cid == "" {
+			continue
+		}
+		out[cid] = evaluateLSTrajectoryLineageWithMaps(fdID, knownFDs, nestedMap, parentByConv, cid, sum.TrajectoryMetadata)
+	}
+	return out, true
 }
 
 func inspectCascadeTrajectory(lsBaseURL, csrfToken, cascadeID string, timeout time.Duration) (respData *lsGetCascadeTrajectoryResponse, supported bool, err error) {

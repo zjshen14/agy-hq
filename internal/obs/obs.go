@@ -459,9 +459,11 @@ var (
 	obsMemByV  = make(map[string]*obsMemCacheEntry)
 )
 
+const currentObsIndexVersion = 4
+
 func shallowCopyObsIndex(src *ObsIndex) *ObsIndex {
 	if src == nil {
-		return &ObsIndex{Version: 3, Conversations: make(map[string]ConversationMetrics)}
+		return &ObsIndex{Version: currentObsIndexVersion, Conversations: make(map[string]ConversationMetrics)}
 	}
 	cp := &ObsIndex{
 		Version:       src.Version,
@@ -476,7 +478,7 @@ func shallowCopyObsIndex(src *ObsIndex) *ObsIndex {
 
 func loadCachedIndex(vaultDir string) *ObsIndex {
 	idx := &ObsIndex{
-		Version:       3,
+		Version:       currentObsIndexVersion,
 		Conversations: make(map[string]ConversationMetrics),
 	}
 	data, err := os.ReadFile(obsIndexFilePath(vaultDir))
@@ -484,7 +486,7 @@ func loadCachedIndex(vaultDir string) *ObsIndex {
 		return idx
 	}
 	var parsed ObsIndex
-	if json.Unmarshal(data, &parsed) == nil && parsed.Version == 3 && parsed.Conversations != nil {
+	if json.Unmarshal(data, &parsed) == nil && parsed.Version == currentObsIndexVersion && parsed.Conversations != nil {
 		return &parsed
 	}
 	return idx
@@ -492,7 +494,7 @@ func loadCachedIndex(vaultDir string) *ObsIndex {
 
 func saveCachedIndex(vaultDir string, idx *ObsIndex) error {
 	p := obsIndexFilePath(vaultDir)
-	idx.Version = 3
+	idx.Version = currentObsIndexVersion
 	idx.UpdatedAt = time.Now().Format(time.RFC3339)
 	data, err := json.Marshal(idx)
 	if err != nil {

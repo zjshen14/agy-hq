@@ -65,12 +65,41 @@ type LSTrajectorySummary struct {
 	HasRunningSubagents bool                      `json:"hasRunningSubagents,omitempty"`
 }
 
-// LSTrajectoryMetadata carries parent/depth lineage so JetboxSubscribeToSummaries
-// excludes nested child subagent subtrajectories while retaining top-level sidebar threads.
+// LSSourceMetadataToolCall identifies the parent tool call (e.g. "run_workflow") that spawned a child trajectory.
+type LSSourceMetadataToolCall struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// LSSourceMetadataTool identifies the caller conversation and tool call that spawned a child trajectory.
+type LSSourceMetadataTool struct {
+	ConversationID string                    `json:"conversationId,omitempty"`
+	StepIndex      int                       `json:"stepIndex,omitempty"`
+	Title          string                    `json:"title,omitempty"`
+	ToolCall       *LSSourceMetadataToolCall `json:"toolCall,omitempty"`
+}
+
+// LSSourceMetadata carries tool-origin metadata and sidebar visibility flags for spawned child trajectories.
+type LSSourceMetadata struct {
+	Tool                     *LSSourceMetadataTool `json:"tool,omitempty"`
+	HideFromConversationList bool                  `json:"hideFromConversationList,omitempty"`
+}
+
+// LSSubagentSpec captures the subagent role/type/model attached by the runtime when spawning a subagent.
+type LSSubagentSpec struct {
+	TypeName string `json:"typeName,omitempty"`
+	Role     string `json:"role,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+// LSTrajectoryMetadata carries parent/depth/source lineage so sidebar sync and Layer-1 task isolation
+// exclude nested child subagents and workflow workers while retaining top-level sidebar threads.
 type LSTrajectoryMetadata struct {
-	ParentConversationID string `json:"parentConversationId,omitempty"`
-	RootConversationID   string `json:"rootConversationId,omitempty"`
-	NestingDepth         int    `json:"nestingDepth,omitempty"`
+	ParentConversationID string            `json:"parentConversationId,omitempty"`
+	RootConversationID   string            `json:"rootConversationId,omitempty"`
+	NestingDepth         int               `json:"nestingDepth,omitempty"`
+	SourceMetadata       *LSSourceMetadata `json:"sourceMetadata,omitempty"`
+	SubagentSpec         *LSSubagentSpec   `json:"subagentSpec,omitempty"`
 }
 
 type lsJetboxSummariesFrame struct {
@@ -258,11 +287,21 @@ func (c *SidebarSyncClient) doJSONRPC(ctx context.Context, method string, reqPay
 
 // GetAllCascadeTrajectories fetches currently loaded in-memory top-level conversation summaries from LanguageServerService.
 func (c *SidebarSyncClient) GetAllCascadeTrajectories(ctx context.Context) (map[string]LSTrajectorySummary, error) {
+	return c.getAllCascadeTrajectoriesWithFilter(ctx, true)
+}
+
+// GetAllCascadeTrajectoriesIncludeSubtrajectories fetches all in-memory conversation summaries
+// including nested subagents and workflow children so lineage inspection can classify them.
+func (c *SidebarSyncClient) GetAllCascadeTrajectoriesIncludeSubtrajectories(ctx context.Context) (map[string]LSTrajectorySummary, error) {
+	return c.getAllCascadeTrajectoriesWithFilter(ctx, false)
+}
+
+func (c *SidebarSyncClient) getAllCascadeTrajectoriesWithFilter(ctx context.Context, excludeSubtrajectories bool) (map[string]LSTrajectorySummary, error) {
 	var raw lsGetAllTrajectoriesResponse
 	err := c.doJSONRPC(
 		ctx,
 		"GetAllCascadeTrajectories",
-		lsGetAllTrajectoriesRequest{ExcludeSubtrajectories: true},
+		lsGetAllTrajectoriesRequest{ExcludeSubtrajectories: excludeSubtrajectories},
 		&raw,
 		DefaultSidebarBatchTimeout,
 	)
@@ -373,7 +412,9 @@ func (c *SidebarSyncClient) GetJetboxTrajectorySummaries(ctx context.Context) (m
 		}
 		framesRead++
 		for k, v := range frame.Updates {
-			if strings.TrimSpace(v.TrajectoryMetadata.ParentConversationID) != "" || v.TrajectoryMetadata.NestingDepth > 0 {
+			if strings.TrimSpace(v.TrajectoryMetadata.ParentConversationID) != "" ||
+				v.TrajectoryMetadata.NestingDepth > 0 ||
+				(v.TrajectoryMetadata.SourceMetadata != nil && v.TrajectoryMetadata.SourceMetadata.HideFromConversationList) {
 				continue
 			}
 			out[normalizeUUID(k)] = v

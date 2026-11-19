@@ -2691,6 +2691,34 @@ func runTasksCLI(vaultDir string, args []string) {
 		case "reopen":
 			runReopenTaskCLI(vaultDir, "hq tasks reopen", args[1:])
 			return
+
+		case "clean-nested":
+			fs := flag.NewFlagSet("tasks clean-nested", flag.ExitOnError)
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(args[1:])
+			reconciled, recErr := obs.ReconcileSubagentAttribution(vaultDir)
+			if recErr != nil {
+				fmt.Fprintf(os.Stderr, "hq tasks clean-nested reconcile error: %v\n", recErr)
+				os.Exit(1)
+			}
+			removed, cleanErr := kernel.CleanNestedTasks(vaultDir)
+			if cleanErr != nil {
+				fmt.Fprintf(os.Stderr, "hq tasks clean-nested error: %v\n", cleanErr)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(map[string]interface{}{
+					"reconciledTasks": reconciled,
+					"cleanedSlugs":    removed,
+					"cleanedCount":    len(removed),
+				})
+				return
+			}
+			fmt.Printf("Cleaned %d leaked nested/workflow task(s) and reconciled %d attribution(s).\n", len(removed), reconciled)
+			return
 		}
 	}
 
@@ -3635,14 +3663,23 @@ func runObsCLI(vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq obs reconcile failed: %v\n", err)
 			os.Exit(1)
 		}
+		removed, cleanErr := kernel.CleanNestedTasks(vaultDir)
+		if cleanErr != nil {
+			fmt.Fprintf(os.Stderr, "hq obs reconcile cleanup failed: %v\n", cleanErr)
+			os.Exit(1)
+		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]int{"repairedTasks": repaired})
+			_ = enc.Encode(map[string]interface{}{
+				"repairedTasks": repaired,
+				"cleanedCount":  len(removed),
+				"cleanedSlugs":  removed,
+			})
 			return
 		}
-		fmt.Printf("Reconciled subagent DAG attribution against ground-truth transcripts (%d task(s) updated)\n", repaired)
+		fmt.Printf("Reconciled subagent DAG attribution (%d task(s) updated, %d nested/workflow leak(s) cleaned)\n", repaired, len(removed))
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown obs subcommand: %s (expected tokens, top, inspect, anomalies, budget, reconcile)\n", sub)

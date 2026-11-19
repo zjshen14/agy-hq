@@ -249,22 +249,17 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
+		isFrontDeskExisting := ok && strings.EqualFold(existing.ConversationID, payload.ConversationID)
 
 		isSubagent = kernel.IsSubagentConversation(vaultDir, payload.ConversationID)
 		if !isSubagent {
 			if t, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); alreadyTracked {
 				matchedTask = t
 				hasMatchedTask = true
-			} else {
-				if linked, okLink := kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName); okLink {
-					matchedTask = linked
-					hasMatchedTask = true
-				} else if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
-					// Known nested descendant subagent: do NOT register into tasks.json!
-					isSubagent = true
-				} else if nestedSub, isNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, payload.ConversationID, promptText, 3*time.Minute); isNested {
-					_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
-					// Nested descendant subagent: do NOT register into tasks.json!
+			} else if !isFrontDeskExisting {
+				nested, _, lin, hasLS := detectNestedDescendant(vaultDir, payload.ConversationID, promptText, existing.ConversationID, 3*time.Minute)
+				if nested {
+					// Known nested descendant subagent or workflow/agentapi worker: do NOT register into tasks.json!
 					isSubagent = true
 				} else if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, promptText, 3*time.Minute); found {
 					isSubagent = true
@@ -288,6 +283,15 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 					_ = kernel.RegisterTask(vaultDir, t)
 					matchedTask = t
+					hasMatchedTask = true
+				} else if hasLS && lin.IsDirectFrontDeskSubagent {
+					isSubagent = true
+					t := buildSubagentTaskFromLSLineage(payload.ConversationID, payload.ModelName, "active", "Running in background...", lin)
+					_ = kernel.RegisterTask(vaultDir, t)
+					matchedTask = t
+					hasMatchedTask = true
+				} else if linked, okLink := kernel.LinkPendingSpawnTask(vaultDir, payload.ConversationID, payload.ModelName); okLink {
+					matchedTask = linked
 					hasMatchedTask = true
 				}
 			}
@@ -2311,6 +2315,16 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		return err
 	}
 
+	if payload.ToolCall.Name == "run_workflow" {
+		_ = kernel.RecordActiveSpawner(vaultDir, payload.ConversationID, payload.TranscriptPath, "run_workflow")
+	}
+	if payload.ToolCall.Name == "run_command" {
+		cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
+		if !isSingleHQCommand(cmdLine) && obs.IsRawAgentAPINewConversationCommand(cmdLine) {
+			_ = kernel.RecordActiveSpawner(vaultDir, payload.ConversationID, payload.TranscriptPath, "agentapi")
+		}
+	}
+
 	if payload.ToolCall.Name == "manage_subagents" {
 		action, _ := payload.ToolCall.Args["Action"].(string)
 		if action == "kill" {
@@ -2641,22 +2655,21 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				vacatedMarker := filepath.Join(vaultDir, "memory", ".vacated")
 				_, vacatedExists := os.Stat(vacatedMarker)
 
-				if !hasFD && shouldAutoClaimVacantFrontDesk(payload.CommonPayload, vaultDir) && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
+				isNested := kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID)
+				var lsLineage kernel.LSConversationLineage
+				var hasLSLineage bool
+				if !alreadyTracked && !isNested {
+					isNested, _, lsLineage, hasLSLineage = detectNestedDescendant(vaultDir, payload.ConversationID, payload.LastUserInput, fd.ConversationID, 60*time.Minute)
+				}
+
+				if !hasFD && !isNested && shouldAutoClaimVacantFrontDesk(payload.CommonPayload, vaultDir) && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
 					// In-session bootstrap fallback: fresh Vault with no tracked tasks, front_desk is vacant,
 					// and no explicit release-desk marker exists. Claim Front Desk instead of registering [Task:general]!
 					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
 					kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 				} else {
-					isNested := kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID)
 					if !alreadyTracked && !isNested {
-						if nestedSub, foundNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 60*time.Minute); foundNested {
-							_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
-							isNested = true
-						}
-					}
-
-					if !alreadyTracked && !isNested {
-						// Subagent fallback: match against pending queue if not yet registered
+						// Subagent fallback: match against pending queue or LS trajectory metadata if not yet registered
 						if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 60*time.Minute); found {
 							modelName := sub.Model
 							if modelName == "" {
@@ -2682,6 +2695,11 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							if strings.TrimSpace(task.LastSummary) == "" {
 								task.LastSummary = "Task completed."
 							}
+							_ = kernel.RegisterTask(vaultDir, task)
+							alreadyTracked = true
+							matchedTask = &task
+						} else if hasLSLineage && lsLineage.IsDirectFrontDeskSubagent {
+							task := buildSubagentTaskFromLSLineage(payload.ConversationID, payload.ModelName, "completed", summary, lsLineage)
 							_ = kernel.RegisterTask(vaultDir, task)
 							alreadyTracked = true
 							matchedTask = &task
@@ -2886,6 +2904,76 @@ func priorJournalStepCountWithDate(vaultDir, convID, todayDateStr string, curren
 	return maxStep
 }
 
+func detectNestedDescendant(vaultDir, convID, lastUserInput, fdConvID string, popMaxAge time.Duration) (bool, string, kernel.LSConversationLineage, bool) {
+	if kernel.IsNestedSubagentConversation(vaultDir, convID) {
+		return true, kernel.GetNestedConversationParent(vaultDir, convID), kernel.LSConversationLineage{}, false
+	}
+	lin, hasLS := kernel.InspectLSConversationLineage(vaultDir, convID)
+	if hasLS && lin.IsNestedDescendant {
+		_ = kernel.RecordNestedConversation(vaultDir, convID, lin.DirectParentID)
+		return true, lin.DirectParentID, lin, true
+	}
+	if nestedSub, foundNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, convID, lastUserInput, popMaxAge); foundNested {
+		_ = kernel.RecordNestedConversation(vaultDir, convID, nestedSub.ParentConversationID)
+		return true, nestedSub.ParentConversationID, lin, hasLS
+	}
+	if hasLS && lin.IsDirectFrontDeskSubagent {
+		return false, "", lin, true
+	}
+	knownFDs := kernel.GetKnownFrontDeskIDSet(vaultDir)
+	if fdID := strings.ToLower(strings.TrimSpace(fdConvID)); fdID != "" {
+		knownFDs[fdID] = true
+	}
+	if edge, foundEdge := obs.FindSpawnEdgeInActiveSpawners(vaultDir, convID); foundEdge {
+		ep := strings.ToLower(strings.TrimSpace(edge.ParentConversationID))
+		if edge.TypeName == "run_workflow" || edge.TypeName == "agentapi" ||
+			(len(knownFDs) > 0 && ep != "" && !knownFDs[ep]) {
+			_ = kernel.RecordNestedConversation(vaultDir, convID, edge.ParentConversationID)
+			return true, edge.ParentConversationID, lin, hasLS
+		}
+	}
+	if hasAnc, ancParent := kernel.HasNonFrontDeskAncestry(vaultDir, convID, lin.DirectParentID); hasAnc {
+		_ = kernel.RecordNestedConversation(vaultDir, convID, ancParent)
+		return true, ancParent, lin, hasLS
+	}
+	return false, "", lin, hasLS
+}
+
+func buildSubagentTaskFromLSLineage(convID, payloadModel, status, summary string, lin kernel.LSConversationLineage) kernel.ActiveTask {
+	modelName := strings.TrimSpace(lin.SubagentModel)
+	if modelName == "" || modelName == "inherit" {
+		modelName = payloadModel
+	}
+	role := strings.TrimSpace(lin.SubagentRole)
+	if role == "" {
+		role = strings.TrimSpace(lin.SourceTitle)
+	}
+	tier, scope, _, title, slug := kernel.ParseSubagentRole(role, modelName)
+	nowISO := time.Now().Format(time.RFC3339)
+	t := kernel.ActiveTask{
+		TaskSlug:             slug,
+		Title:                title,
+		Kind:                 "subagent",
+		Scope:                scope,
+		ParentConversationID: lin.DirectParentID,
+		Tier:                 tier,
+		Model:                modelName,
+		ConversationID:       convID,
+		Status:               status,
+		TurnCount:            1,
+		CreatedAt:            nowISO,
+		LastUpdatedAt:        nowISO,
+		LastSummary:          strings.TrimSpace(summary),
+	}
+	if status == "completed" {
+		t.CompletedAt = nowISO
+		if t.LastSummary == "" {
+			t.LastSummary = "Task completed."
+		}
+	}
+	return t
+}
+
 func resolveParentConversationID(vaultDir, convID string) string {
 	if convID == "" {
 		return ""
@@ -2897,7 +2985,7 @@ func resolveParentConversationID(vaultDir, convID string) string {
 			}
 		}
 	}
-	return ""
+	return kernel.GetNestedConversationParent(vaultDir, convID)
 }
 
 // isReadOnlyFileViewerOutput returns true if the tool output step is a file viewer (`read_file`)

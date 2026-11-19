@@ -3,18 +3,245 @@ package obs
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
 var (
-	reCreatedAtLine   = regexp.MustCompile(`(?m)^Created At:\s*(\S+)`)
-	reCompletedAtLine = regexp.MustCompile(`(?m)^Completed At:\s*(\S+)`)
-	reSubagentConvID  = regexp.MustCompile(`"conversationId"\s*:\s*"([0-9a-zA-Z_-]{6,64})"`)
+	reCreatedAtLine      = regexp.MustCompile(`(?m)^Created At:\s*(\S+)`)
+	reCompletedAtLine    = regexp.MustCompile(`(?m)^Completed At:\s*(\S+)`)
+	reSubagentConvID     = regexp.MustCompile(`"conversationId"\s*:\s*"([0-9a-zA-Z_-]{6,64})"`)
+	reFlexibleConvID     = regexp.MustCompile(`\\?"conversation(?:Id|_id)\\?"\s*:\s*\\?"([0-9a-zA-Z_-]{6,64})\\?"`)
+	reBgTaskIDLine       = regexp.MustCompile(`(?i)\btask id:\s*([0-9a-zA-Z_-]+/task-\d+)`)
+	reFinishedTaskIDLine = regexp.MustCompile(`(?i)(?:Task id\s+"([0-9a-zA-Z_-]+/task-\d+)"\s+finished|sender=([0-9a-zA-Z_-]+/task-\d+))`)
+	reStepOutputRef      = regexp.MustCompile(`\.system_generated/steps/(\d+)/output\.txt`)
+	reWorkflowDescLine   = regexp.MustCompile(`Workflow\s+"([^"]+)"\s+completed`)
 )
+
+// splitShellSegmentsUnquoted splits cmdLine on unquoted &&, ||, ;, |, &, or \n separators.
+func splitShellSegmentsUnquoted(cmdLine string) []string {
+	var segments []string
+	var cur strings.Builder
+	var quote byte
+	escaped := false
+
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			segments = append(segments, s)
+		}
+		cur.Reset()
+	}
+
+	for i := 0; i < len(cmdLine); i++ {
+		c := cmdLine[i]
+		if escaped {
+			cur.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if quote != 0 {
+			cur.WriteByte(c)
+			if c == quote {
+				quote = 0
+			} else if c == '\\' && quote == '"' {
+				escaped = true
+			}
+			continue
+		}
+		if c == '\\' {
+			cur.WriteByte(c)
+			escaped = true
+			continue
+		}
+		if c == '\'' || c == '"' {
+			cur.WriteByte(c)
+			quote = c
+			continue
+		}
+		if c == '\n' || c == ';' || c == '|' || c == '&' {
+			flush()
+			if (c == '|' || c == '&') && i+1 < len(cmdLine) && cmdLine[i+1] == c {
+				i++
+			}
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	flush()
+	return segments
+}
+
+// tokenizeShellWords extracts unquoted/unwrapped tokens from a single shell segment.
+func tokenizeShellWords(seg string) []string {
+	var words []string
+	var cur strings.Builder
+	var quote byte
+	inWord := false
+	escaped := false
+
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		if escaped {
+			cur.WriteByte(c)
+			escaped = false
+			inWord = true
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			} else if c == '\\' && quote == '"' {
+				escaped = true
+			} else {
+				cur.WriteByte(c)
+			}
+			inWord = true
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			inWord = true
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			inWord = true
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\r' || c == '(' || c == ')' {
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+			continue
+		}
+		cur.WriteByte(c)
+		inWord = true
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words
+}
+
+func isEnvAssignmentToken(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i := 0; i < eq; i++ {
+		ch := tok[i]
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9' && i > 0) || ch == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func stripCommandWrappers(words []string) []string {
+	i := 0
+	for i < len(words) {
+		w := words[i]
+		if isEnvAssignmentToken(w) {
+			i++
+			continue
+		}
+		base := filepath.Base(w)
+		if base == "env" {
+			i++
+			for i < len(words) {
+				opt := words[i]
+				if opt == "-u" || opt == "--unset" {
+					i += 2
+					continue
+				}
+				if strings.HasPrefix(opt, "-") || isEnvAssignmentToken(opt) {
+					i++
+					continue
+				}
+				break
+			}
+			continue
+		}
+		if base == "command" || base == "exec" || base == "nohup" {
+			i++
+			continue
+		}
+		if base == "timeout" && i+1 < len(words) {
+			i++
+			for i < len(words) && strings.HasPrefix(words[i], "-") {
+				i++
+			}
+			if i < len(words) {
+				i++ // duration arg
+			}
+			continue
+		}
+		break
+	}
+	return words[i:]
+}
+
+// IsRawAgentAPINewConversationCommand returns true if cmdLine invokes the external agentapi CLI
+// to start an ephemeral child worker conversation (excluding hq spawn, hq adopt, and explicit [Task:...]/[Auto] titles,
+// and ignoring quoted strings such as git commit messages or echo payloads).
+func IsRawAgentAPINewConversationCommand(cmdLine string) bool {
+	if strings.TrimSpace(cmdLine) == "" {
+		return false
+	}
+	segments := splitShellSegmentsUnquoted(cmdLine)
+	foundRawAgentAPI := false
+	for _, seg := range segments {
+		words := stripCommandWrappers(tokenizeShellWords(seg))
+		if len(words) < 2 {
+			continue
+		}
+		exe := strings.ToLower(filepath.Base(words[0]))
+		if exe == "hq" && (words[1] == "spawn" || words[1] == "adopt") {
+			return false
+		}
+		if exe == "agentapi" || exe == "agentapi.exe" {
+			sub := ""
+			hasExplicitTaskTitle := false
+			for j := 1; j < len(words); j++ {
+				arg := words[j]
+				if arg == "--title" && j+1 < len(words) {
+					tv := words[j+1]
+					if strings.HasPrefix(tv, "[Task:") || strings.HasPrefix(tv, "[Auto]") {
+						hasExplicitTaskTitle = true
+					}
+					j++
+					continue
+				}
+				if strings.HasPrefix(arg, "--title=") {
+					tv := strings.TrimPrefix(arg, "--title=")
+					if strings.HasPrefix(tv, "[Task:") || strings.HasPrefix(tv, "[Auto]") {
+						hasExplicitTaskTitle = true
+					}
+					continue
+				}
+				if sub == "" && !strings.HasPrefix(arg, "-") {
+					sub = arg
+				}
+			}
+			if sub == "new-conversation" {
+				if hasExplicitTaskTitle {
+					return false
+				}
+				foundRawAgentAPI = true
+			}
+		}
+	}
+	return foundRawAgentAPI
+}
 
 type rawToolCall struct {
 	ID            string                 `json:"id"`
@@ -49,6 +276,86 @@ type pendingSpawnCall struct {
 	typeName  string
 	workspace string
 	prompt    string
+}
+
+func isFileViewerStepContent(content string) bool {
+	return strings.HasPrefix(content, "Showing lines ") ||
+		strings.Contains(content, "\nShowing lines ") ||
+		strings.HasPrefix(content, "Made 1 replacement in ") ||
+		strings.HasPrefix(content, "Created file ")
+}
+
+func expandStepContentWithSiblingOutput(transcriptPath, content string) string {
+	if transcriptPath == "" || content == "" {
+		return content
+	}
+	matches := reStepOutputRef.FindAllStringSubmatch(content, 4)
+	if len(matches) == 0 {
+		return content
+	}
+	sysGenDir := filepath.Dir(filepath.Dir(transcriptPath))
+	if filepath.Base(sysGenDir) != ".system_generated" {
+		return content
+	}
+	var sb strings.Builder
+	sb.WriteString(content)
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) != 2 {
+			continue
+		}
+		stepNum := m[1]
+		if seen[stepNum] {
+			continue
+		}
+		seen[stepNum] = true
+		outPath := filepath.Join(sysGenDir, "steps", stepNum, "output.txt")
+		f, err := os.Open(outPath)
+		if err != nil {
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(f, 2*1024*1024))
+		_ = f.Close()
+		if len(raw) > 0 {
+			sb.WriteByte('\n')
+			sb.Write(raw)
+		}
+	}
+	return sb.String()
+}
+
+func extractDistinctChildConvIDs(parentConvID, text string) []string {
+	parentNorm := strings.ToLower(strings.TrimSpace(parentConvID))
+	matches := reFlexibleConvID.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, m := range matches {
+		if len(m) != 2 {
+			continue
+		}
+		cid := strings.ToLower(strings.TrimSpace(m[1]))
+		if len(cid) < 8 || cid == parentNorm || seen[cid] {
+			continue
+		}
+		if !kernel.IsCanonicalUUID(cid) && !(strings.Contains(cid, "-") && strings.ContainsAny(cid, "0123456789")) {
+			continue
+		}
+		seen[cid] = true
+		out = append(out, cid)
+	}
+	return out
+}
+
+func parseCommandLineFromArgs(args map[string]interface{}) string {
+	for _, k := range []string{"CommandLine", "commandLine", "command"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func parseTimestamp(s string) time.Time {
@@ -155,6 +462,11 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 	var curTurn *TurnMetrics
 	var curToolSet map[string]bool
 	var pendingSpawns []pendingSpawnCall
+	var pendingWorkflowCalls []pendingSpawnCall
+	var pendingAgentAPICalls []pendingSpawnCall
+	pendingWorkflowTasks := make(map[string]pendingSpawnCall)
+	pendingAgentAPITasks := make(map[string]pendingSpawnCall)
+	recordedEdgeChildren := make(map[string]bool)
 
 	lastPlannerHadTools := false
 	lastPlannerHadRunCmd := false
@@ -291,7 +603,19 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			curTurn.CompactionCount++
 		}
 
+		if st.Type == "USER_INPUT" {
+			// New turn boundary: clear any unconsumed single-step tool calls from the prior turn.
+			pendingSpawns = nil
+			pendingWorkflowCalls = nil
+			pendingAgentAPICalls = nil
+		}
+
 		if st.Type == "PLANNER_RESPONSE" {
+			// Clear unconsumed immediate tool results from earlier planner steps before collecting new calls.
+			pendingSpawns = nil
+			pendingWorkflowCalls = nil
+			pendingAgentAPICalls = nil
+
 			curTurn.PlannerSteps++
 			// Estimate LLM generation time from previous step timestamp inside the turn
 			if !stTime.IsZero() && !lastStepTime.IsZero() && stTime.After(lastStepTime) {
@@ -313,6 +637,29 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 				}
 				if tc.Name == "run_command" {
 					lastPlannerHadRunCmd = true
+					cmdLine := parseCommandLineFromArgs(tc.Args)
+					if IsRawAgentAPINewConversationCommand(cmdLine) {
+						pendingAgentAPICalls = append(pendingAgentAPICalls, pendingSpawnCall{
+							stepIdx:   i,
+							createdAt: st.CreatedAt,
+							typeName:  "agentapi",
+							prompt:    cleanPromptPreview(cmdLine),
+						})
+					}
+				}
+				if tc.Name == "run_workflow" {
+					desc, _ := tc.Args["Description"].(string)
+					script, _ := tc.Args["Script"].(string)
+					if script == "" {
+						script, _ = tc.Args["ScriptPath"].(string)
+					}
+					pendingWorkflowCalls = append(pendingWorkflowCalls, pendingSpawnCall{
+						stepIdx:   i,
+						createdAt: st.CreatedAt,
+						role:      strings.TrimSpace(desc),
+						typeName:  "run_workflow",
+						prompt:    cleanPromptPreview(strings.TrimSpace(script)),
+					})
 				}
 				if tc.Name == "ask_question" {
 					lastPlannerHadAskQuestion = true
@@ -367,6 +714,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 							createdAt: st.CreatedAt,
 						}
 					}
+					recordedEdgeChildren[childID] = true
 					cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
 						StepIndex:            matched.stepIdx,
 						ChildConversationID:  childID,
@@ -379,9 +727,109 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 						CreatedAt:            matched.createdAt,
 					})
 				}
+			} else if bm := reBgTaskIDLine.FindStringSubmatch(st.Content); len(bm) == 2 {
+				taskID := strings.TrimSpace(bm[1])
+				if len(pendingWorkflowCalls) > 0 {
+					pendingWorkflowTasks[taskID] = pendingWorkflowCalls[0]
+					pendingWorkflowCalls = pendingWorkflowCalls[1:]
+				} else if len(pendingAgentAPICalls) > 0 {
+					pendingAgentAPITasks[taskID] = pendingAgentAPICalls[0]
+					pendingAgentAPICalls = pendingAgentAPICalls[1:]
+				}
+			} else if !isFileViewerStepContent(st.Content) {
+				if len(pendingWorkflowCalls) > 0 && (strings.Contains(st.Content, "Workflow ") || reFlexibleConvID.MatchString(st.Content) || reStepOutputRef.MatchString(st.Content)) {
+					matched := pendingWorkflowCalls[0]
+					pendingWorkflowCalls = pendingWorkflowCalls[1:]
+					expanded := expandStepContentWithSiblingOutput(transcriptPath, st.Content)
+					for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
+						if recordedEdgeChildren[childID] {
+							continue
+						}
+						recordedEdgeChildren[childID] = true
+						cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
+							StepIndex:            matched.stepIdx,
+							ChildConversationID:  childID,
+							ParentConversationID: convID,
+							Role:                 matched.role,
+							TypeName:             "run_workflow",
+							PromptPrefix:         matched.prompt,
+							CreatedAt:            matched.createdAt,
+						})
+					}
+				} else if len(pendingAgentAPICalls) > 0 && (reFlexibleConvID.MatchString(st.Content) || reStepOutputRef.MatchString(st.Content) || strings.Contains(st.Content, "Command exited")) {
+					matched := pendingAgentAPICalls[0]
+					pendingAgentAPICalls = pendingAgentAPICalls[1:]
+					expanded := expandStepContentWithSiblingOutput(transcriptPath, st.Content)
+					for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
+						if recordedEdgeChildren[childID] {
+							continue
+						}
+						recordedEdgeChildren[childID] = true
+						cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
+							StepIndex:            matched.stepIdx,
+							ChildConversationID:  childID,
+							ParentConversationID: convID,
+							Role:                 matched.role,
+							TypeName:             "agentapi",
+							PromptPrefix:         matched.prompt,
+							CreatedAt:            matched.createdAt,
+						})
+					}
+				}
 			}
 		} else if !stTime.IsZero() {
 			lastStepTime = stTime
+		}
+
+		if st.Type == "SYSTEM_MESSAGE" {
+			var taskID string
+			if fm := reFinishedTaskIDLine.FindStringSubmatch(st.Content); len(fm) == 3 {
+				if fm[1] != "" {
+					taskID = strings.TrimSpace(fm[1])
+				} else {
+					taskID = strings.TrimSpace(fm[2])
+				}
+			}
+			var matched *pendingSpawnCall
+			if taskID != "" {
+				if m, ok := pendingWorkflowTasks[taskID]; ok {
+					cp := m
+					matched = &cp
+					delete(pendingWorkflowTasks, taskID)
+				} else if m, ok := pendingAgentAPITasks[taskID]; ok {
+					cp := m
+					matched = &cp
+					delete(pendingAgentAPITasks, taskID)
+				}
+			}
+			if matched == nil && !strings.Contains(st.Content, "<MESSAGE") && !strings.Contains(st.Content, "sender=") {
+				if wm := reWorkflowDescLine.FindStringSubmatch(st.Content); len(wm) == 2 {
+					matched = &pendingSpawnCall{
+						stepIdx:   i,
+						createdAt: st.CreatedAt,
+						role:      strings.TrimSpace(wm[1]),
+						typeName:  "run_workflow",
+					}
+				}
+			}
+			if matched != nil {
+				expanded := expandStepContentWithSiblingOutput(transcriptPath, st.Content)
+				for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
+					if recordedEdgeChildren[childID] {
+						continue
+					}
+					recordedEdgeChildren[childID] = true
+					cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
+						StepIndex:            matched.stepIdx,
+						ChildConversationID:  childID,
+						ParentConversationID: convID,
+						Role:                 matched.role,
+						TypeName:             matched.typeName,
+						PromptPrefix:         matched.prompt,
+						CreatedAt:            matched.createdAt,
+					})
+				}
+			}
 		}
 
 		if isStepError(st.Status, st.Content, lastPlannerHadTools, lastPlannerHadRunCmd) {
@@ -557,4 +1005,58 @@ func normalizeRawStep(st *rawStep) {
 			}
 		}
 	}
+}
+
+// FindSpawnEdgeInActiveSpawners inspects recently active spawner transcripts (from active_spawners.json)
+// to see if any parent conversation recorded a ground-truth spawn edge (run_workflow, agentapi, or invoke_subagent)
+// for childConvID. Reuses obs/index.json cached SpawnEdges when FileSize/ModTimeNano match to stay O(stat).
+func FindSpawnEdgeInActiveSpawners(vaultDir, childConvID string) (SubagentSpawnEdge, bool) {
+	cid := strings.ToLower(strings.TrimSpace(childConvID))
+	if cid == "" {
+		return SubagentSpawnEdge{}, false
+	}
+	spawners := kernel.ListActiveSpawners(vaultDir, 24*time.Hour)
+	if len(spawners) == 0 {
+		return SubagentSpawnEdge{}, false
+	}
+	cachedIdx := loadCachedIndex(vaultDir)
+	brainDir := ResolveBrainDir(vaultDir)
+	for _, sp := range spawners {
+		spID := strings.ToLower(strings.TrimSpace(sp.ConversationID))
+		if spID == "" || spID == cid {
+			continue
+		}
+		tPath := strings.TrimSpace(sp.TranscriptPath)
+		if tPath == "" && brainDir != "" {
+			tPath = filepath.Join(brainDir, sp.ConversationID, ".system_generated", "logs", "transcript.jsonl")
+		}
+		if tPath == "" {
+			continue
+		}
+		var edges []SubagentSpawnEdge
+		if info, err := os.Stat(tPath); err == nil {
+			if cached, ok := cachedIdx.Conversations[spID]; ok &&
+				cached.TranscriptPath == tPath &&
+				cached.FileSize == info.Size() &&
+				cached.ModTimeNano == info.ModTime().UnixNano() {
+				edges = cached.SpawnEdges
+			}
+		}
+		if edges == nil {
+			cm, err := ParseTranscriptFile(spID, tPath, "", "")
+			if err != nil {
+				continue
+			}
+			edges = cm.SpawnEdges
+		}
+		for _, edge := range edges {
+			if strings.ToLower(strings.TrimSpace(edge.ChildConversationID)) == cid {
+				if edge.ParentConversationID == "" {
+					edge.ParentConversationID = spID
+				}
+				return edge, true
+			}
+		}
+	}
+	return SubagentSpawnEdge{}, false
 }

@@ -1087,3 +1087,293 @@ func TestVaultQuotaConfigMaxDailySpawnsAndInteractiveExemption(t *testing.T) {
 		t.Fatalf("expected in-place config.yaml update preserving sibling keys, got:\n%s", string(updatedCfg))
 	}
 }
+
+func TestLayer1LSLineageAndCleanNestedTasksLeakFixes(t *testing.T) {
+	vaultDir := t.TempDir()
+	fdID := "aaaaaaaa-0000-0000-0000-000000000001"
+	topTaskID := "aaaaaaaa-0000-0000-0000-000000000002"
+	subDirectID := "aaaaaaaa-0000-0000-0000-000000000003"
+	subNestedID := "aaaaaaaa-0000-0000-0000-000000000004"
+	wfChildID := "aaaaaaaa-0000-0000-0000-000000000005"
+	standaloneID := "aaaaaaaa-0000-0000-0000-000000000006"
+
+	_ = SetFrontDesk(vaultDir, fdID, "")
+
+	summaries := map[string]LSTrajectorySummary{
+		fdID: {
+			TrajectoryMetadata: LSTrajectoryMetadata{RootConversationID: fdID, NestingDepth: 0},
+		},
+		topTaskID: {
+			TrajectoryMetadata: LSTrajectoryMetadata{RootConversationID: topTaskID, NestingDepth: 0},
+		},
+		subDirectID: {
+			TrajectoryMetadata: LSTrajectoryMetadata{
+				ParentConversationID: fdID,
+				RootConversationID:   fdID,
+				NestingDepth:         1,
+				SubagentSpec:         &LSSubagentSpec{Role: "[standard] core: Direct Worker", Model: "flash"},
+			},
+		},
+		subNestedID: {
+			TrajectoryMetadata: LSTrajectoryMetadata{
+				ParentConversationID: topTaskID,
+				RootConversationID:   topTaskID,
+				NestingDepth:         1,
+				SubagentSpec:         &LSSubagentSpec{Role: "[quick] core: Nested Sub", Model: "flash_lite"},
+			},
+		},
+		wfChildID: {
+			TrajectoryMetadata: LSTrajectoryMetadata{
+				RootConversationID: topTaskID,
+				NestingDepth:       0,
+				SourceMetadata: &LSSourceMetadata{
+					HideFromConversationList: true,
+					Tool: &LSSourceMetadataTool{
+						ConversationID: topTaskID,
+						Title:          "Workflow fanout",
+						ToolCall:       &LSSourceMetadataToolCall{ID: "tc1", Name: "run_workflow"},
+					},
+				},
+			},
+		},
+		standaloneID: {
+			TrajectoryMetadata: LSTrajectoryMetadata{
+				RootConversationID: standaloneID,
+				NestingDepth:       0,
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-codeium-csrf-token") != "csrf-test" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/GetAllCascadeTrajectories") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"trajectorySummaries": summaries})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectory") {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			cid := normalizeUUID(req["cascadeId"])
+			if sum, ok := summaries[cid]; ok {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"status": "CASCADE_RUN_STATUS_IDLE",
+					"trajectory": map[string]interface{}{
+						"metadata": sum.TrajectoryMetadata,
+					},
+				})
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
+
+	// 1. InspectLSConversationLineage checks unary metadata classification
+	linWF, okWF := InspectLSConversationLineage(vaultDir, wfChildID)
+	if !okWF || !linWF.IsNestedDescendant || !linWF.IsWorkflowChild || linWF.DirectParentID != topTaskID {
+		t.Fatalf("expected wfChildID to be nested workflow child under %s, got ok=%v %+v", topTaskID, okWF, linWF)
+	}
+	linNested, okNested := InspectLSConversationLineage(vaultDir, subNestedID)
+	if !okNested || !linNested.IsNestedDescendant || linNested.IsDirectFrontDeskSubagent {
+		t.Fatalf("expected subNestedID to be nested descendant, got ok=%v %+v", okNested, linNested)
+	}
+	linDirect, okDirect := InspectLSConversationLineage(vaultDir, subDirectID)
+	if !okDirect || linDirect.IsNestedDescendant || !linDirect.IsDirectFrontDeskSubagent {
+		t.Fatalf("expected subDirectID to be direct FD subagent, got ok=%v %+v", okDirect, linDirect)
+	}
+	linStandalone, okStandalone := InspectLSConversationLineage(vaultDir, standaloneID)
+	if !okStandalone || linStandalone.IsNestedDescendant || linStandalone.IsDirectFrontDeskSubagent {
+		t.Fatalf("expected standaloneID to be Layer-1 standalone conversation, got ok=%v %+v", okStandalone, linStandalone)
+	}
+
+	// 2. IsLayer1Task rejects leaked Kind:"task" with non-FD parent or subagent markers
+	leakedKindTaskWithParent := ActiveTask{
+		TaskSlug:             "conv-aaaa0004",
+		Title:                "[Task:core] Leaked Nested",
+		Kind:                 "task",
+		ParentConversationID: topTaskID,
+		ConversationID:       subNestedID,
+	}
+	leakedKindTaskWithSubMarker := ActiveTask{
+		TaskSlug: "subagent-core-leaked",
+		Title:    "[Subagent:core] Leaked Marker [quick]",
+		Kind:     "task",
+	}
+	if IsLayer1Task(leakedKindTaskWithParent, fdID) {
+		t.Fatalf("expected IsLayer1Task to reject Kind=task with non-FD ParentConversationID")
+	}
+	if IsLayer1Task(leakedKindTaskWithSubMarker, fdID) {
+		t.Fatalf("expected IsLayer1Task to reject Kind=task with subagent markers")
+	}
+
+	// 3. CleanNestedTasks prunes leaked Kind:"task" subagents & LS workflow children while keeping standalone & explicit tasks
+	q := LoadQuota(vaultDir)
+	q.SpawnsToday = 2
+	_ = SaveQuota(vaultDir, q)
+
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "core-explicit-task",
+		Title:          "[Task:core] Explicit Task",
+		Kind:           "task",
+		ConversationID: topTaskID,
+		Status:         "active",
+	})
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "conv-aaaaaaaa-0006",
+		Title:          "[Task:general] Standalone User Chat",
+		Kind:           "task",
+		ConversationID: standaloneID,
+		Status:         "idle",
+	})
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:             "subagent-core-leaked-nested",
+		Title:                "[Subagent:core] Nested Sub",
+		Kind:                 "task",
+		ParentConversationID: topTaskID,
+		ConversationID:       subNestedID,
+		Status:               "completed",
+	})
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "conv-aaaaaaaa-0005",
+		Title:          "Workflow step worker",
+		Kind:           "task",
+		ConversationID: wfChildID,
+		Status:         "idle",
+	})
+
+	removed, err := CleanNestedTasks(vaultDir)
+	if err != nil {
+		t.Fatalf("CleanNestedTasks: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Fatalf("expected 2 leaked entries removed, got %d (%v)", len(removed), removed)
+	}
+	remaining, _ := ListTasks(vaultDir)
+	if len(remaining) != 2 {
+		t.Fatalf("expected 2 genuine Layer-1 tasks remaining, got %d: %+v", len(remaining), remaining)
+	}
+	if !IsNestedSubagentConversation(vaultDir, wfChildID) || !IsNestedSubagentConversation(vaultDir, subNestedID) {
+		t.Fatalf("expected pruned workflow & nested subagent to be recorded in nested_conversations.json")
+	}
+	// Quota SpawnsToday should NOT decrement for leaked Kind:"task" entries.
+	if afterQ := LoadQuota(vaultDir); afterQ.SpawnsToday != 2 {
+		t.Fatalf("expected SpawnsToday to remain 2 when pruning leaked Kind=task entries, got %d", afterQ.SpawnsToday)
+	}
+	// Archived cold entries should be reclassified to Kind:"subagent".
+	cold, _, _ := ListArchivedTasks(vaultDir, 0)
+	for _, c := range cold {
+		if c.Kind != "subagent" {
+			t.Fatalf("expected archived leak %s reclassified to Kind=subagent, got %q", c.TaskSlug, c.Kind)
+		}
+	}
+}
+
+func TestFrontDeskRotationPreservesLayer1SubagentsAndAvoidsBatchFallback(t *testing.T) {
+	vaultDir := t.TempDir()
+	fd1 := "bbbbbbbb-0000-0000-0000-000000000001"
+	fd2 := "bbbbbbbb-0000-0000-0000-000000000002"
+	sub1 := "bbbbbbbb-0000-0000-0000-000000000003"
+	hop1 := "bbbbbbbb-0000-0000-0000-000000000004"
+	hop2 := "bbbbbbbb-0000-0000-0000-000000000005"
+	omittedMetaID := "bbbbbbbb-0000-0000-0000-000000000006"
+
+	_ = SetFrontDesk(vaultDir, fd1, "")
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:             "subagent-core-fd1-worker",
+		Title:                "[Subagent:core] FD1 Worker [standard]",
+		Kind:                 "subagent",
+		ParentConversationID: fd1,
+		ConversationID:       sub1,
+		Status:               "active",
+	})
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:       "core-user-named-conv-task",
+		Title:          "[Task:core] User Named Conv Refactor",
+		Kind:           "task",
+		ConversationID: hop1,
+		Status:         "active",
+	})
+	// Check user-named conv-refactor slug isn't misclassified when Title is [Task:...] and TaskSlug matches.
+	if !IsExplicitTopLevelTask(ActiveTask{
+		TaskSlug:       "conv-refactor",
+		Title:          "[Task:core] Conv Refactor",
+		Kind:           "task",
+		ConversationID: hop1,
+	}) {
+		t.Fatalf("expected explicit user-named conv-refactor task to be treated as IsExplicitTopLevelTask")
+	}
+
+	// Rotate Front Desk fd1 -> vacant -> fd2
+	if err := ReleaseFrontDesk(vaultDir); err != nil {
+		t.Fatalf("ReleaseFrontDesk: %v", err)
+	}
+	// During temporary vacancy, fd1's active subagent stays Layer-1 and survives CleanNestedTasks
+	if removed, err := CleanNestedTasks(vaultDir); err != nil || len(removed) != 0 {
+		t.Fatalf("expected temporary Front Desk vacancy to NOT purge fd1 subagent, got err=%v removed=%v", err, removed)
+	}
+	_ = SetFrontDesk(vaultDir, fd2, "")
+	if removed, err := CleanNestedTasks(vaultDir); err != nil || len(removed) != 0 {
+		t.Fatalf("expected Front Desk rotation to fd2 to NOT purge fd1 subagent, got err=%v removed=%v", err, removed)
+	}
+	if layer1 := FilterLayer1Tasks(vaultDir, func() []ActiveTask { l, _ := ListTasks(vaultDir); return l }()); len(layer1) != 2 {
+		t.Fatalf("expected both fd1 subagent and top-level task to remain Layer-1 after rotation, got %+v", layer1)
+	}
+
+	// Verify transitive multi-hop HasNonFrontDeskAncestry (hop1 [task] -> sub -> hop2)
+	_ = RegisterTask(vaultDir, ActiveTask{
+		TaskSlug:             "subagent-core-hop",
+		Title:                "[Subagent:core] Hop Sub",
+		Kind:                 "subagent",
+		ParentConversationID: hop1,
+		ConversationID:       hop2,
+		Status:               "active",
+	})
+	if hasAnc, _ := HasNonFrontDeskAncestry(vaultDir, "", hop2); !hasAnc {
+		t.Fatalf("expected transitive child of %s to report HasNonFrontDeskAncestry=true", hop2)
+	}
+
+	// Verify InspectLSConversationLineage handles HTTP 200 omitted proto3 metadata WITHOUT calling GetAllCascadeTrajectories
+	batchCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/GetAllCascadeTrajectories") {
+			batchCalls++
+			http.Error(w, "should not be called on HTTP 200 unary response", http.StatusInternalServerError)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectory") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "CASCADE_RUN_STATUS_IDLE",
+				"trajectory": map[string]interface{}{
+					"steps": []interface{}{},
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
+
+	lin, ok := InspectLSConversationLineage(vaultDir, omittedMetaID)
+	if !ok || lin.IsNestedDescendant || lin.IsDirectFrontDeskSubagent {
+		t.Fatalf("expected omitted proto3 metadata HTTP 200 to return standalone lin, got ok=%v %+v", ok, lin)
+	}
+	if batchCalls != 0 {
+		t.Fatalf("expected 0 GetAllCascadeTrajectories fallback calls on HTTP 200 GetCascadeTrajectory, got %d", batchCalls)
+	}
+}
