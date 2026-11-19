@@ -285,7 +285,7 @@ All verbs are short-lived stdio calls: one UTF-8 JSON request on `stdin`, one JS
 
 ### 6.2 `list`: Paginated Inventory
 
-Request fields: `cursor`, `limit` (≤ 200), `include_auxiliary` (default `false`; hides export/review/scratch workspaces). Response: `workspaces: [Info]`, `next_cursor`. `list` never reports `changes` (cheap enumeration); `status` does.
+Request fields: `cursor`, `limit` (≤ 200), `include_auxiliary` (default `false`; hides tooling-created auxiliary workspaces). Response: `workspaces: [Info]`, `next_cursor`. `list` never reports `changes` (cheap enumeration); `status` does.
 
 ### 6.3 `create`: Isolated Workspace for a Task
 
@@ -300,7 +300,7 @@ Request fields: `cursor`, `limit` (≤ 200), `include_auxiliary` (default `false
 
 ### 6.4 `status`: Fresh State + Changes
 
-Request: `workspace_id`. Response: full `Info` including `state`, `base`, and `changes[]`. Core validates and clamps every field (§11.3) before caching.
+Request: `workspace_id`. Response: `workspace: {...}` (the same `Info` shape as `probe`, now including `state`, `base`, and `changes[]`). Core validates and clamps every field (§11.3) before caching.
 
 ### 6.5 `remove`: Delete a Workspace
 
@@ -536,6 +536,22 @@ hq workspace prune [--dry-run] [--json]
 2. **Change-landed notifications:** should a transition to `landed` emit a `brief_rollup` outbox item ("ledger-fix: change landed; workspace eligible for cleanup")? Proposed: yes, deduplicated per `(key, change id)`.
 3. **Multiple writers by design:** some shared-history systems support several working copies per task (one per subagent). Should W1 lease per `(task, workspace)` instead of per workspace, so a task's own subagents can each hold a sibling workspace created via `share_from`? Proposed: per workspace, with `share_from` as the sanctioned way to parallelize.
 4. **Foreign placement messaging:** confirm empirically which agent-API cross-project paths succeed for parent ↔ child report-backs before Phase 4 is scheduled.
+
+---
+
+## 16. Implementation Decisions for the First Landing (v1)
+
+Approved for implementation on 2026-11-19. These decisions resolve §15 Q1–Q3 and narrow the first landing. Where they conflict with earlier sections, this section wins.
+
+1. **Ledger scope (resolves Q1).** The ledger is a separate `<vault>/memory/workspaces.json` at `RankWorkspaces = 78`. It records **provider** workspaces only. Git worktrees keep their existing storage (`WorktreeDir`/`WorktreeDirs`/`RepoRoot`) and their existing `<vault>/worktrees/` guard, and `hq workspace list` merges both views. There is no backfill and no dual-write (supersedes the last bullet of §7.1 and the migration bullets of §7.2).
+2. **Task bindings.** `ActiveTask.Workspaces []workspace.Binding` stores provider bindings only. `ActiveTask.AllWorkspaceBindings()` synthesizes read-only `core/git-worktree` bindings from the legacy fields. Existing git code paths (`spawn --repo`, archive, reopen, compact, prune) are **not** refactored; provider bindings are handled alongside them (supersedes "route through it" in §4.2 and the Phase 0 rerouting in §14).
+3. **Single-writer lease (resolves Q3).** W1 leases are per workspace and enforced only when the ledger entry has `lease_enforced: true`. That flag is set by `hq spawn --workspace`, `hq workspace create --task`, and `hq workspace adopt --task`. Entries auto-attached from `Stop` record `writer_task` but stay advisory until confirmed with `hq workspace handoff` or `adopt --task`. W1 v1 covers `write_file`/`edit_file`; `run_command` relies on the spawn preamble and W4. Parallel subagents use `share_from` sibling workspaces.
+4. **Landed notifications (resolves Q2).** A transition to `landed` emits one deduplicated `brief_rollup` outbox item per `(ledger key, change id)`.
+5. **Foreign placement** (§9.3) is deferred. v1 ships Home placement only and does not expose `--placement`.
+6. **WebUI** is read-only in v1 (no Refresh/Unbind/Handoff/Remove buttons); actions go through the CLI.
+7. **Protocol freeze.** `hq-workspace-provider/v1` is exactly §6: common request fields `protocol`, `op`, `provider_id`, `request_id`, `timestamp`; common response fields `protocol`, `ok`, `error{code,message}`. `probe`, `create`, and `status` return the workspace under a `workspace` key; `create` also returns `existed`; `list` returns `workspaces` and `next_cursor`. `provider` is filled in by core, never by the provider.
+8. **`Stop` auto-binding** records candidate paths in the ledger's bounded, deduplicated `probe_candidates` list. The daemon drains it with `probe` calls; no event-inbox entries and no LLM spawns.
+9. **Destructive `hq` verbs.** `hq workspace remove` stages a `workspace_remove` proposal whenever the workspace is dirty or has open changes. The approval-only execution form (`--approved-proposal=<id>`) is denied for direct LLM invocation by a core approvals rule, the same way `hq gmail send-draft` is.
 
 ---
 

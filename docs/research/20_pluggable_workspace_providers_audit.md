@@ -11,7 +11,7 @@
 
 `agy-hq` isolates parallel engineering work in **git worktrees** under `<vault>/worktrees/<repo>-<task>/` ([RFC-0001](../design/0001-vault-and-task-isolation.md)). That model is a good fit for open-source repositories, but many engineers spend most of their day in workspace systems that are not git at all:
 
-- **Virtual-filesystem monorepo clients** (a FUSE-mounted client per change, created and deleted by a vendor CLI, often hundreds per user).
+- **Virtual-filesystem monorepo clients** (a mounted client per change, created and deleted by a vendor CLI).
 - **Centralized VCS clients** (Perforce-style clients/streams where "a change" is a server-side changelist, not a commit).
 - **Alternative DVCS front-ends** layered on a monorepo (Jujutsu workspaces, Mercurial shares, Sapling checkouts), where several working copies share one history.
 
@@ -153,7 +153,7 @@ Every surveyed system can be reduced to the same small vocabulary:
 
 ### 5.4 Discovery Scale
 
-Monorepo users commonly have **hundreds** of workspaces, many of them short-lived export or review clients. `SessionStart` and the console must therefore show only workspaces **bound to live tasks** (bounded, like the [RFC-0009](../design/0009-task-board-redesign.md) Task Board tiers), while the full inventory is available on demand through `hq workspace list --provider=<id>` and the WebUI, paginated by the provider.
+Users of per-change workspace systems can accumulate many workspaces, including short-lived auxiliary ones created by tooling. `SessionStart` and the console must therefore show only workspaces **bound to live tasks** (bounded, like the [RFC-0009](../design/0009-task-board-redesign.md) Task Board tiers), while the full inventory is available on demand through `hq workspace list --provider=<id>` and the WebUI, paginated by the provider.
 
 ---
 
