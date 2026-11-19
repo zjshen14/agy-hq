@@ -666,6 +666,11 @@ func TestP0ProposeDashDashChainingAndWorkspaceLedgerShellGuard(t *testing.T) {
 		"hq propose --type=x --summary=y --cmd=$(gh${IFS}pr${IFS}merge${IFS}42)",
 		`hq propose --type=x --summary=y -- hq $'\'' ; gh pr merge 42 # '`,
 		`hq propose --type=x --summary=y -- hq $'\'' ; hq workspace own ` + key + ` # '`,
+		// Verifier P0-2D & P0-2E bypass repros: ANSI-C $'...' before --cmd= and \<LF> line continuations
+		`hq propose --type=x --summary=$'a\' --cmd=' ; gh pr merge 42 # '`,
+		"hq propose --type=x --summary=y -- hq status $\\\n(gh pr merge 42)",
+		"hq propose --type=x --summary=y -- hq status <\\\n(gh pr merge 42)",
+		"hq propose --type=x --summary=y --cmd=\"$\\\n(gh pr merge 42)\"",
 		// P2-8b regression: direct, relative, and globbed shell tampering of workspaces.json or .workspaces.lock
 		"sed -i 's/attached/owned/' local/memory/workspaces.json",
 		"sed -i 's/attached/owned/' " + filepath.Join(vaultDir, "memory", "workspaces.json"),

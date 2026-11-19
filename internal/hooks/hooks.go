@@ -1410,6 +1410,9 @@ func hasUnquotedShellChainingOrSubst(s string) bool {
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		if escaped {
+			if ch == '\n' || ch == '\r' {
+				return true // bash strips \<LF> before tokenization (can splice $( or <()
+			}
 			escaped = false
 			continue
 		}
@@ -1456,9 +1459,10 @@ func hasUnquotedShellChainingOrSubst(s string) bool {
 }
 
 // stripSafeProposeCmdFlag replaces `--cmd=<val>` with `--cmd=""` only when `<val>` is cleanly bounded
-// (single-quoted, double-quoted without command substitution, or unquoted without shell metacharacters)
-// and immediately followed by whitespace or end-of-string. Anything suspicious (e.g. `--cmd=hq;evil` or
-// `--cmd=$(evil)`) is left unstripped so EvaluateCommand inspects and blocks it fail-closed.
+// (single-quoted, double-quoted without command substitution or \<LF> continuation, or unquoted without shell
+// metacharacters) and immediately followed by whitespace or end-of-string. Anything suspicious (including
+// bash $'...' / $"..." quoting, \<LF> line continuations, unclosed quotes, `--cmd=hq;evil`, or `--cmd=$(evil)`)
+// causes the entire command line to be returned unstripped so EvaluateCommand inspects and blocks it fail-closed.
 func stripSafeProposeCmdFlag(cmdLine string) string {
 	var out strings.Builder
 	out.Grow(len(cmdLine))
@@ -1468,6 +1472,9 @@ func stripSafeProposeCmdFlag(cmdLine string) string {
 	for i := 0; i < len(cmdLine); {
 		ch := cmdLine[i]
 		if escaped {
+			if ch == '\n' || ch == '\r' {
+				return cmdLine
+			}
 			out.WriteByte(ch)
 			escaped = false
 			i++
@@ -1491,6 +1498,9 @@ func stripSafeProposeCmdFlag(cmdLine string) string {
 			i++
 			continue
 		}
+		if ch == '$' && i+1 < len(cmdLine) && (cmdLine[i+1] == '\'' || cmdLine[i+1] == '"') {
+			return cmdLine // fail closed on bash ANSI-C $'...' or locale $"..." quoting
+		}
 		if strings.HasPrefix(cmdLine[i:], "--cmd=") && (i == 0 || cmdLine[i-1] == ' ' || cmdLine[i-1] == '\t') {
 			valStart := i + len("--cmd=")
 			if valStart < len(cmdLine) {
@@ -1512,6 +1522,10 @@ func stripSafeProposeCmdFlag(cmdLine string) string {
 					for j < len(cmdLine) {
 						c := cmdLine[j]
 						if c == '\\' && j+1 < len(cmdLine) {
+							if cmdLine[j+1] == '\n' || cmdLine[j+1] == '\r' {
+								safe = false
+								break
+							}
 							j += 2
 							continue
 						}
@@ -1560,6 +1574,9 @@ func stripSafeProposeCmdFlag(cmdLine string) string {
 		}
 		out.WriteByte(ch)
 		i++
+	}
+	if inSingle || inDouble || escaped {
+		return cmdLine
 	}
 	return out.String()
 }
