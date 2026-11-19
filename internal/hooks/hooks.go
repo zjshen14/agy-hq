@@ -584,11 +584,15 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	if !leanAuto {
 		if isFrontDesk {
 			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "front_desk"); len(ovs) > 0 {
-				zone2Sections = append(zone2Sections, "## Companion Front Desk Policy Overlays (Advisory)\n"+trimBytesPreservingLines(strings.Join(ovs, "\n\n"), 900))
+				zone2Sections = append(zone2Sections, "## Companion Front Desk Policy Overlays (Advisory)\n"+trimBytesPreservingLines(strings.Join(ovs, "\n\n"), extension.MaxOverlayBytes))
 			}
-		} else if hasMatchedTask && strings.TrimSpace(matchedTask.Scope) != "" {
-			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "task:"+strings.TrimSpace(matchedTask.Scope)); len(ovs) > 0 {
-				zone2Sections = append(zone2Sections, "## Companion Task Policy Overlays (Advisory)\n"+trimBytesPreservingLines(strings.Join(ovs, "\n\n"), 900))
+		} else if hasMatchedTask {
+			taskScope := strings.TrimSpace(matchedTask.Scope)
+			if taskScope == "" {
+				taskScope = "general"
+			}
+			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "task:"+taskScope); len(ovs) > 0 {
+				zone2Sections = append(zone2Sections, "## Companion Task Policy Overlays (Advisory)\n"+trimBytesPreservingLines(strings.Join(ovs, "\n\n"), extension.MaxOverlayBytes))
 			}
 		}
 	}
@@ -672,24 +676,22 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			zone2Sections = append(zone2Sections, "## Pending Approvals in Queue\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 1200))
 		}
-		if wts, err := worktree.List(vaultDir); err == nil && len(wts) > 0 {
-			var lines []string
-			for _, wt := range wts {
-				lines = append(lines, fmt.Sprintf("- `%s` (%s)", filepath.Base(wt), wt))
-			}
-			zone2Sections = append(zone2Sections, "## Active Git Worktrees\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 900))
+		// Unified Active Workspaces section combining managed git worktrees (zero-subprocess fast listing)
+		// and provider ledger entries (read-only cache; never calls external providers).
+		var layer1Tasks []kernel.ActiveTask
+		if allTasks, tErr := kernel.ListTasks(vaultDir); tErr == nil {
+			layer1Tasks = kernel.FilterLayer1Tasks(vaultDir, allTasks)
 		}
-		// RFC-0025 provider workspaces: additive sections rendered from the ledger cache only (no provider calls).
-		// An unreadable ledger surfaces a warning (and W1 fails closed) while still listing the task's own bindings.
+		var gitEntries []workspace.SurfaceEntry
+		if wts, err := worktree.List(vaultDir); err == nil && len(wts) > 0 {
+			gitEntries = kernel.FastGitWorktreeSurfaceEntries(vaultDir, wts, layer1Tasks, now)
+		}
 		wsLedger, wsErr := workspace.LoadLedger(vaultDir)
 		if wsErr != nil {
 			zone2Sections = append(zone2Sections, "## Workspace Ledger Warning\n- ⚠️ `local/memory/workspaces.json` could not be loaded (corrupt, symlinked, or newer schema); workspace edits outside the Vault are blocked fail-closed until repaired.")
-		} else if len(wsLedger.Entries) > 0 {
-			if allTasks, tErr := kernel.ListTasks(vaultDir); tErr == nil {
-				if sec := formatActiveWorkspacesSection(wsLedger, kernel.FilterLayer1Tasks(vaultDir, allTasks), now); sec != "" {
-					zone2Sections = append(zone2Sections, sec)
-				}
-			}
+		}
+		if sec := formatUnifiedActiveWorkspacesSection(wsLedger, gitEntries, layer1Tasks, now); sec != "" {
+			zone2Sections = append(zone2Sections, sec)
 		}
 		if hasMatchedTask && !isFrontDesk {
 			if sec := formatActiveTaskWorkspacesSection(wsLedger, matchedTask); sec != "" {
@@ -994,6 +996,9 @@ func sectionTrimPriority(sec string) (tier int, floor int) {
 	// Tier 1 (trim second): roadmap, task checkpoints, approvals, role banners
 	// Tier 2 (protected core): USER.md standing rules, Active Vault Facts, Scoped Playbooks
 	switch {
+	case strings.HasPrefix(sec, "## Companion Front Desk Policy Overlays"),
+		strings.HasPrefix(sec, "## Companion Task Policy Overlays"):
+		return 2, 2400
 	case strings.HasPrefix(sec, "## HQ Vault: USER.md"),
 		strings.HasPrefix(sec, "## Active Vault Facts"),
 		strings.HasPrefix(sec, "### Scoped Playbook:"):

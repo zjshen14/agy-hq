@@ -1030,11 +1030,11 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	for i := range pending {
 		enrichPendingDraftPayload(vaultDir, &pending[i])
 	}
+	now := time.Now()
 	wts, _ := worktree.List(vaultDir)
-	wsEntries, _ := workspace.LoadSurfaceEntries(vaultDir)
+	wsEntries := kernel.UnifiedSurfaceEntries(vaultDir, now)
 	tasks, _ := kernel.ListTasks(vaultDir)
 	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
-	now := time.Now()
 	coldCount := kernel.CountColdArchivedTasks(vaultDir)
 	sel := kernel.SelectConsoleTasks(layer1Tasks, coldCount, now)
 	turns := loadTodayJournals(vaultDir)
@@ -1715,8 +1715,13 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
   <div class="kpi-grid">
     <div class="kpi-tile">
       <div class="kpi-label">Today Uncached Burn</div>
+      {{if .Observability.Budget.TokenCircuitDisabled}}
+      <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}}</div>
+      <div class="kpi-sub">Budget guard disabled ({{.Observability.TodayTurnCount}} turns)</div>
+      {{else}}
       <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyUncachedBudget}}</div>
       <div class="kpi-sub">{{printf "%.1f" .Observability.DailyBudgetPct}}% of daily budget ({{.Observability.TodayTurnCount}} turns)</div>
+      {{end}}
     </div>
     <div class="kpi-tile">
       <div class="kpi-label">Prefix Cache Hit Ratio</div>
@@ -1730,7 +1735,11 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     </div>
     <div class="kpi-tile">
       <div class="kpi-label">Deep Tier Burn Today</div>
+      {{if .Observability.Budget.TokenCircuitDisabled}}
+      <div class="kpi-val" id="obs-deep-burn">{{fmtTokens .Observability.TodayDeepUncachedTokens}}</div>
+      {{else}}
       <div class="kpi-val" id="obs-deep-burn">{{fmtTokens .Observability.TodayDeepUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyDeepUncachedBudget}}</div>
+      {{end}}
       <div class="kpi-sub">{{printf "%.0f" .Observability.TodayQuotaUnits}} QBU today</div>
     </div>
   </div>
@@ -1787,26 +1796,16 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
 {{end}}
 </div>
 
-<h2>Active Parallel Git Worktrees ({{len .Worktrees}})</h2>
-<div id="worktrees-list">
-{{if .Worktrees}}
-  {{range .Worktrees}}
-  <div class="card"><code style="color:var(--accent)">{{base .}}</code> <span class="muted">({{.}})</span></div>
-  {{end}}
-{{else}}
-  <div class="card muted">No active git worktrees in local/worktrees/.</div>
-{{end}}
-</div>
-{{if .Workspaces}}
 <h2>
   <span>Active Workspaces ({{len .Workspaces}})</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Provider Ledger Cache · Read-Only</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Git Worktrees &amp; Provider Workspaces · Read-Only</span>
 </h2>
 <div id="workspaces-list">
+{{if .Workspaces}}
   {{range .Workspaces}}
   <div class="card">
     <div class="meta-row">
-      <strong>🧩 <code style="color:var(--accent)">{{.WorkspaceID}}</code> <span class="muted">{{.Provider}}</span></strong>
+      <strong>{{if eq .Provider "core/git-worktree"}}🌿{{else}}🧩{{end}} <code style="color:var(--accent)">{{.DisplayName}}</code> <span class="muted">{{.Provider}}</span></strong>
       <span class="badge {{if eq .State "clean"}}badge-pass{{else if eq .State "dirty"}}badge-warn{{else}}badge-danger{{end}}">{{.State}}</span>
     </div>
     <div class="muted" style="margin:4px 0">
@@ -1820,8 +1819,10 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
     {{end}}
   </div>
   {{end}}
-</div>
+{{else}}
+  <div class="card muted">No active workspaces.</div>
 {{end}}
+</div>
 
 <h2>
   <span>Scheduled Automations (<span id="schedules-count">{{len .Schedules}}</span>)</span>
@@ -2340,15 +2341,24 @@ func SyncMarkdownConsole(vaultDir string) error {
 		interNote = fmt.Sprintf(" · Interactive: `+%d`", state.Quota.InteractiveSpawnsToday)
 	}
 	fmt.Fprintf(&b, "- **Background Auto Spawns Today:** `%d / %d` (`%s`%s%s)\n", state.Quota.EffectiveAutoSpawns(), state.Quota.MaxDailySpawns, circuitBadge, interNote, gatekeeperNote)
-	fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
-		obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
-		obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
-		state.Observability.DailyBudgetPct,
-		obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
-		state.Observability.TodayCacheHitRatio*100.0,
-		obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
-		obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
-	)
+	if state.Observability.Budget.TokenCircuitDisabled {
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached):** `%s` (`budget guard disabled` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s`)\n",
+			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+			state.Observability.TodayCacheHitRatio*100.0,
+			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+		)
+	} else {
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
+			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
+			state.Observability.DailyBudgetPct,
+			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+			state.Observability.TodayCacheHitRatio*100.0,
+			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
+		)
+	}
 	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s / 256k` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
 		obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens),
 		state.Observability.FrontDeskContextStatus,
@@ -2437,20 +2447,8 @@ func SyncMarkdownConsole(vaultDir string) error {
 		b.WriteString("\n---\n\n")
 	}
 
-	fmt.Fprintf(&b, "## 🌿 3. Active Parallel Git Worktrees (`%d` Active)\n", len(state.Worktrees))
-	if len(state.Worktrees) == 0 {
-		b.WriteString("- None active in `local/worktrees/`.\n\n---\n\n")
-	} else {
-		for _, wt := range state.Worktrees {
-			fmt.Fprintf(&b, "- `%s` (`%s`)\n", filepath.Base(wt), wt)
-		}
-		b.WriteString("\n---\n\n")
-	}
-
-	if wsSection := formatConsoleWorkspacesSection(state.Workspaces); wsSection != "" {
-		b.WriteString(wsSection)
-		b.WriteString("\n---\n\n")
-	}
+	b.WriteString(formatConsoleWorkspacesSection(state.Workspaces))
+	b.WriteString("\n---\n\n")
 
 	if len(state.ActiveSpaces) > 0 {
 		fmt.Fprintf(&b, "## 🗂️ Active Console Spaces (`%d` Active)\n", len(state.ActiveSpaces))

@@ -16,6 +16,7 @@ import (
 type BudgetConfig struct {
 	DailyUncachedBudget     int64 `json:"dailyUncachedBudget"`
 	DailyDeepUncachedBudget int64 `json:"dailyDeepUncachedBudget"`
+	TokenCircuitDisabled    bool  `json:"tokenCircuitDisabled,omitempty"`
 	WarnContextTokens       int64 `json:"warnContextTokens"`
 	NudgeContextTokens      int64 `json:"nudgeContextTokens"`
 	CritContextTokens       int64 `json:"critContextTokens"`
@@ -60,6 +61,7 @@ func LoadBudgetConfig(vaultDir string) BudgetConfig {
 	if parsed.DailyDeepUncachedBudget > 0 {
 		cfg.DailyDeepUncachedBudget = parsed.DailyDeepUncachedBudget
 	}
+	cfg.TokenCircuitDisabled = parsed.TokenCircuitDisabled
 	if parsed.WarnContextTokens > 0 {
 		cfg.WarnContextTokens = parsed.WarnContextTokens
 	}
@@ -290,7 +292,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 	}
 
 	// A5: Daily Token Budget Guard (soft-warn at 80%, pause kind:auto triggers at 100%)
-	if cfg.DailyUncachedBudget > 0 {
+	if !cfg.TokenCircuitDisabled && cfg.DailyUncachedBudget > 0 {
 		warnThresh := int64(float64(cfg.DailyUncachedBudget) * 0.80)
 		if todayUncached >= warnThresh {
 			sev := "WARN"
@@ -314,7 +316,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 			})
 		}
 	}
-	if cfg.DailyDeepUncachedBudget > 0 {
+	if !cfg.TokenCircuitDisabled && cfg.DailyDeepUncachedBudget > 0 {
 		warnDeep := int64(float64(cfg.DailyDeepUncachedBudget) * 0.80)
 		if todayDeepUncached >= warnDeep {
 			sev := "WARN"
@@ -378,12 +380,14 @@ func SyncDailyBudgetCircuitBreaker(vaultDir string, now time.Time) (tripped bool
 		}
 	}
 
-	if cfg.DailyUncachedBudget > 0 && todayUncached >= cfg.DailyUncachedBudget {
-		reason = fmt.Sprintf("daily uncached token budget reached (%s / %s)", FormatTokensCompact(todayUncached), FormatTokensCompact(cfg.DailyUncachedBudget))
-		tripped = true
-	} else if cfg.DailyDeepUncachedBudget > 0 && todayDeepUncached >= cfg.DailyDeepUncachedBudget {
-		reason = fmt.Sprintf("daily deep-tier token budget reached (%s / %s)", FormatTokensCompact(todayDeepUncached), FormatTokensCompact(cfg.DailyDeepUncachedBudget))
-		tripped = true
+	if !cfg.TokenCircuitDisabled {
+		if cfg.DailyUncachedBudget > 0 && todayUncached >= cfg.DailyUncachedBudget {
+			reason = fmt.Sprintf("daily uncached token budget reached (%s / %s)", FormatTokensCompact(todayUncached), FormatTokensCompact(cfg.DailyUncachedBudget))
+			tripped = true
+		} else if cfg.DailyDeepUncachedBudget > 0 && todayDeepUncached >= cfg.DailyDeepUncachedBudget {
+			reason = fmt.Sprintf("daily deep-tier token budget reached (%s / %s)", FormatTokensCompact(todayDeepUncached), FormatTokensCompact(cfg.DailyDeepUncachedBudget))
+			tripped = true
+		}
 	}
 
 	if tripped {

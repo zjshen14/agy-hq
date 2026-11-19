@@ -573,3 +573,54 @@ func TestParseWorkflowAndAgentAPIEdgesAndReconcileCleanup(t *testing.T) {
 		t.Fatalf("expected unconsumed turn-1 agentapi call NOT to hijack turn-2 hq tasks --json, got %+v", isoCM.SpawnEdges)
 	}
 }
+
+func TestTokenCircuitDisabledSuppressesBreakerAndA5(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	now := time.Date(2026, 11, 19, 14, 0, 0, 0, time.UTC)
+	cid := "cccccccc-0000-0000-0000-000000000099"
+	writeTranscriptFixture(t, brainDir, cid, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-19T12:00:00Z","content":"Run eval"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-19T12:00:05Z","input_tokens":2000000,"cache_read_tokens":0,"output_tokens":10000,"content":"Done"}`,
+	})
+
+	// 1. Enabled budget trips circuit and emits A5.
+	if err := SaveBudgetConfig(vaultDir, BudgetConfig{DailyUncachedBudget: 1_000_000, DailyDeepUncachedBudget: 500_000}); err != nil {
+		t.Fatalf("SaveBudgetConfig: %v", err)
+	}
+	if tripped, _ := SyncDailyBudgetCircuitBreaker(vaultDir, now); !tripped {
+		t.Fatalf("expected enabled token budget to trip circuit breaker")
+	}
+	if !kernel.LoadQuota(vaultDir).CircuitOpen {
+		t.Fatalf("expected QuotaState.CircuitOpen = true after trip")
+	}
+
+	// 2. Disabling token circuit persists across LoadBudgetConfig, auto-closes the budget circuit, and suppresses A5.
+	cfg := LoadBudgetConfig(vaultDir)
+	cfg.TokenCircuitDisabled = true
+	if err := SaveBudgetConfig(vaultDir, cfg); err != nil {
+		t.Fatalf("SaveBudgetConfig disabled: %v", err)
+	}
+	reloaded := LoadBudgetConfig(vaultDir)
+	if !reloaded.TokenCircuitDisabled {
+		t.Fatalf("expected TokenCircuitDisabled to persist in LoadBudgetConfig")
+	}
+	if tripped, reason := SyncDailyBudgetCircuitBreaker(vaultDir, now); tripped || reason != "" {
+		t.Fatalf("expected disabled token circuit not to trip, got tripped=%v reason=%q", tripped, reason)
+	}
+	if q := kernel.LoadQuota(vaultDir); q.CircuitOpen {
+		t.Fatalf("expected SyncDailyBudgetCircuitBreaker to auto-close budget circuit when disabled, got %+v", q)
+	}
+	sum := BuildDashboardSummary(vaultDir, now)
+	if sum.DailyBudgetPct != 0 || sum.DeepBudgetPct != 0 {
+		t.Fatalf("expected zero budget pct when disabled, got daily=%v deep=%v", sum.DailyBudgetPct, sum.DeepBudgetPct)
+	}
+	for _, a := range sum.Anomalies {
+		if a.Code == "A5" {
+			t.Fatalf("expected A5 daily budget anomaly suppressed when disabled, got %+v", a)
+		}
+	}
+}

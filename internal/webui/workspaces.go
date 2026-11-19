@@ -171,13 +171,14 @@ func consoleWorkspaceChanges(e workspace.SurfaceEntry) string {
 	return cell
 }
 
-// formatConsoleWorkspacesSection renders the additive "## 🧩 Active Workspaces" console section (RFC-0025
-// §11.2): a `Provider · Workspace · Owner Task · State · Changes` table over every provider ledger entry, followed
-// by "⚠️ Orphaned with open changes" rows for owned entries flagged orphaned_open_changes so they are never
-// silently forgotten. It returns "" when the ledger has no entries, leaving the console byte-identical.
+// formatConsoleWorkspacesSection renders the unified "## 🧩 3. Active Workspaces" console section covering
+// both built-in core/git-worktree workspaces and external provider ledger entries, followed by
+// "⚠️ Orphaned with open changes" rows for owned entries flagged orphaned_open_changes.
 func formatConsoleWorkspacesSection(entries []workspace.SurfaceEntry) string {
+	var b strings.Builder
 	if len(entries) == 0 {
-		return ""
+		b.WriteString("## 🧩 3. Active Workspaces (`0` Active)\n- None active.\n")
+		return b.String()
 	}
 	var regular, orphans []workspace.SurfaceEntry
 	openTotal, needsTotal := 0, 0
@@ -190,12 +191,11 @@ func formatConsoleWorkspacesSection(entries []workspace.SurfaceEntry) string {
 		}
 		regular = append(regular, e)
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "## 🧩 Active Workspaces (`%d` Tracked · `%d` Open Change(s) · `%d` Needs You)\n", len(entries), openTotal, needsTotal)
+	fmt.Fprintf(&b, "## 🧩 3. Active Workspaces (`%d` Active · `%d` Open Change(s) · `%d` Needs You)\n", len(entries), openTotal, needsTotal)
 	b.WriteString("| Provider | Workspace | Owner Task | State | Changes |\n| :--- | :--- | :--- | :--- | :--- |\n")
 	row := func(providerCell string, e workspace.SurfaceEntry) {
 		fmt.Fprintf(&b, "| %s | %s (%s) | %s | %s | %s |\n",
-			providerCell, mdCode(e.WorkspaceID), e.Ownership, consoleWorkspaceOwners(e), consoleWorkspaceState(e), consoleWorkspaceChanges(e))
+			providerCell, mdCode(e.DisplayName()), e.Ownership, consoleWorkspaceOwners(e), consoleWorkspaceState(e), consoleWorkspaceChanges(e))
 	}
 	for i, e := range regular {
 		if i >= maxConsoleWorkspaceRows {

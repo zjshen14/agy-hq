@@ -1619,6 +1619,107 @@ func WorkspaceInventory(vaultDir string, opts WorkspaceInventoryOptions) ([]Work
 	return rows, warnings, nil
 }
 
+// UnifiedSurfaceEntries returns a single display-safe slice combining external provider ledger entries
+// (read-only cache; never calls external providers) and managed git worktrees (InspectWorktrees), sorted
+// deterministically by provider and display name. Used by CONSOLE.md, the WebUI, Console Spaces, and Brief.
+func UnifiedSurfaceEntries(vaultDir string, now time.Time) []workspace.SurfaceEntry {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	ledgerEntries, _ := workspace.LoadSurfaceEntries(vaultDir)
+	seen := make(map[string]bool, len(ledgerEntries))
+	out := make([]workspace.SurfaceEntry, 0, len(ledgerEntries))
+	for _, e := range ledgerEntries {
+		seen[e.Key] = true
+		out = append(out, e)
+	}
+	if statuses, err := InspectWorktrees(vaultDir, now); err == nil {
+		for _, st := range statuses {
+			info := gitWorktreeInfo(st)
+			entry := workspace.LedgerEntry{
+				Provider:    workspace.CoreGitProviderID,
+				WorkspaceID: info.WorkspaceID,
+				Name:        info.Name,
+				Root:        info.Root,
+				WorkDir:     info.WorkDir,
+				Ownership:   workspace.OwnershipOwned,
+				WriterTask:  st.OwnerTaskSlug,
+				Status: workspace.LedgerStatus{
+					State:   info.State,
+					Changes: info.Changes,
+				},
+			}
+			if st.OwnerTaskSlug != "" {
+				entry.BoundTasks = []string{st.OwnerTaskSlug}
+			}
+			se := workspace.NewSurfaceEntry(entry)
+			if seen[se.Key] {
+				continue
+			}
+			seen[se.Key] = true
+			out = append(out, se)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		if di, dj := out[i].DisplayName(), out[j].DisplayName(); di != dj {
+			return di < dj
+		}
+		return out[i].WorkspaceID < out[j].WorkspaceID
+	})
+	return out
+}
+
+// FastGitWorktreeSurfaceEntries projects managed git worktree directories onto workspace.SurfaceEntry without
+// spawning git subprocesses (safe for the SessionStart hook hot path). Owner task slugs are matched from tasks.
+func FastGitWorktreeSurfaceEntries(vaultDir string, wts []string, tasks []ActiveTask, now time.Time) []workspace.SurfaceEntry {
+	if len(wts) == 0 {
+		return nil
+	}
+	ownerByDir := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		if t.EffectiveStatus(now) == "archived" || t.EffectiveStatus(now) == "cancelled" {
+			continue
+		}
+		for _, d := range t.AllWorktreeDirs() {
+			clean := canonicalCleanDir(d)
+			if clean != "" && ownerByDir[clean] == "" {
+				ownerByDir[clean] = t.TaskSlug
+			}
+		}
+	}
+	out := make([]workspace.SurfaceEntry, 0, len(wts))
+	for _, wt := range wts {
+		clean := canonicalCleanDir(wt)
+		if clean == "" {
+			continue
+		}
+		owner := ownerByDir[clean]
+		entry := workspace.LedgerEntry{
+			Provider:    workspace.CoreGitProviderID,
+			WorkspaceID: clean,
+			Name:        filepath.Base(clean),
+			Root:        clean,
+			WorkDir:     clean,
+			Ownership:   workspace.OwnershipOwned,
+			WriterTask:  owner,
+			Status: workspace.LedgerStatus{
+				State: workspace.StateUnknown,
+			},
+		}
+		if owner != "" {
+			entry.BoundTasks = []string{owner}
+		}
+		out = append(out, workspace.NewSurfaceEntry(entry))
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].DisplayName() < out[j].DisplayName()
+	})
+	return out
+}
+
 // WorkspaceSummary aggregates the ledger cache for `hq status`.
 type WorkspaceSummary struct {
 	Total       int            `json:"total"`

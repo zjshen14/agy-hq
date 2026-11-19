@@ -11,7 +11,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
-	"github.com/zjshen14/agy-hq/internal/worktree"
+	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
 // SpaceWidgetOutput holds safe declarative lines rendered by a built-in Console Space widget.
@@ -444,16 +444,29 @@ func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time) []Space
 			}
 			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Proactive Ideas", Lines: lines})
 
-		case "worktree_git_status":
-			wts, _ := worktree.List(vaultDir)
+		case "worktree_git_status", "active_workspaces", "workspaces_status":
+			entries := kernel.UnifiedSurfaceEntries(vaultDir, now)
 			var lines []string
-			for _, wt := range wts {
-				lines = append(lines, filepath.Base(wt))
+			for _, e := range entries {
+				label := e.DisplayName()
+				if e.Provider != workspace.CoreGitProviderID && e.ProviderShort != "" {
+					label = e.ProviderShort + ":" + label
+				}
+				if e.OpenChanges > 0 {
+					if e.NeedsOwner > 0 {
+						label += fmt.Sprintf(" (%d open, %d needs you)", e.OpenChanges, e.NeedsOwner)
+					} else {
+						label += fmt.Sprintf(" (%d open)", e.OpenChanges)
+					}
+				} else if e.State == workspace.StateDirty {
+					label += " (dirty)"
+				}
+				lines = append(lines, label)
 			}
 			if len(lines) == 0 {
-				lines = []string{"No active git worktrees."}
+				lines = []string{"No active workspaces."}
 			}
-			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Active Worktrees", Lines: lines})
+			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Active Workspaces", Lines: lines})
 
 		case "thesis_status":
 			invDir := filepath.Join(vaultDir, "notes", "investing")

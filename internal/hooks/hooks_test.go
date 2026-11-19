@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
@@ -617,7 +619,7 @@ func TestLeanAutoSessionStartGrayZoneGuardAndCompactionNudge(t *testing.T) {
 	fullStr := fullOut.String()
 	autoStr := autoOut.String()
 	for _, omittedSection := range []string{
-		"Active Git Worktrees",
+		"Active Workspaces",
 		"Tracked Task Conversations",
 		"Pending Approvals in Queue",
 		"Proactive Triggers",
@@ -1876,5 +1878,71 @@ func TestHandleStopFallsBackToPersistedLSWhenHookEnvUnreachable(t *testing.T) {
 	}
 	if diag := kernel.DiagnoseLSSession(vaultDir); !diag.PersistedReachable || diag.EffectiveSource != "persisted" {
 		t.Fatalf("expected dead hook env NOT to clobber healthy persisted LS session, got %+v", diag)
+	}
+}
+
+func TestSessionStartOverlayFullLengthWildcardAndExclusion(t *testing.T) {
+	vaultDir := t.TempDir()
+	packDir := filepath.Join(t.TempDir(), "acme-work")
+	tailMarker := "MANDATORY_TAIL_RULE_PAST_1900_BYTES"
+	body := "# Work Task Policy\n" + strings.Repeat("- Check primary sources and test evidence before finishing a task.\n", 28) + "\n## Mandatory Tail\n- " + tailMarker + "\n"
+	if len(body) < 1900 || len(body) > extension.MaxOverlayBytes {
+		t.Fatalf("unexpected overlay body len=%d", len(body))
+	}
+	if err := os.MkdirAll(filepath.Join(packDir, "hq-overlays"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(packDir, "plugin.json"), []byte(`{"name":"acme-work","version":"1.0.0"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(packDir, "hq-extension.json"), []byte(`{
+  "schema_version": 1,
+  "id": "acme-work",
+  "version": "1.0.0",
+  "components": {
+    "front_desk_overlays": [
+      {"id": "work-tasks", "path": "hq-overlays/work-tasks.md", "scope": ["task:*", "!task:repo-core"], "max_bytes": 4096}
+    ]
+  }
+}`), 0o644)
+	_ = os.WriteFile(filepath.Join(packDir, "hq-overlays", "work-tasks.md"), []byte(body), 0o644)
+
+	if _, err := extension.EnablePack(context.Background(), vaultDir, "acme-work", packDir, false); err != nil {
+		t.Fatalf("EnablePack: %v", err)
+	}
+	bundle, err := extension.BuildTrustBundle(vaultDir, "acme-work", packDir)
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	rawBundle, _ := json.Marshal(bundle)
+	if err := extension.ApplyTrustBundle(vaultDir, rawBundle); err != nil {
+		t.Fatalf("ApplyTrustBundle: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	billingConv := "11111111-1111-4111-8111-111111111111"
+	coreConv := "22222222-2222-4222-8222-222222222222"
+	_ = kernel.SetFrontDesk(vaultDir, "00000000-0000-4000-8000-000000000001", t.TempDir())
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "billing-fix", Title: "[Task:billing] Billing fix", Scope: "billing", Kind: "task",
+		ConversationID: billingConv, Status: "active", CreatedAt: now, LastUpdatedAt: now,
+	})
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "repo-core-fix", Title: "[Task:repo-core] Core fix", Scope: "repo-core", Kind: "task",
+		ConversationID: coreConv, Status: "active", CreatedAt: now, LastUpdatedAt: now,
+	})
+
+	var outBilling bytes.Buffer
+	if err := HandleSessionStart(strings.NewReader(fmt.Sprintf(`{"conversationId":%q}`, billingConv)), &outBilling, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart billing: %v", err)
+	}
+	if !strings.Contains(outBilling.String(), tailMarker) {
+		t.Fatalf("expected full ~2KB task overlay past 900B to be preserved in SessionStart, got:\n%s", outBilling.String())
+	}
+
+	var outCore bytes.Buffer
+	if err := HandleSessionStart(strings.NewReader(fmt.Sprintf(`{"conversationId":%q}`, coreConv)), &outCore, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart repo-core: %v", err)
+	}
+	if strings.Contains(outCore.String(), tailMarker) {
+		t.Fatalf("expected !task:repo-core exclusion to prevent overlay injection, got:\n%s", outCore.String())
 	}
 }

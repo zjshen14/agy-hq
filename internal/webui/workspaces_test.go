@@ -37,18 +37,18 @@ func readConsoleBody(t *testing.T, vaultDir string) string {
 	return stripConsoleTimestampHeader(string(raw))
 }
 
-func TestWorkspaceSurfacesAbsentWhenLedgerEmpty(t *testing.T) {
+func TestWorkspaceSurfacesUnifiedWhenEmpty(t *testing.T) {
 	vaultDir := t.TempDir()
 	now := time.Now().UTC().Format(time.RFC3339)
 	if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{TaskSlug: "ledger-fix", Title: "[Task:acme] Ledger fix", Kind: "task", ConversationID: "conv-ledger-fix", Status: "active", CreatedAt: now, LastUpdatedAt: now}); err != nil {
 		t.Fatalf("RegisterTask: %v", err)
 	}
 	before := readConsoleBody(t, vaultDir)
-	if strings.Contains(before, "🧩") || strings.Contains(before, "Active Workspaces") {
-		t.Fatalf("console must not render workspace surfaces without ledger entries:\n%s", before)
+	if strings.Contains(before, "Active Parallel Git Worktrees") {
+		t.Fatalf("console must not render the legacy separate git worktrees section:\n%s", before)
 	}
-	if !strings.Contains(before, "## 🌿 3. Active Parallel Git Worktrees (`0` Active)\n- None active in `local/worktrees/`.") {
-		t.Fatalf("git worktree section changed:\n%s", before)
+	if !strings.Contains(before, "## 🧩 3. Active Workspaces (`0` Active)\n- None active.") {
+		t.Fatalf("expected unified empty Active Workspaces section:\n%s", before)
 	}
 
 	// An existing but empty ledger keeps the console byte-identical.
@@ -66,13 +66,17 @@ func TestWorkspaceSurfacesAbsentWhenLedgerEmpty(t *testing.T) {
 		t.Fatalf("decode /api/state: %v", err)
 	}
 	if _, ok := raw["workspaces"]; ok {
-		t.Fatalf("/api/state must omit workspaces when the ledger is empty: %s", stateJSON)
+		t.Fatalf("/api/state must omit workspaces when none exist: %s", stateJSON)
 	}
 	if _, ok := raw["worktrees"]; !ok {
-		t.Fatalf("/api/state must keep the worktrees field: %s", stateJSON)
+		t.Fatalf("/api/state must keep the backwards-compatible worktrees field: %s", stateJSON)
 	}
-	if html := getWebUI(t, h, "/"); strings.Contains(html, "workspaces-list") || strings.Contains(html, "Active Workspaces (") {
-		t.Fatal("WebUI rendered workspace cards for an empty ledger")
+	html := getWebUI(t, h, "/")
+	if strings.Contains(html, "worktrees-list") || strings.Contains(html, "Active Parallel Git Worktrees") {
+		t.Fatal("WebUI must not render a duplicate Git Worktrees section")
+	}
+	if !strings.Contains(html, "Active Workspaces (0)") || !strings.Contains(html, "No active workspaces.") {
+		t.Fatal("WebUI must render the unified empty Active Workspaces section")
 	}
 }
 
@@ -120,8 +124,9 @@ func TestConsoleWorkspacesTableTaskBadgeAndWebUICards(t *testing.T) {
 
 	md := readConsoleBody(t, vaultDir)
 	for _, want := range []string{
-		"## 🧩 Active Workspaces (`3` Tracked · `3` Open Change(s) · `1` Needs You)\n| Provider | Workspace | Owner Task | State | Changes |\n| :--- | :--- | :--- | :--- | :--- |\n",
+		"## 🧩 3. Active Workspaces (`4` Active · `3` Open Change(s) · `1` Needs You)\n| Provider | Workspace | Owner Task | State | Changes |\n| :--- | :--- | :--- | :--- | :--- |\n",
 		"| `acme-monorepo/client` | `ledger-fix` (owned) | `ledger-fix` 🔒 | 🟠 `dirty` | 1 draft · 1 in review · 1 landed · 1 ⏳ needs you — [`c-4821`](https://review.example.com/c/4821) Fix \\| rounding; \\[redacted-injection-cue\\] \\<b\\>; `c-4822` Follow-up |",
+		"| `core/git-worktree` | `repo-ledger-fix` (owned) | `ledger-fix` | ",
 		"| `zeta-vcs/ws` | `shared-ws` (attached) | `perf-tune` | 🟢 `clean` · ⚠️ refresh failed | — |",
 		"| ⚠️ Orphaned with open changes · `acme-monorepo/client` | `old-fix` (owned) | `old-task` | 🟢 `clean` | 1 approved — `c-3000` |",
 		"*just now · 🌿 wt · 🧩 acme-monorepo · 1 draft · 1 in review · 1 landed · 1 ⏳ needs you*",
@@ -130,16 +135,16 @@ func TestConsoleWorkspacesTableTaskBadgeAndWebUICards(t *testing.T) {
 			t.Fatalf("CONSOLE.md missing %q:\n%s", want, md)
 		}
 	}
-	for _, leaked := range []string{"ignore previous instructions", "<b>", "provider timeout"} {
+	for _, leaked := range []string{"ignore previous instructions", "<b>", "provider timeout", "Active Parallel Git Worktrees"} {
 		if strings.Contains(md, leaked) {
-			t.Fatalf("CONSOLE.md leaked unsanitized provider text %q:\n%s", leaked, md)
+			t.Fatalf("CONSOLE.md contained unexpected text %q:\n%s", leaked, md)
 		}
 	}
-	idxWT := strings.Index(md, "## 🌿 3. Active Parallel Git Worktrees (`1` Active)")
-	idxWS := strings.Index(md, "## 🧩 Active Workspaces")
+	idx2 := strings.Index(md, "## 📋 2. Task Board")
+	idx3 := strings.Index(md, "## 🧩 3. Active Workspaces")
 	idx4 := strings.Index(md, "## 🕒 4. Recent Turn Activity")
-	if idxWT < 0 || idxWS <= idxWT || idx4 <= idxWS {
-		t.Fatalf("expected git worktrees < workspaces < recent activity, got %d %d %d:\n%s", idxWT, idxWS, idx4, md)
+	if idx2 < 0 || idx3 <= idx2 || idx4 <= idx3 {
+		t.Fatalf("expected task board < active workspaces < recent activity, got %d %d %d:\n%s", idx2, idx3, idx4, md)
 	}
 
 	invalidateStateCache(vaultDir)
@@ -148,8 +153,8 @@ func TestConsoleWorkspacesTableTaskBadgeAndWebUICards(t *testing.T) {
 	if err := json.Unmarshal([]byte(getWebUI(t, h, "/api/state")), &state); err != nil {
 		t.Fatalf("decode /api/state: %v", err)
 	}
-	if len(state.Workspaces) != 3 || len(state.Worktrees) != 1 {
-		t.Fatalf("expected 3 workspaces and the unchanged worktree list, got %d / %v", len(state.Workspaces), state.Worktrees)
+	if len(state.Workspaces) != 4 || len(state.Worktrees) != 1 {
+		t.Fatalf("expected 4 unified workspaces and 1 backwards-compatible worktree entry, got %d / %v", len(state.Workspaces), state.Worktrees)
 	}
 	first := state.Workspaces[0]
 	if first.Key != "acme-monorepo/client:ledger-fix" || first.OpenChanges != 2 || first.NeedsOwner != 1 || !first.LeaseEnforced || first.Summary == "" {
@@ -157,7 +162,8 @@ func TestConsoleWorkspacesTableTaskBadgeAndWebUICards(t *testing.T) {
 	}
 	html := getWebUI(t, h, "/")
 	for _, want := range []string{
-		"Active Workspaces (3)",
+		"Active Workspaces (4)",
+		`🌿 <code style="color:var(--accent)">repo-ledger-fix</code> <span class="muted">core/git-worktree</span>`,
 		`<a href="https://review.example.com/c/4821" target="_blank" rel="noopener noreferrer"><code>c-4821</code></a>`,
 		"Fix | rounding; [redacted-injection-cue] &lt;b&gt;",
 		"⚠️ Orphaned with open changes",
@@ -168,7 +174,19 @@ func TestConsoleWorkspacesTableTaskBadgeAndWebUICards(t *testing.T) {
 			t.Fatalf("WebUI HTML missing %q", want)
 		}
 	}
-	if strings.Contains(html, "<b>") {
-		t.Fatal("WebUI rendered an unescaped provider title")
+	if strings.Contains(html, "<b>") || strings.Contains(html, "worktrees-list") {
+		t.Fatal("WebUI rendered unescaped provider title or duplicate worktrees-list")
+	}
+
+	// Verify Console Space widget renders both git worktrees and provider workspaces under Active Workspaces.
+	_ = os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte("spaces:\n  - id: eng\n    title: Eng\n    schedule: \"daily 00:00-23:59 UTC\"\n    widgets: [worktree_git_status]\n"), 0o600)
+	spaces, err := ActiveSpaces(vaultDir, time.Now().UTC())
+	if err != nil || len(spaces) != 1 || len(spaces[0].RenderedCards) != 1 {
+		t.Fatalf("expected 1 active space with 1 rendered widget, got err=%v spaces=%+v", err, spaces)
+	}
+	card := spaces[0].RenderedCards[0]
+	joined := strings.Join(card.Lines, " | ")
+	if card.Title != "Active Workspaces" || !strings.Contains(joined, "repo-ledger-fix") || !strings.Contains(joined, "acme-monorepo:ledger-fix (2 open, 1 needs you)") {
+		t.Fatalf("unexpected unified space widget card: %+v", card)
 	}
 }

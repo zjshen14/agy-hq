@@ -358,7 +358,7 @@ func TestSpacesScheduleIdeasAndPIIBadge(t *testing.T) {
 	mdBytes, _ := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
 	md := string(mdBytes)
 	idx2 := strings.Index(md, "## 📋 2. Task Board")
-	idx3 := strings.Index(md, "## 🌿 3. Active Parallel Git Worktrees")
+	idx3 := strings.Index(md, "## 🧩 3. Active Workspaces")
 	idxSpaces := strings.Index(md, "## 🗂️ Active Console Spaces")
 	idx4 := strings.Index(md, "## 🕒 4. Recent Turn Activity")
 	if idx2 < 0 || idx3 <= idx2 || idxSpaces <= idx3 || idx4 <= idxSpaces {

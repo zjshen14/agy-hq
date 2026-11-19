@@ -1226,7 +1226,7 @@ func TestCUJ11_SubagentLifecycleAndTaskboardTracking(t *testing.T) {
 	consoleBytes, _ = os.ReadFile(filepath.Join(artDesk, "hq_console.md"))
 	consoleStr = string(consoleBytes)
 	tbStart := strings.Index(consoleStr, "## 📋 2. Task Board")
-	tbEnd := strings.Index(consoleStr, "## 🌿 3. Active Parallel Git Worktrees")
+	tbEnd := strings.Index(consoleStr, "## 🧩 3. Active Workspaces")
 	if tbStart >= 0 && tbEnd > tbStart {
 		tbSection := consoleStr[tbStart:tbEnd]
 		if strings.Contains(tbSection, "Child Helper") || strings.Contains(tbSection, nestedConv) {
@@ -6161,11 +6161,11 @@ func TestCUJ41_PluggableWorkspaceProviders(t *testing.T) {
 	writeJSON(tasksPath, []interface{}{legacy}, 0o644)
 	legacyWant, _ := json.Marshal(legacy)
 
-	// 1. An empty ledger keeps the console byte-identical: provider surfaces are additive.
+	// 1. An empty ledger keeps the unified console byte-identical (legacy git worktrees still render under Active Workspaces).
 	noLedger := consoleBody()
 	writeJSON(filepath.Join(env.vaultDir, "memory", "workspaces.json"), map[string]interface{}{"schema_version": 1, "entries": map[string]interface{}{}}, 0o600)
-	if withEmptyLedger := consoleBody(); withEmptyLedger != noLedger || strings.Contains(noLedger, "Active Workspaces") {
-		t.Fatalf("an empty workspace ledger must leave CONSOLE.md byte-identical:\n--- no ledger\n%s\n--- empty ledger\n%s", noLedger, withEmptyLedger)
+	if withEmptyLedger := consoleBody(); withEmptyLedger != noLedger || !strings.Contains(noLedger, "## 🧩 3. Active Workspaces") {
+		t.Fatalf("an empty workspace ledger must leave CONSOLE.md byte-identical and show unified Active Workspaces:\n--- no ledger\n%s\n--- empty ledger\n%s", noLedger, withEmptyLedger)
 	}
 
 	// 2. Pack contract: strict manifest parsing and every LintPack rejection, then a clean manifest.
@@ -6560,7 +6560,7 @@ printf '00000000-0000-4000-8000-%%012d\n' "$n"
 	if out, err := hq("", "status"); err != nil || !strings.Contains(out, "Workspaces: 2 (git: 0, acme-monorepo/client: 2) · open changes: 1 · needs you: 1") {
 		t.Fatalf("unexpected hq status workspace summary: err=%v out=%s", err, out)
 	}
-	if console := consoleBody(); !strings.Contains(console, "## 🧩 Active Workspaces") || !strings.Contains(console, "⚠️ Orphaned with open changes") {
+	if console := consoleBody(); !strings.Contains(console, "## 🧩 3. Active Workspaces") || !strings.Contains(console, "⚠️ Orphaned with open changes") {
 		t.Fatalf("CONSOLE.md must list the orphaned owned workspace:\n%s", console)
 	}
 

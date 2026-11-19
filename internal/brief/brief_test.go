@@ -12,6 +12,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
 func setupBriefTestVault(t *testing.T) string {
@@ -243,5 +244,50 @@ func TestFormatQuarantinedSummariesAndModePromptRejection(t *testing.T) {
 	}
 	if !strings.Contains(fenced, "<<<HQ_BRIEF_NONCE_") || strings.Contains(fenced, "<script>") || strings.Contains(fenced, "prop-123-fake") {
 		t.Fatalf("unexpected fenced output: %s", fenced)
+	}
+}
+
+func TestCollectIncludesUnifiedActiveWorkspaces(t *testing.T) {
+	vaultDir := setupBriefTestVault(t)
+	if err := os.MkdirAll(filepath.Join(vaultDir, "worktrees", "repo-alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsRoot := filepath.Join(t.TempDir(), "ws-billing")
+	if err := workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
+		l.Put(workspace.LedgerEntry{
+			Provider:    "acme-monorepo/client",
+			WorkspaceID: "ws-billing",
+			Root:        wsRoot,
+			WorkDir:     filepath.Join(wsRoot, "src"),
+			Ownership:   workspace.OwnershipAttached,
+			WriterTask:  "billing-fix",
+			BoundTasks:  []string{"billing-fix"},
+			Status: workspace.LedgerStatus{
+				State: workspace.StateDirty,
+				Changes: []workspace.ChangeRef{
+					{ID: "c-101", State: workspace.ChangeInReview, NeedsOwner: true},
+				},
+			},
+		})
+		return true, nil
+	}); err != nil {
+		t.Fatalf("UpdateLedger: %v", err)
+	}
+
+	pkt, err := Collect(context.Background(), vaultDir, CollectOptions{
+		Lease: false,
+		Now:   time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(pkt.ActiveWorktrees) != 1 || len(pkt.ActiveWorkspaces) != 2 {
+		t.Fatalf("expected 1 legacy worktree and 2 unified active workspaces, got worktrees=%v workspaces=%+v", pkt.ActiveWorktrees, pkt.ActiveWorkspaces)
+	}
+	if pkt.ActiveWorkspaces[0].Provider != "acme-monorepo/client" || pkt.ActiveWorkspaces[0].OpenChanges != 1 || pkt.ActiveWorkspaces[0].NeedsOwner != 1 {
+		t.Fatalf("unexpected first brief workspace summary: %+v", pkt.ActiveWorkspaces[0])
+	}
+	if pkt.ActiveWorkspaces[1].Provider != workspace.CoreGitProviderID || pkt.ActiveWorkspaces[1].Name != "repo-alpha" {
+		t.Fatalf("unexpected second brief workspace summary: %+v", pkt.ActiveWorkspaces[1])
 	}
 }

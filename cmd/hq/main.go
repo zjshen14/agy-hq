@@ -3641,6 +3641,8 @@ func runObsCLI(vaultDir string, args []string) {
 		fs := flag.NewFlagSet("obs budget", flag.ExitOnError)
 		setDailyUncached := fs.Int64("set-daily-uncached", 0, "Set daily uncached token budget (e.g. 15000000)")
 		setDailyDeep := fs.Int64("set-daily-deep", 0, "Set daily deep-tier uncached token budget (e.g. 5000000)")
+		disableTokenCircuit := fs.Bool("disable-token-circuit", false, "Disable daily token budget alerts and auto-spawn circuit breaker (telemetry remains active)")
+		enableTokenCircuit := fs.Bool("enable-token-circuit", false, "Re-enable daily token budget alerts and auto-spawn circuit breaker")
 		setWarnCtx := fs.Int64("set-warn-context", 0, "Set Front Desk context warning threshold (default 120000)")
 		setNudgeCtx := fs.Int64("set-nudge-context", 0, "Set Front Desk SessionStart /compact nudge threshold (default 160000)")
 		setCritCtx := fs.Int64("set-crit-context", 0, "Set Front Desk critical context threshold (default 180000)")
@@ -3655,8 +3657,19 @@ func runObsCLI(vaultDir string, args []string) {
 			targetMaxSpawns = *maxDailySpawnsAlias
 		}
 
+		if *disableTokenCircuit && *enableTokenCircuit {
+			fmt.Fprintln(os.Stderr, "hq obs budget: --disable-token-circuit and --enable-token-circuit cannot be combined")
+			os.Exit(2)
+		}
 		cfg := obs.LoadBudgetConfig(vaultDir)
 		updated := false
+		if *disableTokenCircuit {
+			cfg.TokenCircuitDisabled = true
+			updated = true
+		} else if *enableTokenCircuit {
+			cfg.TokenCircuitDisabled = false
+			updated = true
+		}
 		if *setDailyUncached > 0 {
 			cfg.DailyUncachedBudget = *setDailyUncached
 			updated = true
@@ -3713,8 +3726,13 @@ func runObsCLI(vaultDir string, args []string) {
 			circuitLabel = "OPEN (" + qState.CircuitReason + ")"
 		}
 		fmt.Printf("HQ Token Budget & Context Guard Configuration (local/memory/obs/budget.json + config.yaml)\n")
-		fmt.Printf("  Daily Uncached Budget:      %s tokens\n", obs.FormatTokensCompact(cfg.DailyUncachedBudget))
-		fmt.Printf("  Daily Deep Uncached Budget: %s tokens\n", obs.FormatTokensCompact(cfg.DailyDeepUncachedBudget))
+		if cfg.TokenCircuitDisabled {
+			fmt.Printf("  Daily Token Budget Guard:   DISABLED (telemetry only; configured reference %s / deep %s)\n",
+				obs.FormatTokensCompact(cfg.DailyUncachedBudget), obs.FormatTokensCompact(cfg.DailyDeepUncachedBudget))
+		} else {
+			fmt.Printf("  Daily Uncached Budget:      %s tokens\n", obs.FormatTokensCompact(cfg.DailyUncachedBudget))
+			fmt.Printf("  Daily Deep Uncached Budget: %s tokens\n", obs.FormatTokensCompact(cfg.DailyDeepUncachedBudget))
+		}
 		fmt.Printf("  Daily Auto Spawn Budget:    %d / %d auto spawns today (+%d interactive, circuit=%s)\n",
 			qState.EffectiveAutoSpawns(), qState.MaxDailySpawns, qState.InteractiveSpawnsToday, circuitLabel)
 		fmt.Printf("  Front Desk Context Guards:  WARN=%s | NUDGE=%s | CRITICAL=%s\n",

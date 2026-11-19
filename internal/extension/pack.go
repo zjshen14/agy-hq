@@ -412,9 +412,12 @@ func LintPack(packDir string) ([]string, error) {
 		}
 	}
 
-	// 4. Validate front_desk_overlays size and safety-bypass phrases
+	// 4. Validate front_desk_overlays size, scope patterns, and safety-bypass phrases
 	totalOvBytes := 0
 	for _, ov := range m.Components.FrontDeskOverlays {
+		if err := validateOverlayScopes(ov.Scope); err != nil {
+			return nil, fmt.Errorf("front_desk_overlay %s invalid scope: %w", ov.Path, err)
+		}
 		full := filepath.Join(packDir, filepath.FromSlash(ov.Path))
 		raw, err := os.ReadFile(full)
 		if err != nil {
@@ -984,6 +987,83 @@ func LoadActiveTrustedPacks(vaultDir string) []DiscoveredPack {
 	return out
 }
 
+func validateOverlayScopes(patterns []string) error {
+	if len(patterns) == 0 {
+		return nil
+	}
+	hasPositive := false
+	for _, raw := range patterns {
+		sc := strings.TrimSpace(raw)
+		if sc == "" {
+			return fmt.Errorf("empty scope pattern")
+		}
+		if strings.HasPrefix(sc, "!") {
+			if strings.TrimSpace(strings.TrimPrefix(sc, "!")) == "" {
+				return fmt.Errorf("negated scope pattern %q is missing a target", raw)
+			}
+			continue
+		}
+		hasPositive = true
+	}
+	if !hasPositive {
+		return fmt.Errorf("scope list must include at least one non-negated pattern (e.g. \"task:*\")")
+	}
+	return nil
+}
+
+// matchScopeWildcard matches a simple '*' wildcard pattern against val (crossing '/' if present).
+func matchScopeWildcard(pattern, val string) bool {
+	if pattern == "*" {
+		return true
+	}
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == val
+	}
+	if !strings.HasPrefix(val, parts[0]) {
+		return false
+	}
+	rest := val[len(parts[0]):]
+	for i := 1; i < len(parts)-1; i++ {
+		if parts[i] == "" {
+			continue
+		}
+		idx := strings.Index(rest, parts[i])
+		if idx < 0 {
+			return false
+		}
+		rest = rest[idx+len(parts[i]):]
+	}
+	return strings.HasSuffix(rest, parts[len(parts)-1])
+}
+
+// matchOverlayScope evaluates an overlay's scope list against roleScope ("front_desk" or "task:<scope>").
+// Empty scope defaults to "front_desk". Supports exact matches, '*' wildcards (e.g. "task:*"), and
+// '!' exclusions (e.g. "!task:repo-core"); any matching exclusion overrides positive matches.
+func matchOverlayScope(patterns []string, roleScope string) bool {
+	if len(patterns) == 0 {
+		return roleScope == "front_desk"
+	}
+	matchedPositive := false
+	for _, raw := range patterns {
+		sc := strings.TrimSpace(raw)
+		if sc == "" {
+			continue
+		}
+		if strings.HasPrefix(sc, "!") {
+			excl := strings.TrimSpace(strings.TrimPrefix(sc, "!"))
+			if excl != "" && matchScopeWildcard(excl, roleScope) {
+				return false
+			}
+			continue
+		}
+		if matchScopeWildcard(sc, roleScope) {
+			matchedPositive = true
+		}
+	}
+	return matchedPositive
+}
+
 // LoadActiveFrontDeskOverlays loads role-scoped markdown overlays from enabled & trusted companion packs,
 // enforcing per-overlay (<= 4 KB) and aggregate (<= 16 KB) budgets.
 func LoadActiveFrontDeskOverlays(vaultDir, roleScope string) []string {
@@ -996,22 +1076,19 @@ func LoadActiveFrontDeskOverlays(vaultDir, roleScope string) []string {
 	totalBytes := 0
 	for _, dp := range packs {
 		for _, ov := range dp.Manifest.Components.FrontDeskOverlays {
-			matchedScope := len(ov.Scope) == 0 && roleScope == "front_desk"
-			for _, sc := range ov.Scope {
-				if sc == roleScope || sc == "*" {
-					matchedScope = true
-					break
-				}
-			}
-			if !matchedScope {
+			if !matchOverlayScope(ov.Scope, roleScope) {
 				continue
 			}
 			full := filepath.Join(dp.Path, filepath.FromSlash(ov.Path))
 			if _, vErr := VerifyTrustedFile(vaultDir, "pack:"+dp.ID, full); vErr != nil {
 				continue
 			}
+			capBytes := MaxOverlayBytes
+			if ov.MaxBytes > 0 && ov.MaxBytes < capBytes {
+				capBytes = ov.MaxBytes
+			}
 			raw, rErr := os.ReadFile(full)
-			if rErr != nil || len(raw) == 0 || len(raw) > MaxOverlayBytes {
+			if rErr != nil || len(raw) == 0 || len(raw) > capBytes {
 				continue
 			}
 			if totalBytes+len(raw) > MaxTotalOverlaysBytes {

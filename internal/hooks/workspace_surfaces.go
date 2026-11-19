@@ -271,12 +271,18 @@ func workspaceCountsLabel(s workspace.SurfaceEntry) string {
 	return "changes: " + s.Summary
 }
 
-// formatActiveWorkspacesSection renders the SessionStart "## Active Workspaces" section: provider ledger
-// entries bound to live (non-archived, non-cancelled) Layer-1 tasks, grouped by provider, with at most
-// maxActiveWorkspaceLines body lines plus a "(+N more: hq workspace list)" footer. It shows IDs, enums, and
-// counts only (RFC-0025 §11.3). It returns "" when no ledger entry is bound to a live task.
+// formatActiveWorkspacesSection renders the SessionStart "## Active Workspaces" section for ledger entries only.
 func formatActiveWorkspacesSection(l workspace.Ledger, layer1 []kernel.ActiveTask, now time.Time) string {
-	if len(l.Entries) == 0 {
+	return formatUnifiedActiveWorkspacesSection(l, nil, layer1, now)
+}
+
+// formatUnifiedActiveWorkspacesSection renders the unified SessionStart "## Active Workspaces" section:
+// managed git worktrees plus provider ledger entries bound to live (non-archived, non-cancelled) Layer-1
+// tasks, grouped by provider, with at most maxActiveWorkspaceLines body lines plus a
+// "(+N more: hq workspace list)" footer. Provider entries show IDs, enums, and counts only (RFC-0025 §11.3).
+// It returns "" when there are no git worktrees and no live-task-bound ledger entries.
+func formatUnifiedActiveWorkspacesSection(l workspace.Ledger, gitEntries []workspace.SurfaceEntry, layer1 []kernel.ActiveTask, now time.Time) string {
+	if len(l.Entries) == 0 && len(gitEntries) == 0 {
 		return ""
 	}
 	var live []kernel.ActiveTask
@@ -287,55 +293,65 @@ func formatActiveWorkspacesSection(l workspace.Ledger, layer1 []kernel.ActiveTas
 			live = append(live, t)
 		}
 	}
-	if len(live) == 0 {
-		return ""
-	}
 	type row struct {
 		s      workspace.SurfaceEntry
 		owners []string
+		isGit  bool
 	}
 	var providers []string
 	groups := make(map[string][]row)
-	keys := make([]string, 0, len(l.Entries))
-	for k := range l.Entries {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		e := l.Entries[key]
-		var owners []string
-		addOwner := func(slug string) {
-			slug = strings.TrimSpace(slug)
-			if slug == "" || !liveSlugs[slug] {
-				return
-			}
-			for _, o := range owners {
-				if o == slug {
+	if len(live) > 0 && len(l.Entries) > 0 {
+		keys := make([]string, 0, len(l.Entries))
+		for k := range l.Entries {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			e := l.Entries[key]
+			var owners []string
+			addOwner := func(slug string) {
+				slug = strings.TrimSpace(slug)
+				if slug == "" || !liveSlugs[slug] {
 					return
 				}
+				for _, o := range owners {
+					if o == slug {
+						return
+					}
+				}
+				owners = append(owners, slug)
 			}
-			owners = append(owners, slug)
-		}
-		addOwner(e.WriterTask)
-		for _, t := range live {
-			for _, b := range t.Workspaces {
-				if b.Key == key {
-					addOwner(t.TaskSlug)
-					break
+			addOwner(e.WriterTask)
+			for _, t := range live {
+				for _, b := range t.Workspaces {
+					if b.Key == key {
+						addOwner(t.TaskSlug)
+						break
+					}
 				}
 			}
+			for _, t := range e.BoundTasks {
+				addOwner(t)
+			}
+			if len(owners) == 0 {
+				continue
+			}
+			s := workspace.NewSurfaceEntry(e)
+			if _, ok := groups[s.Provider]; !ok {
+				providers = append(providers, s.Provider)
+			}
+			groups[s.Provider] = append(groups[s.Provider], row{s: s, owners: owners})
 		}
-		for _, t := range e.BoundTasks {
-			addOwner(t)
+	}
+	for _, ge := range gitEntries {
+		if _, ok := groups[ge.Provider]; !ok {
+			providers = append(providers, ge.Provider)
 		}
-		if len(owners) == 0 {
-			continue
+		var owners []string
+		if ge.WriterTask != "" {
+			owners = []string{ge.WriterTask}
 		}
-		s := workspace.NewSurfaceEntry(e)
-		if _, ok := groups[s.Provider]; !ok {
-			providers = append(providers, s.Provider)
-		}
-		groups[s.Provider] = append(groups[s.Provider], row{s: s, owners: owners})
+		groups[ge.Provider] = append(groups[ge.Provider], row{s: ge, owners: owners, isGit: true})
 	}
 	if len(providers) == 0 {
 		return ""
@@ -362,24 +378,36 @@ func formatActiveWorkspacesSection(l workspace.Ledger, layer1 []kernel.ActiveTas
 		}
 		headerAdded := false
 		for _, r := range rows {
-			var ownerParts []string
-			for _, o := range r.owners {
-				part := fmt.Sprintf("`%s`", hookInline(o, 128))
-				if o == r.s.WriterTask {
-					if r.s.LeaseEnforced {
-						part += " (writer, lease enforced)"
-					} else {
-						part += " (writer)"
-					}
+			var line string
+			if r.isGit {
+				parts := []string{fmt.Sprintf("`%s` (%s)", hookInline(r.s.DisplayName(), 128), r.s.Ownership)}
+				if len(r.owners) > 0 {
+					parts = append(parts, fmt.Sprintf("task `%s`", hookInline(r.owners[0], 128)))
 				}
-				ownerParts = append(ownerParts, part)
+				if safeRoot := workspace.SafeInlinePath(r.s.Root); safeRoot != "" {
+					parts = append(parts, fmt.Sprintf("(%s)", safeRoot))
+				}
+				line = "  - " + strings.Join(parts, " · ")
+			} else {
+				var ownerParts []string
+				for _, o := range r.owners {
+					part := fmt.Sprintf("`%s`", hookInline(o, 128))
+					if o == r.s.WriterTask {
+						if r.s.LeaseEnforced {
+							part += " (writer, lease enforced)"
+						} else {
+							part += " (writer)"
+						}
+					}
+					ownerParts = append(ownerParts, part)
+				}
+				label := "task"
+				if len(ownerParts) > 1 {
+					label = "tasks"
+				}
+				line = fmt.Sprintf("  - `%s` (%s) · %s %s · %s · %s",
+					hookInline(r.s.DisplayName(), 128), r.s.Ownership, label, strings.Join(ownerParts, ", "), workspaceStateLabel(r.s), workspaceCountsLabel(r.s))
 			}
-			label := "task"
-			if len(ownerParts) > 1 {
-				label = "tasks"
-			}
-			line := fmt.Sprintf("  - `%s` (%s) · %s %s · %s · %s",
-				hookInline(r.s.WorkspaceID, 128), r.s.Ownership, label, strings.Join(ownerParts, ", "), workspaceStateLabel(r.s), workspaceCountsLabel(r.s))
 			reserve := 0
 			if !headerAdded {
 				reserve = 1

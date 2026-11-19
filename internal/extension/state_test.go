@@ -352,3 +352,67 @@ func TestDispatchResolve_VaultSkillOverlaysAndQuarantineProtection(t *testing.T)
 		t.Fatalf("expected LoadGeneralOverlayRules capped at 5, got %d", len(genRules))
 	}
 }
+
+func TestOverlayWildcardAndExclusionScopes(t *testing.T) {
+	vaultDir := t.TempDir()
+	packDir := filepath.Join(t.TempDir(), "acme-work")
+	body := "# Work Task Policy\n" + strings.Repeat("- Always verify changes against live tests.\n", 45)
+	if len(body) <= 1800 || len(body) >= MaxOverlayBytes {
+		t.Fatalf("unexpected fixture size %d", len(body))
+	}
+	writePackFiles(t, packDir, map[string]string{
+		"plugin.json": `{"name":"acme-work","version":"1.0.0"}`,
+		"hq-extension.json": `{
+  "schema_version": 1,
+  "id": "acme-work",
+  "version": "1.0.0",
+  "components": {
+    "front_desk_overlays": [
+      {"id": "task-wild", "path": "hq-overlays/tasks.md", "scope": ["task:*", "!task:repo-core"], "max_bytes": 4096}
+    ]
+  }
+}`,
+		"hq-overlays/tasks.md": body,
+	})
+	if _, err := EnablePack(context.Background(), vaultDir, "acme-work", packDir, false); err != nil {
+		t.Fatalf("EnablePack: %v", err)
+	}
+	bundle, err := BuildTrustBundle(vaultDir, "acme-work", packDir)
+	if err != nil {
+		t.Fatalf("BuildTrustBundle: %v", err)
+	}
+	rawBundle, _ := json.Marshal(bundle)
+	if err := ApplyTrustBundle(vaultDir, rawBundle); err != nil {
+		t.Fatalf("ApplyTrustBundle: %v", err)
+	}
+
+	if got := LoadActiveFrontDeskOverlays(vaultDir, "task:billing"); len(got) != 1 || !strings.Contains(got[0], "Always verify changes") {
+		t.Fatalf("expected task:* wildcard to match task:billing, got %+v", got)
+	}
+	if got := LoadActiveFrontDeskOverlays(vaultDir, "task:repo-core"); len(got) != 0 {
+		t.Fatalf("expected !task:repo-core exclusion to suppress overlay, got %+v", got)
+	}
+	if got := LoadActiveFrontDeskOverlays(vaultDir, "front_desk"); len(got) != 0 {
+		t.Fatalf("expected task:* not to match front_desk, got %+v", got)
+	}
+
+	// Reject malformed / exclusion-only scope lists during LintPack.
+	badPack := filepath.Join(t.TempDir(), "bad-scope")
+	writePackFiles(t, badPack, map[string]string{
+		"plugin.json": `{"name":"bad-scope","version":"1.0.0"}`,
+		"hq-extension.json": `{
+  "schema_version": 1,
+  "id": "bad-scope",
+  "version": "1.0.0",
+  "components": {
+    "front_desk_overlays": [
+      {"id": "only-excl", "path": "hq-overlays/tasks.md", "scope": ["!task:repo-core"]}
+    ]
+  }
+}`,
+		"hq-overlays/tasks.md": "# Policy\n",
+	})
+	if _, err := LintPack(badPack); err == nil || !strings.Contains(err.Error(), "non-negated") {
+		t.Fatalf("expected LintPack to reject exclusion-only scope, got %v", err)
+	}
+}

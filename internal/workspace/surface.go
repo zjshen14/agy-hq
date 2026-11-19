@@ -142,6 +142,15 @@ func LoadSurfaceEntries(vaultDir string) ([]SurfaceEntry, error) {
 	return SurfaceEntries(l), nil
 }
 
+// DisplayName returns the compact workspace name for human-facing tables and cards (Name when distinct from
+// WorkspaceID, such as a git worktree basename, otherwise WorkspaceID).
+func (s SurfaceEntry) DisplayName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.WorkspaceID
+}
+
 // Owners returns the tasks associated with the entry: the writer first, then bound tasks, then the creator.
 func (s SurfaceEntry) Owners() []string {
 	var out []string

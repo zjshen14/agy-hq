@@ -353,7 +353,22 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 	} else {
 		obsSum = obs.BuildDashboardSummary(vaultDir, time.Time{})
 	}
-	if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100 {
+	if obsSum.Budget.TokenCircuitDisabled {
+		status := "PASS"
+		if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.FrontDeskContextStatus == "WARN" {
+			status = "WARN"
+		}
+		results = append(results, CheckResult{
+			Name:   "Token Budget & Context Health",
+			Status: status,
+			Detail: fmt.Sprintf("Today uncached %s (budget circuit disabled), CHR %.1f%%, Front Desk context %s / 256k (%s)",
+				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
+				obsSum.TodayCacheHitRatio*100.0,
+				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
+				obsSum.FrontDeskContextStatus,
+			),
+		})
+	} else if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100 {
 		results = append(results, CheckResult{
 			Name:   "Token Budget & Context Health",
 			Status: "WARN",

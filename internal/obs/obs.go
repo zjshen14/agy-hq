@@ -1305,11 +1305,13 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 		}
 	}
 
-	if budget.DailyUncachedBudget > 0 {
-		sum.DailyBudgetPct = (float64(sum.TodayUncachedTokens) / float64(budget.DailyUncachedBudget)) * 100.0
-	}
-	if budget.DailyDeepUncachedBudget > 0 {
-		sum.DeepBudgetPct = (float64(sum.TodayDeepUncachedTokens) / float64(budget.DailyDeepUncachedBudget)) * 100.0
+	if !budget.TokenCircuitDisabled {
+		if budget.DailyUncachedBudget > 0 {
+			sum.DailyBudgetPct = (float64(sum.TodayUncachedTokens) / float64(budget.DailyUncachedBudget)) * 100.0
+		}
+		if budget.DailyDeepUncachedBudget > 0 {
+			sum.DeepBudgetPct = (float64(sum.TodayDeepUncachedTokens) / float64(budget.DailyDeepUncachedBudget)) * 100.0
+		}
 	}
 
 	allAnomalies := EvaluateAnomalies(vaultDir, idx, budget, now)

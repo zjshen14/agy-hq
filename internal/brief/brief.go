@@ -168,6 +168,18 @@ type TokenDigest struct {
 	EstCostUSD  float64 `json:"est_cost_usd"`
 }
 
+// BriefWorkspaceSummary is a compact read-only digest of one active workspace (git worktree or provider workspace).
+type BriefWorkspaceSummary struct {
+	Provider    string `json:"provider"`
+	Name        string `json:"name"`
+	Root        string `json:"root"`
+	OwnerTask   string `json:"owner_task,omitempty"`
+	State       string `json:"state"`
+	OpenChanges int    `json:"open_changes"`
+	NeedsOwner  int    `json:"needs_owner"`
+	Summary     string `json:"summary,omitempty"`
+}
+
 // Packet is the structured Morning Brief data packet returned by `hq brief collect`.
 type Packet struct {
 	SchemaVersion         int                            `json:"schema_version"`
@@ -180,6 +192,7 @@ type Packet struct {
 	DueGoals              []kernel.Goal                  `json:"due_goals"`
 	OverdueWaiting        []kernel.OverdueWaitingSummary `json:"overdue_waiting"`
 	ActiveWorktrees       []string                       `json:"active_worktrees"`
+	ActiveWorkspaces      []BriefWorkspaceSummary        `json:"active_workspaces"`
 	TokenTelemetry        *TokenDigest                   `json:"token_telemetry,omitempty"`
 	Connectors            []ConnectorBriefSection        `json:"connectors"`
 	Extensions            []ExtensionBriefSection        `json:"extensions"`
@@ -458,16 +471,17 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 	callerConv := resolveOptionalCallerConv(vaultDir, opts.FlagConv)
 
 	pkt := Packet{
-		SchemaVersion:   1,
-		GeneratedAt:     now.UTC().Format(time.RFC3339),
-		Mode:            "peek",
-		OutboxItems:     []OutboxBriefCard{},
-		Proposals:       []ProposalAlert{},
-		DueGoals:        []kernel.Goal{},
-		OverdueWaiting:  []kernel.OverdueWaitingSummary{},
-		ActiveWorktrees: []string{},
-		Connectors:      []ConnectorBriefSection{},
-		Extensions:      []ExtensionBriefSection{},
+		SchemaVersion:    1,
+		GeneratedAt:      now.UTC().Format(time.RFC3339),
+		Mode:             "peek",
+		OutboxItems:      []OutboxBriefCard{},
+		Proposals:        []ProposalAlert{},
+		DueGoals:         []kernel.Goal{},
+		OverdueWaiting:   []kernel.OverdueWaitingSummary{},
+		ActiveWorktrees:  []string{},
+		ActiveWorkspaces: []BriefWorkspaceSummary{},
+		Connectors:       []ConnectorBriefSection{},
+		Extensions:       []ExtensionBriefSection{},
 	}
 
 	// 1. Non-destructive Outbox peek vs. caller-bound lease
@@ -519,6 +533,18 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 	}
 	if wts, wErr := worktree.List(vaultDir); wErr == nil && wts != nil {
 		pkt.ActiveWorktrees = wts
+	}
+	for _, ws := range kernel.UnifiedSurfaceEntries(vaultDir, now) {
+		pkt.ActiveWorkspaces = append(pkt.ActiveWorkspaces, BriefWorkspaceSummary{
+			Provider:    ws.Provider,
+			Name:        ws.DisplayName(),
+			Root:        ws.Root,
+			OwnerTask:   ws.WriterTask,
+			State:       string(ws.State),
+			OpenChanges: ws.OpenChanges,
+			NeedsOwner:  ws.NeedsOwner,
+			Summary:     ws.Summary,
+		})
 	}
 	if rep, oErr := obs.BuildSummaryReport(vaultDir, "today", "tier", now); oErr == nil && rep != nil {
 		pkt.TokenTelemetry = &TokenDigest{
