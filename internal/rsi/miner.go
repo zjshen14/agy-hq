@@ -335,7 +335,7 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 
 	if dateDirs, err := os.ReadDir(journalRoot); err == nil {
 		for _, d := range dateDirs {
-			if !d.IsDir() {
+			if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || d.Name() == "archive" {
 				continue
 			}
 			files, _ := os.ReadDir(filepath.Join(journalRoot, d.Name()))
@@ -350,6 +350,9 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 				}
 				var je hooks.JournalEntry
 				if err := json.Unmarshal(raw, &je); err != nil {
+					continue
+				}
+				if t, ok := tasksByConv[je.ConversationID]; ok && t.Ephemeral {
 					continue
 				}
 				if !cutoff.IsZero() && je.Timestamp != "" {

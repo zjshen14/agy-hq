@@ -5,14 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 10
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -177,6 +179,15 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	if prev.Version > 0 && prev.Version < 9 {
 		seededStarters := seedActiveExistingVaultStarters(vaultDir, templateDir)
 		recordStep("v9_vault_skill_overlay", fmt.Sprintf("Initialized Vault skill user space & auto-seeded %d active domain starter skill(s): %s", len(seededStarters), strings.Join(seededStarters, ", ")))
+	}
+
+	// Migration v9 -> v10: Memory v2 Orthogonal Vault & Lifecycle (RFC-0024) —
+	// archive subdirs (0700), compact facts.jsonl (0600), strip redundant ## Knowledge Map from MEMORY.md
+	// when all slugs exist on disk in memory/topics/, sweep orphan progress files, and upgrade unmodified
+	// sleep-consolidate trigger to daemon_gatekeeper with dream-plan --precheck.
+	if prev.Version < 10 {
+		v10Summary := migrateV10MemoryV2(vaultDir)
+		recordStep("v10_memory_v2_orthogonal_vault", v10Summary)
 	}
 
 	// 3. Synchronize unedited installed starter templates (dpkg-style, preserving RSI rule blocks)
@@ -517,6 +528,181 @@ func seedActiveExistingVaultStarters(vaultDir, templateDir string) []string {
 		trySeed("filing-diff")
 	}
 	return seeded
+}
+
+var reTopicSlugRef = regexp.MustCompile(`topics/([a-z0-9][a-z0-9\-_]*)\.md`)
+
+func migrateV10MemoryV2(vaultDir string) string {
+	for _, rel := range []string{
+		filepath.Join("memory", "journal", "archive"),
+		filepath.Join("memory", "progress", "archived"),
+		filepath.Join("memory", "topics", "archived"),
+		filepath.Join("memory", "entities", "archived"),
+		filepath.Join("notes", "briefs", "archive"),
+	} {
+		_ = os.MkdirAll(filepath.Join(vaultDir, rel), 0o700)
+	}
+
+	beforeFacts, afterFacts, _ := CompactFacts(vaultDir)
+	strippedMap := stripRedundantKnowledgeMapFromMemoryMD(vaultDir)
+
+	activeSlugs := make(map[string]bool)
+	if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+		for _, t := range tasks {
+			st := strings.ToLower(strings.TrimSpace(t.Status))
+			if st != "done" && st != "archived" && strings.TrimSpace(t.TaskSlug) != "" {
+				activeSlugs[strings.ToLower(strings.TrimSpace(t.TaskSlug))] = true
+			}
+		}
+	}
+	archivedProgress := SweepOrphanProgress(vaultDir, activeSlugs, time.Now().UTC())
+	upgradedTrigger := upgradeV10SleepConsolidateTrigger(vaultDir)
+
+	return fmt.Sprintf("Upgraded Memory v2 (facts=%d->%d, strippedKnowledgeMap=%v, orphanProgressArchived=%d, sleepGatekeeper=%v)",
+		beforeFacts, afterFacts, strippedMap, len(archivedProgress), upgradedTrigger)
+}
+
+func stripRedundantKnowledgeMapFromMemoryMD(vaultDir string) bool {
+	memPath := filepath.Join(vaultDir, "MEMORY.md")
+	if !isRegularNonSymlinkFile(memPath) {
+		return false
+	}
+	b, err := os.ReadFile(memPath)
+	if err != nil {
+		return false
+	}
+	content := strings.ReplaceAll(string(b), "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+
+	startIdx := -1
+	endIdx := len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if startIdx == -1 {
+			if strings.HasPrefix(trimmed, "## Knowledge Map") {
+				startIdx = i
+			}
+		} else if strings.HasPrefix(trimmed, "## ") {
+			endIdx = i
+			break
+		}
+	}
+	if startIdx == -1 {
+		return false
+	}
+
+	// Verify every topic slug referenced in ## Knowledge Map already exists on disk before stripping.
+	topicsDir := filepath.Join(vaultDir, "memory", "topics")
+	sectionText := strings.Join(lines[startIdx:endIdx], "\n")
+	matches := reTopicSlugRef.FindAllStringSubmatch(sectionText, -1)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		tp := filepath.Join(topicsDir, m[1]+".md")
+		if _, err := os.Stat(tp); err != nil {
+			return false
+		}
+	}
+
+	var kept []string
+	kept = append(kept, lines[:startIdx]...)
+	kept = append(kept, lines[endIdx:]...)
+	updated := strings.TrimRight(strings.Join(kept, "\n"), "\n") + "\n"
+	if updated == content {
+		return false
+	}
+	err = withMemoryLock(vaultDir, func() error {
+		return store.WriteAtomic(memPath, []byte(updated), 0o600)
+	})
+	return err == nil
+}
+
+func upgradeV10SleepConsolidateTrigger(vaultDir string) bool {
+	trigPath := filepath.Join(vaultDir, "triggers.yaml")
+	if !isRegularNonSymlinkFile(trigPath) {
+		return false
+	}
+	b, err := os.ReadFile(trigPath)
+	if err != nil {
+		return false
+	}
+	s := strings.ReplaceAll(string(b), "\r\n", "\n")
+	if strings.Contains(s, "dream-plan") {
+		return false
+	}
+
+	lines := strings.Split(s, "\n")
+	startIdx := -1
+	endIdx := len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if startIdx == -1 {
+			if trimmed == "- id: sleep-consolidate" {
+				startIdx = i
+			}
+		} else {
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "- id:") || (len(line) > 0 && line[0] != ' ' && line[0] != '\t') {
+				endIdx = i
+				break
+			}
+		}
+	}
+	if startIdx == -1 {
+		return false
+	}
+
+	block := lines[startIdx:endIdx]
+	hasIsolatedMode := false
+	hasPrecheck := false
+	for _, l := range block {
+		t := strings.TrimSpace(l)
+		if t == "mode: isolated_worker" {
+			hasIsolatedMode = true
+		}
+		if strings.HasPrefix(t, "precheck_cmd:") {
+			hasPrecheck = true
+		}
+	}
+	if !hasIsolatedMode || hasPrecheck {
+		return false
+	}
+
+	var updatedBlock []string
+	insertedPrecheck := false
+	for _, l := range block {
+		t := strings.TrimSpace(l)
+		if t == "mode: isolated_worker" {
+			indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))]
+			updatedBlock = append(updatedBlock, indent+"mode: daemon_gatekeeper")
+			continue
+		}
+		if strings.HasPrefix(t, "delivery:") && !insertedPrecheck {
+			indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))]
+			updatedBlock = append(updatedBlock,
+				indent+`precheck_cmd: ["hq", "memory", "dream-plan", "--precheck"]`,
+				indent+"dedup_mode: exit_zero_nonempty",
+			)
+			insertedPrecheck = true
+		}
+		updatedBlock = append(updatedBlock, l)
+	}
+	if !insertedPrecheck {
+		updatedBlock = append(updatedBlock,
+			`    precheck_cmd: ["hq", "memory", "dream-plan", "--precheck"]`,
+			"    dedup_mode: exit_zero_nonempty",
+		)
+	}
+
+	var outLines []string
+	outLines = append(outLines, lines[:startIdx]...)
+	outLines = append(outLines, updatedBlock...)
+	outLines = append(outLines, lines[endIdx:]...)
+	updated := strings.Join(outLines, "\n")
+	if updated == s {
+		return false
+	}
+	return store.WriteAtomic(trigPath, []byte(updated), 0o600) == nil
 }
 
 // mergeMissingTopLevelYAMLBlocksFromTemplate checks if template YAML (from disk or embedded FS)

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "description": "Deterministic synthetic fixtures (F1-F4) for RFC-0024 Memory v2 evaluation",
+  "fixtures": [
+    {
+      "id": "F1_scoped_isolation",
+      "category": "scope_isolation",
+      "description": "Repo-alpha task receives repo:repo-alpha facts and excludes repo:repo-beta facts; Front Desk enforces <=3 facts per topic diversity cap",
+      "facts": [
+        {"id": "f-alpha-1", "topic": "architecture", "statement": "Always run go test -race in repo-alpha", "scopes": ["repo:repo-alpha"], "verified": true},
+        {"id": "f-beta-1", "topic": "architecture", "statement": "Use pnpm build in repo-beta", "scopes": ["repo:repo-beta"], "verified": true},
+        {"id": "f-global-1", "topic": "comms", "statement": "Reply concisely in active language", "scopes": ["global"], "verified": true},
+        {"id": "f-fd-1", "topic": "tooling", "statement": "Tooling note 1", "scopes": ["global"], "verified": true},
+        {"id": "f-fd-2", "topic": "tooling", "statement": "Tooling note 2", "scopes": ["global"], "verified": true},
+        {"id": "f-fd-3", "topic": "tooling", "statement": "Tooling note 3", "scopes": ["global"], "verified": true},
+        {"id": "f-fd-4", "topic": "tooling", "statement": "Tooling note 4 should be capped on Front Desk", "scopes": ["global"], "verified": true}
+      ]
+    },
+    {
+      "id": "F2_ttl_expiry_and_imminent_boost",
+      "category": "temporal_freshness",
+      "description": "Past expiresAt facts auto-expire with 0 LLM tokens; facts expiring within 72h receive priority boost",
+      "facts": [
+        {"id": "f-past", "topic": "schedule", "statement": "Old dentist appointment", "expiresOffsetHours": -24, "verified": true},
+        {"id": "f-imminent", "topic": "schedule", "statement": "Quarterly board review in 24h", "expiresOffsetHours": 24, "verified": true},
+        {"id": "f-future", "topic": "schedule", "statement": "Annual renewal in 30 days", "expiresOffsetHours": 720, "verified": true}
+      ]
+    },
+    {
+      "id": "F3_playbook_owner_and_front_desk_exclusion",
+      "category": "playbook_isolation",
+      "description": "Scoped task injects matching Playbook-Owner ## Active Playbook; Front Desk injects 0 playbooks",
+      "topics": [
+        {
+          "slug": "alpha-arch",
+          "content": "# Alpha Architecture\n> **Summary:** Core build and test traps for repo-alpha.\n> **Scopes:** repo:repo-alpha\n> **Playbook-Owner:** repo:repo-alpha\n\n## Active Playbook\n- Run `go test ./...` before pushing.\n- Never commit binary artifacts.\n\n## Details\nDeep architecture notes.\n"
+        }
+      ]
+    },
+    {
+      "id": "F4_bm25_search_and_security_boundary",
+      "category": "search_security",
+      "description": "BM25 search retrieves curated topic section with line provenance while excluding private/ secrets and tainted journals",
+      "query": "quarterly earnings checklist",
+      "secretQuery": "TOPSECRET_TAX_TOKEN_999"
+    }
+  ]
+}

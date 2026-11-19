@@ -269,19 +269,35 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		})
 	}
 
-	// 7. Check Memory Roadmap Index Budget & Knowledge Wiki
-	if rep, err := vault.AuditMemory(vaultDir, nil); err == nil && rep.MemoryLines > 0 {
-		if rep.OverBudget {
+	// 7. Check Memory Roadmap Index Budget & Knowledge Wiki (RFC-0024 Dual Caps)
+	if rep, err := vault.AuditMemory(vaultDir, nil); err == nil {
+		if rep.MemoryLines > 0 {
+			if rep.OverBudget {
+				results = append(results, CheckResult{
+					Name:   "Memory Roadmap Budget",
+					Status: "WARN",
+					Detail: fmt.Sprintf("MEMORY.md is %d/%d lines, %d/%d bytes (~%d tokens); keep Active Priorities concise and distill details into local/memory/topics/", rep.MemoryLines, rep.MemoryMaxLines, rep.MemoryBytes, rep.MemoryMaxBytes, rep.EstimatedTokens),
+				})
+			} else {
+				results = append(results, CheckResult{
+					Name:   "Memory Roadmap Budget",
+					Status: "PASS",
+					Detail: fmt.Sprintf("MEMORY.md %d/%d lines, %d/%d bytes (~%d tokens), %d topic page(s), %d active fact(s)", rep.MemoryLines, rep.MemoryMaxLines, rep.MemoryBytes, rep.MemoryMaxBytes, rep.EstimatedTokens, len(rep.Topics), rep.ActiveFactCount),
+				})
+			}
+		}
+		if rep.UserBytes > rep.UserMaxBytes {
 			results = append(results, CheckResult{
-				Name:   "Memory Roadmap Budget",
+				Name:   "USER.md Size Advisory",
 				Status: "WARN",
-				Detail: fmt.Sprintf("MEMORY.md is %d/%d lines (~%d tokens); distill details into local/memory/topics/", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens),
+				Detail: fmt.Sprintf("USER.md is %d bytes (advisory <= %d bytes); trim verbose rules to keep SessionStart lean", rep.UserBytes, rep.UserMaxBytes),
 			})
-		} else {
+		}
+		if len(rep.DuplicatePlaybookOwners) > 0 || len(rep.BrokenTopicLinks) > 0 || len(rep.InvalidTopicHeaders) > 0 {
 			results = append(results, CheckResult{
-				Name:   "Memory Roadmap Budget",
-				Status: "PASS",
-				Detail: fmt.Sprintf("MEMORY.md %d/%d lines (~%d tokens), %d topic page(s), %d active fact(s)", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens, len(rep.Topics), rep.ActiveFactCount),
+				Name:   "Knowledge Wiki Integrity",
+				Status: "WARN",
+				Detail: fmt.Sprintf("duplicatePlaybookOwners=%d brokenLinks=%d invalidHeaders=%d (run 'hq memory status')", len(rep.DuplicatePlaybookOwners), len(rep.BrokenTopicLinks), len(rep.InvalidTopicHeaders)),
 			})
 		}
 	}

@@ -1,13 +1,6 @@
-# Consolidated Long-Term Memory (Roadmap Index)
+# Active Priorities Roadmap
 
-> Maintained as a concise Roadmap Index (`<= 80` lines) via nightly `sleep-consolidate` dreaming. Deep domain lessons live in `local/memory/topics/*.md` and `local/notes/`.
+> Maintained strictly as a concise Active Priorities Roadmap (`<= 40` lines & `<= 2,200` bytes) reconciled against `local/memory/goals.json` and `tasks.json` by nightly `sleep-consolidate`. Deep domain reference and scoped playbooks live in `local/memory/topics/*.md`; global style/constitution lives in `local/USER.md`; atomic scoped constraints live in `local/memory/facts.jsonl`.
 
 ## Active Priorities
 - Bootstrap `agy-hq` personal assistant workspace and daily workflows.
-
-## Durable Preferences & Facts
-- Prefer single-entry-point orchestration from `headquarter`, using `local/worktrees/<repo>-<task>/` for parallel coding tasks across repositories.
-- Keep all personal notes in `local/notes/` and sensitive financial/tax records in `local/private/`.
-
-## Knowledge Map (Topic Wiki)
-- `agy-hq-architecture` (`local/memory/topics/agy-hq-architecture.md`): Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory architecture.

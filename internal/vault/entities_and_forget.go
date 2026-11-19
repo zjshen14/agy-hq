@@ -1,6 +1,8 @@
 package vault
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,7 +10,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
+
+const MaxEntityBullets = 10
 
 var reNonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -37,6 +43,7 @@ type ForgetReport struct {
 	MemoryLinesRemoved int      `json:"memoryLinesRemoved"`
 	DeletedFiles       []string `json:"deletedFiles,omitempty"`
 	ScrubbedFiles      []string `json:"scrubbedFiles,omitempty"`
+	SourceConvIDs      []string `json:"sourceConvIds,omitempty"`
 	DenylistUpdated    bool     `json:"denylistUpdated"`
 	SnapshotCommitted  bool     `json:"snapshotCommitted"`
 }
@@ -68,8 +75,19 @@ func dedupCleanStrings(items ...string) []string {
 	return out
 }
 
+func isRegularNonSymlinkFile(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
+}
+
 // ParseEntityDossierFile parses a local/memory/entities/<slug>.md markdown file into an EntityDossier.
 func ParseEntityDossierFile(path string) (EntityDossier, error) {
+	if !isRegularNonSymlinkFile(path) {
+		return EntityDossier{}, os.ErrNotExist
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return EntityDossier{}, err
@@ -81,7 +99,7 @@ func ParseEntityDossierFile(path string) (EntityDossier, error) {
 		Kind: "person",
 		Path: path,
 	}
-	if info, statErr := os.Stat(path); statErr == nil {
+	if info, statErr := os.Lstat(path); statErr == nil {
 		d.UpdatedAt = info.ModTime().Format("2006-01-02")
 	}
 
@@ -165,7 +183,9 @@ func renderEntityDossierMarkdown(d EntityDossier) string {
 	return sb.String()
 }
 
-// UpsertEntity creates or merges an entity dossier in local/memory/entities/<slug>.md (0600 permissions).
+// UpsertEntity creates or merges an entity dossier in local/memory/entities/<slug>.md
+// under store.RankMemory with atomic 0600 writes. Overflow bullets beyond MaxEntityBullets
+// are rolled into local/memory/entities/archived/<slug>-history.md.
 func UpsertEntity(vaultDir string, input EntityDossier, appendNote string) (EntityDossier, error) {
 	slug := SanitizeEntitySlug(input.Slug)
 	if slug == "" {
@@ -181,45 +201,94 @@ func UpsertEntity(vaultDir string, input EntityDossier, appendNote string) (Enti
 	}
 	entPath := filepath.Join(entDir, slug+".md")
 
-	cur := EntityDossier{
-		Slug: slug,
-		Name: slug,
-		Kind: "person",
-		Path: entPath,
-	}
-	if existing, err := ParseEntityDossierFile(entPath); err == nil {
-		cur = existing
-	}
-
-	if strings.TrimSpace(input.Name) != "" {
-		cur.Name = strings.TrimSpace(input.Name)
-	}
-	if strings.TrimSpace(input.Kind) != "" {
-		cur.Kind = strings.TrimSpace(input.Kind)
-	}
-	cur.Emails = dedupCleanStrings(append(cur.Emails, input.Emails...)...)
-	cur.Handles = dedupCleanStrings(append(cur.Handles, input.Handles...)...)
-	cur.Spaces = dedupCleanStrings(append(cur.Spaces, input.Spaces...)...)
-	if strings.TrimSpace(input.Context) != "" {
-		cur.Context = strings.TrimSpace(input.Context)
-	}
-	for _, n := range input.Notes {
-		cur.Notes = appendUniqueNote(cur.Notes, n)
-	}
-	if strings.TrimSpace(appendNote) != "" {
-		note := strings.TrimSpace(appendNote)
-		if !strings.HasPrefix(note, "[") {
-			note = fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02"), note)
+	var result EntityDossier
+	err := withMemoryLock(vaultDir, func() error {
+		cur := EntityDossier{
+			Slug: slug,
+			Name: slug,
+			Kind: "person",
+			Path: entPath,
 		}
-		cur.Notes = appendUniqueNote(cur.Notes, note)
-	}
-	cur.UpdatedAt = time.Now().Format("2006-01-02")
-	cur.Path = entPath
+		if existing, err := ParseEntityDossierFile(entPath); err == nil {
+			cur = existing
+		}
 
-	if err := os.WriteFile(entPath, []byte(renderEntityDossierMarkdown(cur)), 0o600); err != nil {
+		if strings.TrimSpace(input.Name) != "" {
+			cur.Name = strings.TrimSpace(input.Name)
+		}
+		if strings.TrimSpace(input.Kind) != "" {
+			cur.Kind = strings.TrimSpace(input.Kind)
+		}
+		cur.Emails = dedupCleanStrings(append(cur.Emails, input.Emails...)...)
+		cur.Handles = dedupCleanStrings(append(cur.Handles, input.Handles...)...)
+		cur.Spaces = dedupCleanStrings(append(cur.Spaces, input.Spaces...)...)
+		if strings.TrimSpace(input.Context) != "" {
+			cur.Context = strings.TrimSpace(input.Context)
+		}
+		for _, n := range input.Notes {
+			cur.Notes = appendUniqueNote(cur.Notes, n)
+		}
+		if strings.TrimSpace(appendNote) != "" {
+			note := strings.TrimSpace(appendNote)
+			if !strings.HasPrefix(note, "[") {
+				note = fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02"), note)
+			}
+			cur.Notes = appendUniqueNote(cur.Notes, note)
+		}
+
+		// Roll overflow bullets beyond MaxEntityBullets into entities/archived/<slug>-history.md
+		if len(cur.Notes) > MaxEntityBullets {
+			overflow := cur.Notes[:len(cur.Notes)-MaxEntityBullets]
+			cur.Notes = append([]string(nil), cur.Notes[len(cur.Notes)-MaxEntityBullets:]...)
+			if err := appendEntityArchivedHistoryLocked(vaultDir, cur.Slug, cur.Name, overflow); err != nil {
+				return err
+			}
+		}
+
+		cur.UpdatedAt = time.Now().Format("2006-01-02")
+		cur.Path = entPath
+
+		if err := store.WriteAtomic(entPath, []byte(renderEntityDossierMarkdown(cur)), 0o600); err != nil {
+			return err
+		}
+		result = cur
+		return nil
+	})
+	if err != nil {
 		return EntityDossier{}, err
 	}
-	return cur, nil
+	return result, nil
+}
+
+func appendEntityArchivedHistoryLocked(vaultDir, slug, name string, overflow []string) error {
+	if len(overflow) == 0 {
+		return nil
+	}
+	archDir := filepath.Join(vaultDir, "memory", "entities", "archived")
+	if err := os.MkdirAll(archDir, 0o700); err != nil {
+		return err
+	}
+	histPath := filepath.Join(archDir, slug+"-history.md")
+	var existing string
+	if isRegularNonSymlinkFile(histPath) {
+		if b, err := os.ReadFile(histPath); err == nil {
+			existing = string(b)
+		}
+	}
+	var sb strings.Builder
+	if strings.TrimSpace(existing) == "" {
+		title := strings.TrimSpace(name)
+		if title == "" {
+			title = slug
+		}
+		sb.WriteString("# " + title + " — Archived Notes\n\n")
+	} else {
+		sb.WriteString(strings.TrimRight(existing, "\n") + "\n")
+	}
+	for _, n := range overflow {
+		sb.WriteString("- " + strings.TrimSpace(n) + "\n")
+	}
+	return store.WriteAtomic(histPath, []byte(sb.String()), 0o600)
 }
 
 func appendUniqueNote(notes []string, candidate string) []string {
@@ -247,7 +316,10 @@ func ListEntities(vaultDir string) ([]EntityDossier, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
 			names = append(names, e.Name())
 		}
 	}
@@ -299,7 +371,9 @@ func entityMatchesQuery(d EntityDossier, qLower string) bool {
 }
 
 // ForgetMemory executes a surgical, cascading deletion across facts.jsonl, MEMORY.md,
-// memory/topics/*.md, memory/entities/*.md, notes/**/*.md, and optionally local/private/pii-denylist.txt.
+// memory/topics/{*.md,archived/*.md}, memory/entities/{*.md,archived/*.md}, notes/**/*.md,
+// memory/progress/{*.md,archived/*.md}, hot & archived memory/journal/, memory/obs/index.json,
+// memory/rsi/, and optionally local/private/pii-denylist.txt.
 func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRun bool) (*ForgetReport, error) {
 	query = strings.TrimSpace(query)
 	topicSlug = SanitizeEntitySlug(topicSlug)
@@ -314,12 +388,56 @@ func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRu
 		EntitySlug: entitySlug,
 		DryRun:     dryRun,
 	}
+
+	execute := func() error {
+		return forgetMemoryInner(vaultDir, query, topicSlug, entitySlug, blockPII, dryRun, rep)
+	}
+
+	var err error
+	if dryRun {
+		err = execute()
+	} else {
+		err = withMemoryLock(vaultDir, execute)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Commit audit snapshot inside private local/.git strictly OUTSIDE store.RankMemory.
+	if !dryRun {
+		rep.SnapshotCommitted = SnapshotVault(vaultDir, "hq memory forget")
+	}
+
+	return rep, nil
+}
+
+func forgetMemoryInner(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRun bool, rep *ForgetReport) error {
 	qLower := strings.ToLower(query)
+	convSet := make(map[string]bool)
+	recordConv := func(id string) {
+		id = strings.TrimSpace(id)
+		if id != "" && !convSet[id] {
+			convSet[id] = true
+			rep.SourceConvIDs = append(rep.SourceConvIDs, id)
+		}
+	}
+	scrubbedSet := make(map[string]bool)
+	recordScrubbed := func(p string) {
+		rel, err := filepath.Rel(vaultDir, p)
+		if err != nil {
+			rel = p
+		}
+		rel = filepath.ToSlash(rel)
+		if !scrubbedSet[rel] {
+			scrubbedSet[rel] = true
+			rep.ScrubbedFiles = append(rep.ScrubbedFiles, rel)
+		}
+	}
 
 	// 1. Soft-expire & redact matching facts in local/memory/facts.jsonl
 	active, expired, rawLines, err := LoadFactsState(vaultDir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	nowStr := time.Now().Format(time.RFC3339)
 	factsMutated := false
@@ -339,6 +457,7 @@ func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRu
 		}
 		if matched {
 			rep.ExpiredFactIDs = append(rep.ExpiredFactIDs, f.ID)
+			recordConv(f.SourceConv)
 			f.ValidTo = &nowStr
 			f.SupersededBy = "forgotten"
 			f.Statement = "[FORGOTTEN BY USER]"
@@ -348,10 +467,10 @@ func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRu
 			nextActive = append(nextActive, f)
 		}
 	}
-	// Also redact any already-expired fact statement that still contains the forgotten query string
 	if query != "" {
 		for i := range expired {
 			if strings.Contains(strings.ToLower(expired[i].Statement), qLower) && expired[i].Statement != "[FORGOTTEN BY USER]" {
+				recordConv(expired[i].SourceConv)
 				expired[i].Statement = "[FORGOTTEN BY USER]"
 				factsMutated = true
 			}
@@ -361,79 +480,92 @@ func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRu
 		all := make([]Fact, 0, len(nextActive)+len(expired))
 		all = append(all, nextActive...)
 		all = append(all, expired...)
-		if err := writeCanonicalFacts(vaultDir, all); err != nil {
-			return nil, err
+		if err := writeCanonicalFactsLocked(vaultDir, all); err != nil {
+			return err
 		}
 	}
 
 	// 2. Scrub matching lines from local/MEMORY.md
 	memPath := filepath.Join(vaultDir, "MEMORY.md")
-	if memData, err := os.ReadFile(memPath); err == nil {
-		lines := strings.Split(strings.ReplaceAll(string(memData), "\r\n", "\n"), "\n")
-		var kept []string
-		removed := 0
-		for _, line := range lines {
-			ll := strings.ToLower(line)
-			drop := false
-			if query != "" && strings.Contains(ll, qLower) {
-				drop = true
+	if isRegularNonSymlinkFile(memPath) {
+		if memData, err := os.ReadFile(memPath); err == nil {
+			lines := strings.Split(strings.ReplaceAll(string(memData), "\r\n", "\n"), "\n")
+			var kept []string
+			removed := 0
+			for _, line := range lines {
+				ll := strings.ToLower(line)
+				drop := false
+				if query != "" && strings.Contains(ll, qLower) {
+					drop = true
+				}
+				if topicSlug != "" && strings.Contains(ll, topicSlug) {
+					drop = true
+				}
+				if entitySlug != "" && strings.Contains(ll, entitySlug) {
+					drop = true
+				}
+				if drop {
+					removed++
+					continue
+				}
+				kept = append(kept, line)
 			}
-			if topicSlug != "" && strings.Contains(ll, topicSlug) {
-				drop = true
+			rep.MemoryLinesRemoved = removed
+			if removed > 0 && !dryRun {
+				_ = store.WriteAtomic(memPath, []byte(strings.Join(kept, "\n")), 0o600)
 			}
-			if entitySlug != "" && strings.Contains(ll, entitySlug) {
-				drop = true
-			}
-			if drop {
-				removed++
-				continue
-			}
-			kept = append(kept, line)
-		}
-		rep.MemoryLinesRemoved = removed
-		if removed > 0 && !dryRun {
-			_ = os.WriteFile(memPath, []byte(strings.Join(kept, "\n")), 0o600)
 		}
 	}
 
-	// 3. Delete targeted topic or entity markdown file when requested by slug
+	// 3. Delete targeted topic or entity markdown file (and archived variants) when requested by slug
 	deletedAbs := make(map[string]bool)
-	if topicSlug != "" {
-		tpPath := filepath.Join(vaultDir, "memory", "topics", topicSlug+".md")
-		if _, err := os.Stat(tpPath); err == nil {
-			rel, _ := filepath.Rel(vaultDir, tpPath)
-			rep.DeletedFiles = append(rep.DeletedFiles, filepath.ToSlash(rel))
-			deletedAbs[tpPath] = true
-			if !dryRun {
-				_ = os.Remove(tpPath)
-			}
+	tryDelete := func(p string) {
+		if !isRegularNonSymlinkFile(p) {
+			return
 		}
+		rel, _ := filepath.Rel(vaultDir, p)
+		rep.DeletedFiles = append(rep.DeletedFiles, filepath.ToSlash(rel))
+		deletedAbs[p] = true
+		if !dryRun {
+			_ = os.Remove(p)
+		}
+	}
+	if topicSlug != "" {
+		tryDelete(filepath.Join(vaultDir, "memory", "topics", topicSlug+".md"))
+		tryDelete(filepath.Join(vaultDir, "memory", "topics", "archived", topicSlug+".md"))
 	}
 	if entitySlug != "" {
-		entPath := filepath.Join(vaultDir, "memory", "entities", entitySlug+".md")
-		if _, err := os.Stat(entPath); err == nil {
-			rel, _ := filepath.Rel(vaultDir, entPath)
-			rep.DeletedFiles = append(rep.DeletedFiles, filepath.ToSlash(rel))
-			deletedAbs[entPath] = true
-			if !dryRun {
-				_ = os.Remove(entPath)
-			}
-		}
+		tryDelete(filepath.Join(vaultDir, "memory", "entities", entitySlug+".md"))
+		tryDelete(filepath.Join(vaultDir, "memory", "entities", "archived", entitySlug+"-history.md"))
 	}
 
-	// 4. Scrub matching lines across topics, entities, and notes when query != ""
+	// 4. Scrub matching lines across markdown files: topics, entities, notes, progress, and rsi/rules
 	if query != "" {
-		scanRoots := []string{
+		mdRoots := []string{
 			filepath.Join(vaultDir, "memory", "topics"),
 			filepath.Join(vaultDir, "memory", "entities"),
+			filepath.Join(vaultDir, "memory", "progress"),
+			filepath.Join(vaultDir, "memory", "rsi", "rules"),
 			filepath.Join(vaultDir, "notes"),
 		}
-		for _, root := range scanRoots {
+		for _, root := range mdRoots {
 			_ = filepath.WalkDir(root, func(p string, d os.DirEntry, walkErr error) error {
-				if walkErr != nil || d.IsDir() || deletedAbs[p] {
+				if walkErr != nil {
+					return nil
+				}
+				if d.Type()&os.ModeSymlink != 0 {
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if d.IsDir() || deletedAbs[p] {
 					return nil
 				}
 				if !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
+					return nil
+				}
+				if !isRegularNonSymlinkFile(p) {
 					return nil
 				}
 				raw, err := os.ReadFile(p)
@@ -451,18 +583,94 @@ func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRu
 					kept = append(kept, line)
 				}
 				if changed {
-					rel, _ := filepath.Rel(vaultDir, p)
-					rep.ScrubbedFiles = append(rep.ScrubbedFiles, filepath.ToSlash(rel))
+					recordScrubbed(p)
 					if !dryRun {
-						_ = os.WriteFile(p, []byte(strings.Join(kept, "\n")), 0o600)
+						_ = store.WriteAtomic(p, []byte(strings.Join(kept, "\n")), 0o600)
 					}
 				}
 				return nil
 			})
 		}
+
+		// 5. Scrub hot memory/journal/YYYY-MM-DD/*.json and cold memory/journal/archive/*.jsonl
+		journalRoot := filepath.Join(vaultDir, "memory", "journal")
+		_ = filepath.WalkDir(journalRoot, func(p string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() || !isRegularNonSymlinkFile(p) {
+				return nil
+			}
+			lowerName := strings.ToLower(d.Name())
+			switch {
+			case strings.HasSuffix(lowerName, ".json"):
+				changed, convIDs := scrubJSONObjectFile(p, qLower, dryRun)
+				for _, cid := range convIDs {
+					recordConv(cid)
+				}
+				if changed {
+					recordScrubbed(p)
+				}
+			case strings.HasSuffix(lowerName, ".jsonl"):
+				changed, convIDs := scrubJSONLFile(p, qLower, dryRun)
+				for _, cid := range convIDs {
+					recordConv(cid)
+				}
+				if changed {
+					recordScrubbed(p)
+				}
+			}
+			return nil
+		})
+
+		// 6. Scrub memory/obs/index.json
+		obsIndexPath := filepath.Join(vaultDir, "memory", "obs", "index.json")
+		if isRegularNonSymlinkFile(obsIndexPath) {
+			if changed, convIDs := scrubJSONObjectFile(obsIndexPath, qLower, dryRun); changed {
+				for _, cid := range convIDs {
+					recordConv(cid)
+				}
+				recordScrubbed(obsIndexPath)
+			}
+		}
+
+		// 7. Scrub memory/rsi/observations.jsonl and memory/rsi/hypotheses/*.json
+		rsiObsPath := filepath.Join(vaultDir, "memory", "rsi", "observations.jsonl")
+		if isRegularNonSymlinkFile(rsiObsPath) {
+			if changed, convIDs := scrubJSONLFile(rsiObsPath, qLower, dryRun); changed {
+				for _, cid := range convIDs {
+					recordConv(cid)
+				}
+				recordScrubbed(rsiObsPath)
+			}
+		}
+		rsiHypDir := filepath.Join(vaultDir, "memory", "rsi", "hypotheses")
+		if entries, err := os.ReadDir(rsiHypDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || e.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+					continue
+				}
+				hp := filepath.Join(rsiHypDir, e.Name())
+				if !isRegularNonSymlinkFile(hp) {
+					continue
+				}
+				if changed, convIDs := scrubJSONObjectFile(hp, qLower, dryRun); changed {
+					for _, cid := range convIDs {
+						recordConv(cid)
+					}
+					recordScrubbed(hp)
+				}
+			}
+		}
 	}
 
-	// 5. Optionally append query to local/private/pii-denylist.txt (--block-pii)
+	// 8. Optionally append query to local/private/pii-denylist.txt (--block-pii)
 	if blockPII && query != "" {
 		privDir := filepath.Join(vaultDir, "private")
 		denyPath := filepath.Join(privDir, "pii-denylist.txt")
@@ -485,16 +693,130 @@ func ForgetMemory(vaultDir, query, topicSlug, entitySlug string, blockPII, dryRu
 					} else {
 						nextContent = prefix + "\n" + query + "\n"
 					}
-					_ = os.WriteFile(denyPath, []byte(nextContent), 0o600)
+					_ = store.WriteAtomic(denyPath, []byte(nextContent), 0o600)
 				}
 			}
 		}
 	}
 
-	// 6. Commit audit snapshot inside private local/.git
-	if !dryRun {
-		rep.SnapshotCommitted = SnapshotVault(vaultDir, "hq memory forget")
-	}
+	sort.Strings(rep.DeletedFiles)
+	sort.Strings(rep.ScrubbedFiles)
+	sort.Strings(rep.SourceConvIDs)
+	return nil
+}
 
-	return rep, nil
+// scrubJSONValue recursively replaces any string containing qLower with "[FORGOTTEN BY USER]"
+// and extracts conversationId values from matched JSON objects.
+func scrubJSONValue(v interface{}, qLower string) (interface{}, bool, []string) {
+	switch val := v.(type) {
+	case string:
+		if strings.Contains(strings.ToLower(val), qLower) && val != "[FORGOTTEN BY USER]" {
+			return "[FORGOTTEN BY USER]", true, nil
+		}
+		return val, false, nil
+	case []interface{}:
+		changed := false
+		var convIDs []string
+		for i, elem := range val {
+			nv, ch, cids := scrubJSONValue(elem, qLower)
+			if ch {
+				val[i] = nv
+				changed = true
+			}
+			convIDs = append(convIDs, cids...)
+		}
+		return val, changed, convIDs
+	case map[string]interface{}:
+		changed := false
+		var convIDs []string
+		for k, elem := range val {
+			nv, ch, cids := scrubJSONValue(elem, qLower)
+			if ch {
+				val[k] = nv
+				changed = true
+			}
+			convIDs = append(convIDs, cids...)
+		}
+		if changed {
+			for _, idKey := range []string{"conversationId", "convId", "sourceConv"} {
+				if cid, ok := val[idKey].(string); ok && strings.TrimSpace(cid) != "" && cid != "[FORGOTTEN BY USER]" {
+					convIDs = append(convIDs, strings.TrimSpace(cid))
+				}
+			}
+		}
+		return val, changed, convIDs
+	default:
+		return v, false, nil
+	}
+}
+
+func scrubJSONObjectFile(path, qLower string, dryRun bool) (bool, []string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, nil
+	}
+	if !strings.Contains(strings.ToLower(string(raw)), qLower) {
+		return false, nil
+	}
+	var parsed interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false, nil
+	}
+	nv, changed, convIDs := scrubJSONValue(parsed, qLower)
+	if !changed {
+		return false, nil
+	}
+	if !dryRun {
+		if out, err := json.MarshalIndent(nv, "", "  "); err == nil {
+			_ = store.WriteAtomic(path, append(out, '\n'), 0o600)
+		}
+	}
+	return true, convIDs
+}
+
+func scrubJSONLFile(path, qLower string, dryRun bool) (bool, []string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, nil
+	}
+	defer f.Close()
+
+	var outLines []string
+	changed := false
+	var convIDs []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(strings.ToLower(line), qLower) {
+			outLines = append(outLines, line)
+			continue
+		}
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(line), &parsed); err != nil {
+			changed = true
+			continue
+		}
+		nv, ch, cids := scrubJSONValue(parsed, qLower)
+		if ch {
+			changed = true
+			convIDs = append(convIDs, cids...)
+			if b, mErr := json.Marshal(nv); mErr == nil {
+				outLines = append(outLines, string(b))
+			}
+		} else {
+			outLines = append(outLines, line)
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if !dryRun {
+		content := strings.Join(outLines, "\n")
+		if content != "" {
+			content += "\n"
+		}
+		_ = store.WriteAtomic(path, []byte(content), 0o600)
+	}
+	return true, convIDs
 }

@@ -65,17 +65,17 @@ func TestMemoryEngine_TopicDiscoveryAndFactLifecycle(t *testing.T) {
 		t.Fatalf("expected 2 canonical lines after PruneFact compaction, got %d", rawLines)
 	}
 
-	// 3. Test AuditMemory stale reference detection
-	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("# Memory\n- Working on legacy-closed-task\n- Linked: 01-arch\n"), 0o644)
+	// 3. Test AuditMemory stale reference detection & dual line/byte budget
+	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("# Memory\n- Working on legacy-closed-task\n"), 0o600)
 	rep, err := AuditMemory(vaultDir, []string{"legacy-closed-task"})
 	if err != nil {
 		t.Fatalf("AuditMemory: %v", err)
 	}
 	if rep.OverBudget {
-		t.Fatalf("expected OverBudget=false for 3-line MEMORY.md")
+		t.Fatalf("expected OverBudget=false for 2-line MEMORY.md")
 	}
-	if len(rep.OrphanTopicSlugs) != 1 || rep.OrphanTopicSlugs[0] != "02-investing" {
-		t.Fatalf("expected 02-investing as orphan topic slug, got %+v", rep.OrphanTopicSlugs)
+	if len(rep.OrphanTopicSlugs) != 0 {
+		t.Fatalf("expected 0 OrphanTopicSlugs under RFC-0024 orthogonal MEMORY.md, got %+v", rep.OrphanTopicSlugs)
 	}
 	if len(rep.StaleReferences) != 1 {
 		t.Fatalf("expected 1 stale reference for legacy-closed-task, got %+v", rep.StaleReferences)

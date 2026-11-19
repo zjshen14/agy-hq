@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -982,6 +983,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq archive error: %v\n", err)
 			os.Exit(1)
 		}
+		_, _ = vault.ArchiveProgress(vaultDir, target, time.Now().UTC())
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if syncRes.SkippedReason == "ui_pinned" || syncRes.SkippedReason == "ui_starred" {
 			fmt.Fprintln(os.Stderr, "note: archived locally, but skipped Antigravity sidebar archive because conversation is pinned/starred in UI (unpin in UI or pass --force)")
@@ -1005,6 +1007,7 @@ func main() {
 		tier := fs.String("tier", "", "Optional complexity tier override (quick, routine, standard, heavy, deep-medium, deep)")
 		titleOverride := fs.String("title", "", "Optional custom conversation title")
 		scopeOverride := fs.String("scope", "", "Optional custom task scope")
+		ephemeral := fs.Bool("ephemeral", false, "Mark task as ephemeral (excluded from nightly sleep-consolidate and RSI mining)")
 		force := fs.Bool("force", false, "Force spawn even if quota circuit breaker is open")
 		ignoreBudget := fs.Bool("ignore-budget", false, "Alias for --force to bypass daily token budget circuit breaker")
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
@@ -1067,6 +1070,7 @@ func main() {
 			LastUpdatedAt: createdAt,
 			LastSummary:   *prompt,
 			Status:        "active",
+			Ephemeral:     *ephemeral,
 		})
 		out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun, isForced)
 		spawnedID := kernel.ExtractUUID(out)
@@ -1846,12 +1850,16 @@ func main() {
 		if len(os.Args) >= 3 {
 			sub = os.Args[2]
 		}
+		// Tainted quarantine boundary: only `memory lookup` (which strips private fields) is allowed in tainted sessions.
+		if sub != "lookup" {
+			denyIfCallerTainted(vaultDir, "memory "+sub)
+		}
 		switch sub {
 		case "status", "audit":
 			var completedSlugs []string
 			if tasks, err := kernel.ListTasks(vaultDir); err == nil {
 				for _, t := range tasks {
-					if t.Status == "completed" || t.Status == "cancelled" {
+					if t.Status == "completed" || t.Status == "cancelled" || t.Status == "done" || t.Status == "archived" {
 						completedSlugs = append(completedSlugs, t.TaskSlug)
 					}
 				}
@@ -1865,13 +1873,52 @@ func main() {
 			if rep.OverBudget {
 				budgetBadge = "OVER_BUDGET"
 			}
-			fmt.Printf("Memory Roadmap Index (MEMORY.md): %d / %d lines (~%d tokens) [%s]\n", rep.MemoryLines, rep.MemoryMaxLines, rep.EstimatedTokens, budgetBadge)
-			fmt.Printf("Knowledge Wiki Topics (topics/):  %d page(s) (unlinked in MEMORY.md: %d)\n", len(rep.Topics), len(rep.OrphanTopicSlugs))
+			fmt.Printf("Memory Roadmap Index (MEMORY.md): %d/%d lines, %d/%d bytes (~%d tokens) [%s]\n",
+				rep.MemoryLines, rep.MemoryMaxLines, rep.MemoryBytes, rep.MemoryMaxBytes, rep.EstimatedTokens, budgetBadge)
+			if rep.UserBytes > rep.UserMaxBytes {
+				fmt.Printf("USER.md Advisory:                 %d / %d bytes [OVER_ADVISORY]\n", rep.UserBytes, rep.UserMaxBytes)
+			}
+			fmt.Printf("Knowledge Wiki Topics (topics/):  %d page(s), %d bytes total\n", len(rep.Topics), rep.TopicsTotalBytes)
 			for _, tp := range rep.Topics {
-				fmt.Printf("  - [%s] %s (%d lines): %s\n", tp.Slug, tp.Title, tp.LineCount, tp.Summary)
+				extra := ""
+				if tp.PlaybookOwner != "" {
+					extra = fmt.Sprintf(" [playbook:%s]", tp.PlaybookOwner)
+				}
+				fmt.Printf("  - [%s] %s (%d lines, %dB)%s: %s\n", tp.Slug, tp.Title, tp.LineCount, tp.ByteSize, extra, tp.Summary)
 			}
 			fmt.Printf("Entity Dossiers (entities/):      %d dossier(s) (0 SessionStart tokens; on-demand lookup)\n", rep.EntityCount)
-			fmt.Printf("Bi-Temporal Facts (facts.jsonl):  %d active, %d expired (%d raw lines)\n", rep.ActiveFactCount, rep.ExpiredFactCount, rep.RawFactLines)
+			fmt.Printf("Bi-Temporal Facts (facts.jsonl):  %d active, %d expired, %d overdue-TTL (%d raw lines)\n",
+				rep.ActiveFactCount, rep.ExpiredFactCount, rep.OverdueTTLFactCount, rep.RawFactLines)
+			if len(rep.DuplicatePlaybookOwners) > 0 {
+				fmt.Println("Duplicate Playbook-Owners Detected:")
+				for _, d := range rep.DuplicatePlaybookOwners {
+					fmt.Printf("  ! %s\n", d)
+				}
+			}
+			if len(rep.InvalidTopicHeaders) > 0 {
+				fmt.Println("Invalid Topic Headers:")
+				for _, ih := range rep.InvalidTopicHeaders {
+					fmt.Printf("  ! %s\n", ih)
+				}
+			}
+			if len(rep.BrokenTopicLinks) > 0 {
+				fmt.Println("Broken Topic Links:")
+				for _, bl := range rep.BrokenTopicLinks {
+					fmt.Printf("  ! %s\n", bl)
+				}
+			}
+			if len(rep.NearDuplicateTopics) > 0 {
+				fmt.Println("Near-Duplicate Topics:")
+				for _, nd := range rep.NearDuplicateTopics {
+					fmt.Printf("  ! %s\n", nd)
+				}
+			}
+			if len(rep.MissingTTLEventFacts) > 0 {
+				fmt.Println("Dated Facts Missing --expires TTL:")
+				for _, mt := range rep.MissingTTLEventFacts {
+					fmt.Printf("  ! %s\n", mt)
+				}
+			}
 			if len(rep.StaleReferences) > 0 {
 				fmt.Println("Stale References Detected:")
 				for _, sr := range rep.StaleReferences {
@@ -1889,24 +1936,264 @@ func main() {
 				fmt.Printf("- %s (%s): %s [%s]\n", tp.Slug, tp.Title, tp.Summary, tp.Path)
 			}
 
+		case "search":
+			var posQ string
+			var flagArgs []string
+			for _, a := range os.Args[3:] {
+				if !strings.HasPrefix(a, "-") && posQ == "" {
+					posQ = a
+				} else {
+					flagArgs = append(flagArgs, a)
+				}
+			}
+			fs := flag.NewFlagSet("memory search", flag.ExitOnError)
+			qFlag := fs.String("query", "", "Search query (BM25 lexical + CJK bigram search)")
+			scopeFlag := fs.String("scope", "", "Optional scope filter (e.g. repo:agy-hq, domain:investing)")
+			layersFlag := fs.String("layers", "", "Comma-separated layers (facts,topics,entities,notes,journal,progress)")
+			includeArchive := fs.Bool("archive", false, "Include archived topics, entities, journals, and expired facts")
+			limit := fs.Int("limit", 10, "Maximum results to return")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(flagArgs)
+			if posQ == "" {
+				posQ = *qFlag
+			}
+			if strings.TrimSpace(posQ) == "" {
+				fmt.Fprintln(os.Stderr, "usage: hq memory search <query> [--scope=...] [--layers=facts,topics,entities,notes,journal,progress] [--archive] [--limit=10] [--json]")
+				os.Exit(1)
+			}
+			var layers []string
+			if strings.TrimSpace(*layersFlag) != "" {
+				layers = strings.Split(*layersFlag, ",")
+			}
+			hits, err := vault.SearchMemory(vaultDir, vault.SearchOptions{
+				Query:          posQ,
+				Scope:          *scopeFlag,
+				Layers:         layers,
+				IncludeArchive: *includeArchive,
+				Limit:          *limit,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory search failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				enc.SetEscapeHTML(false)
+				_ = enc.Encode(hits)
+				return
+			}
+			if len(hits) == 0 {
+				fmt.Printf("No memory hits matched %q.\n", posQ)
+				return
+			}
+			for i, h := range hits {
+				fmt.Printf("%d. [%s · score=%.2f] %s\n   %s\n   %s\n", i+1, h.Layer, h.Score, h.Title, h.Provenance, h.Snippet)
+			}
+
+		case "dream-plan":
+			fs := flag.NewFlagSet("memory dream-plan", flag.ExitOnError)
+			precheck := fs.Bool("precheck", false, "Emit empty stdout when idle or concise 1-line summary when delta exists (gatekeeper exit_zero_nonempty)")
+			sinceStr := fs.String("since", "", "Optional lookback duration (e.g. 24h, 72h) or RFC3339 timestamp")
+			limit := fs.Int("limit", 15, "Maximum salient conversations to include")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(os.Args[3:])
+
+			var since time.Time
+			if s := strings.TrimSpace(*sinceStr); s != "" {
+				if d, err := parseFlexibleDuration(s); err == nil {
+					since = time.Now().UTC().Add(-d)
+				} else if ts, err := time.Parse(time.RFC3339, s); err == nil {
+					since = ts.UTC()
+				} else {
+					fmt.Fprintf(os.Stderr, "invalid --since value %q (expected duration like 24h/7d or RFC3339)\n", s)
+					os.Exit(1)
+				}
+			}
+			plan, err := vault.BuildDreamPlan(vaultDir, vault.DreamPlanOptions{
+				Since: since,
+				Now:   time.Now().UTC(),
+				Limit: *limit,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory dream-plan failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *precheck {
+				if line := plan.PrecheckLine(); line != "" {
+					fmt.Println(line)
+				}
+				return
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				enc.SetEscapeHTML(false)
+				_ = enc.Encode(plan)
+				return
+			}
+			fmt.Printf("Dream Plan (since %s) — hasDelta=%v\n", plan.Since, plan.HasDelta)
+			fmt.Printf("  Salient conversations: %d (skipped tainted turns: %d, ephemeral convs: %d)\n",
+				len(plan.SalientConversations), plan.SkippedTaintedTurns, plan.SkippedEphemeralConv)
+			fmt.Printf("  MEMORY.md: %d lines, %d bytes (overBudget=%v) · overdueFacts=%d · pendingArchiveDays=%d\n",
+				plan.MemoryLines, plan.MemoryBytes, plan.MemoryOverBudget, plan.OverdueTTLFactCount, plan.PendingArchiveDays)
+			if len(plan.WikiAlerts) > 0 {
+				fmt.Printf("  Wiki alerts: %s\n", strings.Join(plan.WikiAlerts, ", "))
+			}
+			if len(plan.NegativeConstraints) > 0 {
+				fmt.Printf("  Negative constraints (recent rejections): %d\n", len(plan.NegativeConstraints))
+			}
+
+		case "eval":
+			fs := flag.NewFlagSet("memory eval", flag.ExitOnError)
+			sinceStr := fs.String("since", "14d", "Telemetry lookback window (e.g. 7d, 14d, 72h, or RFC3339)")
+			runFixtures := fs.Bool("fixtures", false, "Run deterministic F1-F4 synthetic fixture suite")
+			runReplay := fs.Bool("replay", false, "Replay historical conversations through SessionStart hook")
+			baselineBin := fs.String("baseline-bin", "", "Optional baseline hq binary path for side-by-side --replay comparison")
+			baselineVault := fs.String("baseline-vault", "", "Optional baseline Vault copy path for --replay comparison")
+			limit := fs.Int("limit", 50, "Maximum historical conversations to sample during --replay")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(os.Args[3:])
+
+			var since time.Time
+			if s := strings.TrimSpace(*sinceStr); s != "" {
+				if d, err := parseFlexibleDuration(s); err == nil {
+					since = time.Now().UTC().Add(-d)
+				} else if ts, err := time.Parse(time.RFC3339, s); err == nil {
+					since = ts.UTC()
+				} else {
+					fmt.Fprintf(os.Stderr, "invalid --since value %q\n", s)
+					os.Exit(1)
+				}
+			}
+
+			rep, err := vault.EvaluateMemory(vaultDir, vault.EvalOptions{
+				Since:    since,
+				Now:      time.Now().UTC(),
+				RepoRoot: rootDir,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory eval failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *runFixtures {
+				fRep, fErr := vault.RunEvalFixtures()
+				if fErr != nil {
+					fmt.Fprintf(os.Stderr, "hq memory eval --fixtures failed: %v\n", fErr)
+					os.Exit(1)
+				}
+				rep.Fixtures = fRep
+			}
+			if *runReplay {
+				selfBin, _ := os.Executable()
+				rRep, rErr := vault.RunHistoricalReplay(vault.ReplayOptions{
+					CandidateBin:   selfBin,
+					CandidateVault: vaultDir,
+					BaselineBin:    *baselineBin,
+					BaselineVault:  *baselineVault,
+					Since:          since,
+					SampleLimit:    *limit,
+				})
+				if rErr != nil {
+					fmt.Fprintf(os.Stderr, "hq memory eval --replay failed: %v\n", rErr)
+					os.Exit(1)
+				}
+				rep.Replay = rRep
+			}
+			if *asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				enc.SetEscapeHTML(false)
+				_ = enc.Encode(rep)
+				if rep.Fixtures != nil && !rep.Fixtures.AllPassed {
+					os.Exit(1)
+				}
+				return
+			}
+			fmt.Printf("Memory v2 Evaluation Report (since %s)\n", rep.Since)
+			fmt.Printf("  [M1 Efficiency]  MEMORY.md=%dL/%dB (overBudget=%v) · USER.md=%dB · CrossLayerOverlap=%.1f%%\n",
+				rep.MemoryLines, rep.MemoryBytes, rep.MemoryOverBudget, rep.UserBytes, rep.CrossLayerOverlapPct)
+			fmt.Printf("  [M2 Freshness]   ActiveFacts=%d (scoped=%d, global=%d) · ScopedPlaybooks=%d · StaleOrMissingTTL=%.1f%% (overdue=%d, undated=%d)\n",
+				rep.ActiveFactCount, rep.ScopedFactCount, rep.GlobalFactCount, rep.ScopedPlaybookCount, rep.StaleOrMissingTTLPct, rep.OverdueTTLFactCount, rep.MissingTTLEventFactsCnt)
+			fmt.Printf("  [M3 Friction]    Turns=%d · ToolErrors/100t=%.1f · PreToolDenials/100t=%.1f · RejectRate=%.1f%% (%d/%d) · WikiReads=%d\n",
+				rep.JournalTurns, rep.ToolErrorsPer100Turns, rep.PreToolDenialsPer100Turns, rep.InterventionRejectionRatePct, rep.InterventionsRejected, rep.InterventionsApproved+rep.InterventionsRejected, rep.WikiReadCount)
+			fmt.Printf("  [M4 Wiki Health] Topics=%d (%dB) · InvalidHeaders=%d · BrokenLinks=%d · DupPlaybookOwners=%d · NearDups=%d · StaleRefs=%d\n",
+				rep.TopicsCount, rep.TopicsTotalBytes, rep.InvalidTopicHeaders, rep.BrokenTopicLinks, rep.DuplicatePlaybookOwners, rep.NearDuplicateTopics, rep.StaleReferences)
+			if rep.DomainCompressionApplicable {
+				fmt.Printf("                   Notes=%dB · DomainCompressionRatio=%.2fx\n", rep.NotesBytes, rep.DomainCompressionRatio)
+			}
+			if rep.Fixtures != nil {
+				fmt.Printf("  [Layer-1 Fixtures] %d/%d passed (allPassed=%v)\n", rep.Fixtures.PassedCount, rep.Fixtures.TotalCount, rep.Fixtures.AllPassed)
+				for _, fr := range rep.Fixtures.Results {
+					status := "PASS"
+					if !fr.Passed {
+						status = "FAIL"
+					}
+					fmt.Printf("    [%s] %s: %s\n", status, fr.ID, fr.Details)
+				}
+			}
+			if rep.Replay != nil {
+				c := rep.Replay.Candidate
+				fmt.Printf("  [Layer-1 Replay] Sampled=%d · Candidate avg=%.0fB p50=%dB p95=%dB max=%dB · fullOver=%d leanOver=%d leanStarved=%d playbooks=%d\n",
+					rep.Replay.SampledConversations, c.AvgContextBytes, c.P50ContextBytes, c.P95ContextBytes, c.MaxContextBytes,
+					c.FullOverBudgetCount, c.LeanAutoOverBudgetCnt, c.LeanAutoStarvedCount, c.PlaybookInjectedCount)
+				if b := rep.Replay.Baseline; b != nil {
+					fmt.Printf("                   Baseline  avg=%.0fB p50=%dB p95=%dB max=%dB · fullOver=%d leanOver=%d leanStarved=%d\n",
+						b.AvgContextBytes, b.P50ContextBytes, b.P95ContextBytes, b.MaxContextBytes,
+						b.FullOverBudgetCount, b.LeanAutoOverBudgetCnt, b.LeanAutoStarvedCount)
+					fmt.Printf("                   Delta     avg=%.1f%% · p95=%.1f%%\n", rep.Replay.AvgByteDeltaPct, rep.Replay.P95ByteDeltaPct)
+				}
+			}
+			if rep.Fixtures != nil && !rep.Fixtures.AllPassed {
+				os.Exit(1)
+			}
+
 		case "add-fact":
-			denyIfCallerTainted(vaultDir, "memory add-fact")
+			// Block unattended [Auto] workers except sleep-consolidate from mutating durable facts directly.
+			if callerConv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")); callerConv != "" {
+				if t, ok := kernel.FindTaskByConversationID(vaultDir, callerConv); ok && t.EffectiveKind() == "auto" {
+					lowerMeta := strings.ToLower(t.TaskSlug + " " + t.Title)
+					if !strings.Contains(lowerMeta, "sleep-consolidate") && !strings.Contains(lowerMeta, "sleep_consolidate") {
+						fmt.Fprintln(os.Stderr, "hq memory add-fact denied: unattended [Auto] workers cannot write durable facts directly; route durable lessons through nightly sleep-consolidate")
+						os.Exit(1)
+					}
+				}
+			}
 			fs := flag.NewFlagSet("memory add-fact", flag.ExitOnError)
 			id := fs.String("id", "", "Optional explicit fact ID")
 			topic := fs.String("topic", "", "Fact topic category (e.g., architecture, workflow, investing)")
-			statement := fs.String("statement", "", "Concise durable fact statement")
+			statement := fs.String("statement", "", "Concise durable fact statement (<= 240 runes)")
 			sourceConv := fs.String("source", "", "Optional source conversation ID")
-			verified := fs.Bool("verified", false, "Mark fact as ground-truth transcript verified")
+			verified := fs.Bool("verified", false, "Mark fact as ground-truth transcript or human verified")
+			scopeStr := fs.String("scope", "", "Optional comma-separated scope tags (e.g., global, repo:agy-hq, domain:investing)")
+			expiresStr := fs.String("expires", "", "Optional TTL expiry (YYYY-MM-DD, RFC3339, +14d, +72h)")
+			pinned := fs.Bool("pinned", false, "Pin high-priority fact for guaranteed SessionStart inclusion")
 			_ = fs.Parse(os.Args[3:])
-			fact, err := vault.AddFact(vaultDir, *id, *topic, *statement, *sourceConv, *verified)
+			var scopes []string
+			if strings.TrimSpace(*scopeStr) != "" {
+				scopes = vault.ParseScopeList(*scopeStr)
+			}
+			fact, warning, err := vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
+				ID:         *id,
+				Topic:      *topic,
+				Statement:  *statement,
+				SourceConv: *sourceConv,
+				Verified:   *verified,
+				Scopes:     scopes,
+				ExpiresAt:  *expiresStr,
+				Pinned:     *pinned,
+				Now:        time.Now().UTC(),
+			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq memory add-fact failed: %v\n", err)
 				os.Exit(1)
 			}
+			if warning != "" {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+			}
 			fmt.Printf("Added fact %s [%s]: %s\n", fact.ID, fact.Topic, fact.Statement)
 
 		case "prune-fact":
-			denyIfCallerTainted(vaultDir, "memory prune-fact")
 			if len(os.Args) < 4 {
 				fmt.Fprintln(os.Stderr, "usage: hq memory prune-fact <fact-id> [--superseded-by=<new-id>]")
 				os.Exit(1)
@@ -1926,17 +2213,35 @@ func main() {
 			fs := flag.NewFlagSet("memory compact", flag.ExitOnError)
 			noSidebar := fs.Bool("no-sidebar", false, "Skip Antigravity sidebar archive sync")
 			_ = fs.Parse(os.Args[3:])
-			before, after, err := vault.CompactFacts(vaultDir)
+			now := time.Now().UTC()
+			if res, tErr := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{NoSidebar: *noSidebar}); tErr == nil {
+				var rotated []string
+				rotated = append(rotated, res.AutoArchivedSlugs...)
+				rotated = append(rotated, res.RotatedColdSlugs...)
+				if len(rotated) > 0 {
+					_ = vault.ArchiveProgressBatch(vaultDir, rotated, now)
+				}
+				fmt.Printf("Compacted tasks.json: %d -> %d hot tasks (rotated %d to tasks_archive.jsonl, total cold: %d)\n",
+					res.HotBefore, res.HotAfter, len(res.RotatedColdSlugs), res.TotalColdAfter)
+			}
+			var activeSlugs []string
+			if tasks, err := kernel.ListTasks(vaultDir); err == nil {
+				for _, t := range tasks {
+					st := strings.ToLower(strings.TrimSpace(t.Status))
+					if st != "done" && st != "archived" && strings.TrimSpace(t.TaskSlug) != "" {
+						activeSlugs = append(activeSlugs, t.TaskSlug)
+					}
+				}
+			}
+			memRep, err := vault.CompactMemory(vaultDir, activeSlugs, now)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq memory compact failed: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", before, after)
-			if res, tErr := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{NoSidebar: *noSidebar}); tErr == nil {
-				_ = webui.SyncMarkdownConsole(vaultDir)
-				fmt.Printf("Compacted tasks.json: %d -> %d hot tasks (rotated %d to tasks_archive.jsonl, total cold: %d)\n",
-					res.HotBefore, res.HotAfter, len(res.RotatedColdSlugs), res.TotalColdAfter)
-			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", memRep.FactsBefore, memRep.FactsAfter)
+			fmt.Printf("Lifecycle archival:    progress=%d, journals=%d, briefs=%d\n",
+				len(memRep.ArchivedProgress), memRep.ArchivedJournals, memRep.ArchivedBriefs)
 
 		case "verify-transcript":
 			if len(os.Args) < 4 {
@@ -1954,7 +2259,6 @@ func main() {
 			_ = enc.Encode(digest)
 
 		case "forget":
-			denyIfCallerTainted(vaultDir, "memory forget")
 			var posQ string
 			var flagArgs []string
 			for _, a := range os.Args[3:] {
@@ -1965,7 +2269,7 @@ func main() {
 				}
 			}
 			fs := flag.NewFlagSet("memory forget", flag.ExitOnError)
-			query := fs.String("query", "", "Substring or fact ID to scrub across facts, MEMORY.md, topics, entities, and notes")
+			query := fs.String("query", "", "Substring or fact ID to scrub across facts, MEMORY.md, topics, entities, notes, journals, progress, obs, and rsi")
 			topicSlug := fs.String("topic", "", "Optional topic wiki slug to delete (local/memory/topics/<slug>.md)")
 			entitySlug := fs.String("entity", "", "Optional entity dossier slug to delete (local/memory/entities/<slug>.md)")
 			blockPII := fs.Bool("block-pii", false, "Also append --query to local/private/pii-denylist.txt")
@@ -1993,8 +2297,8 @@ func main() {
 			if *dryRun {
 				mode = "[DRY-RUN] Previewed"
 			}
-			fmt.Printf("%s surgical forget: expiredFacts=%d, memoryLinesRemoved=%d, deletedFiles=%d, scrubbedFiles=%d, denylistUpdated=%v\n",
-				mode, len(rep.ExpiredFactIDs), rep.MemoryLinesRemoved, len(rep.DeletedFiles), len(rep.ScrubbedFiles), rep.DenylistUpdated)
+			fmt.Printf("%s surgical forget: expiredFacts=%d, memoryLinesRemoved=%d, deletedFiles=%d, scrubbedFiles=%d, sourceConvs=%d, denylistUpdated=%v\n",
+				mode, len(rep.ExpiredFactIDs), rep.MemoryLinesRemoved, len(rep.DeletedFiles), len(rep.ScrubbedFiles), len(rep.SourceConvIDs), rep.DenylistUpdated)
 
 		case "entities":
 			fs := flag.NewFlagSet("memory entities", flag.ExitOnError)
@@ -2016,7 +2320,6 @@ func main() {
 			}
 
 		case "add-entity":
-			denyIfCallerTainted(vaultDir, "memory add-entity")
 			fs := flag.NewFlagSet("memory add-entity", flag.ExitOnError)
 			slug := fs.String("slug", "", "Entity slug (defaults to kebab-case of --name)")
 			name := fs.String("name", "", "Display name")
@@ -2108,7 +2411,6 @@ func main() {
 			}
 
 		case "commit":
-			denyIfCallerTainted(vaultDir, "memory commit")
 			fs := flag.NewFlagSet("memory commit", flag.ExitOnError)
 			msg := fs.String("message", "", "Optional commit message for the private Vault git repository")
 			msgShort := fs.String("m", "", "Alias for --message")
@@ -2118,6 +2420,8 @@ func main() {
 			if m == "" {
 				m = strings.TrimSpace(*msgShort)
 			}
+			// Advance dream cursor strictly inside `hq memory commit` (before git commit so working tree stays clean).
+			_ = vault.AdvanceDreamCursor(vaultDir, strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")), time.Now().UTC())
 			committed, err := vault.CommitVault(vaultDir, m)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hq memory commit failed: %v\n", err)
@@ -2144,7 +2448,7 @@ func main() {
 			}
 
 		default:
-			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup, commit)\n", sub)
+			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, search, dream-plan, eval, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup, commit)\n", sub)
 			os.Exit(1)
 		}
 
@@ -2273,6 +2577,12 @@ func runTasksCLI(vaultDir string, args []string) {
 				os.Exit(1)
 			}
 			if !*dryRun {
+				var rotated []string
+				rotated = append(rotated, res.AutoArchivedSlugs...)
+				rotated = append(rotated, res.RotatedColdSlugs...)
+				if len(rotated) > 0 {
+					_ = vault.ArchiveProgressBatch(vaultDir, rotated, now)
+				}
 				_ = webui.SyncMarkdownConsole(vaultDir)
 			}
 			if *asJSON {
@@ -3929,4 +4239,16 @@ Subcommands:
   precheck | triage         Run 0-token unread Gmail precheck
   triage-result             Record validated triage results
   attachment-quarantine     Quarantine a downloaded attachment`)
+}
+
+func parseFlexibleDuration(raw string) (time.Duration, error) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if strings.HasSuffix(s, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid day duration %q", raw)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }

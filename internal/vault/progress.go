@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 const MaxProgressLines = 60
@@ -87,11 +89,9 @@ func SaveProgress(vaultDir string, cp ProgressCheckpoint, now time.Time) (Progre
 	}
 	content := strings.Join(lines, "\n") + "\n"
 
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		return ProgressCheckpoint{}, err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := withMemoryLock(vaultDir, func() error {
+		return store.WriteAtomic(dst, []byte(content), 0o600)
+	}); err != nil {
 		return ProgressCheckpoint{}, err
 	}
 	return cp, nil
@@ -181,7 +181,7 @@ func ListProgress(vaultDir string) ([]ProgressCheckpoint, error) {
 	return out, nil
 }
 
-// ArchiveProgress moves local/memory/progress/<slug>.md into local/memory/progress/archived/.
+// ArchiveProgress moves local/memory/progress/<slug>.md into local/memory/progress/archived/ under store.RankMemory.
 func ArchiveProgress(vaultDir, rawSlug string, now time.Time) (string, error) {
 	slug, err := normalizeProgressSlug(rawSlug)
 	if err != nil {
@@ -190,17 +190,51 @@ func ArchiveProgress(vaultDir, rawSlug string, now time.Time) (string, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	src := filepath.Join(progressDir(vaultDir), slug+".md")
-	if _, err := os.Stat(src); err != nil {
-		return "", fmt.Errorf("progress checkpoint %q not found", slug)
+	var dst string
+	err = withMemoryLock(vaultDir, func() error {
+		src := filepath.Join(progressDir(vaultDir), slug+".md")
+		if _, err := os.Stat(src); err != nil {
+			return fmt.Errorf("progress checkpoint %q not found", slug)
+		}
+		archDir := filepath.Join(progressDir(vaultDir), "archived")
+		if err := os.MkdirAll(archDir, 0o700); err != nil {
+			return err
+		}
+		dst = filepath.Join(archDir, fmt.Sprintf("%s_%s.md", now.UTC().Format("2006-01-02"), slug))
+		return os.Rename(src, dst)
+	})
+	return dst, err
+}
+
+// ArchiveProgressBatch archives any existing progress checkpoints matching slugs, returning archived slugs.
+func ArchiveProgressBatch(vaultDir string, slugs []string, now time.Time) []string {
+	var archived []string
+	for _, s := range slugs {
+		if strings.TrimSpace(s) == "" {
+			continue
+		}
+		if _, err := ArchiveProgress(vaultDir, s, now); err == nil {
+			archived = append(archived, s)
+		}
 	}
-	archDir := filepath.Join(progressDir(vaultDir), "archived")
-	if err := os.MkdirAll(archDir, 0o700); err != nil {
-		return "", err
+	return archived
+}
+
+// SweepOrphanProgress archives any active local/memory/progress/<slug>.md file whose slug is not in activeSlugs.
+func SweepOrphanProgress(vaultDir string, activeSlugs map[string]bool, now time.Time) []string {
+	entries, err := os.ReadDir(progressDir(vaultDir))
+	if err != nil {
+		return nil
 	}
-	dst := filepath.Join(archDir, fmt.Sprintf("%s_%s.md", now.UTC().Format("2006-01-02"), slug))
-	if err := os.Rename(src, dst); err != nil {
-		return "", err
+	var orphans []string
+	for _, e := range entries {
+		if e.IsDir() || e.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(e.Name(), ".md") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		slug := strings.TrimSuffix(e.Name(), ".md")
+		if !activeSlugs[strings.ToLower(slug)] {
+			orphans = append(orphans, slug)
+		}
 	}
-	return dst, nil
+	return ArchiveProgressBatch(vaultDir, orphans, now)
 }

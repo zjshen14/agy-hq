@@ -20,8 +20,10 @@ schedules:
     skill: morning-brief
   - id: sleep-consolidate
     cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
-    mode: isolated_worker
+    mode: daemon_gatekeeper
     tier: deep_routine
+    precheck_cmd: ["hq", "memory", "dream-plan", "--precheck"]
+    dedup_mode: exit_zero_nonempty
     delivery: silent_ledger
     skill: sleep-consolidate
 

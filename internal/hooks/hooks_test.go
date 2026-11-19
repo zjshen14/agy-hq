@@ -1481,3 +1481,102 @@ func TestTopLevelTaskApprovalSymmetryAndSubagentAskQuestionDeny(t *testing.T) {
 		t.Fatalf("expected top-level [Task:...] conversation hq approve to succeed with minted cap-token, got: %s", approveOut.String())
 	}
 }
+
+func TestMemoryV2_SessionStartScopesPlaybooksAndBudgets(t *testing.T) {
+	vaultDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory", "topics"), 0o700)
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory", "journal", "archive"), 0o700)
+
+	// Seed oversized USER.md & MEMORY.md + scoped topic with Playbook-Owner + scoped facts
+	_ = os.WriteFile(filepath.Join(vaultDir, "USER.md"), []byte("# User\n"+strings.Repeat("- Durable preference line.\n", 80)), 0o600)
+	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("# Active Priorities\n"+strings.Repeat("- Active priority item.\n", 60)), 0o600)
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "topics", "blogs-site.md"),
+		[]byte("# Blogs Engineering\n> **Summary:** Hugo build traps and deploy conventions.\n> **Scopes:** repo:blogs\n> **Playbook-Owner:** repo:blogs\n\n## Active Playbook\n- Run `hugo --minify` before pushing.\n- Never edit generated public/ files directly.\n"), 0o600)
+
+	_, _, _ = vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
+		ID:        "f-blogs-1",
+		Topic:     "blogs",
+		Statement: "Blogs repo uses Hugo static generator",
+		Scopes:    []string{"repo:blogs"},
+		Verified:  true,
+	})
+	_, _, _ = vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
+		ID:        "f-other-1",
+		Topic:     "other",
+		Statement: "Other repo uses Bazel build",
+		Scopes:    []string{"repo:other-repo"},
+		Verified:  true,
+	})
+
+	// Seed transcript with worktrees/blogs-draft path when lastUserInput is empty (Antigravity SessionStart contract)
+	txPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	_ = os.WriteFile(txPath, []byte(`{"step_index":0,"type":"USER_INPUT","content":"Work in worktrees/blogs-draft to fix Hugo theme"}`+"\n"), 0o600)
+
+	fdID := "fd-memv2-0001"
+	taskID := "task-blogs-0001"
+	_ = kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(vaultDir, "art"))
+
+	// 1. Front Desk: <= 12KB hard cap, 0 playbooks injected
+	var fdOut bytes.Buffer
+	fdPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": fdID,
+		"workspacePaths": []string{"/tmp/headquarter"},
+	})
+	if err := HandleSessionStart(bytes.NewReader(fdPayload), &fdOut, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart front desk: %v", err)
+	}
+	var fdResp struct {
+		InjectSteps []struct {
+			SystemMessage struct {
+				SystemMessage string `json:"systemMessage"`
+			} `json:"systemMessage"`
+		} `json:"injectSteps"`
+	}
+	_ = json.Unmarshal(fdOut.Bytes(), &fdResp)
+	fdMsg := fdResp.InjectSteps[0].SystemMessage.SystemMessage
+	if len(fdMsg) > vault.MaxSessionFullBytes {
+		t.Fatalf("Front Desk SessionStart exceeded %dB hard cap: got %dB", vault.MaxSessionFullBytes, len(fdMsg))
+	}
+	if strings.Contains(fdMsg, "### Scoped Playbook:") {
+		t.Fatalf("Front Desk must inject 0 Scoped Playbooks, got:\n%s", fdMsg)
+	}
+
+	// 2. Task session with empty lastUserInput + umbrella workspace + transcript referencing worktrees/blogs-draft
+	var taskOut bytes.Buffer
+	taskPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": taskID,
+		"workspacePaths": []string{"/tmp/headquarter"},
+		"transcriptPath": txPath,
+	})
+	if err := HandleSessionStart(bytes.NewReader(taskPayload), &taskOut, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart task: %v", err)
+	}
+	var taskResp struct {
+		InjectSteps []struct {
+			SystemMessage struct {
+				SystemMessage string `json:"systemMessage"`
+			} `json:"systemMessage"`
+		} `json:"injectSteps"`
+	}
+	_ = json.Unmarshal(taskOut.Bytes(), &taskResp)
+	taskMsg := taskResp.InjectSteps[0].SystemMessage.SystemMessage
+	if len(taskMsg) > vault.MaxSessionFullBytes {
+		t.Fatalf("Task SessionStart exceeded %dB hard cap: got %dB", vault.MaxSessionFullBytes, len(taskMsg))
+	}
+	if !strings.Contains(taskMsg, "### Scoped Playbook: Blogs Engineering") || !strings.Contains(taskMsg, "hugo --minify") {
+		t.Fatalf("expected repo:blogs Scoped Playbook from transcript worktree path, got:\n%s", taskMsg)
+	}
+	if !strings.Contains(taskMsg, "f-blogs-1") || strings.Contains(taskMsg, "f-other-1") {
+		t.Fatalf("expected repo:blogs fact included and repo:other-repo excluded, got:\n%s", taskMsg)
+	}
+	if !strings.Contains(taskMsg, "Temporal Precedence:") {
+		t.Fatalf("expected Temporal Precedence directive in Active Vault Facts")
+	}
+
+	// 3. priorJournalStepCountWithDate falls back to memory/journal/archive/*.jsonl
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "journal", "archive", "2026-10.jsonl"),
+		[]byte(`{"conversationId":"conv-archived-fd","stepCount":321}`+"\n"), 0o600)
+	if got := priorJournalStepCountWithDate(vaultDir, "conv-archived-fd", "2026-11-18", 2); got != 321 {
+		t.Fatalf("expected priorJournalStepCountWithDate archive fallback=321, got %d", got)
+	}
+}

@@ -28,14 +28,17 @@ type GlobalConfig struct {
 
 // Fact represents a bi-temporal fact entry in local/memory/facts.jsonl.
 type Fact struct {
-	ID           string  `json:"id"`
-	Topic        string  `json:"topic"`
-	Statement    string  `json:"statement"`
-	SourceConv   string  `json:"source_conv,omitempty"`
-	Verified     bool    `json:"verified,omitempty"`
-	ValidFrom    string  `json:"valid_from"`
-	ValidTo      *string `json:"valid_to"`
-	SupersededBy string  `json:"superseded_by,omitempty"`
+	ID           string   `json:"id"`
+	Topic        string   `json:"topic"`
+	Statement    string   `json:"statement"`
+	SourceConv   string   `json:"source_conv,omitempty"`
+	Verified     bool     `json:"verified,omitempty"`
+	ValidFrom    string   `json:"valid_from"`
+	ValidTo      *string  `json:"valid_to"`
+	SupersededBy string   `json:"superseded_by,omitempty"`
+	Scopes       []string `json:"scopes,omitempty"`
+	ExpiresAt    string   `json:"expires_at,omitempty"`
+	Pinned       bool     `json:"pinned,omitempty"`
 }
 
 // IsTempPath returns true if p resides inside os.TempDir() (handling macOS /private/var symlink resolution).

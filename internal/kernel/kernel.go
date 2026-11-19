@@ -207,6 +207,7 @@ type ActiveTask struct {
 	ConversationID       string   `json:"conversationId,omitempty"`
 	TurnCount            int      `json:"turnCount,omitempty"`
 	Pinned               bool     `json:"pinned,omitempty"`
+	Ephemeral            bool     `json:"ephemeral,omitempty"`
 	CreatedAt            string   `json:"createdAt"`
 	LastUpdatedAt        string   `json:"lastUpdatedAt"`
 	CompletedAt          string   `json:"completedAt,omitempty"`

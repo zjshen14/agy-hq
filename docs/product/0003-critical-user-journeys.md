@@ -329,3 +329,9 @@
 
 ## CUJ-38: Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling ([RFC-0023](../design/0023-front-desk-channel-bridge.md))
 1. **Trust-Pinned `hq-channel-bridge/v1` Lifecycle (`hq channels`, `hq daemon`, `hq hook stop`):** Supervises SHA-256-pinned companion channel bridges with LLM-invisible `0600` credentials (`local/private/channels/`), tunnels inbound messages and `0`-token `desk_reply` mirrors across Front Desk rotations (`bind-desk`), fans out `interrupt` and task `blocked`/`done` cards, and verifies single-use `bca_`/`bcr_` mobile approval/rejection callbacks.
+
+---
+
+## CUJ-39: Memory v2 Orthogonal Vault, Scoped Playbooks, BM25 Search, Gatekeeper Dream-Plan & Eval ([RFC-0024](../design/0024-memory-v2-prediction-and-eval.md))
+1. **Orthogonal Scoped Context & Budget Envelopes (`hq hook session-start`, `hq memory add-fact`):** Enforces dual line + byte caps (`MEMORY.md <= 40L / 2.2 KB`, full `<= 12 KB`, `lean_auto <= 4.8 KB` with zero starvation, tainted `<= 800 B`), routes scoped `facts.jsonl` (`--scope`, `--expires`, `--pinned`) and 1:1 `Playbook-Owner` `## Active Playbook` sections (`0` on Front Desk), blocks unattended `[Auto]` direct writes, and guarantees `0`-token TTL expiration.
+2. **Full-Vault BM25 Recall, Gatekeeper Dreaming & 3-Layer Eval (`hq memory search|dream-plan|eval|compact`):** Retrieves allowlisted Vault memory layers with clickable `file://#Lstart-Lend` provenance while excluding `private/**` and tainted journals, gates nightly `sleep-consolidate` via `dream-plan --precheck` (`exit_zero_nonempty`) with commit-only cursor advancement, archives `> 14d` journals/briefs safely, and verifies `F1`–`F4` fixtures and M1–M4 metrics via `hq memory eval`.

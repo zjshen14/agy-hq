@@ -239,11 +239,18 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	var hasMatchedTask bool
 	leanAuto := false
 	isFrontDesk := false
+	isSubagent := false
+	isAutoWorker := false
+
+	promptText := strings.TrimSpace(payload.LastUserInput)
+	if promptText == "" && strings.TrimSpace(payload.TranscriptPath) != "" {
+		promptText = readFirstUserPromptFromTranscript(payload.TranscriptPath)
+	}
 
 	if payload.ConversationID != "" {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
 
-		isSubagent := kernel.IsSubagentConversation(vaultDir, payload.ConversationID)
+		isSubagent = kernel.IsSubagentConversation(vaultDir, payload.ConversationID)
 		if !isSubagent {
 			if t, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); alreadyTracked {
 				matchedTask = t
@@ -255,11 +262,11 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				} else if kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID) {
 					// Known nested descendant subagent: do NOT register into tasks.json!
 					isSubagent = true
-				} else if nestedSub, isNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 3*time.Minute); isNested {
+				} else if nestedSub, isNested := kernel.PopPendingNestedSubagentForCaller(vaultDir, payload.ConversationID, promptText, 3*time.Minute); isNested {
 					_ = kernel.RecordNestedConversation(vaultDir, payload.ConversationID, nestedSub.ParentConversationID)
 					// Nested descendant subagent: do NOT register into tasks.json!
 					isSubagent = true
-				} else if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 3*time.Minute); found {
+				} else if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, promptText, 3*time.Minute); found {
 					isSubagent = true
 					modelName := sub.Model
 					if modelName == "" {
@@ -289,7 +296,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			hasMatchedTask = true
 		}
 
-		isAutoWorker := hasMatchedTask && matchedTask.EffectiveKind() == "auto"
+		isAutoWorker = (hasMatchedTask && matchedTask.EffectiveKind() == "auto") ||
+			(!hasMatchedTask && !isSubagent && strings.HasPrefix(strings.ToLower(strings.TrimSpace(promptText)), "[auto]"))
 		leanAuto = isSubagent || isAutoWorker || isTaintedStart
 		isFrontDesk = !leanAuto && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
 		if isTaintedStart {
@@ -428,35 +436,106 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	// Zone 1: Byte-Stable Cacheable Prefix (USER.md + MEMORY.md + Deterministic Topic Index)
+	now := time.Now().UTC()
+	scopeCtx := ResolveSessionScopes(vaultDir, payload, matchedTask, hasMatchedTask, isFrontDesk, isSubagent, isAutoWorker, leanAuto, promptText)
+
+	// Quarantined Tainted Session: hard <= 800B cap; omit all private Vault memory layers.
+	if isTaintedStart {
+		msg := capSessionEnvelope("[agy-hq Session Context Loaded]\n\n"+strings.Join(zone2Sections, "\n\n"), vault.MaxSessionTaintBytes)
+		resp := map[string]interface{}{
+			"injectSteps": []map[string]interface{}{
+				{
+					"systemMessage": map[string]interface{}{
+						"systemMessage": msg,
+					},
+				},
+			},
+		}
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		return enc.Encode(resp)
+	}
+
+	// Zone 1: Byte-Stable Cacheable Prefix (Role-Aware Dual Line + Byte Budgets)
 	if userBytes, err := os.ReadFile(filepath.Join(vaultDir, "USER.md")); err == nil {
 		if s := strings.TrimSpace(string(userBytes)); s != "" {
+			userCap := 2400
+			if leanAuto {
+				userCap = 1400
+			}
+			s = trimBytesPreservingLines(s, userCap)
+			if !leanAuto && len(userBytes) > vault.MaxUserAdvisoryBytes {
+				s += fmt.Sprintf("\n\n> ⚠️ `local/USER.md` is %d bytes (advisory target <= %d bytes). Trim prose to keep startup context lean.", len(userBytes), vault.MaxUserAdvisoryBytes)
+			}
 			zone1Sections = append(zone1Sections, "## HQ Vault: USER.md\n"+s)
 		}
 	}
-	if !isTaintedStart {
+
+	// MEMORY.md: Active Priorities ONLY (<= 40 lines & <= 2,200 bytes). Omitted in lean_auto to prevent Zone 2 starvation.
+	if !leanAuto {
 		if memBytes, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
 			if s := strings.TrimSpace(string(memBytes)); s != "" {
-				lines := strings.Split(s, "\n")
-				if len(lines) > vault.MaxMemoryIndexLines {
-					s = strings.Join(lines[:vault.MaxMemoryIndexLines], "\n") +
-						fmt.Sprintf("\n\n> ⚠️ **[Roadmap Index Budget Warning]:** `local/MEMORY.md` exceeds %d lines (%d lines). Run `/sleep-consolidate` or `./bin/hq memory status` to distill detailed notes into `local/memory/topics/<slug>.md`.", vault.MaxMemoryIndexLines, len(lines))
+				trimmedMem, wasTrunc := vault.TruncateMemoryIndex(s, vault.MaxMemoryIndexLines, vault.MaxMemoryIndexBytes)
+				if wasTrunc {
+					trimmedMem += fmt.Sprintf("\n\n> ⚠️ **[Roadmap Index Budget Warning]:** `local/MEMORY.md` exceeds %d lines / %d bytes. Run `/sleep-consolidate` or `hq memory status` to keep `MEMORY.md` focused on Active Priorities.", vault.MaxMemoryIndexLines, vault.MaxMemoryIndexBytes)
 				}
-				zone1Sections = append(zone1Sections, "## HQ Vault: MEMORY.md\n"+s)
+				zone1Sections = append(zone1Sections, "## HQ Vault: MEMORY.md\n"+trimmedMem)
 			}
 		}
-		if topics, err := vault.LoadTopicIndex(vaultDir); err == nil && len(topics) > 0 {
-			var topicLines []string
-			topicLines = append(topicLines, "> **Retrieval Directive:** When your task touches any topic listed below, call `read_file` on its topic page first to load verified architectural context.")
+	}
+
+	topics, _ := vault.LoadTopicIndex(vaultDir)
+	if len(topics) > 0 {
+		var selectedTopics []vault.TopicPage
+		if leanAuto {
+			selectedTopics = vault.FilterTopicsForScope(topics, scopeCtx, 5)
+		} else {
+			topicLimit := 15
+			if !isFrontDesk {
+				topicLimit = 10
+			}
+			// Put scope-matched topics first, then remaining topics deterministically up to topicLimit.
+			matched := vault.FilterTopicsForScope(topics, scopeCtx, topicLimit)
+			seenSlug := make(map[string]bool, len(matched))
+			for _, tp := range matched {
+				seenSlug[tp.Slug] = true
+				selectedTopics = append(selectedTopics, tp)
+			}
 			for _, tp := range topics {
-				if tp.Summary != "" {
-					topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`): %s", tp.Title, tp.Path, tp.Slug, tp.Summary))
+				if len(selectedTopics) >= topicLimit {
+					break
+				}
+				if !seenSlug[tp.Slug] {
+					seenSlug[tp.Slug] = true
+					selectedTopics = append(selectedTopics, tp)
+				}
+			}
+		}
+		if len(selectedTopics) > 0 {
+			var topicLines []string
+			topicLines = append(topicLines, "> **Retrieval Directive:** Call `read_file` on relevant topic pages below, or run `hq memory search \"<query>\"` for full-vault BM25 lookup.")
+			for _, tp := range selectedTopics {
+				summary := trimInlineRunes(tp.Summary, 110)
+				if summary != "" {
+					topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`): %s", tp.Title, tp.Path, tp.Slug, summary))
 				} else {
 					topicLines = append(topicLines, fmt.Sprintf("- **[%s](file://%s)** (`%s`)", tp.Title, tp.Path, tp.Slug))
 				}
 			}
-			zone1Sections = append(zone1Sections, "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n"+strings.Join(topicLines, "\n"))
+			if len(topics) > len(selectedTopics) {
+				topicLines = append(topicLines, fmt.Sprintf("- *(+%d more topic page(s) available via `hq memory search`)*", len(topics)-len(selectedTopics)))
+			}
+			topicBlock := "## HQ Knowledge Wiki (Topic Index — Read On-Demand)\n" + strings.Join(topicLines, "\n")
+			if leanAuto {
+				topicBlock = trimBytesPreservingLines(topicBlock, 750)
+			} else {
+				topicBlock = trimBytesPreservingLines(topicBlock, 1800)
+			}
+			zone1Sections = append(zone1Sections, topicBlock)
 		}
+	}
+
+	if !leanAuto {
 		if extSt, eErr := extension.LoadVaultState(vaultDir); eErr == nil && len(extSt.SkillOverrides) > 0 {
 			keys := make([]string, 0, len(extSt.SkillOverrides))
 			for k := range extSt.SkillOverrides {
@@ -474,62 +553,100 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				zone1Sections = append(zone1Sections, "## Active Companion Skill Overrides\n"+strings.Join(ovLines, "\n"))
 			}
 		}
-		if genRules := extension.LoadGeneralOverlayRules(vaultDir, 5); len(genRules) > 0 {
-			zone1Sections = append(zone1Sections, "## Learned Personal RSI Rules (`general`)\n"+strings.Join(genRules, "\n\n"))
+	}
+
+	rsiLimit := 5
+	if leanAuto {
+		rsiLimit = 2
+	}
+	if genRules := extension.LoadGeneralOverlayRules(vaultDir, rsiLimit); len(genRules) > 0 {
+		rsiBlock := "## Learned Personal RSI Rules (`general`)\n" + strings.Join(genRules, "\n\n")
+		if leanAuto {
+			rsiBlock = trimBytesPreservingLines(rsiBlock, 550)
 		}
+		zone1Sections = append(zone1Sections, rsiBlock)
 	}
 
 	// Zone 2: Role-Scoped Dynamic Tail
-	if !isTaintedStart && !leanAuto {
+	if !leanAuto {
 		if isFrontDesk {
 			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "front_desk"); len(ovs) > 0 {
-				zone2Sections = append(zone2Sections, "## Companion Front Desk Policy Overlays (Advisory)\n"+strings.Join(ovs, "\n\n"))
+				zone2Sections = append(zone2Sections, "## Companion Front Desk Policy Overlays (Advisory)\n"+trimBytesPreservingLines(strings.Join(ovs, "\n\n"), 900))
 			}
 		} else if hasMatchedTask && strings.TrimSpace(matchedTask.Scope) != "" {
 			if ovs := extension.LoadActiveFrontDeskOverlays(vaultDir, "task:"+strings.TrimSpace(matchedTask.Scope)); len(ovs) > 0 {
-				zone2Sections = append(zone2Sections, "## Companion Task Policy Overlays (Advisory)\n"+strings.Join(ovs, "\n\n"))
+				zone2Sections = append(zone2Sections, "## Companion Task Policy Overlays (Advisory)\n"+trimBytesPreservingLines(strings.Join(ovs, "\n\n"), 900))
 			}
 		}
 	}
-	if !isTaintedStart && hasMatchedTask && matchedTask.TaskSlug != "" {
+
+	if hasMatchedTask && matchedTask.TaskSlug != "" {
 		if _, rawProg, foundProg, pErr := vault.LoadProgress(vaultDir, matchedTask.TaskSlug); pErr == nil && foundProg && strings.TrimSpace(rawProg) != "" {
-			zone2Sections = append(zone2Sections, "## Active Task Progress Checkpoint\n"+strings.TrimSpace(rawProg))
+			progCap := 1200
+			if leanAuto {
+				progCap = 750
+			}
+			zone2Sections = append(zone2Sections, "## Active Task Progress Checkpoint\n"+trimBytesPreservingLines(strings.TrimSpace(rawProg), progCap))
 		}
 	}
 
-	factLimit := 25
-	if leanAuto {
-		factLimit = 8
+	// Scoped ## Active Playbook (1:1 Playbook-Owner, 0 on Front Desk)
+	if len(topics) > 0 {
+		playbooks := vault.SelectScopedPlaybooks(topics, scopeCtx, vault.MaxPlaybookLines, vault.MaxPlaybookBytes)
+		for _, pb := range playbooks {
+			pbCap := vault.MaxPlaybookBytes
+			if leanAuto {
+				pbCap = 850
+			}
+			pbBody := trimBytesPreservingLines(pb.ActivePlaybook, pbCap)
+			zone2Sections = append(zone2Sections, fmt.Sprintf("### Scoped Playbook: %s (`%s`)\n%s", pb.Title, pb.PlaybookOwner, pbBody))
+		}
+		// 1-line Matched Context Hints (Task & Subagent sessions only; 0 on Front Desk)
+		if hints := vault.MatchContextHints(topics, scopeCtx, 2); len(hints) > 0 {
+			var hLines []string
+			for _, h := range hints {
+				hLines = append(hLines, fmt.Sprintf("- **%s**: %s (`read_file` [file](file://%s))", h.Title, trimInlineRunes(h.Summary, 90), h.Path))
+			}
+			zone2Sections = append(zone2Sections, "## Matched Context Hints\n"+strings.Join(hLines, "\n"))
+		}
 	}
-	if !isTaintedStart {
-		if facts, err := vault.LoadActiveFacts(vaultDir, factLimit); err == nil && len(facts) > 0 {
+
+	// Role-Scoped Active Vault Facts (Deterministic Go Physics + Temporal Precedence Directive)
+	if activeFacts, _, _, err := vault.LoadFactsStateAt(vaultDir, now); err == nil && len(activeFacts) > 0 {
+		factMaxCount, factMaxBytes := 15, 2200
+		if isFrontDesk {
+			factMaxCount, factMaxBytes = 10, 1600
+		} else if leanAuto {
+			factMaxCount, factMaxBytes = 6, 850
+		}
+		selectedFacts := vault.SelectFactsForSession(activeFacts, scopeCtx, now, factMaxCount, factMaxBytes)
+		if len(selectedFacts) > 0 {
 			var lines []string
-			for _, f := range facts {
-				meta := ""
-				if f.ID != "" {
-					if f.Verified {
-						meta = fmt.Sprintf(" (%s · verified)", f.ID)
-					} else {
-						meta = fmt.Sprintf(" (%s)", f.ID)
-					}
-				}
-				lines = append(lines, fmt.Sprintf("- [%s]%s %s", f.Topic, meta, f.Statement))
+			lines = append(lines, "> **Temporal Precedence:** If the user's current request or live tool output contradicts any stored fact below, treat the live statement/output as ground truth and update via `hq memory add-fact`.")
+			for _, f := range selectedFacts {
+				lines = append(lines, vault.FormatFactBullet(f))
 			}
 			zone2Sections = append(zone2Sections, "## Active Vault Facts\n"+strings.Join(lines, "\n"))
 		}
 	}
 
-	if reportedDigest := outbox.FormatReportedDigest(vaultDir, time.Now(), 8); reportedDigest != "" {
-		zone2Sections = append(zone2Sections, "## Recently Reported to User\n"+reportedDigest)
+	reportedLimit := 6
+	if leanAuto {
+		reportedLimit = 4
+	}
+	if reportedDigest := outbox.FormatReportedDigest(vaultDir, now, reportedLimit); reportedDigest != "" {
+		repCap := 900
+		if leanAuto {
+			repCap = 600
+		}
+		zone2Sections = append(zone2Sections, "## Recently Reported to User\n"+trimBytesPreservingLines(reportedDigest, repCap))
 	}
 
 	if !leanAuto {
-		_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", time.Now())
-		_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
-		if !isTaintedStart {
-			if pol, _, pErr := approvals.LoadPolicy(vaultDir); pErr == nil {
-				zone2Sections = append(zone2Sections, approvals.FormatActivePolicySummary(pol))
-			}
+		_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", now)
+		_, _ = approvals.ReconcileLocalGitProposals(vaultDir, now)
+		if pol, _, pErr := approvals.LoadPolicy(vaultDir); pErr == nil {
+			zone2Sections = append(zone2Sections, approvals.FormatActivePolicySummary(pol))
 		}
 		if pending, err := approvals.List(vaultDir); err == nil && len(pending) > 0 {
 			var lines []string
@@ -540,17 +657,16 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				}
 				lines = append(lines, fmt.Sprintf("- `%s` (%s · sha256:%s): %s — `%s`", p.ID, p.ActionType, short, p.Summary, p.Command))
 			}
-			zone2Sections = append(zone2Sections, "## Pending Approvals in Queue\n"+strings.Join(lines, "\n"))
+			zone2Sections = append(zone2Sections, "## Pending Approvals in Queue\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 1200))
 		}
 		if wts, err := worktree.List(vaultDir); err == nil && len(wts) > 0 {
 			var lines []string
 			for _, wt := range wts {
 				lines = append(lines, fmt.Sprintf("- `%s` (%s)", filepath.Base(wt), wt))
 			}
-			zone2Sections = append(zone2Sections, "## Active Git Worktrees\n"+strings.Join(lines, "\n"))
+			zone2Sections = append(zone2Sections, "## Active Git Worktrees\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 900))
 		}
 		if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
-			now := time.Now()
 			layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
 			selected, omitted := kernel.SelectSessionStartTasks(layer1Tasks, now)
 			if len(selected) > 0 {
@@ -559,10 +675,11 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
 					lines = append(lines, fmt.Sprintf("- **%s** (`%s`, kind: `%s`, status: `%s`, conv: `%s`)", cleanTitle, t.TaskSlug, t.EffectiveKind(), t.EffectiveStatus(now), t.ConversationID))
 				}
+				body := trimBytesPreservingLines(strings.Join(lines, "\n"), 1450)
 				if omitted > 0 {
-					lines = append(lines, fmt.Sprintf("- *(+%d older completed/archived task(s) omitted from context; run `./bin/hq tasks` to inspect)*", omitted))
+					body += fmt.Sprintf("\n- *(+%d older completed/archived task(s) omitted from context; run `hq tasks` to inspect)*", omitted)
 				}
-				zone2Sections = append(zone2Sections, "## Tracked Task Conversations\n"+strings.Join(lines, "\n"))
+				zone2Sections = append(zone2Sections, "## Tracked Task Conversations\n"+body)
 			}
 		}
 		if cfg, err := kernel.LoadEffectiveTriggers(vaultDir); err == nil && len(cfg.Schedules) > 0 {
@@ -584,7 +701,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				}
 				lines = append(lines, fmt.Sprintf("- `%s` (`%s`, mode: `%s`, status: `%s`, skill: `%s`)", s.ID, s.Cron, s.EffectiveMode(), status, s.Skill))
 			}
-			zone2Sections = append(zone2Sections, "## Proactive Triggers (`local/triggers.yaml`)\n"+strings.Join(lines, "\n"))
+			zone2Sections = append(zone2Sections, "## Proactive Triggers (`local/triggers.yaml`)\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 1100))
 			if len(fd.AdHocCrons) > 0 {
 				var adHocLines []string
 				for _, ac := range fd.AdHocCrons {
@@ -594,7 +711,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 					adHocLines = append(adHocLines, fmt.Sprintf("- **%s** (%s`%s`)", ac.Summary, idPart, ac.Cron))
 				}
-				zone2Sections = append(zone2Sections, "## Ad-Hoc Conversation Crons (Preserved in Front Desk)\n"+strings.Join(adHocLines, "\n"))
+				zone2Sections = append(zone2Sections, "## Ad-Hoc Conversation Crons (Preserved in Front Desk)\n"+trimBytesPreservingLines(strings.Join(adHocLines, "\n"), 600))
 			}
 		}
 	}
@@ -606,7 +723,15 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		return err
 	}
 
-	msg := "[agy-hq Session Context Loaded]\n\n" + strings.Join(sections, "\n\n")
+	header := "[agy-hq Session Context Loaded]\n\n"
+	if leanAuto {
+		header = "[agy-hq Lean Auto/Skill Context Loaded]\n\n"
+	}
+	budget := vault.MaxSessionFullBytes
+	if leanAuto {
+		budget = vault.MaxSessionLeanBytes
+	}
+	msg := assembleSessionMessage(header, sections, budget)
 	resp := map[string]interface{}{
 		"injectSteps": []map[string]interface{}{
 			{
@@ -619,6 +744,253 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(resp)
+}
+
+var reWorktreePathPrompt = regexp.MustCompile(`worktrees/([a-zA-Z0-9._-]+)`)
+
+// readFirstUserPromptFromTranscript performs a bounded <=16KB read of transcript.jsonl to recover Turn-1 user prompt
+// when Antigravity SessionStart stdin omits lastUserInput.
+func readFirstUserPromptFromTranscript(transcriptPath string) string {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	lr := io.LimitReader(f, 16*1024)
+	scanner := bufio.NewScanner(lr)
+	scanner.Buffer(make([]byte, 0, 4096), 16*1024)
+	for scanner.Scan() {
+		var step struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &step) != nil {
+			continue
+		}
+		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
+			return trimInlineRunes(cleanUserPrompt(step.Content), 512)
+		}
+	}
+	return ""
+}
+
+// ResolveSessionScopes derives deterministic canonical scopes for SessionStart selection
+// with strict repo precedence: (1) WorktreeDir / worktree path in prompt -> (2) Task Scope/RepoRoot -> (3) WorkspacePaths[0].
+func ResolveSessionScopes(vaultDir string, payload CommonPayload, matchedTask kernel.ActiveTask, hasMatchedTask, isFrontDesk, isSubagent, isAutoWorker, leanAuto bool, promptText string) vault.SessionScopeContext {
+	role := "task"
+	switch {
+	case isFrontDesk:
+		role = "front_desk"
+	case isAutoWorker:
+		role = "auto"
+	case isSubagent:
+		role = "subagent"
+	}
+
+	ctx := vault.SessionScopeContext{
+		Role:       role,
+		PromptText: promptText,
+		LeanAuto:   leanAuto,
+	}
+
+	scopeSet := make(map[string]bool)
+	addScope := func(raw string) {
+		s := vault.NormalizeScope(raw)
+		if s != "" && !scopeSet[s] {
+			scopeSet[s] = true
+			ctx.Scopes = append(ctx.Scopes, s)
+		}
+	}
+
+	extractRepoFromWorktree := func(wt string) string {
+		base := strings.ToLower(strings.TrimSpace(filepath.Base(filepath.Clean(wt))))
+		if base == "" || base == "." || base == "/" {
+			return ""
+		}
+		prefix := base
+		if idx := strings.IndexByte(base, '-'); idx > 0 {
+			prefix = base[:idx]
+		}
+		if prefix == "headquarter" || prefix == "agy" {
+			return "agy-hq"
+		}
+		return prefix
+	}
+
+	// Precedence 1: matchedTask.WorktreeDir or explicit <vault>/worktrees/<repo>-<task> path in promptText
+	if hasMatchedTask && strings.TrimSpace(matchedTask.WorktreeDir) != "" {
+		if r := extractRepoFromWorktree(matchedTask.WorktreeDir); r != "" {
+			ctx.RepoSlug = r
+		}
+	}
+	if ctx.RepoSlug == "" && promptText != "" {
+		if m := reWorktreePathPrompt.FindStringSubmatch(filepath.ToSlash(promptText)); len(m) >= 2 {
+			if r := extractRepoFromWorktree(m[1]); r != "" {
+				ctx.RepoSlug = r
+			}
+		}
+	}
+
+	// Precedence 2: matchedTask.RepoRoot / matchedTask.Scope
+	if hasMatchedTask {
+		if ctx.RepoSlug == "" && strings.TrimSpace(matchedTask.RepoRoot) != "" {
+			rr := filepath.Clean(matchedTask.RepoRoot)
+			if vault.IsAgyHQRepo(rr) {
+				ctx.RepoSlug = "agy-hq"
+			} else {
+				ctx.RepoSlug = strings.ToLower(filepath.Base(rr))
+			}
+		}
+		if sc := strings.ToLower(strings.TrimSpace(matchedTask.Scope)); sc != "" && sc != "general" {
+			ctx.TaskScope = sc
+			addScope("domain:" + sc)
+			if ctx.RepoSlug == "" && (sc == "headquarter" || sc == "agy-hq") {
+				ctx.RepoSlug = "agy-hq"
+			}
+		}
+	}
+
+	// Precedence 3: WorkspacePaths[0]
+	if ctx.RepoSlug == "" && len(payload.WorkspacePaths) > 0 {
+		ws := strings.TrimSpace(payload.WorkspacePaths[0])
+		if ws != "" {
+			cleanWS := filepath.Clean(ws)
+			if isPathInsideVaultWorktrees(cleanWS, vaultDir) {
+				ctx.RepoSlug = extractRepoFromWorktree(cleanWS)
+			} else if vault.IsAgyHQRepo(cleanWS) {
+				ctx.RepoSlug = "agy-hq"
+			} else {
+				ctx.RepoSlug = strings.ToLower(filepath.Base(cleanWS))
+			}
+		}
+	}
+
+	if ctx.RepoSlug != "" {
+		addScope("repo:" + ctx.RepoSlug)
+		if ctx.RepoSlug == "agy-hq" {
+			addScope("repo:headquarter")
+		}
+	}
+
+	// Skill & domain cues from task metadata + Turn-1 prompt
+	cueText := strings.ToLower(strings.TrimSpace(matchedTask.TaskSlug + " " + matchedTask.Title + " " + promptText))
+	skillDomainMap := map[string]string{
+		"thesis-check":      "investing",
+		"filing-diff":       "investing",
+		"swe-pulse":         "swe",
+		"gchat":             "comms",
+		"gmail":             "comms",
+		"tax-prep":          "finance",
+		"ledger-ingest":     "finance",
+		"morning-brief":     "ops",
+		"sleep-consolidate": "ops",
+	}
+	for sk, dom := range skillDomainMap {
+		if strings.Contains(cueText, sk) {
+			if ctx.ActiveSkill == "" {
+				ctx.ActiveSkill = sk
+			}
+			addScope("skill:" + sk)
+			addScope("domain:" + dom)
+		}
+	}
+
+	return ctx
+}
+
+func trimInlineRunes(s string, maxRunes int) string {
+	clean := strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	runes := []rune(clean)
+	if len(runes) <= maxRunes {
+		return clean
+	}
+	if maxRunes <= 1 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
+func trimBytesPreservingLines(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var out []string
+	used := 0
+	const suffix = "\n… *(trimmed to session budget)*"
+	limit := maxBytes - len(suffix)
+	if limit < 64 {
+		return capSessionEnvelope(s, maxBytes)
+	}
+	for _, line := range lines {
+		add := len(line)
+		if len(out) > 0 {
+			add++
+		}
+		if used+add > limit {
+			if len(out) == 0 {
+				return capSessionEnvelope(line, limit) + suffix
+			}
+			break
+		}
+		out = append(out, line)
+		used += add
+	}
+	return strings.Join(out, "\n") + suffix
+}
+
+func capSessionEnvelope(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	const marker = "\n… *(capped to budget)*"
+	cut := maxBytes - len(marker)
+	if cut < 32 {
+		cut = maxBytes
+	}
+	// Avoid splitting UTF-8 multi-byte rune
+	for cut > 0 && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	if maxBytes-len(marker) < 32 {
+		return s[:cut]
+	}
+	return strings.TrimRight(s[:cut], "\n ") + marker
+}
+
+func assembleSessionMessage(header string, sections []string, maxBytes int) string {
+	full := header + strings.Join(sections, "\n\n")
+	if maxBytes <= 0 || len(full) <= maxBytes {
+		return full
+	}
+	// Proportionally trim longest non-critical sections first so core Zone 2 sections are never starved.
+	trimmed := append([]string(nil), sections...)
+	for pass := 0; pass < 4; pass++ {
+		cur := header + strings.Join(trimmed, "\n\n")
+		if len(cur) <= maxBytes {
+			return cur
+		}
+		excess := len(cur) - maxBytes
+		// Find largest section to shrink
+		bestIdx := -1
+		bestLen := 0
+		for i, sec := range trimmed {
+			if len(sec) > bestLen && len(sec) > 360 {
+				bestLen = len(sec)
+				bestIdx = i
+			}
+		}
+		if bestIdx < 0 {
+			break
+		}
+		targetLen := bestLen - excess - 48
+		if targetLen < 280 {
+			targetLen = 280
+		}
+		trimmed[bestIdx] = trimBytesPreservingLines(trimmed[bestIdx], targetLen)
+	}
+	return capSessionEnvelope(header+strings.Join(trimmed, "\n\n"), maxBytes)
 }
 
 var (
@@ -2435,7 +2807,7 @@ func priorJournalStepCountWithDate(vaultDir, convID, todayDateStr string, curren
 	maxStep := 0
 	prefix := convID + "-"
 	for _, d := range dateDirs {
-		if !d.IsDir() {
+		if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || d.Name() == "archive" {
 			continue
 		}
 		files, _ := os.ReadDir(filepath.Join(journalRoot, d.Name()))
@@ -2455,6 +2827,9 @@ func priorJournalStepCountWithDate(vaultDir, convID, todayDateStr string, curren
 				}
 			}
 		}
+	}
+	if maxStep == 0 {
+		maxStep = vault.FindArchivedMaxStepCount(vaultDir, convID)
 	}
 	return maxStep
 }
@@ -2749,7 +3124,7 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 		if dateDirs, err := os.ReadDir(journalRoot); err == nil {
 			for i := len(dateDirs) - 1; i >= 0; i-- {
 				d := dateDirs[i]
-				if !d.IsDir() {
+				if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || d.Name() == "archive" {
 					continue
 				}
 				files, _ := os.ReadDir(filepath.Join(journalRoot, d.Name()))
@@ -2768,6 +3143,10 @@ func VerifyTranscript(target string, vaultDir string) (*TranscriptVerificationDi
 					break
 				}
 			}
+		}
+		// 1b. Fallback to compacted cold journal archives (memory/journal/archive/*.jsonl)
+		if transcriptPath == "" {
+			transcriptPath = vault.FindArchivedTranscriptPath(vaultDir, convID)
 		}
 		// 2. Fallback to standard Antigravity brain directory
 		if transcriptPath == "" {

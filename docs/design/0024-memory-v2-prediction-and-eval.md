@@ -1,6 +1,6 @@
 # RFC-0024: Memory Engine v2 — Orthogonal Single-Source Vault Architecture, Dual-Cap Budgets, Scoped Topic Playbooks, Pure-Go Hybrid Search & Deterministic Memory Eval
 
-- **Status:** Proposed (Draft B+ — Revised After Independent Carbon High Architecture Review)
+- **Status:** Implemented (Draft B+ — Phase 2A–2D complete, CI + CUJ-39 + offline A/B replay verified)
 - **Date:** 2026-11-18
 - **Author:** `[Task:agy-hq] Memory Architecture Deep Dive & RFC` (`gemini-4-carbon-high` / `gemini-4-neon-high`)
 - **Companion Research:** [19 — Anthropic's *"The Components of Agent Memory"* & 12-Day Production Vault Telemetry Audit](../research/19_anthropic_memory_components_and_vault_audit.md)

@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -543,12 +544,12 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 		}
 	}
 
-	// 3. Scan local/memory/journal/*/*.json using per-date-directory mtime cache
+	// 3. Scan local/memory/journal/*/*.json using per-date-directory mtime cache (skipping archive/)
 	journalRoot := filepath.Join(vaultDir, "memory", "journal")
 	if dateDirs, err := os.ReadDir(journalRoot); err == nil {
 		seenDates := make(map[string]bool, len(dateDirs))
 		for _, d := range dateDirs {
-			if !d.IsDir() {
+			if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || d.Name() == "archive" {
 				continue
 			}
 			dateName := d.Name()
@@ -617,6 +618,47 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 					delete(journalCache, k)
 				}
 			}
+		}
+	}
+
+	// 3b. Scan cold journal archives (memory/journal/archive/*.jsonl) for archived conversations
+	archDir := filepath.Join(journalRoot, "archive")
+	if archEntries, aErr := os.ReadDir(archDir); aErr == nil {
+		for _, ae := range archEntries {
+			if ae.IsDir() || ae.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(ae.Name(), ".jsonl") {
+				continue
+			}
+			af, oErr := os.Open(filepath.Join(archDir, ae.Name()))
+			if oErr != nil {
+				continue
+			}
+			sc := bufio.NewScanner(af)
+			sc.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+			for sc.Scan() {
+				var je struct {
+					ConversationID string `json:"conversationId"`
+					TranscriptPath string `json:"transcriptPath"`
+					ModelName      string `json:"modelName"`
+				}
+				if json.Unmarshal(sc.Bytes(), &je) != nil || je.ConversationID == "" {
+					continue
+				}
+				cid := strings.ToLower(strings.TrimSpace(je.ConversationID))
+				cand := byConv[cid]
+				cand.convID = cid
+				if cand.modelHint == "" && je.ModelName != "" {
+					cand.modelHint = je.ModelName
+				}
+				if cand.transcriptPath == "" && je.TranscriptPath != "" {
+					if info, sErr := os.Stat(je.TranscriptPath); sErr == nil && !info.IsDir() {
+						cand.transcriptPath = je.TranscriptPath
+					}
+				}
+				if cand.transcriptPath != "" {
+					byConv[cid] = cand
+				}
+			}
+			_ = af.Close()
 		}
 	}
 

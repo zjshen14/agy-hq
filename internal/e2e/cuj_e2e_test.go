@@ -25,6 +25,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/taint"
+	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/webui"
@@ -826,8 +827,9 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq upgrade --no-pull failed: %v (%s)", err, upOut)
 	}
-	if !strings.Contains(upOut, "Vault Schema Migration: v0 -> v9") {
-		t.Fatalf("expected v0 -> v9 migration output, got:\n%s", upOut)
+	wantMig := fmt.Sprintf("Vault Schema Migration: v0 -> v%d", vault.CurrentSchemaVersion)
+	if !strings.Contains(upOut, wantMig) {
+		t.Fatalf("expected %s migration output, got:\n%s", wantMig, upOut)
 	}
 
 	// 1. Verify customized USER.md was preserved intact
@@ -853,13 +855,14 @@ func TestCUJ9_EngineUpgradeAndVaultMigration(t *testing.T) {
 		t.Fatalf("expected deprecated hq_console_mobile.md to be removed during migration")
 	}
 
-	// 5. Verify schema_version.json is now at version 9 and re-running `hq migrate` is a clean idempotent no-op
+	// 5. Verify schema_version.json is now at CurrentSchemaVersion and re-running `hq migrate` is a clean idempotent no-op
 	migOut2, err := env.run("", "migrate")
 	if err != nil {
 		t.Fatalf("second hq migrate failed: %v (%s)", err, migOut2)
 	}
-	if !strings.Contains(migOut2, "Vault Schema Migration: v9 -> v9") {
-		t.Fatalf("expected idempotent v9 -> v9 on second run, got:\n%s", migOut2)
+	wantIdemp := fmt.Sprintf("Vault Schema Migration: v%d -> v%d", vault.CurrentSchemaVersion, vault.CurrentSchemaVersion)
+	if !strings.Contains(migOut2, wantIdemp) {
+		t.Fatalf("expected idempotent %s on second run, got:\n%s", wantIdemp, migOut2)
 	}
 }
 
@@ -1703,7 +1706,7 @@ func TestCUJ15_MemoryEngineUpgradeAndDreamingVerification(t *testing.T) {
 		!strings.Contains(ssOut, "Quarantined email reader") {
 		t.Fatalf("expected auto-discovered Topic Wiki Index in SessionStart, got:\n%s", ssOut)
 	}
-	if !strings.Contains(ssOut, "(fact-rfc0006-002 · verified)") {
+	if !strings.Contains(ssOut, "(fact-rfc0006-002 · verified") {
 		t.Fatalf("expected verified fact-rfc0006-002 in SessionStart, got:\n%s", ssOut)
 	}
 	if strings.Contains(ssOut, "fact-legacy-001") || strings.Contains(ssOut, "Store all notes in a flat MEMORY.md file") {
@@ -2975,7 +2978,8 @@ func TestCUJ25_GlobalPluginPackagingAndStandaloneVault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hq version --json in extRepo failed: %v (%s)", err, verOut)
 	}
-	if !strings.Contains(verOut, fmt.Sprintf(`"version": %q`, version.Version)) || !strings.Contains(verOut, `"vaultSchemaVersion": 9`) {
+	wantSchema := fmt.Sprintf(`"vaultSchemaVersion": %d`, vault.CurrentSchemaVersion)
+	if !strings.Contains(verOut, fmt.Sprintf(`"version": %q`, version.Version)) || !strings.Contains(verOut, wantSchema) {
 		t.Fatalf("unexpected version --json output:\n%s", verOut)
 	}
 
@@ -5863,5 +5867,114 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
 	docOut, err := env.run("", "doctor", "--json")
 	if err != nil || !strings.Contains(docOut, "Channel Bridge (acme-messaging/desk-bridge)") || strings.Contains(docOut, "cuj38_private_room_id") {
 		t.Fatalf("unexpected hq doctor output (err=%v):\n%s", err, docOut)
+	}
+}
+
+// CUJ-39: Memory v2 Orthogonal Vault, Scoped Playbooks, BM25 Search, Gatekeeper Dream-Plan & Eval (RFC-0024)
+func TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval(t *testing.T) {
+	env := setupHQEnv(t)
+	if out, err := env.run("", "init"); err != nil {
+		t.Fatalf("hq init failed: %v (%s)", err, out)
+	}
+
+	// 1. Add scoped durable facts (--scope, --expires, --pinned) and verify unattended [Auto] worker is denied add-fact
+	if out, err := env.run("", "memory", "add-fact",
+		"--id=f-cuj39-repo", "--topic=architecture", "--scope=repo:blogs",
+		"--statement=Blogs repo builds with hugo --minify", "--verified"); err != nil || !strings.Contains(out, "f-cuj39-repo") {
+		t.Fatalf("hq memory add-fact scoped failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "memory", "add-fact",
+		"--id=f-cuj39-exp", "--topic=schedule", "--scope=global", "--expires=+48h", "--pinned",
+		"--statement=Quarterly launch review in 48 hours", "--verified"); err != nil || !strings.Contains(out, "f-cuj39-exp") {
+		t.Fatalf("hq memory add-fact expires failed: %v (%s)", err, out)
+	}
+	// Seed an unattended non-sleep-consolidate [Auto] task and confirm it cannot call `hq memory add-fact`
+	autoCID := "00000000-0000-4000-8000-000000003901"
+	_ = kernel.RegisterTask(env.vaultDir, kernel.ActiveTask{
+		TaskSlug:       "auto-morning-brief",
+		Title:          "[Auto] Morning Brief",
+		Kind:           "auto",
+		ConversationID: autoCID,
+		Status:         "active",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	})
+	if out, err := env.runWithEnv("", []string{"ANTIGRAVITY_CONVERSATION_ID=" + autoCID}, "memory", "add-fact",
+		"--topic=misc", "--statement=Unauthorized auto write"); err == nil {
+		t.Fatalf("expected unattended [Auto] worker to be denied `hq memory add-fact`, got: %s", out)
+	}
+
+	// 2. Seed a scoped Topic Wiki page with Playbook-Owner + a private secret file, then verify `hq memory search`
+	_ = os.MkdirAll(filepath.Join(env.vaultDir, "memory", "topics"), 0o700)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "memory", "topics", "blogs-playbook.md"),
+		[]byte("# Blogs Playbook\n> **Summary:** Hugo build and deployment traps.\n> **Scopes:** repo:blogs\n> **Playbook-Owner:** repo:blogs\n\n## Active Playbook\n- Run `hugo --minify` before pushing.\n\n## Deployment\nVerify static assets and RSS feed.\n"), 0o600)
+	_ = os.MkdirAll(filepath.Join(env.vaultDir, "private"), 0o700)
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "private", "secrets.md"),
+		[]byte("CUJ39_PRIVATE_SECRET_TOKEN hugo minify\n"), 0o600)
+
+	searchOut, err := env.run("", "memory", "search", "hugo minify", "--scope=repo:blogs", "--json")
+	if err != nil || !strings.Contains(searchOut, "blogs-playbook.md") || !strings.Contains(searchOut, "#L") {
+		t.Fatalf("expected BM25 search to return blogs-playbook.md with #L provenance, got err=%v out=%s", err, searchOut)
+	}
+	secretSearchOut, err := env.run("", "memory", "search", "CUJ39_PRIVATE_SECRET_TOKEN", "--json")
+	if err != nil || strings.Contains(secretSearchOut, "CUJ39_PRIVATE_SECRET_TOKEN") {
+		t.Fatalf("expected private/ secret to be unconditionally excluded from memory search, got err=%v out=%s", err, secretSearchOut)
+	}
+
+	// 3. Tainted caller MUST be denied `hq memory search`, `hq memory dream-plan`, and `hq memory eval`
+	taintedCID := "00000000-0000-4000-8000-000000003999"
+	_, _ = taint.Mark(nil, env.vaultDir, taint.Record{ConvID: taintedCID, Source: "cuj39-test"})
+	for _, sub := range []string{"search", "dream-plan", "eval", "status"} {
+		if out, tErr := env.runWithEnv("", []string{"ANTIGRAVITY_CONVERSATION_ID=" + taintedCID}, "memory", sub); tErr == nil {
+			t.Fatalf("expected tainted caller to be denied `hq memory %s`, got: %s", sub, out)
+		}
+	}
+
+	// 4. Verify `hq memory dream-plan --precheck` returns empty stdout when idle, non-empty when journal delta arrives,
+	//    and resets to empty ONLY after `hq memory commit` advances dream_cursor.json
+	if out, err := env.run("", "memory", "commit", "--message=chore(vault): cuj39 baseline"); err != nil {
+		t.Fatalf("baseline hq memory commit failed: %v (%s)", err, out)
+	}
+	idlePrecheck, err := env.run("", "memory", "dream-plan", "--precheck")
+	if err != nil || strings.TrimSpace(idlePrecheck) != "" {
+		t.Fatalf("expected empty stdout from idle `dream-plan --precheck`, got err=%v out=%q", err, idlePrecheck)
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	_ = os.MkdirAll(filepath.Join(env.vaultDir, "memory", "journal", today), 0o700)
+	jRec, _ := json.Marshal(vault.JournalRecord{
+		Timestamp:      time.Now().UTC().Add(time.Second).Format(time.RFC3339),
+		ConversationID: "conv-cuj39-salient",
+		ExecutionNum:   1,
+		StepCount:      10,
+		FilesModified:  []string{"content/post.md"},
+		UserPrompt:     "Always run hugo --minify",
+	})
+	_ = os.WriteFile(filepath.Join(env.vaultDir, "memory", "journal", today, "conv-cuj39-salient-1.json"), jRec, 0o600)
+
+	activePrecheck, err := env.run("", "memory", "dream-plan", "--precheck")
+	if err != nil || !strings.Contains(activePrecheck, "dream-delta: convs=1") {
+		t.Fatalf("expected non-empty `dream-plan --precheck` after new journal, got err=%v out=%q", err, activePrecheck)
+	}
+	// Running --precheck must NOT advance cursor (second call still sees delta)
+	activePrecheck2, err := env.run("", "memory", "dream-plan", "--precheck")
+	if err != nil || strings.TrimSpace(activePrecheck2) == "" {
+		t.Fatalf("expected --precheck not to advance dream_cursor.json, got err=%v out=%q", err, activePrecheck2)
+	}
+	if out, err := env.run("", "memory", "commit", "--message=chore(vault): cuj39 consolidated"); err != nil {
+		t.Fatalf("post-dream hq memory commit failed: %v (%s)", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(env.vaultDir, "memory", "dream_cursor.json")); err != nil {
+		t.Fatalf("expected dream_cursor.json created by hq memory commit: %v", err)
+	}
+
+	// 5. Verify `hq memory eval --fixtures --json` passes all F1-F4 fixtures and emits M1-M4 telemetry
+	evalOut, err := env.run("", "memory", "eval", "--fixtures", "--json")
+	if err != nil || !strings.Contains(evalOut, `"allPassed": true`) || !strings.Contains(evalOut, `"scopedPlaybookCount": 1`) {
+		t.Fatalf("expected `hq memory eval --fixtures --json` to pass all fixtures, got err=%v out=%s", err, evalOut)
+	}
+
+	// 6. Verify `hq memory compact` runs unified fact + progress + journal/brief archival cleanly
+	compactOut, err := env.run("", "memory", "compact", "--no-sidebar")
+	if err != nil || !strings.Contains(compactOut, "Lifecycle archival:") {
+		t.Fatalf("expected unified `hq memory compact` output, got err=%v out=%s", err, compactOut)
 	}
 }
