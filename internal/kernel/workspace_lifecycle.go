@@ -457,6 +457,7 @@ type WorkspaceAcquireOptions struct {
 	Provider      string // provider FQID (core/git-worktree is refused: git worktrees keep their own storage)
 	WorkspaceID   string // attach this existing workspace (provider `status`) instead of creating one
 	Name          string // create name derived from the task slug (workspace.ValidateCreateName)
+	ShareFrom     string // create a shared-history sibling of this ledger entry (key or bare workspace id, same provider)
 	TaskSlug      string // owning Layer-1 task: added to bound_tasks and, unless Role is readonly, made writer_task
 	Role          string // binding role for TaskSlug (default primary)
 	LeaseEnforced bool   // enforce the W1 single-writer lease for TaskSlug
@@ -481,7 +482,9 @@ type WorkspaceAcquireResult struct {
 // AcquireWorkspace creates (Name) or attaches (WorkspaceID) a provider workspace and records it in the ownership
 // ledger. A workspace created by this call (existed=false) is ledgered as owned; a pre-existing one as attached.
 // An existing ledger entry keeps its ownership and is reused. The provider runs outside every lock; a live
-// writer lease held by another task is refused (hand it off with `hq workspace handoff`).
+// writer lease held by another task is refused (hand it off with `hq workspace handoff`). ShareFrom asks the
+// provider for a shared-history sibling (RFC-0025 §6.3) of a ledgered workspace of the same provider; the provider
+// must declare shared_history (pack providers additionally require the source to be ledger-owned).
 func AcquireWorkspace(vaultDir string, opts WorkspaceAcquireOptions) (WorkspaceAcquireResult, error) {
 	fqid := strings.TrimSpace(opts.Provider)
 	if fqid == workspace.CoreGitProviderID {
@@ -499,6 +502,15 @@ func AcquireWorkspace(vaultDir string, opts WorkspaceAcquireOptions) (WorkspaceA
 	slug := strings.TrimSpace(opts.TaskSlug)
 	attachID := strings.TrimSpace(opts.WorkspaceID)
 	takesLease := slug != "" && role != workspace.RoleReadonly
+	shareFrom := ""
+	if raw := strings.TrimSpace(opts.ShareFrom); raw != "" {
+		if attachID != "" {
+			return WorkspaceAcquireResult{}, wsInvalid("share_from creates a new sibling workspace; it cannot be combined with attaching %q", attachID)
+		}
+		if shareFrom, err = resolveShareFromSource(vaultDir, fqid, raw); err != nil {
+			return WorkspaceAcquireResult{}, err
+		}
+	}
 
 	ix := loadWorkspaceTaskIndex(vaultDir)
 	if attachID != "" && takesLease {
@@ -526,7 +538,10 @@ func AcquireWorkspace(vaultDir string, opts WorkspaceAcquireOptions) (WorkspaceA
 		if !p.Capabilities().Create {
 			return WorkspaceAcquireResult{}, &workspace.ProviderError{Code: workspace.CodeUnsupported, Message: fqid + " does not support create (attach an existing workspace with <provider>:<workspace-id>)"}
 		}
-		res, cErr := p.Create(ctx, workspace.CreateRequest{Name: name, IdempotencyKey: WorkspaceCreateIdempotencyKey(fqid, name)})
+		if shareFrom != "" && !p.Capabilities().SharedHistory {
+			return WorkspaceAcquireResult{}, &workspace.ProviderError{Code: workspace.CodeUnsupported, Message: fqid + " does not support shared-history siblings (capabilities.shared_history)"}
+		}
+		res, cErr := p.Create(ctx, workspace.CreateRequest{Name: name, ShareFrom: shareFrom, IdempotencyKey: WorkspaceCreateIdempotencyKey(fqid, name)})
 		if cErr != nil {
 			return WorkspaceAcquireResult{}, cErr
 		}
@@ -637,6 +652,31 @@ func checkWorkspaceLease(e workspace.LedgerEntry, slug string, ix workspaceTaskI
 		return wsConflict("workspace %s is leased to live task %q; transfer it first with `hq workspace handoff %s --to=%s`", e.Key(), e.WriterTask, e.Key(), slug)
 	}
 	return nil
+}
+
+// resolveShareFromSource maps a --share-from value (ledger key "<fqid>:<id>" or bare workspace id) to the source
+// workspace ID. The source must be a ledger entry of the same provider: core never forwards share_from values that
+// are not in the ledger (RFC-0025 §6.3).
+func resolveShareFromSource(vaultDir, fqid, raw string) (string, error) {
+	id := strings.TrimSpace(raw)
+	if provider, wsID, ok := workspace.ParseLedgerKey(id); ok && strings.Contains(provider, "/") {
+		if provider != fqid {
+			return "", wsInvalid("share_from %s belongs to provider %s, not %s", id, provider, fqid)
+		}
+		id = wsID
+	}
+	if !workspace.ValidWorkspaceID(id) {
+		return "", wsInvalid("share_from %q must be a ledger key (<provider-fqid>:<workspace-id>) or a workspace id", clipWorkspaceText(raw, 80))
+	}
+	key := workspace.LedgerKey(fqid, id)
+	e, ok := workspace.GetEntry(vaultDir, key)
+	if !ok {
+		return "", wsNotFound("share_from source %s is not in the workspace ledger (create or adopt it first)", key)
+	}
+	if e.Ownership != workspace.OwnershipOwned && e.Ownership != workspace.OwnershipAttached {
+		return "", wsInvalid("share_from source %s has no recorded ownership", key)
+	}
+	return id, nil
 }
 
 // RollbackAcquiredWorkspace undoes AcquireWorkspace after a failed spawn. It releases taskSlug's binding and

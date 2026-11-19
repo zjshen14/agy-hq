@@ -28,7 +28,9 @@ const workspaceUsage = `usage: hq workspace <subcommand> [flags]
 
   providers [--json]                                     List registered workspace providers and their trust status
   list [--provider=<fqid>] [--all] [--json]              Ledger workspaces + git worktrees (--all also pages provider list)
-  create <provider-fqid> <name> [--task=<slug-or-conv>]  Create an hq-owned workspace (bound to the task when given)
+  create <provider-fqid> <name> [--task=<slug-or-conv>] [--share-from=<key-or-workspace-id>]
+                                                         Create an hq-owned workspace (bound to the task when given;
+                                                         --share-from asks for a shared-history sibling of a ledgered one)
   adopt <path> [--task=<slug-or-conv>] [--role=primary|secondary|readonly]
                                                          Attach the existing workspace that owns <path>
   status [<key>] [--refresh] [--json]                    Cached status (--refresh asks the provider)
@@ -395,9 +397,9 @@ func printWorkspaceAcquired(w io.Writer, verb, taskSlug string, acq kernel.Works
 }
 
 func runWorkspaceCreate(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, []string{"task"}, nil)
+	a, err := parseWorkspaceArgs(args, []string{"task", "share-from"}, nil)
 	if err != nil || len(a.pos) != 2 {
-		return workspaceUsageError(stderr, "create <provider-fqid> <name> [--task=<slug-or-conv>]")
+		return workspaceUsageError(stderr, "create <provider-fqid> <name> [--task=<slug-or-conv>] [--share-from=<key-or-workspace-id>]")
 	}
 	if workspaceCallerBlockedByTaint(vaultDir, "create", stderr) || workspaceCallerBlockedAsAuto(vaultDir, "create", stderr) {
 		return 1
@@ -408,7 +410,7 @@ func runWorkspaceCreate(vaultDir string, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "hq workspace create failed: %v\n", err)
 		return 1
 	}
-	opts := kernel.WorkspaceAcquireOptions{Provider: fqid, Name: name, Now: time.Now()}
+	opts := kernel.WorkspaceAcquireOptions{Provider: fqid, Name: name, ShareFrom: a.val("share-from"), Now: time.Now()}
 	if hasTask {
 		opts.TaskSlug = task.TaskSlug
 		opts.Role = kernel.DefaultWorkspaceBindingRole(task)
@@ -696,6 +698,7 @@ func runWorkspacePrune(vaultDir string, args []string, stdout, stderr io.Writer)
 // workspaceSpawnRequest carries the already-resolved `hq spawn` inputs for a provider workspace spawn.
 type workspaceSpawnRequest struct {
 	Spec      string
+	ShareFrom string // create a shared-history sibling of this ledgered workspace (key or id)
 	TaskSlug  string
 	Title     string
 	Scope     string
@@ -730,10 +733,15 @@ func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stder
 		fmt.Fprintf(stderr, "hq spawn workspace error: %v\n", err)
 		return 1
 	}
+	if strings.TrimSpace(req.ShareFrom) != "" && id != "" {
+		fmt.Fprintln(stderr, "hq spawn workspace error: --share-from creates a new sibling workspace and cannot be combined with --workspace=<provider>:<id>")
+		return 1
+	}
 	acq, err := kernel.AcquireWorkspace(vaultDir, kernel.WorkspaceAcquireOptions{
 		Provider:      fqid,
 		WorkspaceID:   id,
 		Name:          slug,
+		ShareFrom:     req.ShareFrom,
 		TaskSlug:      slug,
 		Role:          workspace.RolePrimary,
 		LeaseEnforced: true,
@@ -797,6 +805,7 @@ func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stder
 type workspaceSubagentRequest struct {
 	CmdLabel   string
 	Spec       string
+	ShareFrom  string // create a shared-history sibling of this ledgered workspace (key or id)
 	ParentConv string
 	Role       string // already defaulted subagent role
 	TaskName   string
@@ -815,6 +824,10 @@ func runWorkspaceSubagentSpawn(vaultDir string, req workspaceSubagentRequest, st
 	fqid, id, err := kernel.ParseWorkspaceSpec(req.Spec)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s workspace error: %v\n", req.CmdLabel, err)
+		return 1
+	}
+	if strings.TrimSpace(req.ShareFrom) != "" && id != "" {
+		fmt.Fprintf(stderr, "%s workspace error: --share-from creates a new sibling workspace and cannot be combined with --workspace=<provider>:<id>\n", req.CmdLabel)
 		return 1
 	}
 	parent := strings.TrimSpace(req.ParentConv)
@@ -843,6 +856,7 @@ func runWorkspaceSubagentSpawn(vaultDir string, req workspaceSubagentRequest, st
 		Provider:      fqid,
 		WorkspaceID:   id,
 		Name:          name,
+		ShareFrom:     req.ShareFrom,
 		TaskSlug:      ownerSlug,
 		Role:          role,
 		LeaseEnforced: ownerSlug != "",

@@ -27,6 +27,7 @@ type cliFakeState struct {
 	rootBase    string
 	workspaces  map[string]workspace.Info
 	preexisting map[string]bool
+	shared      bool
 	calls       []string
 }
 
@@ -47,7 +48,13 @@ func (p cliFakeProvider) ForVault(v string) workspace.Provider {
 }
 func (p cliFakeProvider) Skill() string { return "fake-cli-guide" }
 func (p cliFakeProvider) Capabilities() workspace.Capabilities {
-	return workspace.Capabilities{Create: true, Remove: true, Changes: true}
+	shared := false
+	if s := p.st(); s != nil {
+		s.mu.Lock()
+		shared = s.shared
+		s.mu.Unlock()
+	}
+	return workspace.Capabilities{Create: true, Remove: true, Changes: true, SharedHistory: shared}
 }
 
 func (p cliFakeProvider) st() *cliFakeState {
@@ -100,6 +107,9 @@ func (p cliFakeProvider) Create(_ context.Context, req workspace.CreateRequest) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, "create:"+req.Name+":"+req.IdempotencyKey)
+	if req.ShareFrom != "" {
+		s.calls = append(s.calls, "share:"+req.Name+"<-"+req.ShareFrom)
+	}
 	if info, ok := s.workspaces[req.Name]; ok {
 		return workspace.CreateResult{Info: info, Existed: true}, nil
 	}
@@ -412,6 +422,74 @@ func TestWorkspaceSubagentSpawnBindsOwningTask(t *testing.T) {
 	}
 	if _, ok := workspace.GetEntry(env.vaultDir, cliKey("sub-fail")); ok || len(env.fake.callsWith("remove:sub-fail")) != 1 {
 		t.Fatal("failed subagent spawn must remove the workspace it created")
+	}
+}
+
+func TestWorkspaceShareFromCreateSpawnAndSubagent(t *testing.T) {
+	env := newCLIWorkspaceEnv(t)
+	env.task("main-line", "task")
+	if code, _, errOut := env.run("create", cliFakeProviderID, "main-line", "--task=main-line"); code != 0 {
+		t.Fatalf("create source: %s", errOut)
+	}
+
+	// Refused while the provider does not declare shared_history; the provider is never asked to create.
+	code, _, errOut := env.run("create", cliFakeProviderID, "sib-a", "--share-from="+cliKey("main-line"))
+	if code != 1 || !strings.Contains(errOut, "shared_history") || len(env.fake.callsWith("create:sib-a")) != 0 {
+		t.Fatalf("expected a clean shared_history refusal: code=%d err=%s", code, errOut)
+	}
+	env.fake.mu.Lock()
+	env.fake.shared = true
+	env.fake.mu.Unlock()
+	// Unknown source.
+	if code, _, errOut = env.run("create", cliFakeProviderID, "sib-a", "--share-from=nowhere"); code != 1 || !strings.Contains(errOut, "not in the workspace ledger") {
+		t.Fatalf("expected an unknown-source refusal: code=%d err=%s", code, errOut)
+	}
+	// Success (ledger key form).
+	code, out, errOut := env.run("create", cliFakeProviderID, "sib-a", "--share-from", cliKey("main-line"))
+	if code != 0 || !strings.Contains(out, "Created workspace "+cliKey("sib-a")+" (owned)") {
+		t.Fatalf("share-from create: code=%d out=%s err=%s", code, out, errOut)
+	}
+	if got := env.fake.callsWith("share:"); len(got) != 1 || got[0] != "share:sib-a<-main-line" {
+		t.Fatalf("expected share_from forwarded: %v", got)
+	}
+
+	// hq spawn --workspace=<fqid> --share-from=<id>: sibling named after the task slug, owned, leased.
+	prevSpawn := spawnTaskFn
+	t.Cleanup(func() { spawnTaskFn = prevSpawn })
+	spawnTaskFn = func(string, string, string, string, string, string, bool, ...bool) (string, error) {
+		return "Spawned conversation 123e4567-e89b-12d3-a456-426614174002", nil
+	}
+	var sout, serr bytes.Buffer
+	if code := runWorkspaceSpawn(env.vaultDir, workspaceSpawnRequest{Spec: cliFakeProviderID, ShareFrom: "main-line", TaskSlug: "side-quest", Title: "t", Prompt: "p"}, &sout, &serr); code != 0 {
+		t.Fatalf("spawn --share-from: %s", serr.String())
+	}
+	e, ok := workspace.GetEntry(env.vaultDir, cliKey("side-quest"))
+	if !ok || e.Ownership != workspace.OwnershipOwned || e.WriterTask != "side-quest" || !e.LeaseEnforced {
+		t.Fatalf("expected an owned, leased sibling for side-quest: %+v ok=%v", e, ok)
+	}
+	if got := env.fake.callsWith("share:side-quest"); len(got) != 1 || got[0] != "share:side-quest<-main-line" {
+		t.Fatalf("expected the spawn to forward share_from: %v", got)
+	}
+	serr.Reset()
+	if code := runWorkspaceSpawn(env.vaultDir, workspaceSpawnRequest{Spec: cliFakeProviderID + ":main-line", ShareFrom: "main-line", TaskSlug: "bad", Prompt: "p"}, &sout, &serr); code != 1 || !strings.Contains(serr.String(), "--share-from") {
+		t.Fatalf("--share-from with an attach id must be refused: %s", serr.String())
+	}
+
+	// hq subagent --workspace=<fqid> --share-from=<key>.
+	prevSub := spawnSubagentFn
+	t.Cleanup(func() { spawnSubagentFn = prevSub })
+	spawnSubagentFn = func(string, string, string, string, string, string, bool, ...bool) (string, error) {
+		return "Spawned subagent 123e4567-e89b-12d3-a456-426614174003", nil
+	}
+	req := workspaceSubagentRequest{CmdLabel: "hq subagent", Spec: cliFakeProviderID, ShareFrom: cliKey("main-line"), ParentConv: "conv-main-line", Role: "[standard] ops: Helper", TaskName: "helper-ws", Prompt: "p", Model: "m", WorkDir: env.rootDir}
+	if code := runWorkspaceSubagentSpawn(env.vaultDir, req, &sout, &serr); code != 0 {
+		t.Fatalf("subagent --share-from: %s", serr.String())
+	}
+	if e, ok := workspace.GetEntry(env.vaultDir, cliKey("helper-ws")); !ok || e.Ownership != workspace.OwnershipOwned || e.WriterTask != "main-line" {
+		t.Fatalf("expected an owned sibling written by the owning task: %+v ok=%v", e, ok)
+	}
+	if got := env.fake.callsWith("share:helper-ws"); len(got) != 1 {
+		t.Fatalf("expected the subagent spawn to forward share_from: %v", got)
 	}
 }
 

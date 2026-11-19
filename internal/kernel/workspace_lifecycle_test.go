@@ -95,6 +95,61 @@ func TestAcquireWorkspaceOwnershipBindingAndLease(t *testing.T) {
 	}
 }
 
+func TestAcquireWorkspaceShareFromSibling(t *testing.T) {
+	vaultDir := newWorkspaceTestVault(t)
+	fs := newFakeWS(t, vaultDir)
+	src := acquireForTask(t, vaultDir, "main-line")
+	registerLiveTask(t, vaultDir, "side-quest", "task")
+
+	// Ledger key form: a new owned sibling for the new task, with the source id forwarded to the provider.
+	sib, err := AcquireWorkspace(vaultDir, WorkspaceAcquireOptions{
+		Provider: fakeWSProviderID, Name: "side-quest", ShareFrom: src.Entry.Key(), TaskSlug: "side-quest", LeaseEnforced: true,
+	})
+	if err != nil {
+		t.Fatalf("share_from create: %v", err)
+	}
+	if got := fs.callsWith("share:"); len(got) != 1 || got[0] != "share:side-quest<-main-line" {
+		t.Fatalf("expected share_from=main-line forwarded to the provider, got %v", got)
+	}
+	if !sib.Created || sib.Entry.Ownership != workspace.OwnershipOwned || sib.Entry.WriterTask != "side-quest" || !sib.Entry.LeaseEnforced {
+		t.Fatalf("expected an owned, leased sibling: %+v", sib)
+	}
+	if e := mustEntry(t, vaultDir, src.Entry.Key()); e.WriterTask != "main-line" {
+		t.Fatalf("the source lease must be untouched: %+v", e)
+	}
+	// Bare workspace id form, and an attached source, are both accepted at the core level.
+	fs.set("borrowed", workspace.StateClean)
+	if _, err := AcquireWorkspace(vaultDir, WorkspaceAcquireOptions{Provider: fakeWSProviderID, WorkspaceID: "borrowed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireWorkspace(vaultDir, WorkspaceAcquireOptions{Provider: fakeWSProviderID, Name: "sib-two", ShareFrom: "borrowed"}); err != nil {
+		t.Fatalf("bare id share_from: %v", err)
+	}
+
+	fs.resetCalls()
+	refusals := map[string]struct {
+		opts WorkspaceAcquireOptions
+		code string
+	}{
+		"unknown source":   {WorkspaceAcquireOptions{Provider: fakeWSProviderID, Name: "x1", ShareFrom: "never-ledgered"}, workspace.CodeNotFound},
+		"other provider":   {WorkspaceAcquireOptions{Provider: fakeWSProviderID, Name: "x2", ShareFrom: "acme-monorepo/client:main-line"}, workspace.CodeInvalid},
+		"malformed source": {WorkspaceAcquireOptions{Provider: fakeWSProviderID, Name: "x3", ShareFrom: "../etc"}, workspace.CodeInvalid},
+		"with attach id":   {WorkspaceAcquireOptions{Provider: fakeWSProviderID, WorkspaceID: "borrowed", ShareFrom: "main-line"}, workspace.CodeInvalid},
+	}
+	for name, tc := range refusals {
+		if _, err := AcquireWorkspace(vaultDir, tc.opts); workspace.ErrorCode(err) != tc.code {
+			t.Fatalf("%s: got %v, want %s", name, err, tc.code)
+		}
+	}
+	fs.noShared = true
+	if _, err := AcquireWorkspace(vaultDir, WorkspaceAcquireOptions{Provider: fakeWSProviderID, Name: "x4", ShareFrom: "main-line"}); workspace.ErrorCode(err) != workspace.CodeUnsupported || !strings.Contains(err.Error(), "shared_history") {
+		t.Fatalf("expected an unsupported shared_history refusal, got %v", err)
+	}
+	if got := fs.callsWith("create:"); len(got) != 0 {
+		t.Fatalf("refused share_from requests must never reach the provider: %v", got)
+	}
+}
+
 func TestAcquireWorkspaceRefusesRootsOverlappingTheVault(t *testing.T) {
 	vaultDir := newWorkspaceTestVault(t)
 	fs := newFakeWS(t, vaultDir)

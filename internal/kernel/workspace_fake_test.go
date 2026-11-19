@@ -26,6 +26,7 @@ type fakeWSState struct {
 	statusErr   map[string]error
 	removeErr   map[string]error
 	noCreate    bool
+	noShared    bool
 	refreshSecs int
 	skill       string
 	calls       []string
@@ -134,7 +135,7 @@ func (p fakeWSProvider) state() *fakeWSState {
 
 func (p fakeWSProvider) Capabilities() workspace.Capabilities {
 	st := p.state()
-	return workspace.Capabilities{Create: st == nil || !st.noCreate, Remove: true, Changes: true, SharedHistory: true}
+	return workspace.Capabilities{Create: st == nil || !st.noCreate, Remove: true, Changes: true, SharedHistory: st == nil || !st.noShared}
 }
 
 func (p fakeWSProvider) StatusRefreshSeconds() int {
@@ -199,6 +200,9 @@ func (p fakeWSProvider) Create(_ context.Context, req workspace.CreateRequest) (
 		return workspace.CreateResult{}, &workspace.ProviderError{Code: workspace.CodeUnavailable, Message: "no fake state"}
 	}
 	st.record("create:" + req.Name + ":" + req.IdempotencyKey)
+	if req.ShareFrom != "" {
+		st.record("share:" + req.Name + "<-" + req.ShareFrom)
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if info, ok := st.workspaces[req.Name]; ok {

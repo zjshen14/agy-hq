@@ -1009,6 +1009,7 @@ func main() {
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
 		workspaceSpec := fs.String("workspace", "", "Optional workspace provider FQID, optionally :<existing-workspace-id>, to create or attach an isolated provider workspace (mutually exclusive with --repo)")
+		shareFrom := fs.String("share-from", "", "With --workspace=<provider-fqid>: create a shared-history sibling of this ledgered workspace (ledger key or workspace id)")
 		taskName := fs.String("task", "", "Short task slug for worktree and conversation title")
 		role := fs.String("role", "", "Optional subagent role when --subagent is set")
 		parentConv := fs.String("parent", "", "Optional parent conversation ID when --subagent is set (defaults to ANTIGRAVITY_CONVERSATION_ID)")
@@ -1025,18 +1026,22 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*taskName == "" && *role == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo> | --workspace=<provider-fqid>[:<id>]] [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--force] [--ignore-budget] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq spawn --task=<slug> [--subagent] [--parent=<conv-id>] [--role=\"...\"] [--repo=<repo> | --workspace=<provider-fqid>[:<id>] [--share-from=<key-or-id>]] [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
 		if strings.TrimSpace(*workspaceSpec) != "" && strings.TrimSpace(*repoSpec) != "" {
 			fmt.Fprintln(os.Stderr, "hq spawn: --workspace and --repo are mutually exclusive (--repo is the git worktree path)")
 			os.Exit(1)
 		}
+		if strings.TrimSpace(*shareFrom) != "" && strings.TrimSpace(*workspaceSpec) == "" {
+			fmt.Fprintln(os.Stderr, "hq spawn: --share-from requires --workspace=<provider-fqid>")
+			os.Exit(1)
+		}
 		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
 		scope := resolveTaskScope(*scopeOverride, *repoSpec, *taskName)
 		if *asSubagent {
-			runSubagentSpawnCLI(rootDir, vaultDir, "hq spawn --subagent", *parentConv, *role, scope, *repoSpec, *workspaceSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
+			runSubagentSpawnCLI(rootDir, vaultDir, "hq spawn --subagent", *parentConv, *role, scope, *repoSpec, *workspaceSpec, *shareFrom, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
 			return
 		}
 		if strings.TrimSpace(*workspaceSpec) != "" {
@@ -1046,6 +1051,7 @@ func main() {
 			}
 			if code := runWorkspaceSpawn(vaultDir, workspaceSpawnRequest{
 				Spec:      *workspaceSpec,
+				ShareFrom: *shareFrom,
 				TaskSlug:  *taskName,
 				Title:     wsTitle,
 				Scope:     scope,
@@ -1147,6 +1153,7 @@ func main() {
 		parentConv := fs.String("parent", "", "Parent conversation ID (defaults to ANTIGRAVITY_CONVERSATION_ID)")
 		repoSpec := fs.String("repo", "", "Optional repo path or GitHub slug to create an isolated worktree for")
 		workspaceSpec := fs.String("workspace", "", "Optional workspace provider FQID, optionally :<existing-workspace-id>, to create or attach an isolated provider workspace (mutually exclusive with --repo)")
+		shareFrom := fs.String("share-from", "", "With --workspace=<provider-fqid>: create a shared-history sibling of this ledgered workspace (ledger key or workspace id)")
 		taskName := fs.String("task", "", "Optional worktree task slug")
 		scopeOverride := fs.String("scope", "", "Optional custom task scope")
 		prompt := fs.String("prompt", "", "Task instructions for the nested subagent")
@@ -1158,13 +1165,13 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "Simulate subagent spawn")
 		_ = fs.Parse(os.Args[2:])
 		if *prompt == "" || (*role == "" && *taskName == "") {
-			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--parent=<conv-id>] [--repo=<repo> | --workspace=<provider-fqid>[:<id>]] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
+			fmt.Fprintln(os.Stderr, "usage: hq subagent --role=\"[<tier>] <scope>: <role>\" [--tier=quick|routine|standard|heavy|deep-medium|deep] [--model=...] [--depth=low|medium|high|xhigh] [--parent=<conv-id>] [--repo=<repo> | --workspace=<provider-fqid>[:<id>] [--share-from=<key-or-id>]] [--task=<slug>] [--force] [--ignore-budget] --prompt=\"...\"")
 			os.Exit(1)
 		}
 		isForced := *force || *ignoreBudget
 		resolvedModel, resolvedTier, _ := kernel.ResolveVaultModel(vaultDir, *prompt, *model, *depth, *tier)
 		scope := resolveTaskScope(*scopeOverride, *repoSpec, *taskName)
-		runSubagentSpawnCLI(rootDir, vaultDir, "hq subagent", *parentConv, *role, scope, *repoSpec, *workspaceSpec, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
+		runSubagentSpawnCLI(rootDir, vaultDir, "hq subagent", *parentConv, *role, scope, *repoSpec, *workspaceSpec, *shareFrom, *taskName, *prompt, resolvedModel, resolvedTier, *dryRun, isForced)
 
 	case "gmail":
 		if len(os.Args) < 3 {
@@ -3771,10 +3778,14 @@ func resolveTaskScope(scopeOverride, repoSpec, taskName string) string {
 	return scope
 }
 
-func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, repoSpec, workspaceSpec, taskName, prompt, resolvedModel, resolvedTier string, dryRun, isForced bool) {
+func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, repoSpec, workspaceSpec, shareFrom, taskName, prompt, resolvedModel, resolvedTier string, dryRun, isForced bool) {
 	subRole := role
 	if subRole == "" {
 		subRole = fmt.Sprintf("[%s] %s: %s", resolvedTier, scope, taskName)
+	}
+	if strings.TrimSpace(shareFrom) != "" && strings.TrimSpace(workspaceSpec) == "" {
+		fmt.Fprintf(os.Stderr, "%s: --share-from requires --workspace=<provider-fqid>\n", cmdLabel)
+		os.Exit(1)
 	}
 	if strings.TrimSpace(workspaceSpec) != "" {
 		if strings.TrimSpace(repoSpec) != "" {
@@ -3784,6 +3795,7 @@ func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, r
 		if code := runWorkspaceSubagentSpawn(vaultDir, workspaceSubagentRequest{
 			CmdLabel:   cmdLabel,
 			Spec:       workspaceSpec,
+			ShareFrom:  shareFrom,
 			ParentConv: parentConv,
 			Role:       subRole,
 			TaskName:   taskName,
