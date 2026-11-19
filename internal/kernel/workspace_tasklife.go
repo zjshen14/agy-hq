@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -35,19 +36,20 @@ type workspaceArchiveStep struct {
 
 // workspaceObservation is the status used for one archive decision: either a fresh provider status or the cache.
 type workspaceObservation struct {
-	State       workspace.State
-	OpenChanges int
-	Err         error
+	State         workspace.State
+	OpenChanges   int
+	TracksChanges bool
+	Err           error
 }
 
-func observationFromInfo(info workspace.Info, err error) workspaceObservation {
+func observationFromInfo(info workspace.Info, tracksChanges bool, err error) workspaceObservation {
 	if err != nil {
 		if workspace.ErrorCode(err) == workspace.CodeNotFound {
-			return workspaceObservation{State: workspace.StateMissing}
+			return workspaceObservation{State: workspace.StateMissing, TracksChanges: tracksChanges}
 		}
-		return workspaceObservation{Err: err}
+		return workspaceObservation{TracksChanges: tracksChanges, Err: err}
 	}
-	return workspaceObservation{State: info.State, OpenChanges: openWorkspaceChanges(info.Changes)}
+	return workspaceObservation{State: info.State, OpenChanges: openWorkspaceChanges(info.Changes), TracksChanges: tracksChanges}
 }
 
 func dedupeBindings(bs []workspace.Binding) []workspace.Binding {
@@ -63,22 +65,24 @@ func dedupeBindings(bs []workspace.Binding) []workspace.Binding {
 	return out
 }
 
-func workspaceRemoveHint(key string) string {
-	return fmt.Sprintf("to delete it anyway, stage an approval: %s", WorkspaceRemoveProposal("hq", key, "open changes"))
+func workspaceRemoveHint(key, reason string) string {
+	return fmt.Sprintf("to delete it anyway, stage an approval: %s", WorkspaceRemoveProposal("hq", key, reason))
 }
 
 // decideWorkspaceArchive applies the RFC-0025 §8 archive table to one binding. sole means no other live task is
 // bound to the entry (so an owned entry is removable); checkDirty means a dirty workspace blocks the archive
-// unless force.
+// unless force. Even with force, dirty, unknown, untracked, or open-change owned workspaces are never deleted
+// without human approval: force archives the task while keeping and unbinding the workspace.
 func decideWorkspaceArchive(target string, e workspace.LedgerEntry, sole, checkDirty, force bool, obs workspaceObservation) (workspaceArchiveStep, error) {
 	key := e.Key()
 	removable := sole && e.Ownership == workspace.OwnershipOwned
 	step := workspaceArchiveStep{Entry: e, Action: wsArchiveUnbind, OpenChanges: obs.OpenChanges}
 	if obs.Err != nil {
+		safeErr := WorkspaceSafeErrorSummary(obs.Err)
 		if checkDirty && !force {
-			return step, fmt.Errorf("refusing to archive %q: cannot verify workspace %s (%s) (pass --force to keep it and unbind)", target, key, clipWorkspaceText(obs.Err.Error(), 160))
+			return step, fmt.Errorf("refusing to archive %q: cannot verify workspace %s (%s) (pass --force to keep it and unbind)", target, key, safeErr)
 		}
-		step.Note = fmt.Sprintf("kept workspace %s (status unavailable: %s)", key, clipWorkspaceText(obs.Err.Error(), 120))
+		step.Note = fmt.Sprintf("kept workspace %s (status unavailable: %s)", key, safeErr)
 		return step, nil
 	}
 	if obs.State == workspace.StateMissing {
@@ -90,22 +94,26 @@ func decideWorkspaceArchive(target string, e workspace.LedgerEntry, sole, checkD
 	}
 	dirty := obs.State != workspace.StateClean
 	if dirty && checkDirty && !force {
-		return step, fmt.Errorf("refusing to archive %q: workspace %s is %s (pass --force to override)", target, key, obs.State)
+		return step, fmt.Errorf("refusing to archive %q: workspace %s is %s (pass --force to archive the task while keeping and unbinding the workspace)", target, key, obs.State)
 	}
 	if !removable {
 		return step, nil
 	}
 	if obs.OpenChanges > 0 {
 		step.Action = wsArchiveKeepOrphan
-		step.Note = fmt.Sprintf("kept owned workspace %s with %d open change(s) (unbound, marked orphaned_open_changes); %s", key, obs.OpenChanges, workspaceRemoveHint(key))
+		step.Note = fmt.Sprintf("kept owned workspace %s with %d open change(s) (unbound, marked orphaned_open_changes); %s", key, obs.OpenChanges, workspaceRemoveHint(key, "open changes"))
 		return step, nil
 	}
-	if dirty && !force {
-		step.Note = fmt.Sprintf("kept owned workspace %s (%s)", key, obs.State)
+	if dirty {
+		step.Note = fmt.Sprintf("kept owned workspace %s (%s, unbound); %s", key, obs.State, workspaceRemoveHint(key, "workspace is "+string(obs.State)))
+		return step, nil
+	}
+	if !obs.TracksChanges {
+		step.Note = fmt.Sprintf("kept owned workspace %s (provider does not track open changes, unbound); %s", key, workspaceRemoveHint(key, "provider does not track open changes"))
 		return step, nil
 	}
 	step.Action = wsArchiveRemove
-	step.RequireClean = !dirty
+	step.RequireClean = true
 	return step, nil
 }
 
@@ -137,11 +145,11 @@ func planTaskWorkspaceArchive(vaultDir, target string, t ActiveTask, force bool,
 		checkDirty := b.Role != workspace.RoleReadonly && (e.WriterTask == "" || e.WriterTask == t.TaskSlug || !ix.isLive(e.WriterTask))
 		var obs workspaceObservation
 		if removable || checkDirty {
-			info, stErr := fetchWorkspaceStatus(vaultDir, e)
+			info, tracksChanges, stErr := fetchWorkspaceStatusContext(context.Background(), vaultDir, e)
 			if updated, _, _ := applyWorkspaceStatusCAS(vaultDir, b.Key, e.Status.RefreshedAt, info, stErr, now); updated.Provider != "" {
 				e = updated
 			}
-			obs = observationFromInfo(info, stErr)
+			obs = observationFromInfo(info, tracksChanges, stErr)
 		} else {
 			obs = workspaceObservation{State: e.Status.State, OpenChanges: openWorkspaceChanges(e.Status.Changes)}
 		}
@@ -200,10 +208,10 @@ func executeTaskWorkspaceArchive(vaultDir, slug string, steps []workspaceArchive
 			notes = append(notes, fmt.Sprintf("workspace %s no longer exists; dropped its ledger entry", key))
 		case workspace.ErrorCode(err) == workspace.CodeHasOpenChanges:
 			st.Action = wsArchiveKeepOrphan
-			notes = append(notes, fmt.Sprintf("kept owned workspace %s: provider reports open changes (unbound, marked orphaned_open_changes); %s", key, workspaceRemoveHint(key)))
+			notes = append(notes, fmt.Sprintf("kept owned workspace %s: provider reports open changes (unbound, marked orphaned_open_changes); %s", key, workspaceRemoveHint(key, "open changes")))
 		default:
 			st.Action = wsArchiveUnbind
-			notes = append(notes, fmt.Sprintf("kept workspace %s: remove failed: %s", key, clipWorkspaceText(err.Error(), 160)))
+			notes = append(notes, fmt.Sprintf("kept workspace %s: remove failed: %s", key, WorkspaceSafeErrorSummary(err)))
 		}
 	}
 	_ = workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
@@ -235,32 +243,46 @@ func executeTaskWorkspaceArchive(vaultDir, slug string, steps []workspaceArchive
 	return notes
 }
 
-// workspaceRefreshSecondsCache memoizes provider refresh cadences (no subprocess: Resolve only reads manifests).
+// workspaceRefreshSecondsCache memoizes provider refresh cadences and capabilities (no subprocess: Resolve only reads manifests).
 type workspaceRefreshSecondsCache struct {
-	vaultDir string
-	byFQID   map[string]int
-	resolved map[string]bool
+	vaultDir      string
+	byFQID        map[string]int
+	tracksChanges map[string]bool
+	resolved      map[string]bool
 }
 
 func newWorkspaceRefreshSecondsCache(vaultDir string) *workspaceRefreshSecondsCache {
-	return &workspaceRefreshSecondsCache{vaultDir: vaultDir, byFQID: make(map[string]int), resolved: make(map[string]bool)}
+	return &workspaceRefreshSecondsCache{
+		vaultDir:      vaultDir,
+		byFQID:        make(map[string]int),
+		tracksChanges: make(map[string]bool),
+		resolved:      make(map[string]bool),
+	}
 }
 
 // get returns the provider's refresh cadence and whether the provider currently resolves (trusted and valid).
 func (c *workspaceRefreshSecondsCache) get(fqid string) (int, bool) {
+	secs, _, ok := c.getMeta(fqid)
+	return secs, ok
+}
+
+func (c *workspaceRefreshSecondsCache) getMeta(fqid string) (refreshSecs int, tracksChanges bool, resolved bool) {
 	if v, ok := c.byFQID[fqid]; ok {
-		return v, c.resolved[fqid]
+		return v, c.tracksChanges[fqid], c.resolved[fqid]
 	}
 	p, err := workspace.Resolve(c.vaultDir, fqid)
 	if err != nil {
 		c.byFQID[fqid] = 0
+		c.tracksChanges[fqid] = false
 		c.resolved[fqid] = false
-		return 0, false
+		return 0, false, false
 	}
 	v := WorkspaceStatusRefreshSeconds(p)
+	tc := p.Capabilities().Changes
 	c.byFQID[fqid] = v
+	c.tracksChanges[fqid] = tc
 	c.resolved[fqid] = true
-	return v, true
+	return v, tc, true
 }
 
 // workspaceCompaction is the lazily loaded, cache-only view CompactTasks uses for provider bindings.
@@ -306,11 +328,14 @@ func (wc *workspaceCompaction) eligible(t ActiveTask, requireClosed bool) bool {
 		if e.WriterTask != "" && e.WriterTask != t.TaskSlug && wc.ix.isLive(e.WriterTask) {
 			continue // another live task writes here; this task only releases its binding
 		}
-		secs, resolved := wc.refresh.get(e.Provider)
+		secs, tracksChanges, resolved := wc.refresh.getMeta(e.Provider)
 		if !resolved {
 			return false
 		}
 		if requireClosed {
+			if !tracksChanges {
+				return false
+			}
 			if ok, _ := WorkspaceDormantEligible(e, secs, wc.now); !ok {
 				return false
 			}
@@ -345,7 +370,7 @@ func (wc *workspaceCompaction) release(t ActiveTask) []string {
 		step := workspaceArchiveStep{Entry: e, Action: wsArchiveUnbind}
 		sole := len(otherLiveBinders(wc.ix, e, t.TaskSlug)) == 0
 		removable := e.Ownership == workspace.OwnershipOwned && sole
-		secs, resolved := wc.refresh.get(e.Provider)
+		secs, tracksChanges, resolved := wc.refresh.getMeta(e.Provider)
 		usable := false
 		if resolved {
 			usable, _ = WorkspaceCacheUsable(e, secs, wc.now)
@@ -358,7 +383,7 @@ func (wc *workspaceCompaction) release(t ActiveTask) []string {
 			case open > 0:
 				step.Action = wsArchiveKeepOrphan
 				step.OpenChanges = open
-			case e.Status.State == workspace.StateClean:
+			case tracksChanges && e.Status.State == workspace.StateClean:
 				step.Action = wsArchiveRemove
 				step.RequireClean = true
 			}
@@ -392,11 +417,11 @@ func restoreTaskWorkspaces(vaultDir string, t ActiveTask, noWorktree bool, now t
 		e, exists := l.Entries[b.Key]
 		createName := slug
 		if exists && !noWorktree {
-			info, stErr := fetchWorkspaceStatus(vaultDir, e)
+			info, tracksChanges, stErr := fetchWorkspaceStatusContext(context.Background(), vaultDir, e)
 			_, _, _ = applyWorkspaceStatusCAS(vaultDir, b.Key, e.Status.RefreshedAt, info, stErr, now)
-			obs := observationFromInfo(info, stErr)
+			obs := observationFromInfo(info, tracksChanges, stErr)
 			if obs.Err != nil {
-				notes = append(notes, fmt.Sprintf("rebound workspace %s without a fresh status (%s)", b.Key, clipWorkspaceText(obs.Err.Error(), 120)))
+				notes = append(notes, fmt.Sprintf("rebound workspace %s without a fresh status (%s)", b.Key, WorkspaceSafeErrorSummary(obs.Err)))
 			}
 			if obs.State == workspace.StateMissing {
 				_ = dropLedgerEntry(vaultDir, b.Key)
@@ -424,7 +449,7 @@ func restoreTaskWorkspaces(vaultDir string, t ActiveTask, noWorktree bool, now t
 			Now:           now,
 		})
 		if aErr != nil {
-			notes = append(notes, fmt.Sprintf("workspace %s no longer exists and could not be re-created: %s", b.Key, clipWorkspaceText(aErr.Error(), 160)))
+			notes = append(notes, fmt.Sprintf("workspace %s no longer exists and could not be re-created: %s", b.Key, WorkspaceSafeErrorSummary(aErr)))
 			continue
 		}
 		notes = append(notes, fmt.Sprintf("re-created workspace %s at %s", acq.Binding.Key, acq.Entry.WorkDir))
@@ -561,14 +586,14 @@ func PruneOrphanWorkspaces(vaultDir string, opts PruneWorkspacesOptions) (*Prune
 				continue
 			}
 		}
-		info, stErr := fetchWorkspaceStatus(vaultDir, e)
+		info, tracksChanges, stErr := fetchWorkspaceStatusContext(context.Background(), vaultDir, e)
 		if !opts.DryRun {
 			_, _, _ = applyWorkspaceStatusCAS(vaultDir, key, e.Status.RefreshedAt, info, stErr, opts.Now)
 		}
-		obs := observationFromInfo(info, stErr)
+		obs := observationFromInfo(info, tracksChanges, stErr)
 		switch {
 		case obs.Err != nil:
-			keep(key, "keep:status_error", clipWorkspaceText(obs.Err.Error(), 160))
+			keep(key, "keep:status_error", WorkspaceSafeErrorSummary(obs.Err))
 			continue
 		case obs.State == workspace.StateMissing:
 			if !opts.DryRun {
@@ -578,6 +603,9 @@ func PruneOrphanWorkspaces(vaultDir string, opts PruneWorkspacesOptions) (*Prune
 			continue
 		case obs.State != workspace.StateClean:
 			keep(key, "keep:dirty", string(obs.State))
+			continue
+		case !obs.TracksChanges:
+			keep(key, "keep:changes_untracked", "provider does not track open changes")
 			continue
 		case obs.OpenChanges > 0:
 			keep(key, "keep:open_changes", fmt.Sprintf("%d open", obs.OpenChanges))
@@ -601,7 +629,7 @@ func PruneOrphanWorkspaces(vaultDir string, opts PruneWorkspacesOptions) (*Prune
 			case workspace.CodeHasOpenChanges:
 				action = "keep:open_changes"
 			}
-			keep(key, action, clipWorkspaceText(rErr.Error(), 160))
+			keep(key, action, WorkspaceSafeErrorSummary(rErr))
 			continue
 		}
 		_ = dropLedgerEntry(vaultDir, key)

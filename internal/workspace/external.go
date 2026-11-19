@@ -371,7 +371,10 @@ func (p *ExternalProvider) invoke(ctx context.Context, op string, payload interf
 		if pe := decodeFailureResponse(stdout); pe != nil {
 			return nil, pe
 		}
-		return nil, fmt.Errorf("workspace provider %s %s failed: %w", p.fqid, op, runErr)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(runErr.Error()), "timed out") {
+			return nil, fmt.Errorf("workspace provider %s %s failed: timed out", p.fqid, op)
+		}
+		return nil, fmt.Errorf("workspace provider %s %s failed: subprocess exited with error", p.fqid, op)
 	}
 	return stdout, nil
 }

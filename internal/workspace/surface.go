@@ -236,16 +236,42 @@ func SafeInlinePath(p string) string {
 }
 
 // FindOwningEntry returns the ledger entry that owns absPath for PreToolUse hygiene and Stop auto-binding.
-// It extends FindEntryForPath (longest segment-aware root match on the cleaned and symlink-resolved path) with
-// a second pass against each entry's symlink-resolved root, and, like MatchRootPattern, never treats a path
-// inside the Vault, or an entry whose root contains the Vault, as provider-owned. It reads only the ledger
-// file and never spawns a subprocess.
+// It matches against each entry's stored Root and persisted CanonicalRoot purely in memory (never statting
+// unrelated ledger roots on the hook hot path), and never treats a path inside the Vault, or an entry whose
+// root contains the Vault, as provider-owned. It reads only the ledger file and never spawns a subprocess.
 func FindOwningEntry(vaultDir, absPath string) (LedgerEntry, bool) {
-	l, err := LoadLedger(vaultDir)
-	if err != nil || len(l.Entries) == 0 {
+	e, ok, err := FindOwningEntryChecked(vaultDir, absPath)
+	if err != nil {
 		return LedgerEntry{}, false
 	}
-	return l.findOwningEntry(vaultRootsFor(vaultDir), absPath)
+	return e, ok
+}
+
+// FindOwningEntryChecked is FindOwningEntry that also surfaces ledger read/parse/schema errors so callers
+// such as PreToolUse W1 can fail closed when <vault>/memory/workspaces.json exists but is unreadable,
+// symlinked, corrupt, or from a newer schema version. A missing ledger returns (zero, false, nil).
+func FindOwningEntryChecked(vaultDir, absPath string) (LedgerEntry, bool, error) {
+	l, err := LoadLedger(vaultDir)
+	if err != nil {
+		// Vault paths are never provider-owned even when the workspace ledger is unreadable.
+		raw := strings.TrimSpace(absPath)
+		if raw != "" && filepath.IsAbs(raw) {
+			vRoots := vaultRootsFor(vaultDir)
+			clean := filepath.Clean(raw)
+			if withinAny(clean, vRoots) {
+				return LedgerEntry{}, false, nil
+			}
+			if canon := CanonicalPath(clean); canon != "" && withinAny(canon, vRoots) {
+				return LedgerEntry{}, false, nil
+			}
+		}
+		return LedgerEntry{}, false, err
+	}
+	if len(l.Entries) == 0 {
+		return LedgerEntry{}, false, nil
+	}
+	e, ok := l.findOwningEntry(vaultRootsFor(vaultDir), absPath)
+	return e, ok, nil
 }
 
 func vaultRootsFor(vaultDir string) []string {
@@ -301,34 +327,15 @@ func (l Ledger) findOwningEntry(vaultRoots []string, absPath string) (LedgerEntr
 		if !filepath.IsAbs(root) || root == string(filepath.Separator) || rootContainsAny(root, vaultRoots) {
 			continue
 		}
+		if e.CanonicalRoot != "" {
+			canonRoot := filepath.Clean(e.CanonicalRoot)
+			if !filepath.IsAbs(canonRoot) || canonRoot == string(filepath.Separator) || rootContainsAny(canonRoot, vaultRoots) {
+				e.CanonicalRoot = ""
+			}
+		}
 		eligible.Entries[key] = e
 	}
-	if e, ok := eligible.findEntryForCandidates(candidates); ok {
-		return e, true
-	}
-	// Second pass: the provider may report a root that traverses a symlink while the agent addresses the
-	// resolved location (or vice versa). Compare against each root's resolved form, but return the stored entry.
-	resolved := Ledger{Entries: make(map[string]LedgerEntry, len(eligible.Entries))}
-	original := make(map[string]LedgerEntry, len(eligible.Entries))
-	for key, e := range eligible.Entries {
-		canonRoot := CanonicalPath(e.Root)
-		if canonRoot == "" || canonRoot == filepath.Clean(e.Root) || canonRoot == string(filepath.Separator) || rootContainsAny(canonRoot, vaultRoots) {
-			continue
-		}
-		shadow := e
-		shadow.Root = canonRoot
-		resolved.Entries[key] = shadow
-		original[shadow.Key()] = e
-	}
-	if len(resolved.Entries) == 0 {
-		return LedgerEntry{}, false
-	}
-	if e, ok := resolved.findEntryForCandidates(candidates); ok {
-		if orig, found := original[e.Key()]; found {
-			return orig, true
-		}
-	}
-	return LedgerEntry{}, false
+	return eligible.findEntryForCandidates(candidates)
 }
 
 // PathOwner reports which workspace owns a modified path (RFC-0025 §7.3 / §16.8 Stop auto-binding).

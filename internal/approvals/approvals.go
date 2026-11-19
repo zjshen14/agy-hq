@@ -822,6 +822,17 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 		cmd.Dir = prop.WorkDir
 	}
 	cmd.Env = SanitizedApprovalEnv(vaultDir)
+	if shouldMintWorkspaceExecCap(prop) {
+		execID, execTok, execCapPath, capErr := mintWorkspaceExecCap(vaultDir, prop, defaultApprovalExecTimeout+30*time.Second)
+		if capErr != nil {
+			if pipeReader != nil {
+				_ = pipeReader.Close()
+			}
+			return "", fmt.Errorf("mint workspace execution capability for %s: %w", id, capErr)
+		}
+		defer func() { _ = os.Remove(execCapPath) }()
+		cmd.Env = append(cmd.Env, "HQ_APPROVAL_EXEC_ID="+execID, "HQ_APPROVAL_EXEC_TOKEN="+execTok)
+	}
 
 	outBytes, execErr := cmd.CombinedOutput()
 	if errors.Is(execCtx.Err(), context.DeadlineExceeded) {

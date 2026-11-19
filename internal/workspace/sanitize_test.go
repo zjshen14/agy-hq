@@ -150,6 +150,26 @@ func TestSanitizeInfoClampsChangeCount(t *testing.T) {
 	if len(got.Changes) != MaxChanges {
 		t.Fatalf("len(Changes) = %d, want %d", len(got.Changes), MaxChanges)
 	}
+	if got.OpenChangeCount() != MaxChanges {
+		t.Fatalf("OpenChangeCount = %d, want %d when >MaxChanges are open", got.OpenChangeCount(), MaxChanges)
+	}
+
+	// P1-3b regression: open changes appearing after MaxChanges closed ones must never be dropped.
+	mixed := validTestInfo()
+	mixed.Changes = nil
+	for i := 0; i < MaxChanges; i++ {
+		mixed.Changes = append(mixed.Changes, ChangeRef{ID: "old-" + strings.Repeat("0", 1+i%3), State: ChangeLanded})
+	}
+	for i := 0; i < 10; i++ {
+		mixed.Changes = append(mixed.Changes, ChangeRef{ID: "new-" + strings.Repeat("1", 1+i%3), State: ChangeInReview})
+	}
+	gotMixed, err := SanitizeInfo("acme-monorepo/client", mixed)
+	if err != nil {
+		t.Fatalf("SanitizeInfo(mixed): %v", err)
+	}
+	if len(gotMixed.Changes) != MaxChanges || gotMixed.OpenChangeCount() != 10 {
+		t.Fatalf("expected all 10 open changes preserved inside MaxChanges=%d, got len=%d open=%d", MaxChanges, len(gotMixed.Changes), gotMixed.OpenChangeCount())
+	}
 }
 
 func TestValidateCreateNameAndWorkspaceID(t *testing.T) {

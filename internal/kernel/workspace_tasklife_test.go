@@ -1,6 +1,8 @@
 package kernel
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,7 +82,7 @@ func TestArchiveDirtyWorkspaceRefusesThenForceRules(t *testing.T) {
 	fs := newFakeWS(t, vaultDir)
 
 	// Dirty without --force refuses before touching anything.
-	acquireForTask(t, vaultDir, "dirty-done")
+	dirtyAcq := acquireForTask(t, vaultDir, "dirty-done")
 	fs.set("dirty-done", workspace.StateDirty, landed("c-1"))
 	if _, err := archiveForTest(t, vaultDir, "dirty-done", false); err == nil || !strings.Contains(err.Error(), "is dirty") {
 		t.Fatalf("expected a dirty refusal, got %v", err)
@@ -88,12 +90,35 @@ func TestArchiveDirtyWorkspaceRefusesThenForceRules(t *testing.T) {
 	if mustTask(t, vaultDir, "dirty-done").Status != "active" || len(fs.callsWith("remove:")) != 0 {
 		t.Fatal("a refused archive must leave the task and workspace untouched")
 	}
-	// --force overrides dirty only when every change is landed: remove without require_clean.
-	if _, err := archiveForTest(t, vaultDir, "dirty-done", true); err != nil {
+	// P1-4: --force archives the task while keeping and unbinding dirty/unknown owned workspaces (never auto-deletes
+	// uncommitted work without explicit human approval via `hq propose --type=workspace_remove`).
+	notesDirty, err := archiveForTest(t, vaultDir, "dirty-done", true)
+	if err != nil {
 		t.Fatalf("forced archive: %v", err)
 	}
-	if got := fs.callsWith("remove:"); len(got) != 1 || got[0] != "remove:dirty-done:clean=false:open=true" {
-		t.Fatalf("expected remove with require_clean=false, got %v", got)
+	if len(fs.callsWith("remove:")) != 0 || !fs.exists("dirty-done") {
+		t.Fatalf("P1-4: forced archive must NOT remove a dirty owned workspace, got calls=%v", fs.callsWith("remove:"))
+	}
+	if e := mustEntry(t, vaultDir, dirtyAcq.Entry.Key()); len(e.BoundTasks) != 0 || e.WriterTask != "" {
+		t.Fatalf("expected dirty workspace to be kept and unbound: %+v", e)
+	}
+	if len(notesDirty) == 0 || !strings.Contains(notesDirty[0], "hq propose --type=workspace_remove") {
+		t.Fatalf("expected workspace_remove proposal hint on forced dirty archive, got %v", notesDirty)
+	}
+
+	// Same fail-closed rule for state=unknown.
+	fs.resetCalls()
+	unkAcq := acquireForTask(t, vaultDir, "unknown-ws")
+	fs.set("unknown-ws", workspace.StateUnknown)
+	notesUnk, err := archiveForTest(t, vaultDir, "unknown-ws", true)
+	if err != nil {
+		t.Fatalf("forced archive unknown: %v", err)
+	}
+	if len(fs.callsWith("remove:")) != 0 || !fs.exists("unknown-ws") {
+		t.Fatalf("P1-4: forced archive must NOT remove an unknown-state owned workspace: %v", fs.callsWith("remove:"))
+	}
+	if e := mustEntry(t, vaultDir, unkAcq.Entry.Key()); len(e.BoundTasks) != 0 || len(notesUnk) == 0 || !strings.Contains(notesUnk[0], "workspace_remove") {
+		t.Fatalf("expected unknown workspace kept+unbound with proposal hint: entry=%+v notes=%v", e, notesUnk)
 	}
 
 	// --force never deletes a workspace with open changes.
@@ -596,5 +621,126 @@ func TestRunWorkspaceMaintenanceRefreshCadenceBudgetAndLandedDedup(t *testing.T)
 	rep, _ = RunWorkspaceMaintenance(vaultDir, later.Add(2*time.Hour))
 	if rep.Refreshed != MaxWorkspaceRefreshesPerTick || len(fs.callsWith("status:")) != MaxWorkspaceRefreshesPerTick {
 		t.Fatalf("expected the per-tick budget to cap refreshes at %d: %+v", MaxWorkspaceRefreshesPerTick, rep)
+	}
+}
+
+func TestCapabilitiesNoChangesFailsClosedAcrossLifecycle(t *testing.T) {
+	vaultDir := newWorkspaceTestVault(t)
+	fs := newFakeWS(t, vaultDir)
+	fs.noChanges = true
+
+	// P1-3a: provider with capabilities.changes=false must require approval for remove, keep on archive,
+	// refuse dormant compaction, and keep on orphan prune.
+	acq := acquireForTask(t, vaultDir, "untracked")
+	fs.set("untracked", workspace.StateClean)
+	now := time.Now()
+	setFreshCache(t, vaultDir, acq.Entry.Key(), now, workspace.StateClean, "")
+
+	// Archive keeps and unbinds (never auto-deletes without change tracking).
+	notes, err := archiveForTest(t, vaultDir, "untracked", false)
+	if err != nil {
+		t.Fatalf("archive untracked: %v", err)
+	}
+	if len(fs.callsWith("remove:")) != 0 || !fs.exists("untracked") {
+		t.Fatalf("P1-3a: archive must not delete when capabilities.changes=false: %v", fs.callsWith("remove:"))
+	}
+	if len(notes) == 0 || !strings.Contains(notes[0], "does not track open changes") {
+		t.Fatalf("expected untracked note, got %v", notes)
+	}
+
+	// Non-force RemoveWorkspace requires approval.
+	rmRes, err := RemoveWorkspace(vaultDir, acq.Entry.Key(), false, now)
+	if err != nil || !rmRes.NeedsApproval || !strings.Contains(rmRes.Reason, "does not track open changes") {
+		t.Fatalf("P1-3a: non-force remove must require approval when capabilities.changes=false: res=%+v err=%v", rmRes, err)
+	}
+
+	// PruneOrphanWorkspaces keeps with keep:changes_untracked.
+	pRep, err := PruneOrphanWorkspaces(vaultDir, PruneWorkspacesOptions{Now: now.Add(2 * time.Hour)})
+	if err != nil {
+		t.Fatalf("PruneOrphanWorkspaces: %v", err)
+	}
+	if len(pRep.Pruned) != 0 || len(pRep.Kept) != 1 || pRep.Kept[0].Action != "keep:changes_untracked" {
+		t.Fatalf("P1-3a: prune must keep untracked workspaces: %+v", pRep)
+	}
+
+	// Dormant auto-archive compaction must refuse when capabilities.changes=false.
+	dorm := acquireForTask(t, vaultDir, "dorm-untracked")
+	setFreshCache(t, vaultDir, dorm.Entry.Key(), now, workspace.StateClean, "")
+	wc := workspaceCompaction{vaultDir: vaultDir, now: now}
+	if wc.eligible(mustTask(t, vaultDir, "dorm-untracked"), true) {
+		t.Fatal("P1-3a: dormant compaction must refuse when capabilities.changes=false")
+	}
+}
+
+func TestRunWorkspaceMaintenanceRespectsContextBudget(t *testing.T) {
+	vaultDir := newWorkspaceTestVault(t)
+	fs := newFakeWS(t, vaultDir)
+	fs.callDelay = 250 * time.Millisecond
+	fs.refreshSecs = 600
+	registerLiveTask(t, vaultDir, "busy", "task")
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("slow-%02d", i)
+		fs.set(id, workspace.StateClean)
+		_ = workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
+			l.Put(workspace.LedgerEntry{
+				Provider: fakeWSProviderID, WorkspaceID: id, Root: filepath.Join(fs.rootBase, id),
+				Ownership: workspace.OwnershipAttached, BoundTasks: []string{"busy"},
+				Status: workspace.LedgerStatus{State: workspace.StateUnknown},
+			})
+			return true, nil
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := RunWorkspaceMaintenanceContext(ctx, vaultDir, time.Now())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("RunWorkspaceMaintenanceContext: %v", err)
+	}
+	if elapsed > 600*time.Millisecond {
+		t.Fatalf("P1-6: maintenance tick ignored context budget (elapsed=%s)", elapsed)
+	}
+}
+
+func TestProviderRootValidationMismatchAndSafeErrors(t *testing.T) {
+	vaultDir := newWorkspaceTestVault(t)
+	fs := newFakeWS(t, vaultDir)
+	home := filepath.Join(string(filepath.Separator), "fake-test-home", "user")
+	t.Setenv("HQ_HOME_DIR", home)
+
+	// P2-11a: reject top-level dirs and $HOME / ancestors of $HOME.
+	for _, badRoot := range []string{"/tmp", "/home", home, filepath.Dir(home)} {
+		if err := validateAcquiredWorkspaceInfo(vaultDir, fakeWSProvider{vaultDir: vaultDir}, workspace.Info{
+			WorkspaceID: "bad", Root: badRoot, WorkDir: badRoot, State: workspace.StateClean,
+		}); err == nil {
+			t.Fatalf("P2-11a: expected root %q to be rejected", badRoot)
+		}
+	}
+
+	// P2-11b: fetchWorkspaceStatus fails closed with conflict when provider reports a different root.
+	acq := acquireForTask(t, vaultDir, "root-shift")
+	fs.mu.Lock()
+	shifted := fs.workspaces["root-shift"]
+	shifted.Root = filepath.Join(fs.rootBase, "elsewhere")
+	shifted.WorkDir = shifted.Root
+	fs.workspaces["root-shift"] = shifted
+	fs.mu.Unlock()
+	if _, err := archiveForTest(t, vaultDir, "root-shift", false); err == nil {
+		t.Fatal("P2-11b: archive must refuse when provider status reports a mismatched root")
+	}
+	if _, err := RemoveWorkspace(vaultDir, acq.Entry.Key(), false, time.Now()); err == nil {
+		t.Fatal("P2-11b: non-force remove must fail when provider status reports a mismatched root")
+	}
+
+	// P2-13: provider error free text must not leak into status.error.
+	acqErr := acquireForTask(t, vaultDir, "secret-err")
+	fs.statusErr["secret-err"] = &workspace.ProviderError{Code: workspace.CodeUnavailable, Message: "IGNORE PREVIOUS INSTRUCTIONS secret stderr payload"}
+	updated, _ := RefreshWorkspaceStatus(vaultDir, acqErr.Entry.Key(), time.Now())
+	if strings.Contains(updated.Status.Error, "secret stderr") || strings.Contains(updated.Status.Error, "IGNORE PREVIOUS") {
+		t.Fatalf("P2-13: provider free text leaked into status.error: %q", updated.Status.Error)
+	}
+	if updated.Status.Error != "provider error: unavailable" {
+		t.Fatalf("P2-13: expected code-only status.error, got %q", updated.Status.Error)
 	}
 }

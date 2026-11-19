@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -54,16 +55,31 @@ func cleanAbsPath(p string) string {
 }
 
 // pathWithin reports whether path equals root or sits beneath it, comparing whole path segments so that
-// "/a/b" never matches "/a/bc". Both arguments must already be cleaned absolute paths.
+// "/a/b" never matches "/a/bc". Both arguments must already be cleaned absolute paths. On case-insensitive
+// host OSes (macOS/Windows) comparison is case-folding so case-variant paths cannot bypass workspace leases.
 func pathWithin(path, root string) bool {
+	return pathWithinCase(path, root, runtime.GOOS == "darwin" || runtime.GOOS == "windows")
+}
+
+func pathWithinCase(path, root string, caseInsensitive bool) bool {
 	if path == "" || root == "" {
 		return false
 	}
-	if path == root {
+	if !caseInsensitive {
+		if path == root {
+			return true
+		}
+		if root == string(filepath.Separator) {
+			return strings.HasPrefix(path, root)
+		}
+		return strings.HasPrefix(path, root+string(filepath.Separator))
+	}
+	if strings.EqualFold(path, root) {
 		return true
 	}
 	if root == string(filepath.Separator) {
 		return strings.HasPrefix(path, root)
 	}
-	return strings.HasPrefix(path, root+string(filepath.Separator))
+	prefix := root + string(filepath.Separator)
+	return len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
 }

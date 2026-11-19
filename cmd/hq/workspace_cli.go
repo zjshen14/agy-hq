@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
@@ -77,7 +78,18 @@ func parseWorkspaceArgs(args []string, valueFlags, boolFlags []string) (workspac
 			out.pos = append(out.pos, a)
 			continue
 		}
-		name := strings.TrimLeft(a, "-")
+		if strings.HasPrefix(a, "---") {
+			return out, fmt.Errorf("invalid flag %s", a)
+		}
+		var name string
+		if strings.HasPrefix(a, "--") {
+			name = a[2:]
+		} else {
+			name = a[1:]
+		}
+		if name == "" || strings.HasPrefix(name, "-") {
+			return out, fmt.Errorf("invalid flag %s", a)
+		}
 		val, hasVal := "", false
 		if k, v, ok := strings.Cut(name, "="); ok {
 			name, val, hasVal = k, v, true
@@ -293,7 +305,7 @@ func runWorkspaceCLI(rootDir, vaultDir string, args []string, stdout, stderr io.
 	case "remove":
 		return runWorkspaceRemove(rootDir, vaultDir, rest, stdout, stderr)
 	case "own":
-		return runWorkspaceOwn(vaultDir, rest, stdout, stderr)
+		return runWorkspaceOwn(rootDir, vaultDir, rest, stdout, stderr)
 	case "prune":
 		return runWorkspacePrune(vaultDir, rest, stdout, stderr)
 	default:
@@ -500,7 +512,7 @@ func runWorkspaceStatus(vaultDir string, args []string, stdout, stderr io.Writer
 		}
 		for _, r := range kernel.RefreshWorkspaces(vaultDir, keys, kernel.MaxConcurrentWorkspaceRefreshes, time.Now()) {
 			if r.Err != nil {
-				fmt.Fprintf(stderr, "warning: refresh %s: %v\n", r.Key, r.Err)
+				fmt.Fprintf(stderr, "warning: refresh %s: %s\n", r.Key, kernel.WorkspaceSafeErrorSummary(r.Err))
 				if workspace.ErrorCode(r.Err) == workspace.CodeNotFound && key != "" {
 					exit = 1
 				}
@@ -604,6 +616,14 @@ func runWorkspaceRemove(rootDir, vaultDir string, args []string, stdout, stderr 
 		fmt.Fprintf(stderr, "hq workspace remove: invalid key %q (expected <provider-fqid>:<workspace-id>)\n", key)
 		return 2
 	}
+	if a.bools["force"] {
+		if capErr := approvals.VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_remove", key); capErr != nil {
+			fmt.Fprintf(stderr, "hq workspace remove --force denied: %v\n", capErr)
+			fmt.Fprintln(stderr, "Stage it with:")
+			fmt.Fprintf(stderr, "  %s\n", kernel.WorkspaceRemoveProposal(displayHQCmd(rootDir), key, "forced removal"))
+			return 1
+		}
+	}
 	res, err := kernel.RemoveWorkspace(vaultDir, key, a.bools["force"], time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "hq workspace remove failed: %v\n", err)
@@ -628,7 +648,7 @@ func runWorkspaceRemove(rootDir, vaultDir string, args []string, stdout, stderr 
 	return 0
 }
 
-func runWorkspaceOwn(vaultDir string, args []string, stdout, stderr io.Writer) int {
+func runWorkspaceOwn(rootDir, vaultDir string, args []string, stdout, stderr io.Writer) int {
 	a, err := parseWorkspaceArgs(args, nil, nil)
 	if err != nil || len(a.pos) != 1 {
 		return workspaceUsageError(stderr, "own <key>")
@@ -640,6 +660,12 @@ func runWorkspaceOwn(vaultDir string, args []string, stdout, stderr io.Writer) i
 	if !validWorkspaceKey(key) {
 		fmt.Fprintf(stderr, "hq workspace own: invalid key %q (expected <provider-fqid>:<workspace-id>)\n", key)
 		return 2
+	}
+	if capErr := approvals.VerifyAndConsumeWorkspaceExecApproval(vaultDir, "workspace_own", key); capErr != nil {
+		fmt.Fprintf(stderr, "hq workspace own denied: %v\n", capErr)
+		fmt.Fprintln(stderr, "Stage it with:")
+		fmt.Fprintf(stderr, "  %s\n", workspaceOwnProposal(displayHQCmd(rootDir), key))
+		return 1
 	}
 	_, changed, err := kernel.OwnWorkspace(vaultDir, key)
 	if err != nil {
@@ -660,7 +686,7 @@ func runWorkspacePrune(vaultDir string, args []string, stdout, stderr io.Writer)
 	if err != nil || len(a.pos) != 0 {
 		return workspaceUsageError(stderr, "prune [--dry-run] [--json]")
 	}
-	if workspaceCallerBlockedByTaint(vaultDir, "prune", stderr) {
+	if workspaceCallerBlockedByTaint(vaultDir, "prune", stderr) || workspaceCallerBlockedAsAuto(vaultDir, "prune", stderr) {
 		return 1
 	}
 	rep, err := kernel.PruneOrphanWorkspaces(vaultDir, kernel.PruneWorkspacesOptions{Now: time.Now(), DryRun: a.bools["dry-run"]})
@@ -730,6 +756,9 @@ func workspaceSpawnPrompt(acq kernel.WorkspaceAcquireResult, prompt string) stri
 // new conversation before its first prompt is delivered, so the child's first write already resolves to the W1
 // writer task; the agentapi fallback creates and prompts in one step and is linked when the spawn returns.
 func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stderr io.Writer) int {
+	if workspaceCallerBlockedByTaint(vaultDir, "spawn", stderr) || workspaceCallerBlockedAsAuto(vaultDir, "spawn --workspace", stderr) {
+		return 1
+	}
 	slug := strings.TrimSpace(req.TaskSlug)
 	if slug == "" {
 		fmt.Fprintln(stderr, "hq spawn --workspace requires --task=<slug>")
@@ -743,6 +772,45 @@ func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stder
 	if strings.TrimSpace(req.ShareFrom) != "" && id != "" {
 		fmt.Fprintln(stderr, "hq spawn workspace error: --share-from creates a new sibling workspace and cannot be combined with --workspace=<provider>:<id>")
 		return 1
+	}
+	if req.DryRun {
+		if id == "" {
+			if err := workspace.ValidateCreateName(slug); err != nil {
+				fmt.Fprintf(stderr, "hq spawn workspace error: %v\n", err)
+				return 1
+			}
+		}
+		p, rErr := workspace.Resolve(vaultDir, fqid)
+		if rErr != nil {
+			fmt.Fprintf(stderr, "hq spawn workspace error: %v\n", rErr)
+			return 1
+		}
+		if id == "" && !p.Capabilities().Create {
+			fmt.Fprintf(stderr, "hq spawn workspace error: %s does not support create\n", fqid)
+			return 1
+		}
+		if strings.TrimSpace(req.ShareFrom) != "" && !p.Capabilities().SharedHistory {
+			fmt.Fprintf(stderr, "hq spawn workspace error: %s does not support shared-history siblings\n", fqid)
+			return 1
+		}
+		previewID := id
+		if previewID == "" {
+			previewID = slug
+		}
+		fullPrompt := kernel.WorkspacePromptPreamble(fqid, previewID, workspace.RolePrimary, "<dry-run:"+fqid+":"+previewID+">", kernel.WorkspaceProviderSkill(p)) + "\n\nTask: " + req.Prompt
+		trigger := "manual-spawn:" + slug
+		var out string
+		if spawnTaskFn != nil {
+			out, err = spawnTaskFn(vaultDir, trigger, "swe-pulse", req.Title, fullPrompt, req.Model, true, req.Force)
+		} else {
+			out, err = spawnTaskWithOptionsFn(vaultDir, trigger, "swe-pulse", req.Title, fullPrompt, req.Model, true, kernel.SpawnTaskOptions{Force: req.Force})
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "hq spawn error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, out)
+		return 0
 	}
 	acq, err := kernel.AcquireWorkspace(vaultDir, kernel.WorkspaceAcquireOptions{
 		Provider:      fqid,
@@ -846,6 +914,9 @@ type workspaceSubagentRequest struct {
 // ID (Front Desk parent) or records the nested parent edge (task parent) before it sends the prompt, so the child's
 // first write resolves to the writer task. The parent passed to SpawnSubagent is the one the owner was derived from.
 func runWorkspaceSubagentSpawn(vaultDir string, req workspaceSubagentRequest, stdout, stderr io.Writer) int {
+	if workspaceCallerBlockedByTaint(vaultDir, "subagent", stderr) || workspaceCallerBlockedAsAuto(vaultDir, "subagent --workspace", stderr) {
+		return 1
+	}
 	fqid, id, err := kernel.ParseWorkspaceSpec(req.Spec)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s workspace error: %v\n", req.CmdLabel, err)
@@ -876,6 +947,33 @@ func runWorkspaceSubagentSpawn(vaultDir string, req workspaceSubagentRequest, st
 			fmt.Fprintf(stderr, "%s workspace error: %v (pass --task=<slug> to name the workspace)\n", req.CmdLabel, err)
 			return 1
 		}
+	}
+	if req.DryRun {
+		p, rErr := workspace.Resolve(vaultDir, fqid)
+		if rErr != nil {
+			fmt.Fprintf(stderr, "%s workspace error: %v\n", req.CmdLabel, rErr)
+			return 1
+		}
+		if id == "" && !p.Capabilities().Create {
+			fmt.Fprintf(stderr, "%s workspace error: %s does not support create\n", req.CmdLabel, fqid)
+			return 1
+		}
+		if strings.TrimSpace(req.ShareFrom) != "" && !p.Capabilities().SharedHistory {
+			fmt.Fprintf(stderr, "%s workspace error: %s does not support shared-history siblings\n", req.CmdLabel, fqid)
+			return 1
+		}
+		previewID := id
+		if previewID == "" {
+			previewID = name
+		}
+		fullPrompt := kernel.WorkspacePromptPreamble(fqid, previewID, workspace.RolePrimary, "<dry-run:"+fqid+":"+previewID+">", kernel.WorkspaceProviderSkill(p)) + "\n\nTask: " + req.Prompt
+		out, sErr := spawnSubagentFn(vaultDir, parent, req.Role, fullPrompt, req.Model, req.WorkDir, true, req.Force)
+		if sErr != nil {
+			fmt.Fprintf(stderr, "%s error: %v\n", req.CmdLabel, sErr)
+			return 1
+		}
+		fmt.Fprintln(stdout, out)
+		return 0
 	}
 	acq, err := kernel.AcquireWorkspace(vaultDir, kernel.WorkspaceAcquireOptions{
 		Provider:      fqid,

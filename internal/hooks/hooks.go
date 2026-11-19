@@ -680,9 +680,11 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			zone2Sections = append(zone2Sections, "## Active Git Worktrees\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 900))
 		}
 		// RFC-0025 provider workspaces: additive sections rendered from the ledger cache only (no provider calls).
-		// An unreadable ledger hides the inventory but still lists the task's own bindings from tasks.json.
+		// An unreadable ledger surfaces a warning (and W1 fails closed) while still listing the task's own bindings.
 		wsLedger, wsErr := workspace.LoadLedger(vaultDir)
-		if wsErr == nil && len(wsLedger.Entries) > 0 {
+		if wsErr != nil {
+			zone2Sections = append(zone2Sections, "## Workspace Ledger Warning\n- ⚠️ `local/memory/workspaces.json` could not be loaded (corrupt, symlinked, or newer schema); workspace edits outside the Vault are blocked fail-closed until repaired.")
+		} else if len(wsLedger.Entries) > 0 {
 			if allTasks, tErr := kernel.ListTasks(vaultDir); tErr == nil {
 				if sec := formatActiveWorkspacesSection(wsLedger, kernel.FilterLayer1Tasks(vaultDir, allTasks), now); sec != "" {
 					zone2Sections = append(zone2Sections, sec)
@@ -1085,7 +1087,7 @@ var (
 	reHQOutboundBodyCmd    = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+(?:gchat\s+(?:propose|stage-send|draft)|propose|gmail\s+(?:draft|propose))\b`)
 	reDoubleQuotedBodyFlag = regexp.MustCompile(`(?:^|\s)--(?:body|message)(?:=|\s+)"((?:\\.|[^"\\])*)"`)
 	reSingleShellVarOnly   = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
-	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/channels)(?:[\s"'/]|$)`)
+	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/(?:channels|workspaces\.json|\.workspaces\.lock))(?:[\s"'/]|$)`)
 
 	reHeavyBuildTest     = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL    = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
@@ -1397,11 +1399,63 @@ func extractProposeCmdForValidation(cmdLine string) (hasCmd bool, cmdVal string,
 	return false, "", nil
 }
 
+// hasUnquotedShellChainingOrSubst reports whether s contains any shell chaining/piping operator outside quotes
+// (;, &, |, newline) or any shell command substitution ($(...) or backtick) outside single quotes, or an
+// unclosed quote (fail-closed).
+func hasUnquotedShellChainingOrSubst(s string) bool {
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+				continue
+			}
+			if ch == '`' || (ch == '$' && i+1 < len(s) && s[i+1] == '(') {
+				return true
+			}
+			continue
+		}
+		switch ch {
+		case '\\':
+			escaped = true
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case ';', '&', '|', '\n', '\r', '`':
+			return true
+		case '$':
+			if i+1 < len(s) && s[i+1] == '(' {
+				return true
+			}
+		}
+	}
+	return inSingle || inDouble || escaped
+}
+
 func stripProposeInnerCommand(cmdLine string) string {
 	stripped := reCmdFlagValue.ReplaceAllString(cmdLine, `--cmd=""`)
 	if idx := strings.Index(stripped, " -- "); idx >= 0 {
 		prefix := stripped[:idx]
-		if !strings.ContainsAny(prefix, ";&|") {
+		tail := stripped[idx+4:]
+		if !hasUnquotedShellChainingOrSubst(prefix) && !hasUnquotedShellChainingOrSubst(tail) {
 			stripped = prefix
 		}
 	}
@@ -1958,7 +2012,9 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 					continue
 				}
 				if strings.Contains(cmdLine, filepath.Join(vBase, "approvals")) ||
-					strings.Contains(cmdLine, filepath.Join(vBase, "memory", "channels")) {
+					strings.Contains(cmdLine, filepath.Join(vBase, "memory", "channels")) ||
+					strings.Contains(cmdLine, filepath.Join(vBase, "memory", "workspaces.json")) ||
+					strings.Contains(cmdLine, filepath.Join(vBase, "memory", ".workspaces.lock")) {
 					credShellHit = true
 					break
 				}
@@ -1977,6 +2033,8 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 			credTargets := []string{
 				filepath.Join(canonVault, "approvals"),
 				filepath.Join(canonVault, "memory", "channels"),
+				filepath.Join(canonVault, "memory", "workspaces.json"),
+				filepath.Join(canonVault, "memory", ".workspaces.lock"),
 			}
 			for _, sub := range protectedPrivateSubs {
 				credTargets = append(credTargets, filepath.Join(canonVault, "private", sub))
@@ -2011,7 +2069,7 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		if credShellHit {
 			return json.NewEncoder(w).Encode(map[string]interface{}{
 				"decision": "deny",
-				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,channels,taint,trust.json,approval_asks,approval_caps,approval_bridge_caps,pii-denylist.txt,daemon_token}, local/memory/channels, or roots.json is strictly prohibited across all sessions.",
+				"reason":   "Blocked by agy-hq Credential Vault policy: direct shell access to local/private/{gmail,gchat,credentials,connectors,channels,taint,trust.json,approval_asks,approval_caps,approval_bridge_caps,pii-denylist.txt,daemon_token}, local/memory/{channels,workspaces.json,.workspaces.lock}, or roots.json is strictly prohibited across all sessions.",
 			})
 		}
 
@@ -2805,6 +2863,9 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							SidebarSyncedAt:      matchedTask.SidebarSyncedAt,
 							LastSummary:          newSummary,
 						})
+						if newStatus == "archived" && matchedTask.Status != "archived" && matchedTask.TaskSlug != "" {
+							kernel.ReleaseTaskWorkspaceLeases(vaultDir, matchedTask.TaskSlug)
+						}
 						if isAuto && newStatus == "archived" && !matchedTask.Pinned && !matchedTask.SidebarArchived {
 							_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
 								ConversationID:  payload.ConversationID,

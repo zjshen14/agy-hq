@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -1812,7 +1813,22 @@ func main() {
 
 		// Background event-driven wake channel, 15s fast timer/inbox/outbox tick, 30s gatekeeper tick, & 30m full heartbeat loop
 		go func() {
-			_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+			var wsMaintRunning atomic.Bool
+			triggerWorkspaceMaintenance := func(tickNow time.Time) {
+				if *dryRun || !wsMaintRunning.CompareAndSwap(false, true) {
+					return
+				}
+				go func(runAt time.Time) {
+					defer wsMaintRunning.Store(false)
+					ctx, cancel := context.WithTimeout(context.Background(), kernel.DefaultWorkspaceMaintenanceBudget)
+					defer cancel()
+					if wsRep, wsErr := kernel.RunWorkspaceMaintenanceContext(ctx, vaultDir, runAt); wsErr == nil && wsRep.Changed() {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				}(tickNow)
+			}
+			_, _ = kernel.RunHeartbeatWithOptions(vaultDir, time.Now(), *dryRun, kernel.HeartbeatOptions{SkipWorkspaceMaintenance: true})
+			triggerWorkspaceMaintenance(time.Now())
 			_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), *dryRun)
 			_ = webui.SyncMarkdownConsole(vaultDir)
 			fastTicker := time.NewTicker(15 * time.Second)
@@ -1857,18 +1873,15 @@ func main() {
 					now := time.Now()
 					gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
 					acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-					wsChanged := false
-					if !*dryRun {
-						// RFC-0025: probe drain + cadence-gated workspace status refresh (no-op without a ledger).
-						if wsRep, wsErr := kernel.RunWorkspaceMaintenance(vaultDir, now); wsErr == nil && wsRep.Changed() {
-							wsChanged = true
-						}
-					}
-					if len(gkActs) > 0 || kernel.HasMaterialDispatchActions(acts) || wsChanged {
+					// RFC-0025: non-blocking single-flight probe drain + cadence-gated status refresh (no-op without a ledger).
+					triggerWorkspaceMaintenance(now)
+					if len(gkActs) > 0 || kernel.HasMaterialDispatchActions(acts) {
 						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
 				case <-hbTicker.C:
-					_, _ = kernel.RunHeartbeat(vaultDir, *dryRun)
+					now := time.Now()
+					_, _ = kernel.RunHeartbeatWithOptions(vaultDir, now, *dryRun, kernel.HeartbeatOptions{SkipWorkspaceMaintenance: true})
+					triggerWorkspaceMaintenance(now)
 					_ = channels.CompactAuditLog(context.Background(), vaultDir)
 					_ = webui.SyncMarkdownConsole(vaultDir)
 				}

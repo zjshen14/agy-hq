@@ -223,6 +223,9 @@ func TestUpdateLedgerConcurrentWritersSerialize(t *testing.T) {
 }
 
 func TestUpdateLedgerLockRankOrdering(t *testing.T) {
+	if !(store.RankTasks < store.RankWorkspaces && store.RankWorkspaces < store.RankMemory) {
+		t.Fatalf("P2-14: expected RankTasks (%d) < RankWorkspaces (%d) < RankMemory (%d)", store.RankTasks, store.RankWorkspaces, store.RankMemory)
+	}
 	vaultDir := t.TempDir()
 	// A task update (RankTasks) may nest a ledger update...
 	err := store.With(context.Background(), store.RankTasks, filepath.Join(vaultDir, "memory", ".tasks.lock"), func(context.Context) error {

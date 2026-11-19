@@ -521,3 +521,181 @@ func ApproveFromCLI(vaultDir, id, shaPrefix, rawCap string) (string, error) {
 
 	return ApproveProposal(vaultDir, id, capRec.FullSHA256)
 }
+
+// WorkspaceExecCapRecord is a one-shot capability minted exclusively by ApproveProposal while executing an
+// approved `hq workspace remove --force` or `hq workspace own` command (RFC-0025 §16.9). Stored under
+// <vault>/private/approval_caps/ (blocked from all LLM tools and shell commands), it ensures direct CLI
+// invocation cannot bypass PreToolUse approval gates even under shell-quoting or flag obfuscation.
+type WorkspaceExecCapRecord struct {
+	ProposalID  string   `json:"proposal_id"`
+	ActionType  string   `json:"action_type"`
+	VaultCanon  string   `json:"vault_canon"`
+	Command     string   `json:"command,omitempty"`
+	CommandArgv []string `json:"command_argv,omitempty"`
+	TokenSHA256 string   `json:"token_sha256"`
+	CreatedAt   string   `json:"created_at"`
+	ExpiresAt   string   `json:"expires_at"`
+}
+
+var reValidExecCapID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{3,95}$`)
+
+func shouldMintWorkspaceExecCap(prop Proposal) bool {
+	if prop.ActionType == "workspace_remove" || prop.ActionType == "workspace_own" {
+		return true
+	}
+	if len(prop.CommandArgv) >= 3 && strings.Contains(strings.ToLower(filepath.Base(prop.CommandArgv[0])), "hq") && prop.CommandArgv[1] == "workspace" {
+		return prop.CommandArgv[2] == "remove" || prop.CommandArgv[2] == "own"
+	}
+	norm := normalizeCommandForRuleMatch(prop.Command)
+	return strings.Contains(norm, "workspace remove ") || strings.Contains(norm, "workspace own ")
+}
+
+func mintWorkspaceExecCap(vaultDir string, prop Proposal, ttl time.Duration) (execID, rawTok, capPath string, err error) {
+	if ttl <= 0 {
+		ttl = 150 * time.Second
+	}
+	var idRand [6]byte
+	var tokBytes [32]byte
+	if _, err = rand.Read(idRand[:]); err != nil {
+		return "", "", "", err
+	}
+	if _, err = rand.Read(tokBytes[:]); err != nil {
+		return "", "", "", err
+	}
+	execID = fmt.Sprintf("%s-%s", prop.ID, hex.EncodeToString(idRand[:]))
+	rawTok = hex.EncodeToString(tokBytes[:])
+	now := time.Now()
+	rec := WorkspaceExecCapRecord{
+		ProposalID:  prop.ID,
+		ActionType:  prop.ActionType,
+		VaultCanon:  canonicalVaultPath(vaultDir),
+		Command:     prop.Command,
+		CommandArgv: append([]string(nil), prop.CommandArgv...),
+		TokenSHA256: sha256HexString(rawTok),
+		CreatedAt:   now.UTC().Format(time.RFC3339),
+		ExpiresAt:   now.Add(ttl).UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return "", "", "", err
+	}
+	if err := os.MkdirAll(approvalCapsDir(vaultDir), 0o700); err != nil {
+		return "", "", "", err
+	}
+	capPath = filepath.Join(approvalCapsDir(vaultDir), ".exec-"+execID+".json")
+	f, err := store.OpenCreateExclNoFollow(capPath, 0o600)
+	if err != nil {
+		return "", "", "", err
+	}
+	if _, wErr := f.Write(append(data, '\n')); wErr != nil {
+		_ = f.Close()
+		_ = os.Remove(capPath)
+		return "", "", "", wErr
+	}
+	_ = f.Sync()
+	_ = f.Close()
+	return execID, rawTok, capPath, nil
+}
+
+// VerifyAndConsumeWorkspaceExecApproval enforces binary-level human-approval proof for destructive workspace
+// mutations (`workspace_remove` with `--force`, and `workspace_own`). In live Vaults or whenever
+// HQ_FORCE_CAP_CHECK=1 or ANTIGRAVITY_CONVERSATION_ID is set, the command must be running inside
+// ApproveProposal with a matching one-shot exec capability token minted for this exact action and key.
+func VerifyAndConsumeWorkspaceExecApproval(vaultDir, actionType, key string) error {
+	actionType = strings.TrimSpace(actionType)
+	key = strings.TrimSpace(key)
+	execID := strings.TrimSpace(os.Getenv("HQ_APPROVAL_EXEC_ID"))
+	execTok := strings.TrimSpace(os.Getenv("HQ_APPROVAL_EXEC_TOKEN"))
+	if execID == "" || execTok == "" {
+		allowCaplessTest := os.Getenv("HQ_FORCE_CAP_CHECK") == "" &&
+			(store.InGoTest() || (strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) == "" && hostpaths.IsTempPath(vaultDir)))
+		if allowCaplessTest {
+			return nil
+		}
+		return fmt.Errorf("human-approved execution token is required for %s on %s; stage it with `hq propose --type=%s` and execute via `hq approve`", actionType, key, actionType)
+	}
+	if !reValidExecCapID.MatchString(execID) {
+		return fmt.Errorf("invalid approval execution token id")
+	}
+	capsDir := approvalCapsDir(vaultDir)
+	capPath := filepath.Join(capsDir, ".exec-"+execID+".json")
+	var rnd [6]byte
+	_, _ = rand.Read(rnd[:])
+	claimedPath := filepath.Join(capsDir, fmt.Sprintf(".exec-claimed-%s-%s.json", execID, hex.EncodeToString(rnd[:])))
+	if err := os.Rename(capPath, claimedPath); err != nil {
+		return fmt.Errorf("missing or already-consumed approval execution token for %s", actionType)
+	}
+	defer func() { _ = os.Remove(claimedPath) }()
+
+	raw, err := os.ReadFile(claimedPath)
+	if err != nil {
+		return fmt.Errorf("read approval execution token: %w", err)
+	}
+	var rec WorkspaceExecCapRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return fmt.Errorf("corrupt approval execution token")
+	}
+	now := time.Now()
+	exp, err := time.Parse(time.RFC3339, rec.ExpiresAt)
+	if err != nil || now.After(exp) {
+		return fmt.Errorf("approval execution token expired")
+	}
+	gotHash := sha256HexString(execTok)
+	if len(gotHash) != len(rec.TokenSHA256) || subtle.ConstantTimeCompare([]byte(gotHash), []byte(rec.TokenSHA256)) != 1 {
+		return fmt.Errorf("approval execution token mismatch")
+	}
+	if rec.VaultCanon != canonicalVaultPath(vaultDir) {
+		return fmt.Errorf("approval execution token vault mismatch")
+	}
+	if !workspaceExecCommandMatches(rec, actionType, key) {
+		return fmt.Errorf("approval execution token does not authorize %s on %s", actionType, key)
+	}
+	return nil
+}
+
+func workspaceExecCommandMatches(rec WorkspaceExecCapRecord, actionType, key string) bool {
+	if key == "" {
+		return false
+	}
+	var segments [][]string
+	if len(rec.CommandArgv) > 0 {
+		segments = [][]string{rec.CommandArgv}
+	} else if norm := normalizeCommandForRuleMatch(rec.Command); norm != "" {
+		for _, seg := range strings.Split(norm, " ; ") {
+			if f := strings.Fields(seg); len(f) > 0 {
+				segments = append(segments, f)
+			}
+		}
+	}
+	for _, toks := range segments {
+		for i := 0; i+2 < len(toks); i++ {
+			if toks[i] != "workspace" {
+				continue
+			}
+			verb := toks[i+1]
+			rest := toks[i+2:]
+			switch actionType {
+			case "workspace_own":
+				if verb == "own" && len(rest) == 1 && rest[0] == key {
+					return true
+				}
+			case "workspace_remove":
+				if verb != "remove" || len(rest) != 2 {
+					continue
+				}
+				hasKey, hasForce := false, false
+				for _, arg := range rest {
+					if arg == key {
+						hasKey = true
+					} else if arg == "--force" || arg == "-force" || arg == "--force=true" || arg == "-force=true" || arg == "--force=1" || arg == "-force=1" {
+						hasForce = true
+					}
+				}
+				if hasKey && hasForce {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}

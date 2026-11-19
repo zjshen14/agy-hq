@@ -45,6 +45,7 @@ type LedgerEntry struct {
 	WorkspaceID         string       `json:"workspace_id"`
 	Name                string       `json:"name,omitempty"`
 	Root                string       `json:"root"`
+	CanonicalRoot       string       `json:"canonical_root,omitempty"`
 	WorkDir             string       `json:"work_dir,omitempty"`
 	Ownership           Ownership    `json:"ownership"`
 	CreatedByTask       string       `json:"created_by_task,omitempty"`
@@ -168,6 +169,16 @@ func UpdateLedger(vaultDir string, fn func(*Ledger) (changed bool, err error)) e
 			return err
 		}
 		l.normalize()
+		// Persist canonical roots at write time for any newly-added entries that lack one so hook-time
+		// ownership lookups (FindOwningEntry) never lstat/EvalSymlinks unrelated ledger roots.
+		for k, e := range l.Entries {
+			if e.CanonicalRoot == "" && filepath.IsAbs(e.Root) {
+				if canon := CanonicalPath(e.Root); canon != "" {
+					e.CanonicalRoot = canon
+					l.Entries[k] = e
+				}
+			}
+		}
 		if err := l.validate(); err != nil {
 			return err
 		}
@@ -212,7 +223,8 @@ func (l Ledger) findEntryForPath(absPath string) (LedgerEntry, bool) {
 	return l.findEntryForCandidates(candidates)
 }
 
-// findEntryForCandidates performs the pure (no filesystem access) longest-root match for pre-resolved path forms.
+// findEntryForCandidates performs the pure (no filesystem access) longest-root match for pre-resolved path forms
+// against both each entry's stored Root and its persisted CanonicalRoot.
 func (l Ledger) findEntryForCandidates(candidates []string) (LedgerEntry, bool) {
 	for _, p := range candidates {
 		if p == "" {
@@ -222,12 +234,17 @@ func (l Ledger) findEntryForCandidates(candidates []string) (LedgerEntry, bool) 
 		bestLen := -1
 		for _, key := range l.sortedKeys() {
 			e := l.Entries[key]
-			root := filepath.Clean(e.Root)
-			if !filepath.IsAbs(root) || root == string(filepath.Separator) {
-				continue
-			}
-			if pathWithin(p, root) && len(root) > bestLen {
-				best, bestLen = e, len(root)
+			for _, rawRoot := range []string{e.Root, e.CanonicalRoot} {
+				if rawRoot == "" {
+					continue
+				}
+				root := filepath.Clean(rawRoot)
+				if !filepath.IsAbs(root) || root == string(filepath.Separator) {
+					continue
+				}
+				if pathWithin(p, root) && len(root) > bestLen {
+					best, bestLen = e, len(root)
+				}
 			}
 		}
 		if bestLen >= 0 {

@@ -152,7 +152,7 @@ func DefaultRules() []Rule {
 			Description: "Force-removing an hq-owned workspace that may hold uncommitted work or open changes",
 			Mode:        ModeAlways,
 			Commands: []string{
-				`\bhq\s+workspace\s+remove\b[^;&|\n]*?[\s"']-{1,2}force\b`,
+				`\bhq\s+workspace\s+remove\b[^;&|\n]*?[\s"']-{1,}force\b`,
 			},
 			Source: "builtin",
 		},
@@ -1082,8 +1082,94 @@ func hasNonLoopbackExternalURL(cmdLine string) bool {
 	return false
 }
 
+// normalizeCommandForRuleMatch splits a shell command line into quote-aware segments (breaking on unquoted
+// separators and command substitutions, including $(...) and backticks inside double quotes) and dequotes
+// each segment's tokens with shellTokensSimple. Matching approval regexes against both the raw line and this
+// normalized form closes quote/backslash obfuscation bypasses such as `hq "workspace" 'own' K` or `--""force`.
+func normalizeCommandForRuleMatch(cmdLine string) string {
+	var segs []string
+	var cur strings.Builder
+	flush := func() {
+		s := strings.TrimSpace(cur.String())
+		cur.Reset()
+		if s == "" {
+			return
+		}
+		toks := shellTokensSimple(s)
+		if len(toks) > 0 {
+			segs = append(segs, strings.Join(toks, " "))
+		}
+	}
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(cmdLine); i++ {
+		ch := cmdLine[i]
+		if escaped {
+			cur.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if inSingle {
+			cur.WriteByte(ch)
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				cur.WriteByte(ch)
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				cur.WriteByte(ch)
+				inDouble = false
+				continue
+			}
+			if ch == '`' {
+				flush()
+				continue
+			}
+			if ch == '$' && i+1 < len(cmdLine) && cmdLine[i+1] == '(' {
+				flush()
+				i++
+				continue
+			}
+			cur.WriteByte(ch)
+			continue
+		}
+		switch ch {
+		case '\\':
+			cur.WriteByte(ch)
+			escaped = true
+		case '\'':
+			inSingle = true
+			cur.WriteByte(ch)
+		case '"':
+			inDouble = true
+			cur.WriteByte(ch)
+		case ';', '\n', '|', '&', '(', ')', '`':
+			flush()
+		case '$':
+			if i+1 < len(cmdLine) && cmdLine[i+1] == '(' {
+				flush()
+				i++
+				continue
+			}
+			cur.WriteByte(ch)
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	flush()
+	return strings.Join(segs, " ; ")
+}
+
 // EvaluateCommand checks checkLine against the resolved PolicyConfig and session autonomy context.
 func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, workDir string) EvalDecision {
+	normLine := normalizeCommandForRuleMatch(checkLine)
 	for i := range pol.Rules {
 		r := &pol.Rules[i]
 		if r.Mode == ModeNever {
@@ -1094,7 +1180,7 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 		}
 		matched := false
 		for _, re := range r.compiled {
-			if re.MatchString(checkLine) {
+			if re.MatchString(checkLine) || (normLine != "" && re.MatchString(normLine)) {
 				matched = true
 				break
 			}

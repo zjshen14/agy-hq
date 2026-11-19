@@ -31,8 +31,8 @@ const (
 	RankChannels      Rank = 65 // <vault>/memory/channels/<bridge>.json
 	RankTaint         Rank = 70 // <vault>/private/taint/*.json
 	RankTasks         Rank = 75 // <vault>/memory/tasks.json & tasks_archive.jsonl
+	RankWorkspaces    Rank = 76 // <vault>/memory/workspaces.json (RFC-0025 ledger; pure leaf callbacks, distinct from RankMemory)
 	RankMemory        Rank = 78 // <vault>/memory/{facts.jsonl,entities,progress,topics} (leaf writes only)
-	RankWorkspaces    Rank = 78 // <vault>/memory/workspaces.json (RFC-0025 ledger; pure leaf callbacks, never nested with RankMemory)
 	RankSubagentQueue Rank = 80 // <vault>/memory/pending_*_subagents.json & nested_conversations.json
 	RankQuota         Rank = 85 // <vault>/memory/quota*.json (leaf store)
 )

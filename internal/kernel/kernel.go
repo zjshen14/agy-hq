@@ -3569,6 +3569,13 @@ func SpawnTaskWithOptions(vaultDir, trigger, skill, title, prompt, modelID strin
 	return output, nil
 }
 
+// HeartbeatOptions configures optional behavior of RunHeartbeatWithOptions.
+type HeartbeatOptions struct {
+	// SkipWorkspaceMaintenance skips synchronous workspace probe/refresh maintenance when the caller
+	// (such as `hq daemon`) already runs it on a dedicated non-blocking single-flight goroutine.
+	SkipWorkspaceMaintenance bool
+}
+
 // RunHeartbeat executes the zero-token Go sidecar pre-check loop (proposal TTL sweep, durable timer evaluation,
 // inbox drop router, schedule-gated daemon gatekeepers/watchers, event inbox dispatch, outbox interrupt
 // delivery, and Waiting-On obligation SLA sweeps).
@@ -3580,6 +3587,11 @@ func RunHeartbeat(vaultDir string, dryRun bool) (string, error) {
 // RunHeartbeatAt runs RunHeartbeat at an explicit reference timestamp `now` so connector watcher polling
 // strictly respects `triggers.yaml` schedule enabled/paused overrides and cron intervals via EvaluateDaemonGatekeepers.
 func RunHeartbeatAt(vaultDir string, now time.Time, dryRun bool) (string, error) {
+	return RunHeartbeatWithOptions(vaultDir, now, dryRun, HeartbeatOptions{})
+}
+
+// RunHeartbeatWithOptions is RunHeartbeatAt with explicit HeartbeatOptions.
+func RunHeartbeatWithOptions(vaultDir string, now time.Time, dryRun bool, opts HeartbeatOptions) (string, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -3612,10 +3624,12 @@ func RunHeartbeatAt(vaultDir string, now time.Time, dryRun bool) (string, error)
 
 	_, _ = ReconcileAutoTasks(vaultDir, now, dryRun)
 
-	if !dryRun {
+	if !dryRun && !opts.SkipWorkspaceMaintenance {
 		// RFC-0025 provider workspace maintenance (probe drain, cadence-gated status refresh, landed notices).
-		// It is a no-op without a workspace ledger.
-		_, _ = RunWorkspaceMaintenance(vaultDir, now)
+		// It is a no-op without a workspace ledger and bounded so standalone `hq heartbeat` cannot hang.
+		wsCtx, wsCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, _ = RunWorkspaceMaintenanceContext(wsCtx, vaultDir, now)
+		wsCancel()
 	}
 
 	if !dryRun && HasPendingSidebarSyncQueue(vaultDir) {

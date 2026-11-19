@@ -55,17 +55,20 @@ func isTaskWriter(owner kernel.ActiveTask, writer string) bool {
 	return owner.TaskSlug == writer || (owner.ConversationID != "" && owner.ConversationID == writer)
 }
 
-// workspaceWriteLeaseDenial enforces the RFC-0025 W1 single-writer lease for write_file / edit_file (v1 scope,
-// §16.3). Only ledger entries with lease_enforced=true can block: the caller's owning Layer-1 task (resolved
-// through nested-subagent parents by kernel.ResolveOwningTask) must hold writer_task, and a readonly binding to
-// the entry never writes. It returns a deny reason, or "" when the write may proceed.
+// workspaceWriteLeaseDenial enforces the RFC-0025 W1 single-writer lease and explicit readonly bindings for
+// write_file / edit_file (v1 scope, §16.3). An unreadable, corrupt, or newer-schema ledger fails closed for
+// writes outside the Vault. Explicit readonly bindings are always enforced (even when lease_enforced=false);
+// single-writer leases block non-writers when lease_enforced=true and the recorded writer task is still live.
 func workspaceWriteLeaseDenial(vaultDir, convID, pathArg string) string {
 	target := resolveHookLexicalAbs(vaultDir, pathArg)
 	if target == "" {
 		return ""
 	}
-	entry, ok := workspace.FindOwningEntry(vaultDir, target)
-	if !ok || !entry.LeaseEnforced {
+	entry, ok, lErr := workspace.FindOwningEntryChecked(vaultDir, target)
+	if lErr != nil {
+		return "Blocked by agy-hq workspace hygiene (RFC-0025 W1): workspace ledger `local/memory/workspaces.json` is unreadable, corrupt, or from a newer schema version; refusing file edits outside the Vault until repaired."
+	}
+	if !ok {
 		return ""
 	}
 	key := entry.Key()
@@ -85,13 +88,19 @@ func workspaceWriteLeaseDenial(vaultDir, convID, pathArg string) string {
 			reason := fmt.Sprintf(
 				"Blocked by agy-hq workspace hygiene (RFC-0025 W1): task `%s` is bound to workspace `%s` with role `readonly`, so it may read but not write files under `%s`. To write here, rebind the task with a writable role (`hq workspace adopt %s --task=%s --role=secondary`)",
 				hookInline(slug, 128), keyDisp, rootDisp, rootDisp, hookInline(slug, 128))
-			if writer != "" && !isTaskWriter(owner, writer) {
+			if writer != "" && !isTaskWriter(owner, writer) && kernel.IsLiveWorkspaceWriter(vaultDir, writer) {
 				reason += fmt.Sprintf(" or route the edit to the writer task `%s`", hookInline(writer, 128))
 			}
 			return reason + "."
 		}
 	}
+	if !entry.LeaseEnforced {
+		return ""
+	}
 	if writer == "" || (resolved && isTaskWriter(owner, writer)) {
+		return ""
+	}
+	if !kernel.IsLiveWorkspaceWriter(vaultDir, writer) {
 		return ""
 	}
 	caller := "does not resolve to a tracked Layer-1 task"

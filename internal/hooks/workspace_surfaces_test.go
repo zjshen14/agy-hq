@@ -233,10 +233,14 @@ func TestW1ReadonlyBindingsDenyAndAdvisoryEntriesNeverBlock(t *testing.T) {
 	if d, r := preToolWorkspaceWrite(t, vaultDir, wsWriterConv, "edit_file", filepath.Join(leased, "README.md")); d != "deny" || !strings.Contains(r, "readonly") {
 		t.Fatalf("expected the writer's own readonly binding to deny writes, got %s: %s", d, r)
 	}
-	// Auto-attached (lease_enforced=false) entries never block, not even readonly-bound tasks.
-	for _, conv := range []string{wsOtherConv, wsReaderConv, "conv-untracked-session"} {
+	// P2-10: explicit readonly bindings are ALWAYS enforced, even on advisory (lease_enforced=false) entries;
+	// advisory entries still never block tasks without a readonly binding.
+	if d, r := preToolWorkspaceWrite(t, vaultDir, wsReaderConv, "write_file", filepath.Join(advisory, "notes.md")); d != "deny" || !strings.Contains(r, "role `readonly`") {
+		t.Fatalf("explicit readonly binding must deny even on advisory entry, got %s: %s", d, r)
+	}
+	for _, conv := range []string{wsOtherConv, "conv-untracked-session"} {
 		if d, r := preToolWorkspaceWrite(t, vaultDir, conv, "write_file", filepath.Join(advisory, "notes.md")); d != "allow" {
-			t.Fatalf("advisory entry blocked %s: %s %s", conv, d, r)
+			t.Fatalf("advisory entry blocked non-readonly caller %s: %s %s", conv, d, r)
 		}
 	}
 	// A lease-enforced entry without a writer only enforces readonly bindings.
@@ -618,5 +622,115 @@ func TestParseTranscriptTurnFilesModifiedScopesToCurrentTurn(t *testing.T) {
 	}
 	if want := []string{"/srv/ws/user/a/z.go", "/srv/ws/user/b/new.go"}; len(tm.TurnFilesModified) != 2 || tm.TurnFilesModified[0] != want[0] || tm.TurnFilesModified[1] != want[1] {
 		t.Fatalf("TurnFilesModified = %v, want %v (current turn only, sorted)", tm.TurnFilesModified, want)
+	}
+}
+
+func preToolRunCmd(t *testing.T, vaultDir, conv, cmdLine string) (decision, reason string) {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]interface{}{
+		"conversationId": conv,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": cmdLine},
+		},
+	})
+	var out bytes.Buffer
+	if err := HandlePreToolUse(bytes.NewReader(raw), &out, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse(run_command %q): %v", cmdLine, err)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("PreToolUse invalid JSON %q: %v", out.String(), err)
+	}
+	d, _ := resp["decision"].(string)
+	r, _ := resp["reason"].(string)
+	return d, r
+}
+
+func TestP0ProposeDashDashChainingAndWorkspaceLedgerShellGuard(t *testing.T) {
+	vaultDir := t.TempDir()
+	key := workspace.LedgerKey(wsTestProvider, "victim")
+
+	// P0-2 regression: `hq propose ... -- <cmd> ; <gated>` and command substitutions must NEVER bypass EvaluateCommand.
+	blocked := []string{
+		"hq propose --type=x --summary=y -- hq status ; hq workspace remove " + key + " --force",
+		"hq propose --type=x --summary=y -- hq status && hq workspace own " + key,
+		"hq propose --type=x --summary=y -- hq status || hq gmail send-draft --id=1",
+		"hq propose --type=x --summary=y -- $(hq workspace own " + key + ")",
+		`hq propose --type=x --summary=y -- "$(hq workspace remove ` + key + ` --force)"`,
+		"hq propose --type=x --summary=y -- `hq workspace own " + key + "`",
+		// P2-8b regression: direct shell tampering of workspaces.json or .workspaces.lock must be blocked.
+		"sed -i 's/attached/owned/' local/memory/workspaces.json",
+		"sed -i 's/attached/owned/' " + filepath.Join(vaultDir, "memory", "workspaces.json"),
+		"rm -f " + filepath.Join(vaultDir, "memory", ".workspaces.lock"),
+		"cat local/memory/.workspaces.lock",
+	}
+	for _, cmd := range blocked {
+		if d, r := preToolRunCmd(t, vaultDir, wsOtherConv, cmd); d != "deny" {
+			t.Fatalf("expected PreToolUse to DENY %q, got %s (%s)", cmd, d, r)
+		}
+	}
+
+	// Legitimate `hq propose -- ...` without unquoted shell chaining or substitution still passes.
+	allowed := []string{
+		"hq propose --type=workspace_remove --summary=cleanup -- hq workspace remove " + key + " --force",
+		"hq propose --type=workspace_own --summary=promote -- hq workspace own " + key,
+		"hq propose --type=ops --summary=script -- sh -c 'hq status; hq tasks'",
+	}
+	for _, cmd := range allowed {
+		if d, r := preToolRunCmd(t, vaultDir, wsOtherConv, cmd); d != "allow" {
+			t.Fatalf("expected PreToolUse to ALLOW legitimate propose %q, got %s (%s)", cmd, d, r)
+		}
+	}
+}
+
+func TestW1CorruptLedgerFailsClosedAndStaleArchivedWriterIsVacant(t *testing.T) {
+	vaultDir := t.TempDir()
+	wsBase := workspace.CanonicalPath(t.TempDir())
+	root := filepath.Join(wsBase, "stale-ws")
+	key := workspace.LedgerKey(wsTestProvider, "stale-ws")
+
+	// P2-9a: an archived writer's stale lease must be treated as vacant by W1.
+	registerWorkspaceTestTask(t, vaultDir, kernel.ActiveTask{TaskSlug: "done-task", ConversationID: wsWriterConv, Status: "archived"})
+	registerWorkspaceTestTask(t, vaultDir, kernel.ActiveTask{TaskSlug: "active-task", ConversationID: wsOtherConv, Status: "active"})
+	seedWorkspaceLedger(t, vaultDir, workspace.LedgerEntry{
+		WorkspaceID: "stale-ws", Root: root, WriterTask: "done-task", LeaseEnforced: true, BoundTasks: []string{"done-task"},
+	})
+	if d, r := preToolWorkspaceWrite(t, vaultDir, wsOtherConv, "write_file", filepath.Join(root, "a.go")); d != "allow" {
+		t.Fatalf("P2-9a: archived writer lease must be treated as vacant, got %s: %s", d, r)
+	}
+
+	// P2-9b: Stop-hook auto-archive of an unpinned [Auto] worker releases its ledger bindings and writer lease.
+	autoConv := "00000000-0000-0000-0000-00000000c0a9"
+	registerWorkspaceTestTask(t, vaultDir, kernel.ActiveTask{
+		TaskSlug: "auto-worker", Title: "[Auto] Worker", Kind: "auto", ConversationID: autoConv, Status: "active",
+		Workspaces: []workspace.Binding{wsBinding(key, root, workspace.RoleSecondary)},
+	})
+	seedWorkspaceLedger(t, vaultDir, workspace.LedgerEntry{
+		WorkspaceID: "stale-ws", Root: root, WriterTask: "auto-worker", LeaseEnforced: true, BoundTasks: []string{"auto-worker"},
+	})
+	autoTranscript := filepath.Join(t.TempDir(), "auto.jsonl")
+	writeStopTranscript(t, autoTranscript, nil)
+	runStopHook(t, vaultDir, autoConv, autoTranscript, 1)
+	l, err := workspace.LoadLedger(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadLedger: %v", err)
+	}
+	if e := l.Entries[key]; e.WriterTask != "" || e.LeaseEnforced || len(e.BoundTasks) != 0 {
+		t.Fatalf("P2-9b: Stop auto-archive of [Auto] worker must release workspace lease/bindings, got %+v", e)
+	}
+
+	// P2-8a: corrupt or newer-schema workspaces.json fails closed for writes outside the Vault and warns in SessionStart.
+	if err := os.WriteFile(filepath.Join(vaultDir, "memory", "workspaces.json"), []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d, r := preToolWorkspaceWrite(t, vaultDir, wsOtherConv, "write_file", filepath.Join(root, "a.go")); d != "deny" || !strings.Contains(r, "workspaces.json") {
+		t.Fatalf("P2-8a: corrupt ledger must fail closed on external write, got %s: %s", d, r)
+	}
+	if d, r := preToolWorkspaceWrite(t, vaultDir, wsOtherConv, "write_file", filepath.Join(vaultDir, "notes", "ok.md")); d != "allow" {
+		t.Fatalf("P2-8a: Vault note write should remain allowed even when workspace ledger is corrupt, got %s: %s", d, r)
+	}
+	if msg := sessionStartMessage(t, vaultDir, wsOtherConv); !strings.Contains(msg, "## Workspace Ledger Warning") {
+		t.Fatalf("P2-8a: SessionStart should warn about corrupt workspaces.json:\n%s", msg)
 	}
 }

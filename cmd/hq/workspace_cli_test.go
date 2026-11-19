@@ -548,9 +548,127 @@ func TestParseWorkspaceArgsInterleavedFlags(t *testing.T) {
 	if len(a.pos) != 2 || a.pos[0] != "acme/client" || a.pos[1] != "name" || a.val("task") != "t1" || a.val("role") != "readonly" || !a.bools["json"] || a.bools["force"] {
 		t.Fatalf("unexpected parse: %+v", a)
 	}
-	for _, bad := range [][]string{{"--task"}, {"--nope"}, {"--json=maybe"}} {
-		if _, err := parseWorkspaceArgs(bad, []string{"task"}, []string{"json"}); err == nil {
+	for _, bad := range [][]string{{"--task"}, {"--nope"}, {"--json=maybe"}, {"---force"}, {"----force=1"}, {"---task=x"}} {
+		if _, err := parseWorkspaceArgs(bad, []string{"task"}, []string{"json", "force"}); err == nil {
 			t.Fatalf("expected an error for %v", bad)
 		}
+	}
+}
+
+func TestP0ForceOwnObfuscationAndBinaryCapEnforcement(t *testing.T) {
+	env := newCLIWorkspaceEnv(t)
+	if code, _, errOut := env.run("create", cliFakeProviderID, "victim"); code != 0 {
+		t.Fatalf("create: %s", errOut)
+	}
+	env.fake.set("victim", workspace.StateDirty, workspace.ChangeRef{ID: "c-1", State: workspace.ChangeInReview})
+	key := cliKey("victim")
+
+	// P0-1 Layer 2: PreToolUse must deny every multi-dash and quote/backslash obfuscation variant.
+	for _, cmd := range []string{
+		"hq workspace remove " + key + " --force",
+		"hq workspace remove " + key + " ---force",
+		"hq workspace remove " + key + " ----force=1",
+		`hq workspace remove ` + key + ` --""force`,
+		`hq workspace "remove" ` + key + " --force",
+		`hq "workspace" remove ` + key + " --force",
+		`hq workspace 'own' ` + key,
+		`hq "workspace" own ` + key,
+	} {
+		resp := preToolDecision(t, env.vaultDir, cmd)
+		if resp["decision"] != "deny" {
+			t.Fatalf("P0-1: PreToolUse allowed %q: %v", cmd, resp)
+		}
+	}
+
+	// P0-1 Layer 1: strict flag parser rejects ---force directly in CLI.
+	if code, _, _ := env.run("remove", key, "---force"); code != 2 {
+		t.Fatalf("P0-1: CLI must reject ---force with usage exit 2, got %d", code)
+	}
+	if len(env.fake.callsWith("remove:")) != 0 {
+		t.Fatal("P0-1: provider remove must not be called on rejected ---force")
+	}
+
+	// P0-1 Layer 3: under HQ_FORCE_CAP_CHECK=1 (live Vault / Antigravity session), direct CLI invocation
+	// of `remove --force` and `own` is blocked at the binary level without ApproveProposal's exec cap.
+	t.Setenv("HQ_FORCE_CAP_CHECK", "1")
+	if code, _, errOut := env.run("remove", key, "--force"); code != 1 || !strings.Contains(errOut, "denied") {
+		t.Fatalf("P0-1 Layer 3: direct remove --force must fail closed under cap check: code=%d err=%s", code, errOut)
+	}
+	env.fake.preexisting["attached-ws"] = true
+	if code, _, errOut := env.run("create", cliFakeProviderID, "attached-ws"); code != 0 {
+		t.Fatalf("create attached-ws: %s", errOut)
+	}
+	if code, _, errOut := env.run("own", cliKey("attached-ws")); code != 1 || !strings.Contains(errOut, "denied") {
+		t.Fatalf("P0-1 Layer 3: direct own must fail closed under cap check: code=%d err=%s", code, errOut)
+	}
+	if e, ok := workspace.GetEntry(env.vaultDir, cliKey("attached-ws")); !ok || e.Ownership != workspace.OwnershipAttached {
+		t.Fatalf("P0-1 Layer 3: attached-ws must remain attached after denied own: %+v", e)
+	}
+}
+
+func TestP1AutoWorkerDeniedOnSpawnSubagentAndPrune(t *testing.T) {
+	env := newCLIWorkspaceEnv(t)
+	env.task("auto-sweeper", "auto")
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-auto-sweeper")
+
+	prevSpawn := spawnTaskFn
+	prevSub := spawnSubagentFn
+	t.Cleanup(func() { spawnTaskFn = prevSpawn; spawnSubagentFn = prevSub })
+	spawnTaskFn = func(string, string, string, string, string, string, bool, ...bool) (string, error) {
+		return "Spawned 123e4567-e89b-12d3-a456-426614174009", nil
+	}
+	spawnSubagentFn = func(string, string, string, string, string, string, bool, ...bool) (string, error) {
+		return "Spawned 123e4567-e89b-12d3-a456-42661417400a", nil
+	}
+
+	var out, errOut bytes.Buffer
+	if code := runWorkspaceSpawn(env.vaultDir, workspaceSpawnRequest{Spec: cliFakeProviderID, TaskSlug: "auto-ws", Title: "t", Prompt: "p"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "[Auto]") {
+		t.Fatalf("P1-5: [Auto] spawn --workspace must be denied: code=%d err=%s", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := runWorkspaceSubagentSpawn(env.vaultDir, workspaceSubagentRequest{CmdLabel: "hq subagent", Spec: cliFakeProviderID, ParentConv: "conv-auto-sweeper", Role: "[quick] ops: helper", TaskName: "auto-sub", Prompt: "p", Model: "m", WorkDir: env.rootDir}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "[Auto]") {
+		t.Fatalf("P1-5: [Auto] subagent --workspace must be denied: code=%d err=%s", code, errOut.String())
+	}
+	if code, _, pErr := env.run("prune"); code != 1 || !strings.Contains(pErr, "[Auto]") {
+		t.Fatalf("P1-5: [Auto] workspace prune must be denied: code=%d err=%s", code, pErr)
+	}
+	if len(env.fake.callsWith("create:")) != 0 {
+		t.Fatalf("P1-5: no provider create should have run for [Auto] worker: %v", env.fake.callsWith("create:"))
+	}
+}
+
+func TestP2SpawnWorkspaceDryRunHasNoSideEffects(t *testing.T) {
+	env := newCLIWorkspaceEnv(t)
+	prevSpawn := spawnTaskFn
+	prevSub := spawnSubagentFn
+	t.Cleanup(func() { spawnTaskFn = prevSpawn; spawnSubagentFn = prevSub })
+	spawnTaskFn = func(_ string, _ string, _ string, _ string, _ string, _ string, dryRun bool, _ ...bool) (string, error) {
+		if !dryRun {
+			t.Fatal("expected dryRun=true")
+		}
+		return "[DRY-RUN] spawn", nil
+	}
+	spawnSubagentFn = func(_ string, _ string, _ string, _ string, _ string, _ string, dryRun bool, _ ...bool) (string, error) {
+		if !dryRun {
+			t.Fatal("expected dryRun=true")
+		}
+		return "[DRY-RUN] subagent", nil
+	}
+	var out, errOut bytes.Buffer
+	if code := runWorkspaceSpawn(env.vaultDir, workspaceSpawnRequest{Spec: cliFakeProviderID, TaskSlug: "dry-ws", Title: "t", Prompt: "p", DryRun: true}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "[DRY-RUN]") {
+		t.Fatalf("P2-12: spawn --workspace --dry-run failed: code=%d out=%s err=%s", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	if code := runWorkspaceSubagentSpawn(env.vaultDir, workspaceSubagentRequest{CmdLabel: "hq subagent", Spec: cliFakeProviderID, Role: "[quick] ops: dry", TaskName: "dry-sub", Prompt: "p", Model: "m", WorkDir: env.rootDir, DryRun: true}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "[DRY-RUN]") {
+		t.Fatalf("P2-12: subagent --workspace --dry-run failed: code=%d out=%s err=%s", code, out.String(), errOut.String())
+	}
+	if len(env.fake.callsWith("create:")) != 0 {
+		t.Fatalf("P2-12: dry-run must not call provider create: %v", env.fake.callsWith("create:"))
+	}
+	if tasks, _ := kernel.ListTasks(env.vaultDir); len(tasks) != 0 {
+		t.Fatalf("P2-12: dry-run must not register tasks: %+v", tasks)
+	}
+	if _, ok := workspace.GetEntry(env.vaultDir, cliKey("dry-ws")); ok {
+		t.Fatal("P2-12: dry-run must not write to workspace ledger")
 	}
 }

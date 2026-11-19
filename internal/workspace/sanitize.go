@@ -110,25 +110,55 @@ func SanitizeInfo(providerFQID string, in Info) (Info, error) {
 	out.State = in.State
 	out.Base = sanitizeDisplayText(in.Base, MaxBaseRunes)
 
-	changes := in.Changes
-	if len(changes) > MaxChanges {
-		changes = changes[:MaxChanges]
-	}
-	for _, c := range changes {
+	// Validate all changes first and retain open changes ahead of closed ones when clamping to MaxChanges,
+	// so truncating a long history can never hide unlanded work behind older landed/abandoned changes.
+	var openChanges, closedChanges []ChangeRef
+	for _, c := range in.Changes {
 		if !reChangeID.MatchString(c.ID) {
 			return Info{}, fmt.Errorf("workspace %s: invalid change id %q", in.WorkspaceID, clipForError(c.ID))
 		}
 		if !c.State.Valid() {
 			return Info{}, fmt.Errorf("workspace %s: change %s has invalid state %q", in.WorkspaceID, c.ID, clipForError(string(c.State)))
 		}
-		out.Changes = append(out.Changes, ChangeRef{
+		clean := ChangeRef{
 			ID:         c.ID,
 			State:      c.State,
 			NeedsOwner: c.NeedsOwner,
 			Title:      sanitizeDisplayText(c.Title, MaxTitleRunes),
 			URL:        sanitizeChangeURL(c.URL),
 			UpdatedAt:  sanitizeTimestamp(c.UpdatedAt),
-		})
+		}
+		if clean.State.Open() {
+			openChanges = append(openChanges, clean)
+		} else {
+			closedChanges = append(closedChanges, clean)
+		}
+	}
+	if len(in.Changes) <= MaxChanges {
+		// Preserve provider order when no truncation occurred.
+		out.Changes = make([]ChangeRef, 0, len(in.Changes))
+		oi, ci := 0, 0
+		for _, c := range in.Changes {
+			if c.State.Open() {
+				out.Changes = append(out.Changes, openChanges[oi])
+				oi++
+			} else {
+				out.Changes = append(out.Changes, closedChanges[ci])
+				ci++
+			}
+		}
+	} else {
+		out.Changes = make([]ChangeRef, 0, MaxChanges)
+		if len(openChanges) >= MaxChanges {
+			out.Changes = append(out.Changes, openChanges[:MaxChanges]...)
+		} else {
+			out.Changes = append(out.Changes, openChanges...)
+			rem := MaxChanges - len(out.Changes)
+			if rem > len(closedChanges) {
+				rem = len(closedChanges)
+			}
+			out.Changes = append(out.Changes, closedChanges[:rem]...)
+		}
 	}
 	return out, nil
 }

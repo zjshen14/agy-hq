@@ -154,6 +154,33 @@ func TestFindOwningEntryResolvesSymlinkedRootsAndExcludesTheVault(t *testing.T) 
 	if e, ok := FindOwningEntry(vaultDir, filepath.Join(base, "a", "b", "c.go")); !ok || e.WorkspaceID != "ab" {
 		t.Fatalf("segment-aware match failed: %+v %v", e, ok)
 	}
+
+	// P1-7 regression: CanonicalRoot is persisted at ledger write time so FindOwningEntry resolves without
+	// statting the symlink root on the hook hot path (even if the symlink itself is later removed).
+	l, err := LoadLedger(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadLedger: %v", err)
+	}
+	if gotCanon := l.Entries["acme-monorepo/client:ledger-fix"].CanonicalRoot; gotCanon != real {
+		t.Fatalf("expected persisted CanonicalRoot=%q, got %q", real, gotCanon)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("remove symlink: %v", err)
+	}
+	if e, ok := FindOwningEntry(vaultDir, filepath.Join(real, "src", "after-link-gone.go")); !ok || e.WorkspaceID != "ledger-fix" {
+		t.Fatalf("expected persisted CanonicalRoot to match purely in memory after symlink removal: %+v %v", e, ok)
+	}
+
+	// P2-15 regression: case-insensitive matching handles case-variant paths without breaking segment boundaries.
+	if !pathWithinCase("/srv/Work/WS/file.go", "/srv/work/ws", true) {
+		t.Fatal("expected case-insensitive pathWithinCase to match case-variant path")
+	}
+	if pathWithinCase("/srv/Work/WS2/file.go", "/srv/work/ws", true) {
+		t.Fatal("case-insensitive pathWithinCase must preserve segment boundaries")
+	}
+	if pathWithinCase("/srv/Work/WS/file.go", "/srv/work/ws", false) {
+		t.Fatal("case-sensitive pathWithinCase must reject case-variant path")
+	}
 }
 
 func TestResolvePathOwnersDedupsByRootWithoutSubprocess(t *testing.T) {

@@ -2,13 +2,16 @@ package kernel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
@@ -41,6 +44,28 @@ var matchWorkspaceRootPattern = workspace.MatchRootPattern
 
 func workspaceProviderContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), workspaceProviderCallTimeout)
+}
+
+func workspaceProviderContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		return workspaceProviderContext()
+	}
+	return context.WithTimeout(parent, workspaceProviderCallTimeout)
+}
+
+// WorkspaceSafeErrorSummary converts an arbitrary provider/transport error into a short code-only summary
+// free of provider-controlled free text or raw stderr, suitable for status.error and LLM-visible surfaces.
+func WorkspaceSafeErrorSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+	if code := workspace.ErrorCode(err); code != "" {
+		return "provider error: " + code
+	}
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timed out") {
+		return "provider call timed out"
+	}
+	return "provider call failed"
 }
 
 func wsInvalid(format string, args ...interface{}) error {
@@ -158,8 +183,9 @@ func wsHasControlRune(s string) bool {
 }
 
 // validateAcquiredWorkspaceInfo checks what a provider returned before it is ledgered: a well-formed ID, a clean
-// absolute root that neither is "/" nor overlaps the Vault, and a work directory inside the root.
-func validateAcquiredWorkspaceInfo(vaultDir string, info workspace.Info) error {
+// absolute root that is neither "/", a top-level system directory, $HOME (or an ancestor of $HOME), nor overlapping
+// the Vault, matches the pack provider's root_patterns when declared, and has a work directory inside the root.
+func validateAcquiredWorkspaceInfo(vaultDir string, p workspace.Provider, info workspace.Info) error {
 	if !workspace.ValidWorkspaceID(info.WorkspaceID) {
 		return wsInvalid("provider returned invalid workspace_id %q", clipWorkspaceText(info.WorkspaceID, 80))
 	}
@@ -167,12 +193,54 @@ func validateAcquiredWorkspaceInfo(vaultDir string, info workspace.Info) error {
 	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) || wsHasControlRune(root) {
 		return wsInvalid("provider returned invalid workspace root %q", clipWorkspaceText(root, 120))
 	}
+	canonRoot := workspace.CanonicalPath(root)
+	if filepath.Dir(root) == string(filepath.Separator) || (canonRoot != "" && filepath.Dir(canonRoot) == string(filepath.Separator)) {
+		return wsConflict("workspace root %s is a top-level directory; provider workspaces must live inside a dedicated subdirectory", root)
+	}
 	if info.WorkDir != "" && (!filepath.IsAbs(info.WorkDir) || filepath.Clean(info.WorkDir) != info.WorkDir || !wsPathWithin(info.WorkDir, root) || wsHasControlRune(info.WorkDir)) {
 		return wsInvalid("provider returned work_dir %q outside workspace root %q", clipWorkspaceText(info.WorkDir, 120), root)
 	}
 	for _, v := range []string{filepath.Clean(vaultDir), workspace.CanonicalPath(vaultDir)} {
-		if v != "" && v != "." && (wsPathsOverlap(root, v) || wsPathsOverlap(workspace.CanonicalPath(root), v)) {
+		if v != "" && v != "." && (wsPathsOverlap(root, v) || (canonRoot != "" && wsPathsOverlap(canonRoot, v))) {
 			return wsConflict("workspace root %s overlaps the Vault; provider workspaces must live outside it", root)
+		}
+	}
+	var homeDirs []string
+	if h := strings.TrimSpace(hostpaths.Resolve(vaultDir).HomeDir); h != "" {
+		homeDirs = append(homeDirs, filepath.Clean(h))
+		if ch := workspace.CanonicalPath(h); ch != "" && ch != filepath.Clean(h) {
+			homeDirs = append(homeDirs, ch)
+		}
+	} else if h, hErr := os.UserHomeDir(); hErr == nil && strings.TrimSpace(h) != "" {
+		homeDirs = append(homeDirs, filepath.Clean(h))
+		if ch := workspace.CanonicalPath(h); ch != "" && ch != filepath.Clean(h) {
+			homeDirs = append(homeDirs, ch)
+		}
+	}
+	for _, h := range homeDirs {
+		if h == "" || h == string(filepath.Separator) {
+			continue
+		}
+		if wsPathWithin(h, root) || (canonRoot != "" && wsPathWithin(h, canonRoot)) {
+			return wsConflict("workspace root %s equals or contains the user home directory", root)
+		}
+	}
+	if ep, ok := p.(*workspace.ExternalProvider); ok && len(ep.Spec().RootPatterns) > 0 {
+		matched := false
+		for _, pat := range ep.Spec().RootPatterns {
+			if ok1, err := filepath.Match(pat, root); err == nil && ok1 {
+				matched = true
+				break
+			}
+			if canonRoot != "" && canonRoot != root {
+				if ok2, err := filepath.Match(pat, canonRoot); err == nil && ok2 {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return wsConflict("workspace root %s does not match provider %s root_patterns", root, ep.ID())
 		}
 	}
 	return nil
@@ -566,9 +634,10 @@ func AcquireWorkspace(vaultDir string, opts WorkspaceAcquireOptions) (WorkspaceA
 	if info.WorkDir == "" {
 		info.WorkDir = info.Root
 	}
-	if err := validateAcquiredWorkspaceInfo(vaultDir, info); err != nil {
+	if err := validateAcquiredWorkspaceInfo(vaultDir, p, info); err != nil {
 		return WorkspaceAcquireResult{}, err
 	}
+	canonRoot := workspace.CanonicalPath(info.Root)
 	key := workspace.LedgerKey(fqid, info.WorkspaceID)
 
 	var result WorkspaceAcquireResult
@@ -586,6 +655,9 @@ func AcquireWorkspace(vaultDir string, opts WorkspaceAcquireOptions) (WorkspaceA
 			if filepath.Clean(e.Root) != info.Root {
 				return false, wsConflict("ledger entry %s has root %s but the provider reported %s", key, e.Root, info.Root)
 			}
+			if e.CanonicalRoot == "" && canonRoot != "" {
+				e.CanonicalRoot = canonRoot
+			}
 			if takesLease {
 				if err := checkWorkspaceLease(e, slug, ix); err != nil {
 					return false, err
@@ -600,14 +672,15 @@ func AcquireWorkspace(vaultDir string, opts WorkspaceAcquireOptions) (WorkspaceA
 				}
 			}
 			e = workspace.LedgerEntry{
-				Provider:    fqid,
-				WorkspaceID: info.WorkspaceID,
-				Name:        info.Name,
-				Root:        info.Root,
-				WorkDir:     info.WorkDir,
-				Ownership:   workspace.OwnershipAttached,
-				CreatedAt:   nowStr,
-				Status:      ledgerStatusFromInfo(info, nowStr),
+				Provider:      fqid,
+				WorkspaceID:   info.WorkspaceID,
+				Name:          info.Name,
+				Root:          info.Root,
+				CanonicalRoot: canonRoot,
+				WorkDir:       info.WorkDir,
+				Ownership:     workspace.OwnershipAttached,
+				CreatedAt:     nowStr,
+				Status:        ledgerStatusFromInfo(info, nowStr),
 			}
 			if attachID == "" && !providerExisted {
 				e.Ownership = workspace.OwnershipOwned
@@ -997,6 +1070,10 @@ func RemoveWorkspace(vaultDir, key string, force bool, now time.Time) (Workspace
 			res.NeedsApproval = true
 			res.Reason = fmt.Sprintf("workspace is %s", info.State)
 			return res, nil
+		case !p.Capabilities().Changes:
+			res.NeedsApproval = true
+			res.Reason = "provider does not track open changes"
+			return res, nil
 		case openWorkspaceChanges(info.Changes) > 0:
 			res.NeedsApproval = true
 			res.Reason = fmt.Sprintf("%d open change(s)", openWorkspaceChanges(info.Changes))
@@ -1147,18 +1224,29 @@ func emitLandedNotices(vaultDir string, notices []landedNotice, now time.Time) i
 
 // fetchWorkspaceStatus resolves the entry's provider and asks it for a fresh status (outside every lock).
 func fetchWorkspaceStatus(vaultDir string, e workspace.LedgerEntry) (workspace.Info, error) {
+	info, _, err := fetchWorkspaceStatusContext(context.Background(), vaultDir, e)
+	return info, err
+}
+
+// fetchWorkspaceStatusContext resolves the entry's provider, queries its status bounded by parent ctx,
+// and verifies the reported root matches the ledger entry (failing closed on root mismatch).
+func fetchWorkspaceStatusContext(parent context.Context, vaultDir string, e workspace.LedgerEntry) (workspace.Info, bool, error) {
 	p, err := workspace.Resolve(vaultDir, e.Provider)
 	if err != nil {
-		return workspace.Info{}, err
+		return workspace.Info{}, false, err
 	}
-	ctx, cancel := workspaceProviderContext()
+	tracksChanges := p.Capabilities().Changes
+	ctx, cancel := workspaceProviderContextFrom(parent)
 	defer cancel()
 	info, err := p.Status(ctx, e.WorkspaceID)
 	if err != nil {
-		return workspace.Info{}, err
+		return workspace.Info{}, tracksChanges, err
 	}
 	info.Provider = e.Provider
-	return info, nil
+	if info.State != workspace.StateMissing && filepath.Clean(info.Root) != filepath.Clean(e.Root) {
+		return workspace.Info{}, tracksChanges, wsConflict("provider reported root mismatch for %s", e.Key())
+	}
+	return info, tracksChanges, nil
 }
 
 // applyWorkspaceStatusCAS applies a provider status result (or error) to the cache of entry key only when
@@ -1190,7 +1278,7 @@ func applyWorkspaceStatusCASCounted(vaultDir, key, expectRefreshedAt string, inf
 		case callErr != nil && workspace.ErrorCode(callErr) == workspace.CodeNotFound:
 			e.Status = workspace.LedgerStatus{State: workspace.StateMissing, RefreshedAt: nowStr}
 		case callErr != nil:
-			e.Status.Error = clipWorkspaceText(callErr.Error(), 200)
+			e.Status.Error = WorkspaceSafeErrorSummary(callErr)
 			if e.Status.Error == "" {
 				e.Status.Error = "status refresh failed"
 			}
@@ -1284,6 +1372,59 @@ func WorkspaceCacheUsable(e workspace.LedgerEntry, refreshSeconds int, now time.
 		return false, "status cache stale"
 	}
 	return true, ""
+}
+
+// IsLiveWorkspaceWriter reports whether writer (a task slug or conversation ID recorded in LedgerEntry.WriterTask)
+// currently belongs to a live (non-archived, non-cancelled) task in local/memory/tasks.json. Used by PreToolUse W1
+// so leases left behind by archived or deleted tasks are treated as vacant rather than permanently blocking edits.
+func IsLiveWorkspaceWriter(vaultDir, writer string) bool {
+	writer = strings.TrimSpace(writer)
+	if writer == "" || strings.TrimSpace(vaultDir) == "" {
+		return false
+	}
+	tasks, err := ListTasks(vaultDir)
+	if err != nil {
+		return true // fail closed when tasks.json is unreadable
+	}
+	for _, t := range tasks {
+		st := strings.ToLower(strings.TrimSpace(t.Status))
+		if st == "archived" || st == "cancelled" {
+			continue
+		}
+		if strings.TrimSpace(t.TaskSlug) == writer || (t.ConversationID != "" && strings.TrimSpace(t.ConversationID) == writer) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReleaseTaskWorkspaceLeases releases slug from bound_tasks and writer leases across the workspace ledger without
+// invoking any provider subprocess. Used when a Stop hook auto-archives a task (e.g. an unpinned [Auto] worker)
+// directly via RegisterTask. Owned entries with cached open changes and no other live binders are marked orphaned.
+func ReleaseTaskWorkspaceLeases(vaultDir, slug string) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" || strings.TrimSpace(vaultDir) == "" {
+		return
+	}
+	ix := loadWorkspaceTaskIndex(vaultDir)
+	_ = workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
+		changed := false
+		for key, e := range l.Entries {
+			if e.WriterTask != slug && !containsString(e.BoundTasks, slug) {
+				continue
+			}
+			if releaseLedgerBinder(&e, slug) {
+				changed = true
+			}
+			if e.Ownership == workspace.OwnershipOwned && len(otherLiveBinders(ix, e, slug)) == 0 && openWorkspaceChanges(e.Status.Changes) > 0 && !e.OrphanedOpenChanges {
+				e.OrphanedOpenChanges = true
+				changed = true
+			}
+			l.Put(e)
+			_ = key
+		}
+		return changed, nil
+	})
 }
 
 // WorkspaceDormantEligible reports whether e lets a dormant task auto-archive: a usable cache, clean state, and

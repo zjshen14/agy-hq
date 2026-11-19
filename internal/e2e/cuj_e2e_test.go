@@ -6529,6 +6529,30 @@ printf '00000000-0000-4000-8000-%%012d\n' "$n"
 	if err != nil || !staged || !exists(filepath.Join(wsRoot, "review-wait")) {
 		t.Fatalf("expected a staged (not executed) workspace_remove proposal: err=%v pending=%+v", err, pending)
 	}
+	// Binary-level exec approval enforcement: direct `remove --force` and `own` fail closed under HQ_FORCE_CAP_CHECK=1,
+	// while executing an approved proposal via ApproveProposal mints the one-shot exec cap and succeeds.
+	if out, err := env.runWithEnv("", append(wsEnv, "HQ_FORCE_CAP_CHECK=1"), "workspace", "remove", key3, "--force"); err == nil || !strings.Contains(out, "denied") {
+		t.Fatalf("direct `hq workspace remove --force` must fail closed at binary level: err=%v out=%s", err, out)
+	}
+	if out, err := env.runWithEnv("", append(wsEnv, "HQ_FORCE_CAP_CHECK=1"), "workspace", "own", keyShared); err == nil || !strings.Contains(out, "denied") {
+		t.Fatalf("direct `hq workspace own` must fail closed at binary level: err=%v out=%s", err, out)
+	}
+	ownProp, err := approvals.CreateWithOptions(env.vaultDir, approvals.CreateOptions{
+		ActionType:  "workspace_own",
+		Summary:     "Promote shared-cache to owned",
+		Command:     "hq workspace own " + keyShared,
+		CommandArgv: []string{env.binPath, "workspace", "own", keyShared},
+	})
+	if err != nil {
+		t.Fatalf("stage workspace_own proposal: %v", err)
+	}
+	t.Setenv("HQ_FORCE_CAP_CHECK", "1")
+	if out, err := approvals.ApproveProposal(env.vaultDir, ownProp.ID, ownProp.SHA256[:12]); err != nil || !strings.Contains(out, "now hq-owned") {
+		t.Fatalf("ApproveProposal(workspace_own) must succeed with minted exec cap: err=%v out=%s", err, out)
+	}
+	if es, ok := workspace.GetEntry(env.vaultDir, keyShared); !ok || es.Ownership != workspace.OwnershipOwned {
+		t.Fatalf("expected shared-cache to become owned after approved workspace_own: %+v ok=%v", es, ok)
+	}
 
 	// 12. Surfaces after the lifecycle: hq status summary and the orphan row on the console.
 	if out, err := hq("", "status"); err != nil || !strings.Contains(out, "Workspaces: 2 (git: 0, acme-monorepo/client: 2) · open changes: 1 · needs you: 1") {

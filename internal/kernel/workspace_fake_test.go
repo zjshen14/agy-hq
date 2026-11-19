@@ -26,7 +26,9 @@ type fakeWSState struct {
 	statusErr   map[string]error
 	removeErr   map[string]error
 	noCreate    bool
+	noChanges   bool
 	noShared    bool
+	callDelay   time.Duration
 	refreshSecs int
 	skill       string
 	calls       []string
@@ -135,7 +137,12 @@ func (p fakeWSProvider) state() *fakeWSState {
 
 func (p fakeWSProvider) Capabilities() workspace.Capabilities {
 	st := p.state()
-	return workspace.Capabilities{Create: st == nil || !st.noCreate, Remove: true, Changes: true, SharedHistory: st == nil || !st.noShared}
+	return workspace.Capabilities{
+		Create:        st == nil || !st.noCreate,
+		Remove:        true,
+		Changes:       st == nil || !st.noChanges,
+		SharedHistory: st == nil || !st.noShared,
+	}
 }
 
 func (p fakeWSProvider) StatusRefreshSeconds() int {
@@ -152,10 +159,17 @@ func (p fakeWSProvider) Skill() string {
 	return ""
 }
 
-func (p fakeWSProvider) Probe(_ context.Context, path string) (workspace.Info, bool, error) {
+func (p fakeWSProvider) Probe(ctx context.Context, path string) (workspace.Info, bool, error) {
 	st := p.state()
 	if st == nil {
 		return workspace.Info{}, false, &workspace.ProviderError{Code: workspace.CodeUnavailable, Message: "no fake state"}
+	}
+	if d := st.callDelay; d > 0 {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return workspace.Info{}, false, ctx.Err()
+		}
 	}
 	st.record("probe:" + path)
 	rel, err := filepath.Rel(st.rootBase, path)
@@ -213,10 +227,17 @@ func (p fakeWSProvider) Create(_ context.Context, req workspace.CreateRequest) (
 	return workspace.CreateResult{Info: info, Existed: st.preexisting[req.Name]}, nil
 }
 
-func (p fakeWSProvider) Status(_ context.Context, id string) (workspace.Info, error) {
+func (p fakeWSProvider) Status(ctx context.Context, id string) (workspace.Info, error) {
 	st := p.state()
 	if st == nil {
 		return workspace.Info{}, &workspace.ProviderError{Code: workspace.CodeUnavailable, Message: "no fake state"}
+	}
+	if d := st.callDelay; d > 0 {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return workspace.Info{}, ctx.Err()
+		}
 	}
 	st.record("status:" + id)
 	st.mu.Lock()
