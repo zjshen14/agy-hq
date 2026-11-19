@@ -35,6 +35,7 @@ flowchart TB
     HOOKS["Lifecycle Hooks (RFC-0002, RFC-0003, RFC-0007)\n• SessionStart: Injects USER.md, MEMORY.md, Topic Wiki Index\n• PreToolUse: Non-blocking Front Desk guard & SHA-256 action blocklist\n• Stop: 0-token transcript extraction & monotonic turn journaling"]
     EXEC["Approval-Bound Executor (RFC-0003)\n• Watches local/memory/pending/<id>.json\n• SHA-256 verification + 0-LLM deterministic execution"]
     TASKS["Layer-1 Task Engine (RFC-0001, RFC-0007, RFC-0009)\n• local/memory/tasks.json (active) vs tasks_archive.jsonl (cold)\n• Isolated git worktrees (local/worktrees/<repo>-<task>/)"]
+    WS["Pluggable Workspace Providers (RFC-0025)\n• internal/workspace seam + pinned pack providers (hq-workspace-provider/v1)\n• local/memory/workspaces.json ownership ledger, W1-W4 hygiene"]
     GCHAT["Google Chat CDP & Gmail Transports (RFC-0005, RFC-0008)\n• Headless Chrome CDP WebSocket (127.0.0.1:9222)\n• Quarantined readers & 1-step proposal staging"]
     RSI["Recursive Self-Improvement Engine (RFC-0010)\n• 4-stage friction mining, hypothesis, 4-gate verification"]
     OBS["Token & Latency Observability (RFC-0012)\n• Stat-cached transcript burn, subagent DAG & budget guards"]
@@ -61,6 +62,8 @@ flowchart TB
   TASKCONV -.-> CHILD
   HOOKS <--> EXEC
   HOOKS <--> TASKS
+  TASKS <--> WS
+  HOOKS <--> WS
   HOOKS <--> GCHAT
   HOOKS <--> RSI
   HOOKS <--> OBS
@@ -250,6 +253,7 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
 │   ├── rsi/                           # 4-stage recursive self-improvement & proactive noise engine
 │   ├── vault/                         # Memory auditing, 4-layer topics, entities, surgical forget & facts
 │   ├── webui/                         # Interactive Aux Console & Scheduled Spaces (http://127.0.0.1:4242)
+│   ├── workspace/                     # Pluggable workspace provider seam, ownership ledger & pinned stdio adapter (RFC-0025)
 │   └── worktree/                      # Isolated git worktree lifecycle manager
 ├── templates/                         # Starter blueprints copied into ./local/ by `hq init`
 ├── docs/                              # Documentation Hub (product/, design/, decisions/, research/)
@@ -292,6 +296,7 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
         ├── journal/YYYY-MM-DD/        # Monotonic per-turn execution journals
         ├── tasks.json                 # Tracked Layer-1 task conversations & lifecycle states
         ├── tasks_archive.jsonl        # Cold storage for archived tasks (RFC-0009)
+        ├── workspaces.json            # Provider workspace ownership ledger, writer leases & status cache (RFC-0025)
         ├── nested_conversations.json  # Ephemeral child subagent processes
         ├── front_desk.json            # Active Front Desk intake lease & armed triggers
         ├── gmail/                     # Gmail registry, drafts, and quarantine staging (RFC-0005)

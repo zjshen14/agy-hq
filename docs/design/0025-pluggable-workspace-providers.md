@@ -1,6 +1,6 @@
 # RFC-0025: Pluggable Workspace Providers
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-11-19
 - **Companion Research:** [Research 20: Git-Worktree Coupling Audit, Non-Git Workspace Requirements & Pluggable Workspace Provider Design Space](../research/20_pluggable_workspace_providers_audit.md)
 - **Extends / Updates:** [RFC-0001](./0001-vault-and-task-isolation.md), [RFC-0009](./0009-task-board-redesign.md), [RFC-0016](./0016-sidebar-conversation-archive-sync.md), [RFC-0017d](./0017d-enterprise-extensibility-and-portability.md), [RFC-0021](./0021-customizable-approval-policy-and-ux.md), [RFC-0023](./0023-front-desk-channel-bridge.md)
@@ -552,6 +552,43 @@ Approved for implementation on 2026-11-19. These decisions resolve §15 Q1–Q3 
 7. **Protocol freeze.** `hq-workspace-provider/v1` is exactly §6: common request fields `protocol`, `op`, `provider_id`, `request_id`, `timestamp`; common response fields `protocol`, `ok`, `error{code,message}`. `probe`, `create`, and `status` return the workspace under a `workspace` key; `create` also returns `existed`; `list` returns `workspaces` and `next_cursor`. `provider` is filled in by core, never by the provider.
 8. **`Stop` auto-binding** records candidate paths in the ledger's bounded, deduplicated `probe_candidates` list. The daemon drains it with `probe` calls; no event-inbox entries and no LLM spawns.
 9. **Destructive `hq` verbs.** `hq workspace remove` stages a `workspace_remove` proposal whenever the workspace is dirty or has open changes. The approval-only execution form (`--approved-proposal=<id>`) is denied for direct LLM invocation by a core approvals rule, the same way `hq gmail send-draft` is.
+
+---
+
+## 17. Implementation Notes (v1)
+
+This section records how the first landing behaves and every deviation from §16 (and, through §16, from earlier sections). Where it conflicts with §1–§16, this section wins.
+
+### 17.1 Code Map
+
+| Area | Location |
+| :--- | :--- |
+| Provider interface, registry, ownership ledger, stdio adapter, sanitization, shared surface helpers | [`internal/workspace`](../../internal/workspace/types.go) |
+| Pack contract: `workspace_providers` schema, `LintPack` step 7, trust pinning, `wsd-` approval rules | [`internal/extension/pack.go`](../../internal/extension/pack.go), [`trust.go`](../../internal/extension/trust.go) |
+| Acquire/rollback, adopt, handoff, unbind, remove/own, archive/reopen/compact/prune, daemon refresh, built-in `core/git-worktree` | [`internal/kernel/workspace_lifecycle.go`](../../internal/kernel/workspace_lifecycle.go) and its `workspace_*.go` siblings |
+| W1, W3, `Stop` auto-binding, `SessionStart` sections | [`internal/hooks/workspace_surfaces.go`](../../internal/hooks/workspace_surfaces.go) |
+| `hq workspace …`, `hq spawn --workspace`, `hq subagent --workspace` | [`cmd/hq/workspace_cli.go`](../../cmd/hq/workspace_cli.go) |
+| `CONSOLE.md` section, Task Board badge, read-only WebUI cards | [`internal/webui/workspaces.go`](../../internal/webui/workspaces.go) |
+| End-to-end journey | `TestCUJ41_PluggableWorkspaceProviders` ([CUJ-41](../product/0003-critical-user-journeys.md)) |
+
+### 17.2 Deviations and Clarifications
+
+1. **Destructive-command rule IDs.** Each provider's `destructive_commands` compile into one `always` approval rule with ID `wsd-<pack>-<id>` (shortened with a stable hash suffix past 63 characters), not `workspace_destructive:<fqid>` (§5.2 rule 7, §10 W4): `:` and `/` are not valid rule-ID characters. These rules are appended after all pack-declared `approval_rules`, and `LintPack` rejects pack rules that use the reserved `wsd-` prefix, so no pack can shadow or weaken the gate.
+2. **Ledger lock rank.** `RankWorkspaces` shares rank `78` with `RankMemory` instead of sitting alone between `RankTasks` and `RankSubagentQueue` (§7.1). Both are leaf stores whose callbacks never nest each other; task and ledger updates are separate, non-nested lock acquisitions.
+3. **Built-in git provider.** `core/git-worktree` creates worktrees through `kernel.RegisterGitWorktreeAdder`, which `cmd/hq` wires to `worktree.Add` at startup (the kernel cannot import `internal/worktree` without an import cycle). Its workspace IDs are canonical worktree paths, so its ledger keys match the bindings synthesized by `ActiveTask.AllWorkspaceBindings()`.
+4. **Approval forms.** `hq workspace remove <key>` never deletes a dirty workspace or one with open changes; it prints `hq propose --type=workspace_remove … --cmd='hq workspace remove <key> --force'`. The approved form is `hq workspace remove <key> --force`, which the core `workspace_remove` rule gates for direct LLM use (instead of `--approved-sha=` in §10.1 or `--approved-proposal=` in §16.9). Promotion is `hq workspace own <key>`, gated by the core `workspace_own` rule. Both rule IDs are core non-disableable rules that packs cannot weaken.
+5. **Live bindings block removal.** A non-`--force` `hq workspace remove` refuses a workspace that is still bound to a live task; unbind it or archive the task first. The approved `--force` form also drops the workspace's binding from every live task.
+6. **Archived tasks keep bindings.** Archiving releases the task from each entry's `bound_tasks` and writer lease but keeps `ActiveTask.Workspaces` as history, like `WorktreeDir`. `hq reopen` rebinds the entries that still exist and re-creates only the primary binding's workspace when it is gone and the provider supports `create`.
+7. **Additive surfaces.** The Workspaces sections are added next to the git ones, which are unchanged: `## Active Git Worktrees`, `## 🌿 3. Active Parallel Git Worktrees`, `DashboardState.Worktrees`, and `Active Worktrees: N` keep their names and contents (§11.2 described renames). A missing or empty ledger renders byte-identical surfaces.
+8. **`Stop` auto-binding scope.** `Stop` binds only paths written with `write_file`/`edit_file` in the current turn. It resolves each with `workspace.FindOwningEntry`, which never matches a path inside the Vault, caps lookups at 20 per turn, and queues `root_patterns` hits as `probe_candidates` (§16.8).
+9. **Readonly bindings.** W1 denies writes through a `readonly` binding only on lease-enforced entries; advisory entries never block (§16.3).
+10. **Landed notices.** The first status observation of an entry is a baseline, so changes already `landed` when first seen emit nothing. Later transitions emit at most one `brief_rollup` per `(ledger key, change id)`, recorded in the entry's `notified_landed` before delivery.
+11. **Spawn → first-write race.** The child conversation receives its prompt inside `SpawnTask`, so a task linked only after `SpawnTask` returned was invisible to W1 during the child's first turn, and the child's first write into its own workspace could be denied. `hq spawn --workspace` now calls `kernel.SpawnTaskWithOptions` with an `OnCascadeCreated` hook that links the pre-registered task to the new conversation after `StartCascade` succeeds and before `SendUserCascadeMessage`; `SpawnTask` keeps its signature and behavior for every other caller. The `agentapi` fallback creates and prompts a conversation in one step, so it still links when the spawn returns (the child's `SessionStart` can also link the pending task); W1 tells an unresolved caller to find its slug with `hq tasks` and retry once. `hq subagent --workspace` needed no hook: `AcquireWorkspace` records the writer lease before the spawn, and `SpawnSubagent` registers the Layer-1 subagent task (Front Desk parent) or records the nested parent edge (task parent) before it sends the prompt. The CLI now passes `SpawnSubagent` the same parent it derived the workspace owner from.
+12. **Journey numbering.** The §14 journey ships as `TestCUJ41_PluggableWorkspaceProviders`, because CUJ-39 (Memory v2) and CUJ-40 were already allocated. §14 item 8 (foreign placement) is covered by the `LintPack` rejection of `capabilities.foreign_placement: true` (§16.5).
+
+### 17.3 Known Limitations
+
+- An approved `hq workspace remove <key> --force` runs through the approvals executor with a sanitized environment, so the pack's `env_allow` variables are absent when the provider runs. A provider that needs them for `remove` fails closed (the workspace is kept) until the executor forwards them.
 
 ---
 

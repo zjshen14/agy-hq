@@ -2610,7 +2610,7 @@ func SyncMarkdownConsole(vaultDir string) error {
 		if !unchangedBody || errArt != nil || errMeta != nil {
 			_ = os.MkdirAll(artDir, 0o755)
 			meta := map[string]interface{}{
-				"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees, Recent Turn Activity, and System Health.",
+				"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees & Workspaces, Recent Turn Activity, and System Health.",
 				"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
 				"requestFeedback": false,
 				"userFacing":      true,
