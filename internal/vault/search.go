@@ -284,7 +284,7 @@ func SearchMemory(vaultDir string, opts SearchOptions) ([]SearchResult, error) {
 			Provenance: prov,
 			Score:      math.Round(s.score*1000) / 1000,
 			Scopes:     d.scopes,
-			Snippet:    buildSearchSnippet(d.text, qLower, 220),
+			Snippet:    buildSearchSnippet(d.text, qLower, 450),
 			Archived:   d.archived,
 		})
 	}

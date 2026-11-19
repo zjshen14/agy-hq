@@ -615,7 +615,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	if activeFacts, _, _, err := vault.LoadFactsStateAt(vaultDir, now); err == nil && len(activeFacts) > 0 {
 		factMaxCount, factMaxBytes := 15, 2200
 		if isFrontDesk {
-			factMaxCount, factMaxBytes = 10, 1600
+			factMaxCount, factMaxBytes = 12, 2000
 		} else if leanAuto {
 			factMaxCount, factMaxBytes = 6, 850
 		}
@@ -959,36 +959,88 @@ func capSessionEnvelope(s string, maxBytes int) string {
 	return strings.TrimRight(s[:cut], "\n ") + marker
 }
 
+func sectionTrimPriority(sec string) (tier int, floor int) {
+	// Tier 0 (trim first): operational chrome, indices, and verbose peripheral lists
+	// Tier 1 (trim second): roadmap, task checkpoints, approvals, role banners
+	// Tier 2 (protected core): USER.md standing rules, Active Vault Facts, Scoped Playbooks
+	switch {
+	case strings.HasPrefix(sec, "## HQ Vault: USER.md"),
+		strings.HasPrefix(sec, "## Active Vault Facts"),
+		strings.HasPrefix(sec, "### Scoped Playbook:"):
+		return 2, 1600
+	case strings.HasPrefix(sec, "## HQ Vault: MEMORY.md"),
+		strings.HasPrefix(sec, "## Active Task Progress Checkpoint"),
+		strings.HasPrefix(sec, "## Pending Approvals in Queue"),
+		strings.HasPrefix(sec, "## Matched Context Hints"),
+		strings.HasPrefix(sec, "## 🎯 Active Role:"),
+		strings.HasPrefix(sec, "## 🚀 New [HQ] Front Desk"),
+		strings.HasPrefix(sec, "## ⚠️ Front Desk Notice"):
+		return 1, 800
+	case strings.HasPrefix(sec, "## Tracked Task Conversations"):
+		return 0, 420
+	default:
+		return 0, 260
+	}
+}
+
+func trimSectionPreservingFooter(sec string, targetBytes int) string {
+	// Preserve the omitted-task summary footer on Tracked Task Conversations if present.
+	if strings.HasPrefix(sec, "## Tracked Task Conversations") {
+		lines := strings.Split(sec, "\n")
+		if len(lines) > 2 && strings.Contains(lines[len(lines)-1], "omitted from context") {
+			footer := lines[len(lines)-1]
+			headBudget := targetBytes - len(footer) - 2
+			if headBudget > 120 {
+				head := trimBytesPreservingLines(strings.Join(lines[:len(lines)-1], "\n"), headBudget)
+				return head + "\n" + footer
+			}
+		}
+	}
+	return trimBytesPreservingLines(sec, targetBytes)
+}
+
 func assembleSessionMessage(header string, sections []string, maxBytes int) string {
 	full := header + strings.Join(sections, "\n\n")
 	if maxBytes <= 0 || len(full) <= maxBytes {
 		return full
 	}
-	// Proportionally trim longest non-critical sections first so core Zone 2 sections are never starved.
+	// Priority-tiered budget trimming: shrink peripheral operational chrome (tier 0) first,
+	// then tier 1, keeping protected core memory (USER.md, Active Vault Facts, Scoped Playbooks) intact.
 	trimmed := append([]string(nil), sections...)
-	for pass := 0; pass < 4; pass++ {
-		cur := header + strings.Join(trimmed, "\n\n")
-		if len(cur) <= maxBytes {
-			return cur
-		}
-		excess := len(cur) - maxBytes
-		// Find largest section to shrink
-		bestIdx := -1
-		bestLen := 0
-		for i, sec := range trimmed {
-			if len(sec) > bestLen && len(sec) > 360 {
-				bestLen = len(sec)
-				bestIdx = i
+	for tier := 0; tier <= 2; tier++ {
+		for pass := 0; pass < len(trimmed)*2; pass++ {
+			cur := header + strings.Join(trimmed, "\n\n")
+			if len(cur) <= maxBytes {
+				return cur
 			}
+			excess := len(cur) - maxBytes
+			bestIdx := -1
+			bestSlack := 0
+			bestFloor := 0
+			for i, sec := range trimmed {
+				st, fl := sectionTrimPriority(sec)
+				if st != tier {
+					continue
+				}
+				if maxBytes <= vault.MaxSessionLeanBytes && fl > 650 {
+					fl = 650
+				}
+				slack := len(sec) - fl
+				if slack > bestSlack {
+					bestSlack = slack
+					bestIdx = i
+					bestFloor = fl
+				}
+			}
+			if bestIdx < 0 || bestSlack < 32 {
+				break
+			}
+			targetLen := len(trimmed[bestIdx]) - excess - 24
+			if targetLen < bestFloor {
+				targetLen = bestFloor
+			}
+			trimmed[bestIdx] = trimSectionPreservingFooter(trimmed[bestIdx], targetLen)
 		}
-		if bestIdx < 0 {
-			break
-		}
-		targetLen := bestLen - excess - 48
-		if targetLen < 280 {
-			targetLen = 280
-		}
-		trimmed[bestIdx] = trimBytesPreservingLines(trimmed[bestIdx], targetLen)
 	}
 	return capSessionEnvelope(header+strings.Join(trimmed, "\n\n"), maxBytes)
 }

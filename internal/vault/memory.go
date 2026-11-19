@@ -718,7 +718,7 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 
 		tier := 4
 		switch {
-		case (scopeMatched && f.Pinned) || (imminent && (ctx.Role == "front_desk" || scopeMatched || isGlobal)):
+		case (scopeMatched && f.Pinned) || (ctx.Role == "front_desk" && isGlobal && f.Pinned) || (imminent && (ctx.Role == "front_desk" || scopeMatched || isGlobal)):
 			tier = 1
 		case (scopeMatched && f.Verified) || (isGlobal && f.Pinned) || lexMatched:
 			tier = 2
