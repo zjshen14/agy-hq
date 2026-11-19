@@ -42,6 +42,12 @@ Rather than bolting on extra directories (`memory/playbooks/`), secondary archiv
 | **`<vault>/memory/facts.jsonl`** | Single canonical bi-temporal file for atomic (`<= 240` runes) state, user constraints & `expires_at`-bounded commitments (`valid_to != nil` / `now > expires_at` is cold storage; **no `facts_cold.jsonl`, no `fact_telemetry.json`**). | Zone 2 deterministic scope selection (`<= 12` / `2,400 B` `full`, `<= 6` / `1,000 B` `lean_auto`). | **Fast Path:** Sync `add-fact` on direct user input<br>**Slow Path:** Dreaming |
 | **`entities/*.md`, `goals.json`, `progress/*.md`, `notes/**`** | Counterparty routing (`entities`), SLA/milestone state (`goals`), `1:1` active-task 120k handoff (`progress`), long-form memos (`notes`). | `0 B` idle (`progress` loaded only for matching `TaskSlug`; queried via `lookup`/`search`/`goals`). | Deterministic `hq` CLI |
 
+> **Where User Preferences Live (Preferences Are First-Class Memory, Partitioned by Scope):**
+> - **Global Persona & Style Constitution** *(rare-change defaults applying to ~100% of turns)* $\rightarrow$ **`<vault>/USER.md`**.
+> - **Domain / Scoped Preferences & Dynamic Constraints** *(e.g. travel cabin class, trading guards, social tone, time-bound overrides)* $\rightarrow$ **`<vault>/memory/facts.jsonl`** (written synchronously from natural language, isolated by `Scopes` so unrelated SWE subagents never carry travel/family preferences).
+> - **Per-Counterparty Style & Channel Preferences** *(e.g. "prefer GChat bullets before 10 AM for Alice")* $\rightarrow$ **`<vault>/memory/entities/<slug>.md`** (`0 B` idle; fetched via `hq memory lookup`).
+> - **Multi-Step Procedural Workflow Preferences** *(e.g. Morning Brief layout or recurring forwarding checklists)* $\rightarrow$ **`<vault>/skills/<slug>/SKILL.md`** or **`rsi/rules/<core>.md`** (progressive disclosure, Ring-2 gated).
+
 ### 2.2 Architecture Dataflow
 
 ```mermaid
@@ -109,8 +115,8 @@ type Fact struct {
 
 ### 3.2 Epistemic Source Split, Live-Connector Grounding & Anti-Tamper Guards
 
-1. **Fast Path (User-Asserted Explicit Truth $\rightarrow$ Sync `hq memory add-fact`):**
-   - When the human user explicitly states a standing preference, constraint, or override in an interactive session (including `[HQ] Front Desk`, where `hq` CLI calls cost `0` lookup quota), the agent calls `hq memory add-fact --verified` immediately (`< 5ms`, `0s` cross-tab latency).
+1. **Fast Path (Natural-Language User-Asserted Truth $\rightarrow$ Silent Sync `hq memory add-fact`):**
+   - **100% Natural-Language UX for the User:** The user never needs to invoke a slash command or CLI flag manually—simply saying *"Never book Basic Economy; minimum Economy Plus"* or *"Raise my limit from \$82 to \$85"* in normal chat triggers the fast path. Governed by a 1-line directive in `.agents/plugins/agy-hq/rules/AGENTS.md`, the agent **silently** runs `hq memory add-fact --verified` under the hood (`< 5ms`, `0` Front Desk lookup quota, zero chat bookkeeping chatter), making the preference or override live across all sibling tabs in `0s`.
    - **Auto-Session Guard:** `cmd/hq` blocks `hq memory add-fact` in all unattended `[Auto]` sessions (`isAutoConversation`) **except** `sleep-consolidate` (and blocks tainted callers unconditionally), and `AGENTS.md` forbids Front Desk from calling `add-fact` in response to proactive alert or timer wakeup text.
    - **Normative vs. Hypothesis Rule:** User *preferences, constraints, and decisions* write `--verified=true`; unverified debugging guesses do not.
 2. **Slow Path (Agent-Discovered Experience $\rightarrow$ Offline Transcript-Verified Dreaming):**
@@ -241,9 +247,27 @@ To integrate cleanly with `internal/kernel/gatekeeper.go` (which spawns on any n
 
 ---
 
-## 7. Pillar 5: Four-Metric Deterministic Memory Eval (`hq memory eval`)
+## 7. Pillar 5: Three-Layer Memory Quality Evaluation & Offline Pre-Merge A/B Gate
 
-Replaces noisy heuristics (`fact_telemetry.json`, regex `TranscriptCorrectionTurns`, raw command-hash `RepeatFrictionRate`) with **four 100% deterministic, high-signal metrics** (`hq memory eval [--since=14d] [--fixtures] [--json]`):
+Deterministic hygiene metrics (`M1`–`M4`) verify memory *plumbing*, but proving that Memory v2 delivers strictly higher **end-to-end answer quality** than v1 requires a three-layer evaluation ladder that cleanly separates **offline pre-merge verification** (on cloned `/tmp` Vault snapshots) from **post-merge live production telemetry**:
+
+### 7.1 Layer 1 — Offline 0-Token Historical Replay (Pre-Merge, `< 5s`)
+- Snapshot the live Vault read-only into two throwaway directories: `/tmp/vault-v1` (untouched v1, driven by `main`'s `~/.local/bin/hq`) and `/tmp/vault-v2` (migrated via the PR branch's `./bin/hq migrate`).
+- Run `hq memory eval --replay --baseline-bin=~/.local/bin/hq --baseline-vault=/tmp/vault-v1` across historical untainted `local/memory/journal/` turns (`~170` real prompts/workspaces) in **0 LLM tokens** to quantify exact before/after `SessionStart` byte reduction, `0%` Zone-2 starvation in `lean_auto`, and scope-matching accuracy on real user history before merging.
+
+### 7.2 Layer 2 — Offline 20–30 Task Blinded `v1` vs. `v2` A/B Quality Benchmark (Pre-Merge Ship Gate, `~5–10m`)
+- Executed strictly **offline on the PR branch** against the cloned `/tmp/vault-v1` vs. `/tmp/vault-v2` snapshots (`0` mutation to live `local/` Vault; `0` waiting on production traffic):
+  - **5 Balanced Task Categories (`20–30` curated prompts; private personal eval file in `<vault>/memory/eval_suite.jsonl` + PII-free synthetic set in `internal/vault/testdata/`):**
+    1. *Constraint & Negative-Guardrail Adherence* (e.g., social reply style, opening-bell trading guard, counterparty preferences);
+    2. *Scoped Engineering Recall (`lean_auto` Subagent)* (does `## Active Playbook` + scoped facts cut failed commands and tool steps?);
+    3. *Multi-Hop Deep Synthesis* (Wiki + `hq memory search` vs. v1 baseline);
+    4. *Temporal Freshness & Contradiction Override* (newer `verified` fast-path fact overriding older `MEMORY.md` prose; elapsed `expires_at` event ignored);
+    5. *Anti-Distraction & Taint Isolation* (`0` unrelated personal leakage into SWE tasks; `0` Vault leakage in `tainted` mode).
+  - **Execution & Blinded Grading:** Run identical fresh isolated headless sessions (`agy -p`, same model) under **Arm A (`main` v1 `SessionStart`, no `hq memory search`)** vs. **Arm B (PR v2 `SessionStart` + `hq memory search`)**, grading both arms via deterministic checklist assertions plus a **blinded LLM-as-Judge** (higher-tier model unaware of Arm A/B labels).
+  - **Pre-Merge Ship Criteria:** Arm B must strictly beat Arm A on overall Rubric Pass Rate with **zero category regressions** (catching any unintended side effect of omitting `MEMORY.md` in `lean_auto`), equal-or-lower median tool steps/tokens, and `>= 50%` lower `SessionStart` uncached tokens.
+
+### 7.3 Layer 3 — Post-Merge Live Production Telemetry (`hq memory eval`, 7–14d Canary)
+After merging to `main` and running `hq upgrade` (which automatically commits a `local/.git` pre-migration restore point), compare `hq obs` cold-start uncached tokens and **`hq memory eval [--since=14d] [--fixtures] [--json]`** against the 12-day v1 baseline recorded in [Research 19 §4](../research/19_anthropic_memory_components_and_vault_audit.md). Replaces noisy heuristics (`fact_telemetry.json`, regex `TranscriptCorrectionTurns`, raw command-hash `RepeatFrictionRate`) with **four 100% deterministic, high-signal metrics**:
 
 | Metric | Exact 0-Token Definition | Target |
 | :--- | :--- | :---: |
@@ -291,7 +315,7 @@ Replaces noisy heuristics (`fact_telemetry.json`, regex `TranscriptCorrectionTur
 | **Phase 2A: Locked `Fact` v2, Dual-Cap Role-Aware `SessionStart` & `MEMORY.md` Slimming** | `internal/store/store.go`, `internal/vault/{vault,memory,migrate}.go`, `internal/hooks/hooks.go`, `templates/MEMORY.md`, `cmd/hq/main.go` | `store.RankMemory = 78` (`0600` leaf atomic writes, lock-free readers); `Fact` v2 (`Scopes`, `ExpiresAt`, `Pinned`, `<= 240c`); `SelectFactsForSession`; `MEMORY.md` `Active Priorities`-only (`<= 40L / 2.2 KB`); `lean_auto` Zone-1 projection (`0%` Zone-2 starvation); Turn-1 `< 16 KB` `TranscriptPath` + `WorktreeDir` `ResolveSessionScopes`; `[Auto]` fast-path & `cmd/hq` uniform taint gate. | `~380` LOC |
 | **Phase 2B: Scoped Topic `## Active Playbook`, Lifecycle Archival & Complete `forget`** | `internal/vault/{memory,progress,entities_and_forget,journal}.go`, `internal/hooks/hooks.go`, `internal/obs/obs.go`, `internal/rsi/{miner,mutator}.go`, `cmd/hq/main.go` | `> **Scopes:**` + `1:1` `> **Playbook-Owner:**` `## Active Playbook` extraction (`<= 25L / 1.2 KB`); `Matched Context Hint` (Task/Subagent only); `vault.WalkJournals` + `14d` journal/brief archival + `HandleStop` archive fallback; `cmd/hq` + `CompactMemory` `progress/` archival (zero import cycle); `--ephemeral` task flag; RSI `occ >= 2` & human-signal filter; `Lstat`-safe full `forget` cascade. | `~400` LOC |
 | **Phase 2C: Pure-Go BM25 `hq memory search` & Gatekeeper-Safe `dream-plan`** | `internal/vault/{search,dream}.go`, `cmd/hq/main.go`, `.agents/plugins/agy-hq/skills/sleep-consolidate/SKILL.md`, `templates/triggers.yaml` | Lock-free `< 15ms` Okapi BM25 `hq memory search` (full `private/**` + `outbox/**` + symlink exclusion); `dream-plan --precheck` (`""` idle under `exit_zero_nonempty`) + Stage-1 `--json` + `dream_cursor.json` updated only on `hq memory commit`; updated `sleep-consolidate/SKILL.md` (`<= 150L`, `H1`-clean). | `~360` LOC |
-| **Phase 2D: 4-Metric `hq memory eval`, `hq doctor` & `CUJ-39` E2E** | `internal/vault/eval.go`, `internal/vault/testdata/memory_eval_fixtures.json`, `cmd/hq/main.go`, `internal/e2e/cuj_e2e_test.go`, `docs/product/0003-critical-user-journeys.md` | 4-metric `hq memory eval` (`M1`–`M4` + `--fixtures`); fixed `AuditMemory` integrity checks; `hq doctor` checks; **`TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval`** black-box E2E test. | `~350` LOC |
+| **Phase 2D: 3-Layer `hq memory eval` (`--replay`, A/B Runner), `hq doctor` & `CUJ-39` E2E** | `internal/vault/eval.go`, `internal/vault/testdata/memory_eval_fixtures.json`, `cmd/hq/main.go`, `internal/e2e/cuj_e2e_test.go`, `docs/product/0003-critical-user-journeys.md` | 4-metric `hq memory eval` (`M1`–`M4`, `--fixtures`, `--replay` v1-vs-v2 historical replay) + offline pre-merge blinded A/B benchmark runner over cloned `/tmp` Vault snapshots; fixed `AuditMemory` integrity checks; `hq doctor` checks; **`TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval`** black-box E2E test. | `~400` LOC |
 
 ---
 
