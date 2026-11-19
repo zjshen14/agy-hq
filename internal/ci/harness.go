@@ -18,6 +18,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
+	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
 // HarnessCheckResult captures the pass/fail result of a single harness contract gate.
@@ -692,7 +693,13 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		return false, "Untainted worker should still be allowed to read private/ledger/"
 	}
 
-	// 6. Verify 125k-token PreToolUse compaction nudge conforms strictly to PreToolUse protojson schema
+	// 6. RFC-0025 W1 single-writer lease: a lease-enforced provider workspace denies non-writer write_file and allows
+	// its writer task; an auto-attached (advisory, lease_enforced=false) entry never blocks anyone.
+	if ok, detail := probeWorkspaceWriteLease(vaultDir, runHook); !ok {
+		return false, detail
+	}
+
+	// 7. Verify 125k-token PreToolUse compaction nudge conforms strictly to PreToolUse protojson schema
 	nudgeTranscript := filepath.Join(vaultDir, "compaction-probe.jsonl")
 	_ = os.WriteFile(nudgeTranscript, []byte(
 		"{\"step_index\":0,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-10T09:00:00Z\",\"content\":\"Long run\"}\n"+
@@ -710,7 +717,7 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		return false, protoSchemaErr
 	}
 
-	// 7. Verify SKILL.md CLI subcommands against valid top-level hq commands
+	// 8. Verify SKILL.md CLI subcommands against valid top-level hq commands
 	allSkillDocs := append(rsi.DiscoverAllSkillFiles(rootDir), discoverTemplateSkillFiles(rootDir)...)
 	for _, skPath := range allSkillDocs {
 		b, rErr := os.ReadFile(skPath)
@@ -725,7 +732,63 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 		}
 	}
 
-	return true, "30/30 PreToolUse security, protojson schema, bare-hq parity, credential-guard, quarantine, Front Desk & SKILL CLI probes passed"
+	return true, "33/33 PreToolUse security, protojson schema, bare-hq parity, credential-guard, quarantine, Front Desk, workspace lease & SKILL CLI probes passed"
+}
+
+// probeWorkspaceWriteLease runs the H2-B RFC-0025 W1 probes against a synthetic ledger in the matrix Vault.
+func probeWorkspaceWriteLease(vaultDir string, runHook func(map[string]interface{}) (string, error)) (bool, string) {
+	wsBase, err := os.MkdirTemp("", "hq-ci-ws-lease-*")
+	if err != nil {
+		return false, fmt.Sprintf("mkdirtemp (workspace lease probe): %v", err)
+	}
+	defer os.RemoveAll(wsBase)
+	wsBase = workspace.CanonicalPath(wsBase)
+	for _, t := range []kernel.ActiveTask{
+		{TaskSlug: "ws-lease-writer", Title: "[Task:ci] Lease writer", Kind: "task", ConversationID: "conv-ws-lease-writer", Status: "active"},
+		{TaskSlug: "ws-lease-other", Title: "[Task:ci] Lease bystander", Kind: "task", ConversationID: "conv-ws-lease-other", Status: "active"},
+	} {
+		if err := kernel.RegisterTask(vaultDir, t); err != nil {
+			return false, fmt.Sprintf("RegisterTask(%s) for workspace lease probe: %v", t.TaskSlug, err)
+		}
+	}
+	leasedRoot := filepath.Join(wsBase, "leased")
+	advisoryRoot := filepath.Join(wsBase, "advisory")
+	if err := workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
+		l.Put(workspace.LedgerEntry{
+			Provider: "acme-monorepo/client", WorkspaceID: "leased", Root: leasedRoot, WorkDir: filepath.Join(leasedRoot, "src"),
+			Ownership: workspace.OwnershipOwned, WriterTask: "ws-lease-writer", LeaseEnforced: true,
+			Status: workspace.LedgerStatus{State: workspace.StateClean},
+		})
+		l.Put(workspace.LedgerEntry{
+			Provider: "acme-monorepo/client", WorkspaceID: "advisory", Root: advisoryRoot,
+			Ownership: workspace.OwnershipAttached, WriterTask: "ws-lease-writer",
+			Status: workspace.LedgerStatus{State: workspace.StateUnknown},
+		})
+		return true, nil
+	}); err != nil {
+		return false, fmt.Sprintf("seed workspace ledger for lease probe: %v", err)
+	}
+	writeCall := func(conv, path string) string {
+		out, _ := runHook(map[string]interface{}{
+			"conversationId": conv,
+			"toolCall": map[string]interface{}{
+				"name": "write_file",
+				"args": map[string]interface{}{"Path": path, "Content": "package main\n"},
+			},
+		})
+		return out
+	}
+	leasedFile := filepath.Join(leasedRoot, "src", "main.go")
+	if out := writeCall("conv-ws-lease-other", leasedFile); !strings.Contains(out, `"decision":"deny"`) || !strings.Contains(out, "hq workspace handoff") {
+		return false, fmt.Sprintf("W1 lease failed to deny a non-writer write_file inside a lease-enforced workspace (got %s)", strings.TrimSpace(out))
+	}
+	if out := writeCall("conv-ws-lease-writer", leasedFile); !strings.Contains(out, `"decision":"allow"`) {
+		return false, fmt.Sprintf("W1 lease denied the writer task's own write_file (got %s)", strings.TrimSpace(out))
+	}
+	if out := writeCall("conv-ws-lease-other", filepath.Join(advisoryRoot, "notes.md")); !strings.Contains(out, `"decision":"allow"`) {
+		return false, fmt.Sprintf("W1 lease blocked a write inside an auto-attached (lease_enforced=false) workspace (got %s)", strings.TrimSpace(out))
+	}
+	return true, ""
 }
 
 func checkGateH3RoutingAndTriggers(rootDir string) (bool, string) {

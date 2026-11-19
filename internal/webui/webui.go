@@ -33,6 +33,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/watcher"
+	"github.com/zjshen14/agy-hq/internal/workspace"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -54,7 +55,7 @@ type ScheduleSummaryRow struct {
 	LatestConvID    string `json:"latestConvId,omitempty"`
 }
 
-// DashboardState aggregates live Vault, approval, worktree, task, schedule, journal, quota, observability, spaces, goals, ideas, and doctor state.
+// DashboardState aggregates live Vault, approval, worktree, provider workspace, task, schedule, journal, quota, observability, spaces, goals, ideas, and doctor state.
 type DashboardState struct {
 	VaultDir       string                         `json:"vaultDir"`
 	UpdatedAt      string                         `json:"updatedAt"`
@@ -67,6 +68,7 @@ type DashboardState struct {
 	OverdueWaits   []kernel.OverdueWaitingSummary `json:"overdueWaits,omitempty"`
 	Ideas          []outbox.OutboxItem            `json:"ideas,omitempty"`
 	Worktrees      []string                       `json:"worktrees"`
+	Workspaces     []workspace.SurfaceEntry       `json:"workspaces,omitempty"` // RFC-0025 provider ledger view (read-only)
 	Tasks          []kernel.ActiveTask            `json:"tasks"`
 	ChannelBridges []channels.BridgeSummary       `json:"channelBridges,omitempty"`
 	TodayTurns     []hooks.JournalEntry           `json:"todayTurns"`
@@ -923,7 +925,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	}
 }
 
-type vaultStateFingerprint [14]int64
+type vaultStateFingerprint [15]int64
 
 func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	var fp vaultStateFingerprint
@@ -951,6 +953,7 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	statAt(11, filepath.Join(mem, "journal", today))
 	statAt(12, filepath.Join(mem, "channels"))
 	statAt(13, filepath.Join(vaultDir, "private", "channels"))
+	statAt(14, filepath.Join(mem, "workspaces.json"))
 	return fp
 }
 
@@ -1028,6 +1031,7 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 		enrichPendingDraftPayload(vaultDir, &pending[i])
 	}
 	wts, _ := worktree.List(vaultDir)
+	wsEntries, _ := workspace.LoadSurfaceEntries(vaultDir)
 	tasks, _ := kernel.ListTasks(vaultDir)
 	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
 	now := time.Now()
@@ -1081,6 +1085,7 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 		OverdueWaits:   overdueWaits,
 		Ideas:          ideas,
 		Worktrees:      wts,
+		Workspaces:     wsEntries,
 		Tasks:          sel.VisibleRows,
 		ChannelBridges: bridgeSummaries,
 		TodayTurns:     turns,
@@ -1792,6 +1797,31 @@ var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
   <div class="card muted">No active git worktrees in local/worktrees/.</div>
 {{end}}
 </div>
+{{if .Workspaces}}
+<h2>
+  <span>Active Workspaces ({{len .Workspaces}})</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Provider Ledger Cache · Read-Only</span>
+</h2>
+<div id="workspaces-list">
+  {{range .Workspaces}}
+  <div class="card">
+    <div class="meta-row">
+      <strong>🧩 <code style="color:var(--accent)">{{.WorkspaceID}}</code> <span class="muted">{{.Provider}}</span></strong>
+      <span class="badge {{if eq .State "clean"}}badge-pass{{else if eq .State "dirty"}}badge-warn{{else}}badge-danger{{end}}">{{.State}}</span>
+    </div>
+    <div class="muted" style="margin:4px 0">
+      {{.Ownership}}{{if .WriterTask}} · Writer: <code>{{.WriterTask}}</code>{{if .LeaseEnforced}} 🔒{{end}}{{end}}{{if .BoundTasks}} · Bound: {{range $i, $t := .BoundTasks}}{{if $i}}, {{end}}<code>{{$t}}</code>{{end}}{{end}}{{if .RefreshedAt}} · Refreshed: <code>{{.RefreshedAt}}</code>{{end}}{{if .RefreshError}} · <span style="color:#fca5a5">last refresh failed</span>{{end}}
+    </div>
+    <div class="muted" style="font-size:11px">Root: <code>{{.Root}}</code>{{if and .WorkDir (ne .WorkDir .Root)}} · Work dir: <code>{{.WorkDir}}</code>{{end}}</div>
+    {{if .Orphaned}}<div style="margin-top:4px"><span class="badge badge-danger">⚠️ Orphaned with open changes</span></div>{{end}}
+    {{if .Summary}}<div style="margin-top:4px">{{.Summary}}</div>{{end}}
+    {{range .Changes}}
+    <div class="muted" style="font-size:11px;margin-top:2px">{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer"><code>{{.ID}}</code></a>{{else}}<code>{{.ID}}</code>{{end}} · {{.State}}{{if .NeedsOwner}} · ⏳ needs you{{end}}{{if .Title}} — {{.Title}}{{end}}</div>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}
 
 <h2>
   <span>Scheduled Automations (<span id="schedules-count">{{len .Schedules}}</span>)</span>
@@ -2339,6 +2369,7 @@ func SyncMarkdownConsole(vaultDir string) error {
 
 	now := time.Now()
 	sel := state.TaskSelection
+	wsByKey := surfaceEntriesByKey(state.Workspaces)
 
 	if state.Layer1Count == 0 && state.ColdTaskCount == 0 {
 		fmt.Fprintf(&b, "## 📋 2. Task Board (`0` Tracked Conversations)\n")
@@ -2384,6 +2415,9 @@ func SyncMarkdownConsole(vaultDir string) error {
 				} else if len(existingWTs) > 1 {
 					metaParts = append(metaParts, fmt.Sprintf("🌿 %d wts", len(existingWTs)))
 				}
+				if wsBadge := taskWorkspaceBadge(t, wsByKey); wsBadge != "" {
+					metaParts = append(metaParts, wsBadge)
+				}
 				if tb, ok := state.Observability.TaskBadges[strings.ToLower(strings.TrimSpace(t.ConversationID))]; ok && tb.GrossTokens > 0 {
 					metaParts = append(metaParts, "🪙 "+obs.FormatTokensCompact(tb.TreeUncachedTokens))
 				}
@@ -2410,6 +2444,11 @@ func SyncMarkdownConsole(vaultDir string) error {
 		for _, wt := range state.Worktrees {
 			fmt.Fprintf(&b, "- `%s` (`%s`)\n", filepath.Base(wt), wt)
 		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if wsSection := formatConsoleWorkspacesSection(state.Workspaces); wsSection != "" {
+		b.WriteString(wsSection)
 		b.WriteString("\n---\n\n")
 	}
 

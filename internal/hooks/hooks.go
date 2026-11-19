@@ -27,6 +27,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/watcher"
+	"github.com/zjshen14/agy-hq/internal/workspace"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
 
@@ -144,6 +145,11 @@ func shouldAutoClaimVacantFrontDesk(payload CommonPayload, vaultDir string) bool
 			if isPathInsideVaultWorktrees(cleanCWD, vaultDir) {
 				return false
 			}
+			// W3 (RFC-0025 §10): a cwd inside a provider workspace (ledger entry or trusted root_patterns) is a
+			// regular coding session, even though non-git workspace roots carry none of the markers below.
+			if isProviderWorkspacePath(vaultDir, cleanCWD) {
+				return false
+			}
 			if vault.IsAgyHQRepo(cleanCWD) {
 				return true
 			}
@@ -162,6 +168,9 @@ func shouldAutoClaimVacantFrontDesk(payload CommonPayload, vaultDir string) bool
 	}
 	cleanWS := filepath.Clean(ws)
 	if isPathInsideVaultWorktrees(cleanWS, vaultDir) {
+		return false
+	}
+	if isProviderWorkspacePath(vaultDir, cleanWS) {
 		return false
 	}
 	if vault.IsAgyHQRepo(cleanWS) {
@@ -670,6 +679,21 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			zone2Sections = append(zone2Sections, "## Active Git Worktrees\n"+trimBytesPreservingLines(strings.Join(lines, "\n"), 900))
 		}
+		// RFC-0025 provider workspaces: additive sections rendered from the ledger cache only (no provider calls).
+		// An unreadable ledger hides the inventory but still lists the task's own bindings from tasks.json.
+		wsLedger, wsErr := workspace.LoadLedger(vaultDir)
+		if wsErr == nil && len(wsLedger.Entries) > 0 {
+			if allTasks, tErr := kernel.ListTasks(vaultDir); tErr == nil {
+				if sec := formatActiveWorkspacesSection(wsLedger, kernel.FilterLayer1Tasks(vaultDir, allTasks), now); sec != "" {
+					zone2Sections = append(zone2Sections, sec)
+				}
+			}
+		}
+		if hasMatchedTask && !isFrontDesk {
+			if sec := formatActiveTaskWorkspacesSection(wsLedger, matchedTask); sec != "" {
+				zone2Sections = append(zone2Sections, sec)
+			}
+		}
 		if tasks, err := kernel.ListTasks(vaultDir); err == nil && len(tasks) > 0 {
 			layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, tasks)
 			selected, omitted := kernel.SelectSessionStartTasks(layer1Tasks, now)
@@ -974,6 +998,7 @@ func sectionTrimPriority(sec string) (tier int, floor int) {
 		return 2, 1600
 	case strings.HasPrefix(sec, "## HQ Vault: MEMORY.md"),
 		strings.HasPrefix(sec, "## Active Task Progress Checkpoint"),
+		strings.HasPrefix(sec, "## Active Task Workspaces"),
 		strings.HasPrefix(sec, "## Pending Approvals in Queue"),
 		strings.HasPrefix(sec, "## Matched Context Hints"),
 		strings.HasPrefix(sec, "## 🎯 Active Role:"),
@@ -988,10 +1013,11 @@ func sectionTrimPriority(sec string) (tier int, floor int) {
 }
 
 func trimSectionPreservingFooter(sec string, targetBytes int) string {
-	// Preserve the omitted-task summary footer on Tracked Task Conversations if present.
-	if strings.HasPrefix(sec, "## Tracked Task Conversations") {
+	// Preserve the omitted-task summary footer on Tracked Task Conversations (and the overflow footer on
+	// Active Workspaces) if present.
+	if strings.HasPrefix(sec, "## Tracked Task Conversations") || strings.HasPrefix(sec, "## Active Workspaces") {
 		lines := strings.Split(sec, "\n")
-		if len(lines) > 2 && strings.Contains(lines[len(lines)-1], "omitted from context") {
+		if len(lines) > 2 && (strings.Contains(lines[len(lines)-1], "omitted from context") || strings.Contains(lines[len(lines)-1], "more: hq workspace list")) {
 			footer := lines[len(lines)-1]
 			headBudget := targetBytes - len(footer) - 2
 			if headBudget > 120 {
@@ -2268,6 +2294,19 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		}
 	}
 
+	// W1 (RFC-0025 §10 / §16.3): single-writer lease on lease-enforced provider workspaces for write_file /
+	// edit_file in every non-tainted session (the Front Desk's Rule A below still applies on top of it).
+	if payload.ToolCall.Name == "write_file" || payload.ToolCall.Name == "edit_file" {
+		if pathArg, ok := payload.ToolCall.Args["Path"].(string); ok && strings.TrimSpace(pathArg) != "" {
+			if reason := workspaceWriteLeaseDenial(vaultDir, payload.ConversationID, pathArg); reason != "" {
+				return json.NewEncoder(w).Encode(map[string]interface{}{
+					"decision": "deny",
+					"reason":   reason,
+				})
+			}
+		}
+	}
+
 	// Surgical Per-Question Proposal Preview + Human-Presence Challenge Nonce overwrite on ask_question (RFC-0021 §4.3D)
 	if payload.ToolCall.Name == "ask_question" {
 		if isAutoConversation(vaultDir, payload.ConversationID) {
@@ -2793,6 +2832,12 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				}
 			}
 
+			// RFC-0025 §7.3 / §16.8: bind provider workspaces written this turn to the owning task (ledger hits) or
+			// queue daemon probe candidates (root_patterns hits). Ledger/tasks reads only; no provider calls.
+			if !isFrontDesk && !isTainted && !tm.TaintedCmdSeen {
+				autoBindWorkspacesFromStop(vaultDir, payload.ConversationID, tm.TurnFilesModified)
+			}
+
 			if obsTurn.CurrentContextTokens >= PreCompactionFlushTokens {
 				if activeTask, ok := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); ok && activeTask.TaskSlug != "" {
 					if _, _, found, _ := vault.LoadProgress(vaultDir, activeTask.TaskSlug); !found {
@@ -3071,6 +3116,7 @@ func isTransientExternalError(content string) bool {
 type transcriptTurnMetrics struct {
 	ToolsUsed               []string
 	FilesModified           []string
+	TurnFilesModified       []string // write_file / edit_file paths from the current turn only (sorted)
 	LastResponse            string
 	CurrentTurnFullResponse string
 	CurrentTurnStartedAt    time.Time
@@ -3097,6 +3143,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 
 	toolSet := make(map[string]bool)
 	fileSet := make(map[string]bool)
+	turnFileSet := make(map[string]bool)
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -3188,6 +3235,9 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 					p := strings.Trim(strings.TrimSpace(rawP), "\"")
 					if p != "" {
 						fileSet[p] = true
+						if inCurrentTurn {
+							turnFileSet[p] = true
+						}
 					}
 				}
 			}
@@ -3216,6 +3266,10 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 	for k := range fileSet {
 		tm.FilesModified = append(tm.FilesModified, k)
 	}
+	for k := range turnFileSet {
+		tm.TurnFilesModified = append(tm.TurnFilesModified, k)
+	}
+	sort.Strings(tm.TurnFilesModified)
 	return tm, obsAcc.Finish()
 }
 
