@@ -87,7 +87,7 @@ func SanitizeInfo(providerFQID string, in Info) (Info, error) {
 	if err != nil {
 		return Info{}, fmt.Errorf("workspace %s: %w", in.WorkspaceID, err)
 	}
-	if !pathWithin(workDir, root) {
+	if !PathWithin(workDir, root) {
 		return Info{}, fmt.Errorf("workspace %s: work_dir %q is outside root %q", in.WorkspaceID, workDir, root)
 	}
 	out.Root = root
@@ -108,7 +108,7 @@ func SanitizeInfo(providerFQID string, in Info) (Info, error) {
 		return Info{}, fmt.Errorf("workspace %s: invalid state %q", in.WorkspaceID, clipForError(string(in.State)))
 	}
 	out.State = in.State
-	out.Base = sanitizeDisplayText(in.Base, MaxBaseRunes)
+	out.Base = SanitizeDisplayText(in.Base, MaxBaseRunes)
 
 	// Validate all changes first and retain open changes ahead of closed ones when clamping to MaxChanges,
 	// so truncating a long history can never hide unlanded work behind older landed/abandoned changes.
@@ -124,7 +124,7 @@ func SanitizeInfo(providerFQID string, in Info) (Info, error) {
 			ID:         c.ID,
 			State:      c.State,
 			NeedsOwner: c.NeedsOwner,
-			Title:      sanitizeDisplayText(c.Title, MaxTitleRunes),
+			Title:      SanitizeDisplayText(c.Title, MaxTitleRunes),
 			URL:        sanitizeChangeURL(c.URL),
 			UpdatedAt:  sanitizeTimestamp(c.UpdatedAt),
 		}
@@ -171,7 +171,7 @@ func sanitizeAbsPath(field, p string) (string, error) {
 	if len(p) > MaxPathLength {
 		return "", fmt.Errorf("%s exceeds %d bytes", field, MaxPathLength)
 	}
-	if hasControlOrFormatRune(p) {
+	if HasControlOrFormatRune(p) {
 		return "", fmt.Errorf("%s contains control or invisible formatting characters", field)
 	}
 	if !filepath.IsAbs(p) {
@@ -188,7 +188,8 @@ func sanitizeAbsPath(field, p string) (string, error) {
 	return p, nil
 }
 
-func hasControlOrFormatRune(s string) bool {
+// HasControlOrFormatRune reports whether s contains the Unicode replacement character, control characters, or invisible formatting runes.
+func HasControlOrFormatRune(s string) bool {
 	for _, r := range s {
 		if r == unicode.ReplacementChar || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return true
@@ -197,9 +198,9 @@ func hasControlOrFormatRune(s string) bool {
 	return false
 }
 
-// sanitizeDisplayText strips control and invisible formatting characters (newlines and tabs become spaces),
+// SanitizeDisplayText strips control and invisible formatting characters (newlines and tabs become spaces),
 // collapses whitespace, neutralizes imperative/injection cues, and clamps to maxRunes.
-func sanitizeDisplayText(s string, maxRunes int) string {
+func SanitizeDisplayText(s string, maxRunes int) string {
 	if s == "" {
 		return ""
 	}
@@ -252,5 +253,5 @@ func sanitizeTimestamp(raw string) string {
 
 // clipForError keeps provider-controlled values short and single-line inside error messages.
 func clipForError(s string) string {
-	return sanitizeDisplayText(s, 80)
+	return SanitizeDisplayText(s, 80)
 }

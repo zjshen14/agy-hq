@@ -132,20 +132,7 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 	}
 
 	if tier == "" {
-		switch inferLogicalTierFromPrompt(prompt) {
-		case "deep_routine":
-			tier = "deep-medium"
-		case "heavy":
-			tier = "heavy"
-		case "routine":
-			tier = "routine"
-		case "deep":
-			tier = "deep"
-		case "quick":
-			tier = "quick"
-		default:
-			tier = "standard"
-		}
+		tier = inferLogicalTierFromPrompt(prompt)
 	}
 
 	inferredDepth := ""
@@ -441,14 +428,20 @@ func builtinDefaultModelForLogical(logical string) string {
 	}
 }
 
-func resolveOptedInPackModel(vaultDir, logical string) (string, string) {
+type optedInPackRouting struct {
+	name  string
+	tiers map[string]string
+}
+
+func loadOptedInPackRoutings(vaultDir string) []optedInPackRouting {
 	if strings.TrimSpace(vaultDir) == "" {
-		return "", ""
+		return nil
 	}
 	extSt, err := extension.LoadVaultState(vaultDir)
 	if err != nil {
-		return "", ""
+		return nil
 	}
+	var out []optedInPackRouting
 	for _, packName := range extSt.OrderedEnabledPacks() {
 		act := extSt.Packs[packName]
 		if !act.Enabled || !act.UsePackRouting || len(act.RoutingTiers) == 0 {
@@ -459,11 +452,46 @@ func resolveOptedInPackModel(vaultDir, logical string) (string, string) {
 				continue
 			}
 		}
-		if rawModel := strings.TrimSpace(act.RoutingTiers[logical]); rawModel != "" {
-			return rawModel, packName
+		out = append(out, optedInPackRouting{name: packName, tiers: act.RoutingTiers})
+	}
+	return out
+}
+
+func lookupPackRoutingModel(packs []optedInPackRouting, logical string) (string, string) {
+	for _, p := range packs {
+		if rawModel := strings.TrimSpace(p.tiers[logical]); rawModel != "" {
+			return rawModel, p.name
 		}
 	}
 	return "", ""
+}
+
+func buildVaultTierResult(target TierTarget, logical, explicitDepth, fallback string) Result {
+	m := applyExplicitDepth(strings.TrimSpace(target.Model), explicitDepth)
+	sub := strings.TrimSpace(target.SubagentModel)
+	if sub == "" {
+		sub = inferSubagentAlias(m, logical)
+	}
+	return Result{
+		ModelID:       m,
+		CanonicalTier: canonicalBucketForLogical(logical),
+		LogicalTier:   logical,
+		SubagentModel: sub,
+		FallbackModel: fallback,
+		Source:        "vault",
+	}
+}
+
+func buildPackTierResult(packModel, packName, logical, explicitDepth, fallback string) Result {
+	m := applyExplicitDepth(packModel, explicitDepth)
+	return Result{
+		ModelID:       m,
+		CanonicalTier: canonicalBucketForLogical(logical),
+		LogicalTier:   logical,
+		SubagentModel: inferSubagentAlias(m, logical),
+		FallbackModel: fallback,
+		Source:        "pack:" + packName,
+	}
 }
 
 func coarseAliasLogicalTier(explicitModel, explicitTier string) (string, bool) {
@@ -523,8 +551,9 @@ func CustomFallbackCandidates(vaultDir, requestedModel string) []string {
 		out = append(out, c)
 	}
 
+	packs := loadOptedInPackRoutings(vaultDir)
 	for _, t := range tierOrder {
-		packM, _ := resolveOptedInPackModel(vaultDir, t)
+		packM, _ := lookupPackRoutingModel(packs, t)
 		if hasVaultCfg {
 			if target, ok := vaultCfg.Tiers[t]; ok && strings.TrimSpace(target.Model) != "" {
 				rawV := strings.TrimSpace(target.Model)
@@ -564,39 +593,19 @@ func Resolve(vaultDir string, req Request) Result {
 
 	vaultCfg, hasVaultCfg := LoadVaultRouting(vaultDir)
 	fallback := vaultCfg.FallbackOn429
+	packs := loadOptedInPackRoutings(vaultDir)
 
 	if coarseLogical, isCoarse := coarseAliasLogicalTier(explicitM, req.ExplicitTier); isCoarse {
-		packCoarse, packCoarseName := resolveOptedInPackModel(vaultDir, coarseLogical)
+		packCoarse, packCoarseName := lookupPackRoutingModel(packs, coarseLogical)
 		if hasVaultCfg {
 			if target, ok := vaultCfg.Tiers[coarseLogical]; ok && strings.TrimSpace(target.Model) != "" {
-				rawVaultModel := strings.TrimSpace(target.Model)
-				if rawVaultModel != builtinDefaultModelForLogical(coarseLogical) {
-					m := applyExplicitDepth(rawVaultModel, req.ExplicitDepth)
-					sub := strings.TrimSpace(target.SubagentModel)
-					if sub == "" {
-						sub = inferSubagentAlias(m, coarseLogical)
-					}
-					return Result{
-						ModelID:       m,
-						CanonicalTier: canonicalBucketForLogical(coarseLogical),
-						LogicalTier:   coarseLogical,
-						SubagentModel: sub,
-						FallbackModel: fallback,
-						Source:        "vault",
-					}
+				if strings.TrimSpace(target.Model) != builtinDefaultModelForLogical(coarseLogical) {
+					return buildVaultTierResult(target, coarseLogical, req.ExplicitDepth, fallback)
 				}
 			}
 		}
 		if packCoarse != "" {
-			m := applyExplicitDepth(packCoarse, req.ExplicitDepth)
-			return Result{
-				ModelID:       m,
-				CanonicalTier: canonicalBucketForLogical(coarseLogical),
-				LogicalTier:   coarseLogical,
-				SubagentModel: inferSubagentAlias(m, coarseLogical),
-				FallbackModel: fallback,
-				Source:        "pack:" + packCoarseName,
-			}
+			return buildPackTierResult(packCoarse, packCoarseName, coarseLogical, req.ExplicitDepth, fallback)
 		}
 	}
 
@@ -612,7 +621,7 @@ func Resolve(vaultDir string, req Request) Result {
 		}
 	}
 
-	packModel, packName := resolveOptedInPackModel(vaultDir, logical)
+	packModel, packName := lookupPackRoutingModel(packs, logical)
 
 	if hasVaultCfg {
 		if target, ok := vaultCfg.Tiers[logical]; ok && strings.TrimSpace(target.Model) != "" {
@@ -620,33 +629,13 @@ func Resolve(vaultDir string, req Request) Result {
 			// If user explicitly opted into pack routing (`--use-pack-routing`) and config.yaml still holds
 			// the unmodified template default for this tier, honor the opted-in pack override.
 			if packModel == "" || rawVaultModel != builtinDefaultModelForLogical(logical) {
-				m := applyExplicitDepth(rawVaultModel, req.ExplicitDepth)
-				sub := strings.TrimSpace(target.SubagentModel)
-				if sub == "" {
-					sub = inferSubagentAlias(m, logical)
-				}
-				return Result{
-					ModelID:       m,
-					CanonicalTier: canonicalBucketForLogical(logical),
-					LogicalTier:   logical,
-					SubagentModel: sub,
-					FallbackModel: fallback,
-					Source:        "vault",
-				}
+				return buildVaultTierResult(target, logical, req.ExplicitDepth, fallback)
 			}
 		}
 	}
 
 	if packModel != "" {
-		m := applyExplicitDepth(packModel, req.ExplicitDepth)
-		return Result{
-			ModelID:       m,
-			CanonicalTier: canonicalBucketForLogical(logical),
-			LogicalTier:   logical,
-			SubagentModel: inferSubagentAlias(m, logical),
-			FallbackModel: fallback,
-			Source:        "pack:" + packName,
-		}
+		return buildPackTierResult(packModel, packName, logical, req.ExplicitDepth, fallback)
 	}
 
 	m, cTier, sub := ResolveBuiltin(req.Prompt, "", req.ExplicitDepth, req.ExplicitTier)

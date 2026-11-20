@@ -58,11 +58,64 @@ func cleanAbsPath(p string) string {
 // "/a/b" never matches "/a/bc". Both arguments must already be cleaned absolute paths. On case-insensitive
 // host OSes (macOS/Windows) comparison is case-folding so case-variant paths cannot bypass workspace leases.
 func PathWithin(path, root string) bool {
-	return pathWithin(path, root)
+	return pathWithinCase(path, root, runtime.GOOS == "darwin" || runtime.GOOS == "windows")
 }
 
-func pathWithin(path, root string) bool {
-	return pathWithinCase(path, root, runtime.GOOS == "darwin" || runtime.GOOS == "windows")
+// pathCandidates returns deduplicated clean and symlink-resolved forms of cleanAbs.
+// When canonicalFirst is true, the canonical path precedes the lexical clean path.
+func pathCandidates(cleanAbs string, canonicalFirst bool) []string {
+	if cleanAbs == "" {
+		return nil
+	}
+	canon := CanonicalPath(cleanAbs)
+	if canon == "" || canon == cleanAbs {
+		return []string{cleanAbs}
+	}
+	if canonicalFirst {
+		return []string{canon, cleanAbs}
+	}
+	return []string{cleanAbs, canon}
+}
+
+func vaultRootsFor(vaultDir string) []string {
+	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	var roots []string
+	for _, v := range []string{cleanAbsPath(vaultDir), CanonicalPath(vaultDir)} {
+		if v == "" || v == string(filepath.Separator) {
+			continue
+		}
+		dup := false
+		for _, r := range roots {
+			if r == v {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			roots = append(roots, v)
+		}
+	}
+	return roots
+}
+
+func withinAny(p string, roots []string) bool {
+	for _, r := range roots {
+		if PathWithin(p, r) {
+			return true
+		}
+	}
+	return false
+}
+
+func rootContainsAny(root string, dirs []string) bool {
+	for _, d := range dirs {
+		if PathWithin(d, root) {
+			return true
+		}
+	}
+	return false
 }
 
 func pathWithinCase(path, root string, caseInsensitive bool) bool {

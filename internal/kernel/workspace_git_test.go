@@ -31,7 +31,7 @@ func TestGitWorktreeInfoMapping(t *testing.T) {
 			tc.st.Path = path
 			tc.st.UpdatedAt = "2026-11-19T08:00:00Z"
 			info := gitWorktreeInfo(tc.st)
-			root := canonicalCleanDir(path)
+			root := workspace.CanonicalPath(path)
 			if info.Provider != workspace.CoreGitProviderID || info.WorkspaceID != root || info.Root != root || info.WorkDir != root || info.Name != "repo-ledger-fix" || info.Flavor != "git" {
 				t.Fatalf("unexpected identity fields: %+v", info)
 			}
@@ -109,7 +109,7 @@ func TestGitWorktreeProviderLifecycle(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	wtDir := filepath.Join(vaultDir, "worktrees", "repo-ledger-fix")
-	root := canonicalCleanDir(wtDir)
+	root := workspace.CanonicalPath(wtDir)
 	if res.Existed || res.Info.WorkspaceID != root || res.Info.State != workspace.StateClean {
 		t.Fatalf("unexpected create result: %+v", res)
 	}
@@ -236,10 +236,10 @@ func TestAllWorkspaceBindingsSynthesizesGitThenProviderBindings(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("len(bindings) = %d, want 3: %+v", len(got), got)
 	}
-	if got[0].Role != workspace.RolePrimary || got[0].Provider != workspace.CoreGitProviderID || got[0].Key != workspace.CoreGitProviderID+":"+canonicalCleanDir(primary) || got[0].WorkDir != got[0].Root {
+	if got[0].Role != workspace.RolePrimary || got[0].Provider != workspace.CoreGitProviderID || got[0].Key != workspace.CoreGitProviderID+":"+workspace.CanonicalPath(primary) || got[0].WorkDir != got[0].Root {
 		t.Fatalf("unexpected primary git binding: %+v", got[0])
 	}
-	if got[1].Role != workspace.RoleSecondary || got[1].Root != canonicalCleanDir(secondary) {
+	if got[1].Role != workspace.RoleSecondary || got[1].Root != workspace.CanonicalPath(secondary) {
 		t.Fatalf("unexpected secondary git binding: %+v", got[1])
 	}
 	if got[2] != provider {

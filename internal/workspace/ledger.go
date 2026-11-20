@@ -216,11 +216,7 @@ func (l Ledger) findEntryForPath(absPath string) (LedgerEntry, bool) {
 	if clean == "" {
 		return LedgerEntry{}, false
 	}
-	candidates := []string{clean}
-	if canon := CanonicalPath(clean); canon != "" && canon != clean {
-		candidates = append(candidates, canon)
-	}
-	return l.findEntryForCandidates(candidates)
+	return l.findEntryForCandidates(pathCandidates(clean, false))
 }
 
 // findEntryForCandidates performs the pure (no filesystem access) longest-root match for pre-resolved path forms
@@ -242,7 +238,7 @@ func (l Ledger) findEntryForCandidates(candidates []string) (LedgerEntry, bool) 
 				if !filepath.IsAbs(root) || root == string(filepath.Separator) {
 					continue
 				}
-				if pathWithin(p, root) && len(root) > bestLen {
+				if PathWithin(p, root) && len(root) > bestLen {
 					best, bestLen = e, len(root)
 				}
 			}
@@ -260,18 +256,15 @@ func (l Ledger) findEntryForCandidates(candidates []string) (LedgerEntry, bool) 
 func RecordProbeCandidate(vaultDir, path, taskSlug string) error {
 	raw := strings.TrimSpace(path)
 	p := cleanAbsPath(raw)
-	if raw == "" || !filepath.IsAbs(raw) || hasControlOrFormatRune(p) || len(p) > MaxPathLength {
+	if raw == "" || !filepath.IsAbs(raw) || HasControlOrFormatRune(p) || len(p) > MaxPathLength {
 		return fmt.Errorf("workspace ledger: invalid probe candidate path %q", clipForError(path))
 	}
 	slug := strings.TrimSpace(taskSlug)
-	if len(slug) > 128 || hasControlOrFormatRune(slug) {
+	if len(slug) > 128 || HasControlOrFormatRune(slug) {
 		slug = ""
 	}
 	// Resolve symlinks before taking the lock so the update callback stays free of filesystem access.
-	candidates := []string{p}
-	if canon := CanonicalPath(p); canon != "" && canon != p {
-		candidates = append(candidates, canon)
-	}
+	candidates := pathCandidates(p, false)
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 	return UpdateLedger(vaultDir, func(l *Ledger) (bool, error) {
 		if _, covered := l.findEntryForCandidates(candidates); covered {
@@ -366,10 +359,10 @@ func (l Ledger) validate() error {
 			return fmt.Errorf("workspace ledger: entry key %q does not match %q", key, e.Key())
 		}
 		root := e.Root
-		if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) || hasControlOrFormatRune(root) {
+		if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) || HasControlOrFormatRune(root) {
 			return fmt.Errorf("workspace ledger: entry %q has invalid root %q", key, clipForError(root))
 		}
-		if e.WorkDir != "" && (!filepath.IsAbs(e.WorkDir) || filepath.Clean(e.WorkDir) != e.WorkDir || !pathWithin(e.WorkDir, root)) {
+		if e.WorkDir != "" && (!filepath.IsAbs(e.WorkDir) || filepath.Clean(e.WorkDir) != e.WorkDir || !PathWithin(e.WorkDir, root)) {
 			return fmt.Errorf("workspace ledger: entry %q has work_dir outside its root", key)
 		}
 		if e.Ownership != OwnershipOwned && e.Ownership != OwnershipAttached {

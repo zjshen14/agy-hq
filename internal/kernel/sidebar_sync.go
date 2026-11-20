@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // Default timeouts, batching limits, and retry bounds for Antigravity Sidebar Archive Sync (RFC-0016).
@@ -676,20 +678,6 @@ func sidebarBackoffDuration(attempts int) time.Duration {
 	}
 }
 
-func parseSidebarTimestamp(raw string) time.Time {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return time.Time{}
-	}
-	if ts, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return ts
-	}
-	if ts, err := time.Parse(time.RFC3339, s); err == nil {
-		return ts
-	}
-	return time.Time{}
-}
-
 func loadSidebarSyncQueueUnlocked(vaultDir string) SidebarSyncQueue {
 	q := SidebarSyncQueue{
 		Items: make(map[string]SidebarSyncQueueItem),
@@ -724,9 +712,6 @@ func saveSidebarSyncQueueUnlocked(vaultDir string, q SidebarSyncQueue, now time.
 		}
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -735,11 +720,7 @@ func saveSidebarSyncQueueUnlocked(vaultDir string, q SidebarSyncQueue, now time.
 	if err != nil {
 		return err
 	}
-	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return store.WriteAtomic(path, data, 0o644)
 }
 
 // LoadSidebarSyncQueue returns a snapshot of the durable sidebar retry queue.
@@ -766,7 +747,7 @@ func InspectSidebarSyncQueue(vaultDir string) SidebarSyncQueueStatus {
 		if st.LastErrorSample == "" && it.LastError != "" {
 			st.LastErrorSample = it.LastError
 		}
-		if ts := parseSidebarTimestamp(it.EnqueuedAt); !ts.IsZero() && (oldest.IsZero() || ts.Before(oldest)) {
+		if ts := parseFlexibleRFC3339(it.EnqueuedAt); !ts.IsZero() && (oldest.IsZero() || ts.Before(oldest)) {
 			oldest = ts
 			st.OldestEnqueuedAt = it.EnqueuedAt
 		}
@@ -1147,7 +1128,7 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 	queue := loadSidebarSyncQueueUnlocked(vaultDir)
 	queueMutated := false
 	for cid, it := range queue.Items {
-		enqTime := parseSidebarTimestamp(it.EnqueuedAt)
+		enqTime := parseFlexibleRFC3339(it.EnqueuedAt)
 		if it.Attempts >= MaxSidebarSyncAttempts || (!enqTime.IsZero() && now.After(enqTime) && now.Sub(enqTime) > MaxSidebarSyncAge) {
 			if !opts.DryRun {
 				delete(queue.Items, cid)
@@ -1201,7 +1182,7 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 		if it.DesiredArchived && activeInHot[cid] {
 			continue
 		}
-		nextAt := parseSidebarTimestamp(it.NextRetryAt)
+		nextAt := parseFlexibleRFC3339(it.NextRetryAt)
 		if !nextAt.IsZero() && now.Before(nextAt) {
 			continue
 		}

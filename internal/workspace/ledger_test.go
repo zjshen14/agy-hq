@@ -385,7 +385,7 @@ func TestCanonicalPathResolvesExistingAncestor(t *testing.T) {
 	if got := CanonicalPath(""); got != "" {
 		t.Fatalf("CanonicalPath(\"\") = %q", got)
 	}
-	if !pathWithin("/a/b/c", "/a/b") || pathWithin("/a/bc", "/a/b") || !pathWithin("/a/b", "/a/b") || !pathWithin("/x", "/") {
-		t.Fatal("pathWithin segment semantics mismatch")
+	if !PathWithin("/a/b/c", "/a/b") || PathWithin("/a/bc", "/a/b") || !PathWithin("/a/b", "/a/b") || !PathWithin("/x", "/") {
+		t.Fatal("PathWithin segment semantics mismatch")
 	}
 }

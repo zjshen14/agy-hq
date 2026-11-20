@@ -18,6 +18,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml (and optional extension packs).
@@ -613,7 +614,7 @@ func RecordDaemonStart(vaultDir, addr string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	return store.WriteAtomic(p, b, 0o644)
 }
 
 // RecordDaemonStop cleans up local/memory/daemon.json upon daemon shutdown.
@@ -767,25 +768,20 @@ func GetDaemonInfo(vaultDir string) DaemonInfo {
 	if port := os.Getenv("PORT"); port != "" {
 		defaultAddr = "127.0.0.1:" + port
 	}
-	if checkHTTPHealth(defaultAddr, vaultDir) {
-		info.Running = true
-		info.Addr = defaultAddr
-		pid := findDaemonPID(defaultAddr)
-		if pid > 0 {
-			info.PID = pid
-		}
-		populateSupervisorStatus(vaultDir, &info)
-		return info
+	candidates := []string{defaultAddr}
+	if defaultAddr != "127.0.0.1:4747" {
+		candidates = append(candidates, "127.0.0.1:4747")
 	}
-	if defaultAddr != "127.0.0.1:4747" && checkHTTPHealth("127.0.0.1:4747", vaultDir) {
-		info.Running = true
-		info.Addr = "127.0.0.1:4747"
-		pid := findDaemonPID("127.0.0.1:4747")
-		if pid > 0 {
-			info.PID = pid
+	for _, candAddr := range candidates {
+		if checkHTTPHealth(candAddr, vaultDir) {
+			info.Running = true
+			info.Addr = candAddr
+			if pid := findDaemonPID(candAddr); pid > 0 {
+				info.PID = pid
+			}
+			populateSupervisorStatus(vaultDir, &info)
+			return info
 		}
-		populateSupervisorStatus(vaultDir, &info)
-		return info
 	}
 
 	populateSupervisorStatus(vaultDir, &info)

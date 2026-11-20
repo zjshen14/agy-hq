@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -249,6 +250,18 @@ func matchProjectIDForFolder(list []loadedProjectEntry, normWorkspace string) st
 	return fallback
 }
 
+func workspaceMatchesProjectFolders(vaultDir, workspaceDir, normWS string, folders []string, allowWorktreePrimary bool) bool {
+	if slices.Contains(folders, normWS) {
+		return true
+	}
+	if allowWorktreePrimary && IsManagedWorktreeDir(vaultDir, workspaceDir) {
+		if primary := normalizeWorkspaceFolderPath(primaryVaultWorkspaceDir(vaultDir)); primary != "" {
+			return slices.Contains(folders, primary)
+		}
+	}
+	return false
+}
+
 // ValidateProjectMatchesWorkspace checks whether projectID maps to workspaceDir in Antigravity's
 // `<ConfigDir>/projects/*.json` registry. When no registry exists on disk (e.g. hermetic tests),
 // registryAvailable is false and valid defaults to projectID != "".
@@ -256,12 +269,8 @@ func ValidateProjectMatchesWorkspace(vaultDir, projectID, workspaceDir string) (
 	projectID = strings.TrimSpace(projectID)
 	normWS := normalizeWorkspaceFolderPath(workspaceDir)
 	if dir := resolveProjectsRegistryDir(vaultDir); dir != "" && projectID != "" && normWS != "" {
-		if entry, ok := loadSingleAntigravityProject(dir, projectID); ok {
-			for _, f := range entry.folders {
-				if f == normWS {
-					return true, true
-				}
-			}
+		if entry, ok := loadSingleAntigravityProject(dir, projectID); ok && slices.Contains(entry.folders, normWS) {
+			return true, true
 		}
 	}
 	_, byID, avail := loadAntigravityProjects(vaultDir)
@@ -271,16 +280,7 @@ func ValidateProjectMatchesWorkspace(vaultDir, projectID, workspaceDir string) (
 	if projectID == "" || normWS == "" {
 		return false, true
 	}
-	folders, exists := byID[projectID]
-	if !exists {
-		return false, true
-	}
-	for _, f := range folders {
-		if f == normWS {
-			return true, true
-		}
-	}
-	return false, true
+	return slices.Contains(byID[projectID], normWS), true
 }
 
 // ResolveVerifiedWorkspaceProjectID validates candidateProjectID against workspaceDir using `<ConfigDir>/projects/*.json`,
@@ -290,19 +290,8 @@ func ResolveVerifiedWorkspaceProjectID(vaultDir, workspaceDir, candidateProjectI
 	normWS := normalizeWorkspaceFolderPath(workspaceDir)
 	if dir := resolveProjectsRegistryDir(vaultDir); dir != "" && cand != "" && normWS != "" {
 		if entry, ok := loadSingleAntigravityProject(dir, cand); ok {
-			for _, f := range entry.folders {
-				if f == normWS {
-					return cand, true, false
-				}
-			}
-			if IsManagedWorktreeDir(vaultDir, workspaceDir) {
-				if primary := normalizeWorkspaceFolderPath(primaryVaultWorkspaceDir(vaultDir)); primary != "" {
-					for _, f := range entry.folders {
-						if f == primary {
-							return cand, true, false
-						}
-					}
-				}
+			if workspaceMatchesProjectFolders(vaultDir, workspaceDir, normWS, entry.folders, true) {
+				return cand, true, false
 			}
 		}
 	}
@@ -310,33 +299,9 @@ func ResolveVerifiedWorkspaceProjectID(vaultDir, workspaceDir, candidateProjectI
 	if !avail || normWS == "" {
 		return cand, false, false
 	}
-
-	matchesTarget := func(id string) bool {
-		folders, ok := byID[id]
-		if !ok {
-			return false
-		}
-		for _, f := range folders {
-			if f == normWS {
-				return true
-			}
-		}
-		if IsManagedWorktreeDir(vaultDir, workspaceDir) {
-			if primary := normalizeWorkspaceFolderPath(primaryVaultWorkspaceDir(vaultDir)); primary != "" {
-				for _, f := range folders {
-					if f == primary {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-
-	if cand != "" && matchesTarget(cand) {
+	if cand != "" && workspaceMatchesProjectFolders(vaultDir, workspaceDir, normWS, byID[cand], true) {
 		return cand, true, false
 	}
-
 	resolved := matchProjectIDForFolder(list, normWS)
 	if resolved == "" && IsManagedWorktreeDir(vaultDir, workspaceDir) {
 		if primary := normalizeWorkspaceFolderPath(primaryVaultWorkspaceDir(vaultDir)); primary != "" {

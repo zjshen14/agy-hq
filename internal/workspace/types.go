@@ -87,15 +87,20 @@ type Info struct {
 	Base        string      `json:"base,omitempty"` // opaque sync point, display only
 }
 
-// OpenChangeCount returns how many changes in i still hold unlanded work.
-func (i Info) OpenChangeCount() int {
+// CountOpenChanges returns how many changes in changes still hold unlanded work.
+func CountOpenChanges(changes []ChangeRef) int {
 	n := 0
-	for _, c := range i.Changes {
+	for _, c := range changes {
 		if c.State.Open() {
 			n++
 		}
 	}
 	return n
+}
+
+// OpenChangeCount returns how many changes in i still hold unlanded work.
+func (i Info) OpenChangeCount() int {
+	return CountOpenChanges(i.Changes)
 }
 
 // Capabilities declares which optional verbs a provider supports.

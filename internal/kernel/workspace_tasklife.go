@@ -51,7 +51,7 @@ func observationFromInfo(info workspace.Info, tracksChanges bool, err error) wor
 		}
 		return workspaceObservation{TracksChanges: tracksChanges, Err: err}
 	}
-	return workspaceObservation{State: info.State, OpenChanges: openWorkspaceChanges(info.Changes), TracksChanges: tracksChanges}
+	return workspaceObservation{State: info.State, OpenChanges: workspace.CountOpenChanges(info.Changes), TracksChanges: tracksChanges}
 }
 
 func dedupeBindings(bs []workspace.Binding) []workspace.Binding {
@@ -153,7 +153,7 @@ func planTaskWorkspaceArchive(vaultDir, target string, t ActiveTask, force bool,
 			}
 			obs = observationFromInfo(info, tracksChanges, stErr)
 		} else {
-			obs = workspaceObservation{State: e.Status.State, OpenChanges: openWorkspaceChanges(e.Status.Changes)}
+			obs = workspaceObservation{State: e.Status.State, OpenChanges: workspace.CountOpenChanges(e.Status.Changes)}
 		}
 		step, dErr := decideWorkspaceArchive(target, e, sole, checkDirty, force, obs)
 		if dErr != nil {
@@ -380,7 +380,7 @@ func (wc *workspaceCompaction) release(t ActiveTask) []string {
 		if usable && sole && e.Status.State == workspace.StateMissing {
 			step.Action = wsArchiveForget
 		} else if removable && usable {
-			open := openWorkspaceChanges(e.Status.Changes)
+			open := workspace.CountOpenChanges(e.Status.Changes)
 			switch {
 			case open > 0:
 				step.Action = wsArchiveKeepOrphan

@@ -250,7 +250,7 @@ func (p gitWorktreeProvider) Remove(ctx context.Context, req workspace.RemoveReq
 	if err != nil {
 		return err
 	}
-	if exp := strings.TrimSpace(req.ExpectedRoot); exp != "" && canonicalCleanDir(exp) != canonicalCleanDir(dir) {
+	if exp := strings.TrimSpace(req.ExpectedRoot); exp != "" && workspace.CanonicalPath(exp) != workspace.CanonicalPath(dir) {
 		return &workspace.ProviderError{Code: workspace.CodeConflict, Message: fmt.Sprintf("expected_root %q does not match worktree %q", exp, dir)}
 	}
 	if st, sErr := os.Stat(dir); sErr != nil || !st.IsDir() {
@@ -290,7 +290,7 @@ func inspectManagedWorktree(vaultDir, wtPath string) ManagedWorktreeStatus {
 }
 
 func newGitWorktreeInfo(dir, name string) workspace.Info {
-	root := canonicalCleanDir(dir)
+	root := workspace.CanonicalPath(dir)
 	return workspace.Info{
 		Provider:    workspace.CoreGitProviderID,
 		WorkspaceID: root,

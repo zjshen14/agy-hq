@@ -75,10 +75,6 @@ func RemoveUnboundTaskBySlug(vaultDir, slug string) {
 	})
 }
 
-func removeTaskBySlug(vaultDir, slug string) {
-	RemoveUnboundTaskBySlug(vaultDir, slug)
-}
-
 func isQuotaDeferralMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "quota") ||
@@ -316,7 +312,7 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, effectiveModel, dryRun)
 		if spawnErr != nil {
 			if !dryRun && !hadPrev && head.Source != "channel_inbound" {
-				removeTaskBySlug(vaultDir, autoSlug)
+				RemoveUnboundTaskBySlug(vaultDir, autoSlug)
 			}
 			if !dryRun {
 				if failedConvID := ExtractUUID(out); failedConvID != "" && (!hadPrev || prevTask.ConversationID != failedConvID) {

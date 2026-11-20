@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
 const (
@@ -15,28 +17,9 @@ const (
 	DefaultOrphanWorktreeMinAge = 1 * time.Hour
 )
 
-func canonicalCleanDir(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	p = filepath.Clean(p)
-	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != "" {
-		return filepath.Clean(resolved)
-	}
-	parent := filepath.Dir(p)
-	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil && resolvedParent != "" {
-		return filepath.Clean(filepath.Join(resolvedParent, filepath.Base(p)))
-	}
-	return p
-}
-
 func sameCleanPath(a, b string) bool {
-	ca := canonicalCleanDir(a)
-	cb := canonicalCleanDir(b)
+	ca := workspace.CanonicalPath(a)
+	cb := workspace.CanonicalPath(b)
 	return ca != "" && ca == cb
 }
 
@@ -47,8 +30,8 @@ func IsManagedWorktreeDir(vaultDir, dir string) bool {
 	if strings.TrimSpace(vaultDir) == "" || strings.TrimSpace(dir) == "" {
 		return false
 	}
-	wtRoot := canonicalCleanDir(filepath.Join(vaultDir, "worktrees"))
-	cleanDir := canonicalCleanDir(dir)
+	wtRoot := workspace.CanonicalPath(filepath.Join(vaultDir, "worktrees"))
+	cleanDir := workspace.CanonicalPath(dir)
 	if wtRoot == "" || cleanDir == "" || cleanDir == wtRoot {
 		return false
 	}
@@ -206,31 +189,7 @@ func AttachWorktreeToTaskWithOptions(vaultDir, targetTaskOrConvID, wtDir, repoRo
 		if len(tasks) == 0 {
 			return tasks, false, nil
 		}
-		walkCur := cur
-		matchedIdx := -1
-		visited := make(map[string]bool)
-		for hop := 0; hop < 8 && walkCur != ""; hop++ {
-			if visited[walkCur] || (deskConv != "" && walkCur == deskConv) {
-				break
-			}
-			visited[walkCur] = true
-			for i := range tasks {
-				if tasks[i].TaskSlug == walkCur || (tasks[i].ConversationID != "" && tasks[i].ConversationID == walkCur) {
-					matchedIdx = i
-					break
-				}
-			}
-			if matchedIdx >= 0 {
-				break
-			}
-			if nestedMap != nil {
-				if nc, ok := nestedMap[walkCur]; ok && strings.TrimSpace(nc.ParentConversationID) != "" {
-					walkCur = strings.TrimSpace(nc.ParentConversationID)
-					continue
-				}
-			}
-			break
-		}
+		matchedIdx := findOwningTaskIndex(tasks, nestedMap, deskConv, cur)
 		if matchedIdx < 0 {
 			return tasks, false, nil
 		}

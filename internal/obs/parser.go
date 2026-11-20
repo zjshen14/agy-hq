@@ -435,6 +435,55 @@ func isStepError(status, content string, lastPlannerHadTools, lastPlannerHadRunC
 	return false
 }
 
+func accumulateLLMLatency(llmLatencyMs *int64, stTime, lastStepTime time.Time) {
+	if !stTime.IsZero() && !lastStepTime.IsZero() && stTime.After(lastStepTime) {
+		deltaMs := stTime.Sub(lastStepTime).Milliseconds()
+		if deltaMs > 0 && deltaMs <= 180_000 {
+			*llmLatencyMs += deltaMs
+		}
+	} else {
+		*llmLatencyMs += 250
+	}
+}
+
+func accumulateToolTiming(humanWaitMs, toolLatencyMs *int64, content string, stTime, lastStepTime time.Time, hadAskQuestion bool) time.Time {
+	if tStart, tEnd, ok := parseToolResultTiming(content); ok {
+		durMs := tEnd.Sub(tStart).Milliseconds()
+		if durMs < 0 {
+			durMs = 0
+		}
+		if hadAskQuestion {
+			*humanWaitMs += durMs
+		} else {
+			*toolLatencyMs += durMs
+		}
+		return tEnd
+	}
+	if !stTime.IsZero() {
+		return stTime
+	}
+	return lastStepTime
+}
+
+func appendExpandedSpawnEdges(cm *ConversationMetrics, recorded map[string]bool, transcriptPath, convID, content string, matched pendingSpawnCall) {
+	expanded := expandStepContentWithSiblingOutput(transcriptPath, content)
+	for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
+		if recorded[childID] {
+			continue
+		}
+		recorded[childID] = true
+		cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
+			StepIndex:            matched.stepIdx,
+			ChildConversationID:  childID,
+			ParentConversationID: convID,
+			Role:                 matched.role,
+			TypeName:             matched.typeName,
+			PromptPrefix:         matched.prompt,
+			CreatedAt:            matched.createdAt,
+		})
+	}
+}
+
 // ParseTranscriptFile parses an Antigravity transcript.jsonl file into ConversationMetrics,
 // extracting per-turn token metrics, 3-part latency, context watermarks, compaction checkpoints,
 // and ground-truth invoke_subagent spawn edges.
@@ -618,14 +667,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 
 			curTurn.PlannerSteps++
 			// Estimate LLM generation time from previous step timestamp inside the turn
-			if !stTime.IsZero() && !lastStepTime.IsZero() && stTime.After(lastStepTime) {
-				deltaMs := stTime.Sub(lastStepTime).Milliseconds()
-				if deltaMs > 0 && deltaMs <= 180_000 {
-					curTurn.LLMLatencyMs += deltaMs
-				}
-			} else {
-				curTurn.LLMLatencyMs += 250
-			}
+			accumulateLLMLatency(&curTurn.LLMLatencyMs, stTime, lastStepTime)
 
 			lastPlannerHadTools = len(st.ToolCalls) > 0
 			lastPlannerHadRunCmd = false
@@ -685,20 +727,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 
 		if st.Type == "GENERIC" {
 			// Check for tool execution duration
-			if tStart, tEnd, ok := parseToolResultTiming(st.Content); ok {
-				durMs := tEnd.Sub(tStart).Milliseconds()
-				if durMs < 0 {
-					durMs = 0
-				}
-				if lastPlannerHadAskQuestion {
-					curTurn.HumanWaitMs += durMs
-				} else {
-					curTurn.ToolLatencyMs += durMs
-				}
-				lastStepTime = tEnd
-			} else if !stTime.IsZero() {
-				lastStepTime = stTime
-			}
+			lastStepTime = accumulateToolTiming(&curTurn.HumanWaitMs, &curTurn.ToolLatencyMs, st.Content, stTime, lastStepTime, lastPlannerHadAskQuestion)
 
 			// Check for ground-truth invoke_subagent result ("Created the following subagent:\n{\n  \"conversationId\": \"...\"")
 			if strings.Contains(st.Content, "Created the following subagent") {
@@ -740,41 +769,11 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 				if len(pendingWorkflowCalls) > 0 && (strings.Contains(st.Content, "Workflow ") || reFlexibleConvID.MatchString(st.Content) || reStepOutputRef.MatchString(st.Content)) {
 					matched := pendingWorkflowCalls[0]
 					pendingWorkflowCalls = pendingWorkflowCalls[1:]
-					expanded := expandStepContentWithSiblingOutput(transcriptPath, st.Content)
-					for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
-						if recordedEdgeChildren[childID] {
-							continue
-						}
-						recordedEdgeChildren[childID] = true
-						cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
-							StepIndex:            matched.stepIdx,
-							ChildConversationID:  childID,
-							ParentConversationID: convID,
-							Role:                 matched.role,
-							TypeName:             "run_workflow",
-							PromptPrefix:         matched.prompt,
-							CreatedAt:            matched.createdAt,
-						})
-					}
+					appendExpandedSpawnEdges(&cm, recordedEdgeChildren, transcriptPath, convID, st.Content, matched)
 				} else if len(pendingAgentAPICalls) > 0 && (reFlexibleConvID.MatchString(st.Content) || reStepOutputRef.MatchString(st.Content) || strings.Contains(st.Content, "Command exited")) {
 					matched := pendingAgentAPICalls[0]
 					pendingAgentAPICalls = pendingAgentAPICalls[1:]
-					expanded := expandStepContentWithSiblingOutput(transcriptPath, st.Content)
-					for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
-						if recordedEdgeChildren[childID] {
-							continue
-						}
-						recordedEdgeChildren[childID] = true
-						cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
-							StepIndex:            matched.stepIdx,
-							ChildConversationID:  childID,
-							ParentConversationID: convID,
-							Role:                 matched.role,
-							TypeName:             "agentapi",
-							PromptPrefix:         matched.prompt,
-							CreatedAt:            matched.createdAt,
-						})
-					}
+					appendExpandedSpawnEdges(&cm, recordedEdgeChildren, transcriptPath, convID, st.Content, matched)
 				}
 			}
 		} else if !stTime.IsZero() {
@@ -813,22 +812,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 				}
 			}
 			if matched != nil {
-				expanded := expandStepContentWithSiblingOutput(transcriptPath, st.Content)
-				for _, childID := range extractDistinctChildConvIDs(convID, expanded) {
-					if recordedEdgeChildren[childID] {
-						continue
-					}
-					recordedEdgeChildren[childID] = true
-					cm.SpawnEdges = append(cm.SpawnEdges, SubagentSpawnEdge{
-						StepIndex:            matched.stepIdx,
-						ChildConversationID:  childID,
-						ParentConversationID: convID,
-						Role:                 matched.role,
-						TypeName:             matched.typeName,
-						PromptPrefix:         matched.prompt,
-						CreatedAt:            matched.createdAt,
-					})
-				}
+				appendExpandedSpawnEdges(&cm, recordedEdgeChildren, transcriptPath, convID, st.Content, *matched)
 			}
 		}
 
@@ -908,14 +892,7 @@ func (s *TurnSliceScanner) ObserveLine(raw []byte) {
 	}
 	if st.Type == "PLANNER_RESPONSE" {
 		s.tm.PlannerSteps++
-		if !stTime.IsZero() && !s.lastStepTime.IsZero() && stTime.After(s.lastStepTime) {
-			deltaMs := stTime.Sub(s.lastStepTime).Milliseconds()
-			if deltaMs > 0 && deltaMs <= 180_000 {
-				s.tm.LLMLatencyMs += deltaMs
-			}
-		} else {
-			s.tm.LLMLatencyMs += 250
-		}
+		accumulateLLMLatency(&s.tm.LLMLatencyMs, stTime, s.lastStepTime)
 		s.lastPlannerHadAskQuestion = false
 		for _, tc := range st.ToolCalls {
 			if tc.Name == "ask_question" {
@@ -924,20 +901,7 @@ func (s *TurnSliceScanner) ObserveLine(raw []byte) {
 		}
 	}
 	if st.Type == "GENERIC" {
-		if tStart, tEnd, ok := parseToolResultTiming(st.Content); ok {
-			durMs := tEnd.Sub(tStart).Milliseconds()
-			if durMs < 0 {
-				durMs = 0
-			}
-			if s.lastPlannerHadAskQuestion {
-				s.tm.HumanWaitMs += durMs
-			} else {
-				s.tm.ToolLatencyMs += durMs
-			}
-			s.lastStepTime = tEnd
-		} else if !stTime.IsZero() {
-			s.lastStepTime = stTime
-		}
+		s.lastStepTime = accumulateToolTiming(&s.tm.HumanWaitMs, &s.tm.ToolLatencyMs, st.Content, stTime, s.lastStepTime, s.lastPlannerHadAskQuestion)
 	} else if !stTime.IsZero() {
 		s.lastStepTime = stTime
 	}

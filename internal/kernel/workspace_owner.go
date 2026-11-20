@@ -8,6 +8,34 @@ import (
 // maxOwnerWalkHops bounds the nested-subagent parent walk (the same bound AttachWorktreeToTaskWithOptions uses).
 const maxOwnerWalkHops = 8
 
+func findOwningTaskIndex(tasks []ActiveTask, nestedMap map[string]NestedConversation, deskConv, cur string) int {
+	walkCur := cur
+	visited := make(map[string]bool)
+	for hop := 0; hop < maxOwnerWalkHops && walkCur != ""; hop++ {
+		if visited[walkCur] || (deskConv != "" && walkCur == deskConv) {
+			return -1
+		}
+		visited[walkCur] = true
+		for i := range tasks {
+			if tasks[i].TaskSlug == walkCur || (tasks[i].ConversationID != "" && tasks[i].ConversationID == walkCur) {
+				if deskConv != "" && strings.TrimSpace(tasks[i].ConversationID) == deskConv {
+					return -1
+				}
+				return i
+			}
+		}
+		if nestedMap == nil {
+			return -1
+		}
+		nc, ok := nestedMap[walkCur]
+		if !ok || strings.TrimSpace(nc.ParentConversationID) == "" {
+			return -1
+		}
+		walkCur = strings.TrimSpace(nc.ParentConversationID)
+	}
+	return -1
+}
+
 // ResolveOwningTask returns the Layer-1 Task Board entry that owns convOrTaskID:
 // a direct TaskSlug/ConversationID match, else walk nested-subagent parent links
 // (<= 8 hops, cycle-safe), never returning or walking through the Front Desk conversation.
@@ -33,27 +61,9 @@ func ResolveOwningTask(vaultDir, convOrTaskID string) (ActiveTask, bool) {
 	if fd, ok := GetFrontDesk(vaultDir); ok {
 		deskConv = strings.TrimSpace(fd.ConversationID)
 	}
-
-	walkCur := cur
-	visited := make(map[string]bool)
-	for hop := 0; hop < maxOwnerWalkHops && walkCur != ""; hop++ {
-		if visited[walkCur] || (deskConv != "" && walkCur == deskConv) {
-			return ActiveTask{}, false
-		}
-		visited[walkCur] = true
-		for i := range tasks {
-			if tasks[i].TaskSlug == walkCur || (tasks[i].ConversationID != "" && tasks[i].ConversationID == walkCur) {
-				if deskConv != "" && strings.TrimSpace(tasks[i].ConversationID) == deskConv {
-					return ActiveTask{}, false
-				}
-				return tasks[i], true
-			}
-		}
-		nc, ok := nestedMap[walkCur]
-		if !ok || strings.TrimSpace(nc.ParentConversationID) == "" {
-			return ActiveTask{}, false
-		}
-		walkCur = strings.TrimSpace(nc.ParentConversationID)
+	idx := findOwningTaskIndex(tasks, nestedMap, deskConv, cur)
+	if idx < 0 {
+		return ActiveTask{}, false
 	}
-	return ActiveTask{}, false
+	return tasks[idx], true
 }

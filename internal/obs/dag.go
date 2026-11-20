@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -8,28 +9,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 )
 
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func rollupsApproxEqual(a, b TokenRollup) bool {
-	const eps = 1e-6
-	diffQ := a.QuotaUnits - b.QuotaUnits
-	if diffQ < 0 {
-		diffQ = -diffQ
-	}
-	diffC := a.EstCostUSD - b.EstCostUSD
-	if diffC < 0 {
-		diffC = -diffC
-	}
 	return a.TurnCount == b.TurnCount &&
 		a.StepCount == b.StepCount &&
 		a.PlannerSteps == b.PlannerSteps &&
@@ -42,8 +22,8 @@ func rollupsApproxEqual(a, b TokenRollup) bool {
 		a.CompactionCount == b.CompactionCount &&
 		a.ActiveLatencyMs == b.ActiveLatencyMs &&
 		a.HumanWaitMs == b.HumanWaitMs &&
-		diffQ <= eps &&
-		diffC <= eps
+		floatApproxEqual(a.QuotaUnits, b.QuotaUnits) &&
+		floatApproxEqual(a.EstCostUSD, b.EstCostUSD)
 }
 
 func floatApproxEqual(a, b float64) bool {
@@ -52,6 +32,46 @@ func floatApproxEqual(a, b float64) bool {
 		d = -d
 	}
 	return d <= 1e-6
+}
+
+func collectKnownFrontDeskIDs(vaultDir string, idx *ObsIndex, taskByConv map[string]kernel.ActiveTask) map[string]bool {
+	knownFDs := kernel.GetKnownFrontDeskIDSet(vaultDir)
+	for parentID, cm := range idx.Conversations {
+		if cm.TaskSlug != "" && strings.HasPrefix(cm.TaskSlug, "headquarter-front-desk-") {
+			knownFDs[strings.ToLower(strings.TrimSpace(parentID))] = true
+		}
+	}
+	for _, t := range taskByConv {
+		if strings.HasPrefix(t.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(t.ConversationID) != "" {
+			knownFDs[strings.ToLower(strings.TrimSpace(t.ConversationID))] = true
+		}
+	}
+	return knownFDs
+}
+
+func collectWinningSpawnEdges(idx *ObsIndex) (parentIDs []string, edgeByChild map[string]SubagentSpawnEdge) {
+	parentIDs = make([]string, 0, len(idx.Conversations))
+	for pid := range idx.Conversations {
+		parentIDs = append(parentIDs, pid)
+	}
+	sort.Strings(parentIDs)
+	edgeByChild = make(map[string]SubagentSpawnEdge)
+	for _, parentID := range parentIDs {
+		cm := idx.Conversations[parentID]
+		normParent := strings.ToLower(strings.TrimSpace(parentID))
+		for _, edge := range cm.SpawnEdges {
+			cID := strings.ToLower(strings.TrimSpace(edge.ChildConversationID))
+			if cID == "" || cID == normParent {
+				continue
+			}
+			cand := edge
+			cand.ParentConversationID = normParent
+			if prev, exists := edgeByChild[cID]; !exists || preferSpawnEdge(cand, prev) {
+				edgeByChild[cID] = cand
+			}
+		}
+	}
+	return parentIDs, edgeByChild
 }
 
 func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
@@ -86,7 +106,6 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	}
 
 	// 1. Collect ground-truth spawn edges from all transcripts
-	edgeByChild := make(map[string]SubagentSpawnEdge)
 	childrenByParent := make(map[string][]string)
 	childSeen := make(map[string]map[string]bool)
 
@@ -105,39 +124,8 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 		}
 	}
 
-	knownFDs := kernel.GetKnownFrontDeskIDSet(vaultDir)
-	for parentID, cm := range idx.Conversations {
-		if cm.TaskSlug != "" && strings.HasPrefix(cm.TaskSlug, "headquarter-front-desk-") {
-			knownFDs[strings.ToLower(strings.TrimSpace(parentID))] = true
-		}
-	}
-	for _, t := range taskByConv {
-		if strings.HasPrefix(t.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(t.ConversationID) != "" {
-			knownFDs[strings.ToLower(strings.TrimSpace(t.ConversationID))] = true
-		}
-	}
-
-	parentIDs := make([]string, 0, len(idx.Conversations))
-	for pid := range idx.Conversations {
-		parentIDs = append(parentIDs, pid)
-	}
-	sort.Strings(parentIDs)
-
-	for _, parentID := range parentIDs {
-		cm := idx.Conversations[parentID]
-		for _, edge := range cm.SpawnEdges {
-			cID := strings.ToLower(strings.TrimSpace(edge.ChildConversationID))
-			if cID == "" || cID == parentID {
-				continue
-			}
-			cand := edge
-			cand.ParentConversationID = parentID
-			prev, exists := edgeByChild[cID]
-			if !exists || preferSpawnEdge(cand, prev) {
-				edgeByChild[cID] = cand
-			}
-		}
-	}
+	knownFDs := collectKnownFrontDeskIDs(vaultDir, idx, taskByConv)
+	parentIDs, edgeByChild := collectWinningSpawnEdges(idx)
 
 	// 2. Enrich each conversation's metadata (Ground-truth SpawnEdge > tasks.json > transcript fallback)
 	for _, cid := range parentIDs {
@@ -236,10 +224,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			if len(cm.Turns) > 0 {
 				preview = cm.Turns[0].PromptPreview
 			}
-			shortID := cid
-			if len(shortID) > 8 {
-				shortID = shortID[:8]
-			}
+			shortID := shortConvID(cid)
 			if preview != "" {
 				cm.Title = kernel.SanitizeTaskTitle(preview, "conv-"+shortID)
 			} else {
@@ -293,7 +278,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	for cid, cm := range idx.Conversations {
 		kids := childrenByParent[cid]
 		sort.Strings(kids)
-		if !stringSlicesEqual(cm.ChildConversationIDs, kids) {
+		if !slices.Equal(cm.ChildConversationIDs, kids) {
 			changed = true
 		}
 		cm.ChildConversationIDs = kids
@@ -395,7 +380,7 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 		return 0, err
 	}
 
-	knownFDs := kernel.GetKnownFrontDeskIDSet(vaultDir)
+	knownFDs := collectKnownFrontDeskIDs(vaultDir, idx, nil)
 	if archived, _, aErr := kernel.ListArchivedTasks(vaultDir, 0); aErr == nil {
 		for _, at := range archived {
 			if strings.HasPrefix(at.TaskSlug, "headquarter-front-desk-") && strings.TrimSpace(at.ConversationID) != "" {
@@ -404,16 +389,10 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 		}
 	}
 
-	parentIDs := make([]string, 0, len(idx.Conversations))
-	for rawParentID, cm := range idx.Conversations {
-		parentIDs = append(parentIDs, rawParentID)
-		if strings.HasPrefix(cm.TaskSlug, "headquarter-front-desk-") {
-			knownFDs[strings.ToLower(strings.TrimSpace(rawParentID))] = true
-		}
+	parentIDs, edgeByChild := collectWinningSpawnEdges(idx)
+	if len(edgeByChild) == 0 {
+		return 0, nil
 	}
-	sort.Strings(parentIDs)
-
-	edgeByChild := make(map[string]SubagentSpawnEdge)
 	parentOf := make(map[string]string)
 
 	// Pass 1: seed from persisted ParentConversationID in deterministic sorted order.
@@ -427,25 +406,9 @@ func ReconcileSubagentAttribution(vaultDir string) (int, error) {
 			}
 		}
 	}
-	// Pass 2: collect winning ground-truth SpawnEdges in priority + sorted order, overriding stale parentOf.
-	for _, rawParentID := range parentIDs {
-		cm := idx.Conversations[rawParentID]
-		parentID := strings.ToLower(strings.TrimSpace(rawParentID))
-		for _, edge := range cm.SpawnEdges {
-			cID := strings.ToLower(strings.TrimSpace(edge.ChildConversationID))
-			if cID == "" || cID == parentID {
-				continue
-			}
-			cand := edge
-			cand.ParentConversationID = parentID
-			if prev, exists := edgeByChild[cID]; !exists || preferSpawnEdge(cand, prev) {
-				edgeByChild[cID] = cand
-				parentOf[cID] = parentID
-			}
-		}
-	}
-	if len(edgeByChild) == 0 {
-		return 0, nil
+	// Pass 2: override stale parentOf with winning ground-truth SpawnEdges.
+	for cID, edge := range edgeByChild {
+		parentOf[cID] = edge.ParentConversationID
 	}
 
 	hasNonFrontDeskAncestor := func(cid, immediateParent string) bool {

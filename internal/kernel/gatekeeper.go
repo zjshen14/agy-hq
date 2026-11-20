@@ -83,7 +83,7 @@ func resolveScheduleModel(vaultDir string, s ScheduleTrigger) string {
 	}).ModelID
 }
 
-func resolveScheduleDispatch(vaultDir string, s ScheduleTrigger) (modelID, effectiveSkill, prompt string) {
+func resolveScheduleDispatch(vaultDir string, s ScheduleTrigger, precheckDigest string) (modelID, effectiveSkill, prompt string) {
 	modelID = resolveScheduleModel(vaultDir, s)
 	effectiveSkill = s.Skill
 	prompt = s.DefaultPrompt()
@@ -96,6 +96,9 @@ func resolveScheduleDispatch(vaultDir string, s ScheduleTrigger) (modelID, effec
 				prompt += fmt.Sprintf("\n\nCompanion Skill Override: Activate %s (%s) at %s.", effectiveSkill, disp.ActiveTarget, disp.SkillPath)
 			}
 		}
+	}
+	if precheckDigest != "" {
+		prompt += fmt.Sprintf("\n\nGatekeeper Delta Output:\n%s", precheckDigest)
 	}
 	if deliv := s.EffectiveDelivery(); deliv != "" {
 		prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
@@ -297,7 +300,7 @@ func FireScheduleOnce(vaultDir, targetID string, bypassPrecheck bool, dryRun boo
 				if now.IsZero() {
 					now = time.Now()
 				}
-				modelID, effSkill, prompt := resolveScheduleDispatch(vaultDir, s)
+				modelID, effSkill, prompt := resolveScheduleDispatch(vaultDir, s, "")
 				title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, effSkill)
 				slotKey := now.UTC().Format("2006-01-02T15:04:05Z")
 				_, _, enqErr := events.Enqueue(vaultDir, events.Event{
@@ -461,48 +464,40 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 
 			var outBytes []byte
 			var cmdErr error
+			timeout := 15 * time.Second
+			if s.PrecheckTimeoutMs > 0 {
+				timeout = time.Duration(s.PrecheckTimeoutMs) * time.Millisecond
+			}
 			if binResolveErr != nil {
 				cmdErr = binResolveErr
-			} else if isSelfHQ {
-				if watchOpts, ok := parseSelfWatchPrecheckArgs(s.PrecheckCmd[1:]); ok {
-					if dryRun {
-						outBytes = []byte("{\"enqueued_total\":0}\n")
-					} else {
-						timeout := 15 * time.Second
-						if s.PrecheckTimeoutMs > 0 {
-							timeout = time.Duration(s.PrecheckTimeoutMs) * time.Millisecond
-						}
-						ctx, cancel := context.WithTimeout(context.Background(), timeout)
-						watchOpts.Now = now
-						sum, pErr := watcher.RunPrecheck(ctx, vaultDir, watchOpts)
-						cancel()
-						cmdErr = pErr
-						if pErr == nil {
-							outBytes, _ = json.Marshal(sum)
-						}
-					}
-				} else {
-					timeout := 15 * time.Second
-					if s.PrecheckTimeoutMs > 0 {
-						timeout = time.Duration(s.PrecheckTimeoutMs) * time.Millisecond
-					}
-					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					cmd := exec.CommandContext(ctx, bin0, s.PrecheckCmd[1:]...)
-					cmd.Dir = rootDir
-					env := append(sanitizedGitCmd().Env, "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
-					cmd.Env = env
-					outBytes, cmdErr = cmd.CombinedOutput()
-					cancel()
+			} else if isSelfHQ && func() bool {
+				watchOpts, ok := parseSelfWatchPrecheckArgs(s.PrecheckCmd[1:])
+				if !ok {
+					return false
 				}
+				if dryRun {
+					outBytes = []byte("{\"enqueued_total\":0}\n")
+					return true
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				watchOpts.Now = now
+				sum, pErr := watcher.RunPrecheck(ctx, vaultDir, watchOpts)
+				cancel()
+				cmdErr = pErr
+				if pErr == nil {
+					outBytes, _ = json.Marshal(sum)
+				}
+				return true
+			}() {
+				// handled in-process via watcher.RunPrecheck
 			} else {
-				timeout := 15 * time.Second
-				if s.PrecheckTimeoutMs > 0 {
-					timeout = time.Duration(s.PrecheckTimeoutMs) * time.Millisecond
-				}
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				cmd := exec.CommandContext(ctx, bin0, s.PrecheckCmd[1:]...)
 				cmd.Dir = rootDir
-				env := scrubExternalPrecheckEnv(append(sanitizedGitCmd().Env, "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir))
+				env := append(sanitizedGitCmd().Env, "HQ_ROOT_DIR="+rootDir, "HQ_VAULT_DIR="+vaultDir)
+				if isExternalPrecheck {
+					env = scrubExternalPrecheckEnv(env)
+				}
 				cmd.Env = env
 				outBytes, cmdErr = cmd.CombinedOutput()
 				cancel()
@@ -514,9 +509,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				if trimmedOut != "" {
 					errMsg = errMsg + ": " + trimmedOut
 				}
-				if runes := []rune(errMsg); len(runes) > 240 {
-					errMsg = string(runes[:240]) + "..."
-				}
+				errMsg = truncateRunes(errMsg, 240)
 				skillName := s.Skill
 				if skillName == "" {
 					skillName = s.ID
@@ -600,11 +593,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				})
 				continue
 			}
-			if runes := []rune(trimmedOut); len(runes) > 300 {
-				precheckDigest = string(runes[:300]) + "..."
-			} else {
-				precheckDigest = trimmedOut
-			}
+			precheckDigest = truncateRunes(trimmedOut, 300)
 		} else {
 			shouldSpawn = true
 		}
@@ -629,19 +618,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				}
 			}
 
-			modelID, effSkill, prompt := resolveScheduleDispatch(vaultDir, s)
-			if precheckDigest != "" {
-				prompt = s.DefaultPrompt()
-				if strings.TrimSpace(s.Skill) != "" {
-					if disp := extension.ResolveSkillDispatch(vaultDir, s.Skill); disp.Overridden && disp.Trust == "ok" && strings.TrimSpace(disp.SkillPath) != "" {
-						prompt += fmt.Sprintf("\n\nCompanion Skill Override: Activate %s (%s) at %s.", effSkill, disp.ActiveTarget, disp.SkillPath)
-					}
-				}
-				prompt += fmt.Sprintf("\n\nGatekeeper Delta Output:\n%s", precheckDigest)
-				if deliv := s.EffectiveDelivery(); deliv != "" {
-					prompt += fmt.Sprintf("\n\nDelivery Policy: %s (route non-critical findings via `hq outbox add --tier=%s` rather than interrupting unnecessarily).", deliv, deliv)
-				}
-			}
+			modelID, effSkill, prompt := resolveScheduleDispatch(vaultDir, s, precheckDigest)
 			title := fmt.Sprintf("[Auto] %s (/%s)", s.ID, effSkill)
 			dedupKey := fmt.Sprintf("gatekeeper:%s:%s:%s", s.ID, slotKey, shaHex)
 			schedTickVal := "0"

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -204,7 +205,7 @@ func drainWorkspaceProbeCandidates(ctx context.Context, vaultDir string, now tim
 					return false, nil
 				}
 				changed := false
-				if !containsString(e.BoundTasks, slug) {
+				if !slices.Contains(e.BoundTasks, slug) {
 					e.BoundTasks = addUniqueSorted(e.BoundTasks, slug)
 					changed = true
 				}

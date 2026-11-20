@@ -509,6 +509,40 @@ type transcriptCandidate struct {
 	modelHint      string
 }
 
+func resolveTranscriptInDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	for _, p := range []string{
+		filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl"),
+		filepath.Join(dir, "transcript.jsonl"),
+	} {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+func mergeJournalCandidate(byConv map[string]transcriptCandidate, convID, transcriptPath, modelHint string, preferExistingModel bool) {
+	if convID == "" {
+		return
+	}
+	cand := byConv[convID]
+	cand.convID = convID
+	if modelHint != "" && (!preferExistingModel || cand.modelHint == "") {
+		cand.modelHint = modelHint
+	}
+	if cand.transcriptPath == "" && transcriptPath != "" {
+		if info, err := os.Stat(transcriptPath); err == nil && !info.IsDir() {
+			cand.transcriptPath = transcriptPath
+		}
+	}
+	if cand.transcriptPath != "" {
+		byConv[convID] = cand
+	}
+}
+
 func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalDateCacheEntry) []transcriptCandidate {
 	byConv := make(map[string]transcriptCandidate)
 
@@ -521,12 +555,8 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 					continue
 				}
 				cid := strings.ToLower(strings.TrimSpace(e.Name()))
-				p1 := filepath.Join(brainDir, e.Name(), ".system_generated", "logs", "transcript.jsonl")
-				p2 := filepath.Join(brainDir, e.Name(), "transcript.jsonl")
-				if info, err := os.Stat(p1); err == nil && !info.IsDir() {
-					byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: p1}
-				} else if info, err := os.Stat(p2); err == nil && !info.IsDir() {
-					byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: p2}
+				if tp := resolveTranscriptInDir(filepath.Join(brainDir, e.Name())); tp != "" {
+					byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: tp}
 				}
 			}
 		}
@@ -535,13 +565,9 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 	// 2. Scan front_desk.json artifactDir
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID != "" && fd.ArtifactDir != "" {
 		cid := strings.ToLower(strings.TrimSpace(fd.ConversationID))
-		p1 := filepath.Join(fd.ArtifactDir, ".system_generated", "logs", "transcript.jsonl")
-		p2 := filepath.Join(fd.ArtifactDir, "transcript.jsonl")
 		if _, exists := byConv[cid]; !exists {
-			if info, err := os.Stat(p1); err == nil && !info.IsDir() {
-				byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: p1}
-			} else if info, err := os.Stat(p2); err == nil && !info.IsDir() {
-				byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: p2}
+			if tp := resolveTranscriptInDir(fd.ArtifactDir); tp != "" {
+				byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: tp}
 			}
 		}
 	}
@@ -599,19 +625,7 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 				}
 			}
 			for _, h := range dateHints {
-				cand := byConv[h.convID]
-				cand.convID = h.convID
-				if h.modelHint != "" {
-					cand.modelHint = h.modelHint
-				}
-				if cand.transcriptPath == "" && h.transcriptPath != "" {
-					if info, sErr := os.Stat(h.transcriptPath); sErr == nil && !info.IsDir() {
-						cand.transcriptPath = h.transcriptPath
-					}
-				}
-				if cand.transcriptPath != "" {
-					byConv[h.convID] = cand
-				}
+				mergeJournalCandidate(byConv, h.convID, h.transcriptPath, h.modelHint, false)
 			}
 		}
 		if journalCache != nil {
@@ -646,19 +660,7 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 					continue
 				}
 				cid := strings.ToLower(strings.TrimSpace(je.ConversationID))
-				cand := byConv[cid]
-				cand.convID = cid
-				if cand.modelHint == "" && je.ModelName != "" {
-					cand.modelHint = je.ModelName
-				}
-				if cand.transcriptPath == "" && je.TranscriptPath != "" {
-					if info, sErr := os.Stat(je.TranscriptPath); sErr == nil && !info.IsDir() {
-						cand.transcriptPath = je.TranscriptPath
-					}
-				}
-				if cand.transcriptPath != "" {
-					byConv[cid] = cand
-				}
+				mergeJournalCandidate(byConv, cid, je.TranscriptPath, je.ModelName, true)
 			}
 			_ = af.Close()
 		}
@@ -1333,13 +1335,7 @@ func GetFrontDeskContextStatus(vaultDir, transcriptPath string) (currentTokens i
 		return 0, budget, ""
 	}
 	if transcriptPath == "" && fd.ArtifactDir != "" {
-		p1 := filepath.Join(fd.ArtifactDir, ".system_generated", "logs", "transcript.jsonl")
-		p2 := filepath.Join(fd.ArtifactDir, "transcript.jsonl")
-		if _, err := os.Stat(p1); err == nil {
-			transcriptPath = p1
-		} else if _, err := os.Stat(p2); err == nil {
-			transcriptPath = p2
-		}
+		transcriptPath = resolveTranscriptInDir(fd.ArtifactDir)
 	}
 	if transcriptPath != "" {
 		tm := ParseSingleTurnSlice(transcriptPath, 0)

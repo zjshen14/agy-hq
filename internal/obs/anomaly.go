@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // BudgetConfig defines daily token budgets and context/turn anomaly thresholds in local/memory/obs/budget.json.
@@ -83,17 +84,13 @@ func LoadBudgetConfig(vaultDir string) BudgetConfig {
 	return cfg
 }
 
-// SaveBudgetConfig writes BudgetConfig to local/memory/obs/budget.json.
+// SaveBudgetConfig writes BudgetConfig to local/memory/obs/budget.json atomically.
 func SaveBudgetConfig(vaultDir string, cfg BudgetConfig) error {
-	p := budgetFilePath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	return store.WriteAtomic(budgetFilePath(vaultDir), append(data, '\n'), 0o644)
 }
 
 // TokenAnomaly represents a detected token/context/cache/budget anomaly (A1..A5).
@@ -292,50 +289,56 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 	}
 
 	// A5: Daily Token Budget Guard (soft-warn at 80%, pause kind:auto triggers at 100%)
-	if !cfg.TokenCircuitDisabled && cfg.DailyUncachedBudget > 0 {
-		warnThresh := int64(float64(cfg.DailyUncachedBudget) * 0.80)
-		if todayUncached >= warnThresh {
-			sev := "WARN"
-			thresh := warnThresh
-			rem := "Approaching daily uncached token budget; prefer `standard` (`flash`) for background subagents."
-			if todayUncached >= cfg.DailyUncachedBudget {
-				sev = "CRITICAL"
-				thresh = cfg.DailyUncachedBudget
-				rem = "Daily uncached token budget reached: automated `kind: auto` background triggers are paused until midnight or `./bin/hq obs budget --reset-circuit`."
+	if !cfg.TokenCircuitDisabled {
+		for _, bc := range []struct {
+			idPrefix string
+			used     int64
+			limit    int64
+			label    string
+			warnRem  string
+			critRem  string
+		}{
+			{
+				idPrefix: "A5-daily-uncached-",
+				used:     todayUncached,
+				limit:    cfg.DailyUncachedBudget,
+				label:    "uncached token burn",
+				warnRem:  "Approaching daily uncached token budget; prefer `standard` (`flash`) for background subagents.",
+				critRem:  "Daily uncached token budget reached: automated `kind: auto` background triggers are paused until midnight or `./bin/hq obs budget --reset-circuit`.",
+			},
+			{
+				idPrefix: "A5-daily-deep-",
+				used:     todayDeepUncached,
+				limit:    cfg.DailyDeepUncachedBudget,
+				label:    "deep-tier uncached token burn",
+				warnRem:  "Approaching daily deep-tier token budget; route non-architectural subagents to `flash`.",
+				critRem:  "Daily deep-tier token budget reached: automated `kind: auto` background triggers are paused until midnight or `./bin/hq obs budget --reset-circuit`.",
+			},
+		} {
+			if bc.limit <= 0 {
+				continue
+			}
+			warnThresh := int64(float64(bc.limit) * 0.80)
+			if bc.used < warnThresh {
+				continue
+			}
+			sev, thresh, rem := "WARN", warnThresh, bc.warnRem
+			if bc.used >= bc.limit {
+				sev, thresh, rem = "CRITICAL", bc.limit, bc.critRem
+			}
+			scopeSuffix := "daily budget"
+			if bc.idPrefix == "A5-daily-deep-" {
+				scopeSuffix = "daily deep budget"
 			}
 			anomalies = append(anomalies, TokenAnomaly{
-				ID:             "A5-daily-uncached-" + todayStr,
+				ID:             bc.idPrefix + todayStr,
 				Code:           "A5",
 				Kind:           "DailyTokenBudgetGuard",
 				Severity:       sev,
 				Timestamp:      now.Format(time.RFC3339),
-				Summary:        fmt.Sprintf("Today's uncached token burn is %s / %s (%.1f%% of daily budget).", FormatTokensCompact(todayUncached), FormatTokensCompact(cfg.DailyUncachedBudget), (float64(todayUncached)/float64(cfg.DailyUncachedBudget))*100.0),
+				Summary:        fmt.Sprintf("Today's %s is %s / %s (%.1f%% of %s).", bc.label, FormatTokensCompact(bc.used), FormatTokensCompact(bc.limit), (float64(bc.used)/float64(bc.limit))*100.0, scopeSuffix),
 				Remediation:    rem,
-				MetricValue:    todayUncached,
-				ThresholdValue: thresh,
-			})
-		}
-	}
-	if !cfg.TokenCircuitDisabled && cfg.DailyDeepUncachedBudget > 0 {
-		warnDeep := int64(float64(cfg.DailyDeepUncachedBudget) * 0.80)
-		if todayDeepUncached >= warnDeep {
-			sev := "WARN"
-			thresh := warnDeep
-			rem := "Approaching daily deep-tier token budget; route non-architectural subagents to `flash`."
-			if todayDeepUncached >= cfg.DailyDeepUncachedBudget {
-				sev = "CRITICAL"
-				thresh = cfg.DailyDeepUncachedBudget
-				rem = "Daily deep-tier token budget reached: automated `kind: auto` background triggers are paused until midnight or `./bin/hq obs budget --reset-circuit`."
-			}
-			anomalies = append(anomalies, TokenAnomaly{
-				ID:             "A5-daily-deep-" + todayStr,
-				Code:           "A5",
-				Kind:           "DailyTokenBudgetGuard",
-				Severity:       sev,
-				Timestamp:      now.Format(time.RFC3339),
-				Summary:        fmt.Sprintf("Today's deep-tier uncached token burn is %s / %s (%.1f%% of daily deep budget).", FormatTokensCompact(todayDeepUncached), FormatTokensCompact(cfg.DailyDeepUncachedBudget), (float64(todayDeepUncached)/float64(cfg.DailyDeepUncachedBudget))*100.0),
-				Remediation:    rem,
-				MetricValue:    todayDeepUncached,
+				MetricValue:    bc.used,
 				ThresholdValue: thresh,
 			})
 		}

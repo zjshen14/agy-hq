@@ -55,16 +55,16 @@ type SurfaceEntry struct {
 // a flag so provider-controlled free text never reaches a surface.
 func NewSurfaceEntry(e LedgerEntry) SurfaceEntry {
 	s := SurfaceEntry{
-		Key:           sanitizeDisplayText(e.Key(), 200),
-		Provider:      sanitizeDisplayText(e.Provider, 128),
+		Key:           SanitizeDisplayText(e.Key(), 200),
+		Provider:      SanitizeDisplayText(e.Provider, 128),
 		ProviderShort: ProviderShort(e.Provider),
-		WorkspaceID:   sanitizeDisplayText(e.WorkspaceID, 128),
-		Name:          sanitizeDisplayText(e.Name, 128),
-		Root:          sanitizeDisplayText(e.Root, 512),
-		WorkDir:       sanitizeDisplayText(e.WorkDir, 512),
+		WorkspaceID:   SanitizeDisplayText(e.WorkspaceID, 128),
+		Name:          SanitizeDisplayText(e.Name, 128),
+		Root:          SanitizeDisplayText(e.Root, 512),
+		WorkDir:       SanitizeDisplayText(e.WorkDir, 512),
 		Ownership:     e.Ownership,
-		CreatedByTask: sanitizeDisplayText(e.CreatedByTask, 128),
-		WriterTask:    sanitizeDisplayText(e.WriterTask, 128),
+		CreatedByTask: SanitizeDisplayText(e.CreatedByTask, 128),
+		WriterTask:    SanitizeDisplayText(e.WriterTask, 128),
 		LeaseEnforced: e.LeaseEnforced,
 		State:         e.Status.State,
 		RefreshedAt:   sanitizeTimestamp(e.Status.RefreshedAt),
@@ -82,7 +82,7 @@ func NewSurfaceEntry(e LedgerEntry) SurfaceEntry {
 	}
 	seen := make(map[string]bool, len(e.BoundTasks))
 	for _, t := range e.BoundTasks {
-		if slug := sanitizeDisplayText(t, 128); slug != "" && !seen[slug] {
+		if slug := SanitizeDisplayText(t, 128); slug != "" && !seen[slug] {
 			seen[slug] = true
 			s.BoundTasks = append(s.BoundTasks, slug)
 		}
@@ -99,7 +99,7 @@ func NewSurfaceEntry(e LedgerEntry) SurfaceEntry {
 			ID:         c.ID,
 			State:      c.State,
 			NeedsOwner: c.NeedsOwner,
-			Title:      sanitizeDisplayText(c.Title, MaxTitleRunes),
+			Title:      SanitizeDisplayText(c.Title, MaxTitleRunes),
 			URL:        sanitizeChangeURL(c.URL),
 			UpdatedAt:  sanitizeTimestamp(c.UpdatedAt),
 		}
@@ -225,7 +225,7 @@ func ProviderShort(fqid string) string {
 		return "git"
 	}
 	if !reSurfaceFQID.MatchString(fqid) {
-		return sanitizeDisplayText(fqid, 32)
+		return SanitizeDisplayText(fqid, 32)
 	}
 	pack, id, _ := strings.Cut(fqid, "/")
 	if pack == "core" {
@@ -238,7 +238,7 @@ func ProviderShort(fqid string) string {
 // absolute, Clean-stable, at most 512 bytes, and free of backticks and control or invisible formatting
 // characters. Otherwise it returns "" so callers withhold the path rather than render a mangled one.
 func SafeInlinePath(p string) string {
-	if p == "" || len(p) > 512 || !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "`|") || hasControlOrFormatRune(p) {
+	if p == "" || len(p) > 512 || !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "`|") || HasControlOrFormatRune(p) {
 		return ""
 	}
 	return p
@@ -283,48 +283,12 @@ func FindOwningEntryChecked(vaultDir, absPath string) (LedgerEntry, bool, error)
 	return e, ok, nil
 }
 
-func vaultRootsFor(vaultDir string) []string {
-	if strings.TrimSpace(vaultDir) == "" {
-		return nil
-	}
-	var roots []string
-	for _, v := range []string{cleanAbsPath(vaultDir), CanonicalPath(vaultDir)} {
-		if v == "" || v == string(filepath.Separator) {
-			continue
-		}
-		dup := false
-		for _, r := range roots {
-			if r == v {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			roots = append(roots, v)
-		}
-	}
-	return roots
-}
-
-func withinAny(p string, roots []string) bool {
-	for _, r := range roots {
-		if pathWithin(p, r) {
-			return true
-		}
-	}
-	return false
-}
-
 func (l Ledger) findOwningEntry(vaultRoots []string, absPath string) (LedgerEntry, bool) {
 	raw := strings.TrimSpace(absPath)
 	if raw == "" || !filepath.IsAbs(raw) {
 		return LedgerEntry{}, false
 	}
-	clean := filepath.Clean(raw)
-	candidates := []string{clean}
-	if canon := CanonicalPath(clean); canon != "" && canon != clean {
-		candidates = append(candidates, canon)
-	}
+	candidates := pathCandidates(filepath.Clean(raw), false)
 	for _, p := range candidates {
 		if withinAny(p, vaultRoots) {
 			return LedgerEntry{}, false
@@ -369,8 +333,9 @@ func ResolvePathOwners(vaultDir string, paths []string, maxPaths int) []PathOwne
 	if err != nil {
 		return nil
 	}
+	providers := loadExternalProviders(vaultDir)
 	hasPatterns := false
-	for _, ep := range loadExternalProviders(vaultDir) {
+	for _, ep := range providers {
 		if len(ep.spec.RootPatterns) > 0 {
 			hasPatterns = true
 			break
@@ -391,7 +356,7 @@ func ResolvePathOwners(vaultDir string, paths []string, maxPaths int) []PathOwne
 	}
 	covered := func(p string) bool {
 		for _, o := range out {
-			if pathWithin(p, filepath.Clean(o.Root)) {
+			if PathWithin(p, filepath.Clean(o.Root)) {
 				return true
 			}
 		}
@@ -428,7 +393,7 @@ func ResolvePathOwners(vaultDir string, paths []string, maxPaths int) []PathOwne
 		if !hasPatterns {
 			continue
 		}
-		if fqid, root, ok := MatchRootPattern(vaultDir, p); ok && !hasRoot(root) {
+		if fqid, root, ok := matchRootPattern(providers, vaultRoots, p); ok && !hasRoot(root) {
 			out = append(out, PathOwner{Path: p, Provider: fqid, Root: root})
 		}
 	}

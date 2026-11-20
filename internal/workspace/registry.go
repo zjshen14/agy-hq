@@ -151,7 +151,7 @@ func ListProviders(vaultDir string) []ProviderStatus {
 			Capabilities: p.Capabilities(),
 		}
 		if d, ok := p.(Describer); ok {
-			st.Description = sanitizeDisplayText(d.Description(), 200)
+			st.Description = SanitizeDisplayText(d.Description(), 200)
 		}
 		out = append(out, st)
 	}
@@ -168,7 +168,7 @@ func ListProviders(vaultDir string) []ProviderStatus {
 			RootPatterns:         append([]string(nil), ep.spec.RootPatterns...),
 			StatusRefreshSeconds: ep.spec.StatusRefreshSeconds,
 			Skill:                strings.TrimSpace(ep.spec.Skill),
-			Description:          sanitizeDisplayText(ep.spec.Description, 200),
+			Description:          SanitizeDisplayText(ep.spec.Description, 200),
 		}
 		st.Trusted, st.Reason = externalTrust(vaultDir, reg, regErr, ep)
 		out = append(out, st)
@@ -219,30 +219,22 @@ func Resolve(vaultDir, fqid string) (Provider, error) {
 // root_patterns come from the trust-verified manifest, so matching does not require the provider binary to be
 // healthy: path ownership stays recognized for hygiene even while a tampered binary is disabled.
 func MatchRootPattern(vaultDir, absPath string) (fqid string, root string, ok bool) {
-	raw := strings.TrimSpace(absPath)
-	if raw == "" || !filepath.IsAbs(raw) {
-		return "", "", false
-	}
 	providers := loadExternalProviders(vaultDir)
 	if len(providers) == 0 {
 		return "", "", false
 	}
-	var vaultRoots []string
-	for _, v := range []string{cleanAbsPath(vaultDir), CanonicalPath(vaultDir)} {
-		if v != "" && (len(vaultRoots) == 0 || vaultRoots[0] != v) {
-			vaultRoots = append(vaultRoots, v)
-		}
+	return matchRootPattern(providers, vaultRootsFor(vaultDir), absPath)
+}
+
+func matchRootPattern(providers []externalProviderEntry, vaultRoots []string, absPath string) (fqid string, root string, ok bool) {
+	raw := strings.TrimSpace(absPath)
+	if raw == "" || !filepath.IsAbs(raw) || len(providers) == 0 {
+		return "", "", false
 	}
-	clean := filepath.Clean(raw)
-	candidates := []string{CanonicalPath(clean)}
-	if clean != candidates[0] {
-		candidates = append(candidates, clean)
-	}
+	candidates := pathCandidates(filepath.Clean(raw), true)
 	for _, p := range candidates {
-		for _, v := range vaultRoots {
-			if pathWithin(p, v) {
-				return "", "", false
-			}
+		if withinAny(p, vaultRoots) {
+			return "", "", false
 		}
 	}
 	for _, p := range candidates {
@@ -266,13 +258,4 @@ func MatchRootPattern(vaultDir, absPath string) (fqid string, root string, ok bo
 		}
 	}
 	return "", "", false
-}
-
-func rootContainsAny(root string, dirs []string) bool {
-	for _, d := range dirs {
-		if pathWithin(d, root) {
-			return true
-		}
-	}
-	return false
 }

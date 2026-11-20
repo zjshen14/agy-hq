@@ -108,7 +108,7 @@ func capabilitiesFromSpec(spec extension.WorkspaceProviderSpec) Capabilities {
 // Probe asks the provider whether it owns absolute path. The returned root must contain path.
 func (p *ExternalProvider) Probe(ctx context.Context, path string) (Info, bool, error) {
 	clean := strings.TrimSpace(path)
-	if clean == "" || !filepath.IsAbs(clean) || len(clean) > MaxPathLength || hasControlOrFormatRune(clean) {
+	if clean == "" || !filepath.IsAbs(clean) || len(clean) > MaxPathLength || HasControlOrFormatRune(clean) {
 		return Info{}, false, &ProviderError{Code: CodeInvalid, Message: "probe path must be a clean absolute path"}
 	}
 	clean = filepath.Clean(clean)
@@ -130,7 +130,7 @@ func (p *ExternalProvider) Probe(ctx context.Context, path string) (Info, bool, 
 	if err != nil {
 		return Info{}, false, p.malformed(OpProbe, err.Error())
 	}
-	if !pathWithin(clean, info.Root) && !pathWithin(CanonicalPath(clean), info.Root) {
+	if !PathWithin(clean, info.Root) && !PathWithin(CanonicalPath(clean), info.Root) {
 		return Info{}, false, p.malformed(OpProbe, fmt.Sprintf("returned root %q does not contain the probed path", info.Root))
 	}
 	return info, true, nil
@@ -142,7 +142,7 @@ func (p *ExternalProvider) List(ctx context.Context, req ListRequest) ([]Info, s
 	if limit <= 0 || limit > MaxListLimit {
 		limit = MaxListLimit
 	}
-	if len(req.Cursor) > maxCursorBytes || hasControlOrFormatRune(req.Cursor) {
+	if len(req.Cursor) > maxCursorBytes || HasControlOrFormatRune(req.Cursor) {
 		return nil, "", &ProviderError{Code: CodeInvalid, Message: "list cursor is malformed"}
 	}
 	wreq := listRequest{
@@ -162,7 +162,7 @@ func (p *ExternalProvider) List(ctx context.Context, req ListRequest) ([]Info, s
 	if len(resp.Workspaces) > limit {
 		return nil, "", p.malformed(OpList, fmt.Sprintf("returned %d workspaces for limit %d", len(resp.Workspaces), limit))
 	}
-	if len(resp.NextCursor) > maxCursorBytes || hasControlOrFormatRune(resp.NextCursor) {
+	if len(resp.NextCursor) > maxCursorBytes || HasControlOrFormatRune(resp.NextCursor) {
 		return nil, "", p.malformed(OpList, "next_cursor is malformed")
 	}
 	out := make([]Info, 0, len(resp.Workspaces))
@@ -186,7 +186,7 @@ func (p *ExternalProvider) Create(ctx context.Context, req CreateRequest) (Creat
 	if err := ValidateCreateName(req.Name); err != nil {
 		return CreateResult{}, err
 	}
-	if len(req.Base) > maxBaseRequestBytes || hasControlOrFormatRune(req.Base) {
+	if len(req.Base) > maxBaseRequestBytes || HasControlOrFormatRune(req.Base) {
 		return CreateResult{}, &ProviderError{Code: CodeInvalid, Message: "create base is malformed"}
 	}
 	if req.ShareFrom != "" {
@@ -454,7 +454,7 @@ func providerErrorFromWire(we *wireError) *ProviderError {
 	if we == nil || !ValidErrorCode(we.Code) {
 		return nil
 	}
-	return &ProviderError{Code: we.Code, Message: sanitizeDisplayText(we.Message, maxErrorMessageRunes)}
+	return &ProviderError{Code: we.Code, Message: SanitizeDisplayText(we.Message, maxErrorMessageRunes)}
 }
 
 // Wire types (RFC-0025 §6, frozen by §16.7). Requests carry exactly the documented fields; responses are
