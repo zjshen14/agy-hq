@@ -992,18 +992,7 @@ func ArchiveTask(vaultDir, target string, force bool) error {
 	return err
 }
 
-// ArchiveTaskWithOptions archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID).
-// If WorktreeDir exists on disk:
-//   - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !opts.Force, returns:
-//     refusing to archive %q: uncommitted changes in worktree (pass --force to override)
-//   - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if opts.Force is true).
-//
-// Sets task status to "archived", saves tasks.json locally first, and then syncs with Antigravity's sidebar unless NoSidebar is true.
-//
-// Provider workspace bindings (RFC-0025 §8) are decided with a fresh provider status before anything is removed:
-// a dirty binding refuses the archive unless opts.Force; owned workspaces with no open changes are removed (both
-// preconditions re-checked by the provider); owned workspaces with open changes are kept, unbound, and marked
-// orphaned_open_changes (never force-deleted); attached workspaces are only unbound.
+// syncTaskSidebarFields persists sidebar archive/sync metadata onto target's row in local/memory/tasks.json.
 func syncTaskSidebarFields(vaultDir string, target ActiveTask) {
 	_ = UpdateTasks(vaultDir, func(cur []ActiveTask) ([]ActiveTask, bool, error) {
 		for i := range cur {
@@ -1017,6 +1006,18 @@ func syncTaskSidebarFields(vaultDir string, target ActiveTask) {
 	})
 }
 
+// ArchiveTaskWithOptions archives a task in local/memory/tasks.json (matched by TaskSlug or ConversationID).
+// If WorktreeDir exists on disk:
+//   - runs `git -C <worktreeDir> status --porcelain`. If there are uncommitted changes and !opts.Force, returns:
+//     refusing to archive %q: uncommitted changes in worktree (pass --force to override)
+//   - safely removes the worktree using `git -C <repoRoot> worktree remove` (adding --force if opts.Force is true).
+//
+// Sets task status to "archived", saves tasks.json locally first, and then syncs with Antigravity's sidebar unless NoSidebar is true.
+//
+// Provider workspace bindings (RFC-0025 §8) are decided with a fresh provider status before anything is removed:
+// a dirty binding refuses the archive unless opts.Force; owned workspaces with no open changes are removed (both
+// preconditions re-checked by the provider); owned workspaces with open changes are kept, unbound, and marked
+// orphaned_open_changes (never force-deleted); attached workspaces are only unbound.
 func ArchiveTaskWithOptions(vaultDir, target string, opts ArchiveTaskOptions) (SidebarSingleSyncResult, error) {
 	tasks, err := ListTasks(vaultDir)
 	if err != nil {
