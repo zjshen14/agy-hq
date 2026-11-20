@@ -466,3 +466,62 @@ func runGitCmd(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v failed: %v (%s)", fullArgs, err, string(out))
 	}
 }
+
+func TestReadOnlySearchSegmentFilteringAndAdversarialBypassDefense(t *testing.T) {
+	pol := approvals.DefaultPolicyConfig()
+
+	// Strictly read-only search commands mentioning gated verbs must NOT false-trigger.
+	allowed := []string{
+		`grep -n "gh release create" docs/release.md`,
+		`egrep "hq workspace own|hq workspace remove" internal/`,
+		`fgrep 'npm publish' package.json`,
+		`rg -n "hq workspace remove a/b:c --force" internal/`,
+		`ag "gh release create" src/`,
+		`ack "docker push" deploy/`,
+		`git grep -n "hq workspace own" internal/`,
+		`git -C /tmp/demo --no-pager grep "gh release create" cmd/ | head -n 20`,
+		`LANG=C grep -rn "hq workspace remove a/b:c --force" . | wc -l`,
+		`grep "gh release create" file.txt 2>/dev/null | sort`,
+	}
+	for _, cmd := range allowed {
+		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); dec.Gated {
+			t.Fatalf("expected pure read-only search command %q to pass without gating, got %+v", cmd, dec)
+		}
+		if dec := approvals.EvaluateCommand(pol, cmd, true, ""); dec.Gated {
+			t.Fatalf("expected pure read-only search command %q to pass in [Auto], got %+v", cmd, dec)
+		}
+	}
+
+	// Adversarial bypass attempts embedding gated commands via chaining, substitutions, shells,
+	// redirects, interpreters, or search preprocessor/pager exec flags MUST STILL BE BLOCKED.
+	blocked := []string{
+		`grep "gh release create" f.txt; gh release create v1.0.0`,
+		`grep "gh release create" f.txt && hq workspace own a/b:c`,
+		`grep "gh release create" f.txt || hq workspace remove a/b:c --force`,
+		`grep "$(gh release create v1.0.0)" f.txt`,
+		"grep `gh release create v1.0.0` f.txt",
+		`grep <(gh release create v1.0.0) f.txt`,
+		`grep $'a\' ; gh release create v1.0.0' f.txt`,
+		`grep "gh release create" f.txt | sh`,
+		`grep "gh release create" f.txt | bash`,
+		`grep "gh release create" f.txt | xargs sh -c`,
+		`grep "gh release create" f.txt | awk '{system($0)}'`,
+		`grep "gh release create" f.txt > /tmp/run.sh`,
+		`rg --pre "gh release create" pattern f.txt`,
+		`rg --pre=sh "gh release create" f.txt`,
+		`ag --pager="gh release create" pattern f.txt`,
+		`git -c core.pager="gh release create" grep foo`,
+		`git grep -O "gh release create" foo`,
+		`git grep --open-files-in-pager="gh release create" foo`,
+		`sed 's/a/gh release create/e' f.txt`,
+		`sh -c 'grep "gh release create" f.txt'`,
+		"grep \\\n\"gh release create\" f.txt",
+		`grep "gh release create" f.txt &`,
+		`(grep "gh release create" f.txt)`,
+	}
+	for _, cmd := range blocked {
+		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); !dec.Gated {
+			t.Fatalf("SECURITY REGRESSION: adversarial command %q bypassed EvaluateCommand!", cmd)
+		}
+	}
+}

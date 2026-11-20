@@ -3,6 +3,8 @@ package kernel
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -540,9 +542,38 @@ func pruneOrphanWorkspacesForCompaction(vaultDir string, opts CompactTasksOption
 	return rep.Pruned
 }
 
+// isConfirmedMissingWorkspaceRoot reports whether root is genuinely deleted on disk while its parent directory
+// still exists and is accessible. Requiring the parent directory to exist prevents auto-forgetting ledger entries
+// when a network or FUSE mount (such as a remote monorepo client root) is temporarily unmounted.
+func isConfirmedMissingWorkspaceRoot(root string) bool {
+	clean := filepath.Clean(strings.TrimSpace(root))
+	if clean == "" || !filepath.IsAbs(clean) || clean == string(filepath.Separator) {
+		return false
+	}
+	parent := filepath.Dir(clean)
+	if parent == clean {
+		return false
+	}
+	pInfo, pErr := os.Stat(parent)
+	if pErr != nil || !pInfo.IsDir() {
+		return false
+	}
+	_, rErr := os.Stat(clean)
+	return os.IsNotExist(rErr)
+}
+
+// forgetMissingAttachedWorkspace detaches dead bindings from live tasks and drops the missing attached entry
+// from the ledger using sequential (never nested) locks in strict RankTasks -> RankWorkspaces order.
+func forgetMissingAttachedWorkspace(vaultDir, key string) bool {
+	_, _ = removeTaskWorkspaceBindings(vaultDir, "", key)
+	return dropLedgerEntry(vaultDir, key) == nil
+}
+
 // PruneOrphanWorkspaces removes owned ledger workspaces that no live task is bound to (RFC-0025 §8): it keeps
 // linked, attached, recently created (MinAge), dirty, and open-change entries, and otherwise sends `remove` with
-// both require_clean and require_no_open_changes after a fresh status. It does nothing when the ledger is empty.
+// both require_clean and require_no_open_changes after a fresh status. It also forgets attached entries that are
+// confirmed deleted externally (parent directory present, root absent, and provider reports missing/not_found).
+// It does nothing when the ledger is empty.
 func PruneOrphanWorkspaces(vaultDir string, opts PruneWorkspacesOptions) (*PruneWorkspacesReport, error) {
 	if opts.Now.IsZero() {
 		opts.Now = time.Now()
@@ -571,6 +602,22 @@ func PruneOrphanWorkspaces(vaultDir string, opts PruneWorkspacesOptions) (*Prune
 	for _, key := range keys {
 		e := l.Entries[key]
 		rep.Scanned++
+		if e.Ownership == workspace.OwnershipAttached && isConfirmedMissingWorkspaceRoot(e.Root) {
+			missing := e.Status.State == workspace.StateMissing
+			if !missing {
+				info, _, stErr := fetchWorkspaceStatusContext(context.Background(), vaultDir, e)
+				if (stErr == nil && info.State == workspace.StateMissing) || workspace.ErrorCode(stErr) == workspace.CodeNotFound {
+					missing = true
+				}
+			}
+			if missing {
+				if !opts.DryRun {
+					_ = forgetMissingAttachedWorkspace(vaultDir, key)
+				}
+				rep.Forgotten = append(rep.Forgotten, key)
+				continue
+			}
+		}
 		if binders := ix.liveBinders(e); len(binders) > 0 {
 			keep(key, "keep:linked", strings.Join(binders, ","))
 			continue

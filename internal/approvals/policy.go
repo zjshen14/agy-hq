@@ -1302,9 +1302,419 @@ func normalizeCommandForRuleMatch(cmdLine string) string {
 	return strings.Join(segs, " ; ")
 }
 
+var pipelineExecOrShellBinaries = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true,
+	"fish": true, "csh": true, "tcsh": true, "ash": true,
+	"eval": true, "exec": true, "source": true, ".": true,
+	"xargs": true, "env": true, "nohup": true, "timeout": true,
+	"sudo": true, "su": true, "doas": true,
+	"python": true, "python3": true, "python2": true,
+	"perl": true, "ruby": true, "node": true, "deno": true, "bun": true,
+	"awk": true, "gawk": true, "mawk": true, "nawk": true,
+	"sed": true, "gsed": true, "lua": true, "php": true, "tclsh": true,
+}
+
+// filterReadOnlySearchSegments removes strictly read-only text-search pipeline stages
+// (grep/egrep/fgrep/rg/ag/ack and `git grep`) so searching for a gated command string does not
+// false-trigger approval rules. It fails closed (returns cmdLine, false) on any shell expansion,
+// quoting trick, subshell, output redirection, exec flag (`rg --pre`), or pipe to a shell/interpreter.
+func filterReadOnlySearchSegments(cmdLine string) (string, bool) {
+	if strings.TrimSpace(cmdLine) == "" {
+		return cmdLine, false
+	}
+	// Fail closed immediately on command/process substitution, ANSI-C/locale quoting, or line continuations.
+	for i := 0; i < len(cmdLine); i++ {
+		ch := cmdLine[i]
+		if ch == '`' || ch == '\r' {
+			return cmdLine, false
+		}
+		if ch == '\\' && i+1 < len(cmdLine) && (cmdLine[i+1] == '\n' || cmdLine[i+1] == '\r') {
+			return cmdLine, false
+		}
+		if ch == '$' && i+1 < len(cmdLine) && (cmdLine[i+1] == '(' || cmdLine[i+1] == '\'' || cmdLine[i+1] == '"') {
+			return cmdLine, false
+		}
+		if (ch == '<' || ch == '>') && i+1 < len(cmdLine) && cmdLine[i+1] == '(' {
+			return cmdLine, false
+		}
+	}
+
+	// Split top-level statements on unquoted ';', '&&', '||', '\n'; reject unclosed quotes or subshells.
+	var stmts []string
+	var cur strings.Builder
+	inSingle, inDouble, escaped := false, false, false
+	for i := 0; i < len(cmdLine); i++ {
+		ch := cmdLine[i]
+		if escaped {
+			cur.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if inSingle {
+			cur.WriteByte(ch)
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				cur.WriteByte(ch)
+				escaped = true
+				continue
+			}
+			cur.WriteByte(ch)
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch ch {
+		case '\\':
+			cur.WriteByte(ch)
+			escaped = true
+		case '\'':
+			inSingle = true
+			cur.WriteByte(ch)
+		case '"':
+			inDouble = true
+			cur.WriteByte(ch)
+		case '(', ')', '{', '}':
+			return cmdLine, false
+		case ';', '\n':
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				stmts = append(stmts, s)
+			}
+			cur.Reset()
+		case '&':
+			if i+1 < len(cmdLine) && cmdLine[i+1] == '&' {
+				if s := strings.TrimSpace(cur.String()); s != "" {
+					stmts = append(stmts, s)
+				}
+				cur.Reset()
+				i++
+				continue
+			}
+			// Allow fd dup like 2>&1 only if preceded by '>'; otherwise fail closed on background '&'.
+			if i > 0 && cmdLine[i-1] == '>' {
+				cur.WriteByte(ch)
+				continue
+			}
+			return cmdLine, false
+		case '|':
+			if i+1 < len(cmdLine) && cmdLine[i+1] == '|' {
+				if s := strings.TrimSpace(cur.String()); s != "" {
+					stmts = append(stmts, s)
+				}
+				cur.Reset()
+				i++
+				continue
+			}
+			cur.WriteByte(ch)
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if inSingle || inDouble || escaped {
+		return cmdLine, false
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		stmts = append(stmts, s)
+	}
+	if len(stmts) == 0 {
+		return cmdLine, false
+	}
+
+	var keptStmts []string
+	strippedAny := false
+	for _, stmt := range stmts {
+		stages, hasOutputRedir := splitPipelineStagesStrict(stmt)
+		if len(stages) == 0 || hasOutputRedir {
+			keptStmts = append(keptStmts, stmt)
+			continue
+		}
+		// If any stage invokes a shell, interpreter, or command runner, keep the entire pipeline fail-closed.
+		hasDangerousConsumer := false
+		parsedStages := make([][]string, len(stages))
+		for idx, st := range stages {
+			words, ok := tokenizeSimpleShellWords(st)
+			if !ok || len(words) == 0 {
+				hasDangerousConsumer = true
+				break
+			}
+			parsedStages[idx] = words
+			bin := firstNonAssignCommandWord(words)
+			if bin == "" || strings.ContainsAny(bin, "$*?") {
+				hasDangerousConsumer = true
+				break
+			}
+			base := strings.ToLower(filepath.Base(bin))
+			if pipelineExecOrShellBinaries[base] || strings.HasPrefix(base, "python") {
+				hasDangerousConsumer = true
+				break
+			}
+		}
+		if hasDangerousConsumer {
+			keptStmts = append(keptStmts, stmt)
+			continue
+		}
+
+		var keptStages []string
+		for idx, st := range stages {
+			if isPureReadOnlySearchCommand(parsedStages[idx]) {
+				strippedAny = true
+				continue
+			}
+			keptStages = append(keptStages, st)
+		}
+		if len(keptStages) > 0 {
+			keptStmts = append(keptStmts, strings.Join(keptStages, " | "))
+		}
+	}
+	if !strippedAny {
+		return cmdLine, false
+	}
+	return strings.Join(keptStmts, " ; "), true
+}
+
+func splitPipelineStagesStrict(stmt string) ([]string, bool) {
+	var stages []string
+	var cur strings.Builder
+	inSingle, inDouble, escaped := false, false, false
+	hasOutputRedir := false
+	for i := 0; i < len(stmt); i++ {
+		ch := stmt[i]
+		if escaped {
+			cur.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if inSingle {
+			cur.WriteByte(ch)
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				cur.WriteByte(ch)
+				escaped = true
+				continue
+			}
+			cur.WriteByte(ch)
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch ch {
+		case '\\':
+			cur.WriteByte(ch)
+			escaped = true
+		case '\'':
+			inSingle = true
+			cur.WriteByte(ch)
+		case '"':
+			inDouble = true
+			cur.WriteByte(ch)
+		case '>':
+			// Allow 2>&1 / >&2 / 2>/dev/null; treat any other '>' as a file-writing redirection.
+			rest := strings.TrimSpace(stmt[i+1:])
+			if !(strings.HasPrefix(rest, "&1") || strings.HasPrefix(rest, "&2") || strings.HasPrefix(rest, "/dev/null")) {
+				hasOutputRedir = true
+			}
+			cur.WriteByte(ch)
+		case '|':
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				stages = append(stages, s)
+			}
+			cur.Reset()
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		stages = append(stages, s)
+	}
+	return stages, hasOutputRedir
+}
+
+func tokenizeSimpleShellWords(s string) ([]string, bool) {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	inSingle, inDouble, escaped := false, false, false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escaped {
+			cur.WriteByte(ch)
+			inWord = true
+			escaped = false
+			continue
+		}
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(ch)
+			}
+			inWord = true
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			} else {
+				cur.WriteByte(ch)
+			}
+			inWord = true
+			continue
+		}
+		switch ch {
+		case '\\':
+			escaped = true
+			inWord = true
+		case '\'':
+			inSingle = true
+			inWord = true
+		case '"':
+			inDouble = true
+			inWord = true
+		case ' ', '\t':
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteByte(ch)
+			inWord = true
+		}
+	}
+	if inSingle || inDouble || escaped {
+		return nil, false
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words, true
+}
+
+func firstNonAssignCommandWord(words []string) string {
+	for _, w := range words {
+		if isEnvAssignToken(w) {
+			continue
+		}
+		return w
+	}
+	return ""
+}
+
+func isEnvAssignToken(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	name := tok[:eq]
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if i == 0 {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+				return false
+			}
+		} else {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isPureReadOnlySearchCommand(words []string) bool {
+	idx := 0
+	for idx < len(words) && isEnvAssignToken(words[idx]) {
+		idx++
+	}
+	if idx >= len(words) {
+		return false
+	}
+	bin := words[idx]
+	if strings.ContainsAny(bin, "$*?") {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(bin))
+	rest := words[idx+1:]
+	switch base {
+	case "grep", "egrep", "fgrep":
+		return true
+	case "rg":
+		// ripgrep --pre executes arbitrary preprocessor binaries; fail closed if present.
+		for _, a := range rest {
+			if a == "--" {
+				break
+			}
+			if a == "--pre" || strings.HasPrefix(a, "--pre=") || a == "--pre-glob" || strings.HasPrefix(a, "--pre-glob=") {
+				return false
+			}
+		}
+		return true
+	case "ag", "ack":
+		for _, a := range rest {
+			if a == "--" {
+				break
+			}
+			if a == "--pager" || strings.HasPrefix(a, "--pager=") {
+				return false
+			}
+		}
+		return true
+	case "git":
+		// Only allow safe non-executing pre-flags (-C <dir>, --no-pager) before `grep`,
+		// and reject pager/diff-driver flags (-O / --open-files-in-pager / --ext-diff / --textconv).
+		j := 0
+		for j < len(rest) {
+			a := rest[j]
+			if a == "-C" {
+				j += 2
+				continue
+			}
+			if strings.HasPrefix(a, "-C") || a == "--no-pager" {
+				j++
+				continue
+			}
+			break
+		}
+		if j >= len(rest) || rest[j] != "grep" {
+			return false
+		}
+		for _, a := range rest[j+1:] {
+			if a == "--" {
+				break
+			}
+			if a == "-O" || a == "--open-files-in-pager" || strings.HasPrefix(a, "--open-files-in-pager=") ||
+				a == "--ext-diff" || a == "--textconv" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 // EvaluateCommand checks checkLine against the resolved PolicyConfig and session autonomy context.
 func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, workDir string) EvalDecision {
-	normLine := normalizeCommandForRuleMatch(checkLine)
+	evalLine, stripped := filterReadOnlySearchSegments(checkLine)
+	if stripped && strings.TrimSpace(evalLine) == "" {
+		return EvalDecision{Gated: false}
+	}
+	normLine := normalizeCommandForRuleMatch(evalLine)
 	for i := range pol.Rules {
 		r := &pol.Rules[i]
 		if r.Mode == ModeNever {
@@ -1315,7 +1725,7 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 		}
 		matched := false
 		for _, re := range r.compiled {
-			if re.MatchString(checkLine) || (normLine != "" && re.MatchString(normLine)) {
+			if re.MatchString(evalLine) || (normLine != "" && re.MatchString(normLine)) {
 				matched = true
 				break
 			}
@@ -1350,7 +1760,7 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 					Reason: r.Description,
 				}
 			}
-			targetRepo := ResolveRepoTarget(r.TargetResolver, checkLine, workDir)
+			targetRepo := ResolveRepoTarget(r.TargetResolver, evalLine, workDir)
 			if !MatchesOwnedRepos(pol.OwnedRepos, targetRepo) {
 				return EvalDecision{
 					Gated:      true,
@@ -1365,9 +1775,9 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 
 	// Built-in unattended [Auto] mutating external HTTP safety net
 	if isAutoOrTainted {
-		lower := strings.ToLower(checkLine)
-		if (strings.Contains(lower, "curl") && reCurlMutFlagPol.MatchString(checkLine) && hasNonLoopbackExternalURL(checkLine)) ||
-			(strings.Contains(lower, "wget") && reWgetMutFlagPol.MatchString(checkLine) && hasNonLoopbackExternalURL(checkLine)) {
+		lower := strings.ToLower(evalLine)
+		if (strings.Contains(lower, "curl") && reCurlMutFlagPol.MatchString(evalLine) && hasNonLoopbackExternalURL(evalLine)) ||
+			(strings.Contains(lower, "wget") && reWgetMutFlagPol.MatchString(evalLine) && hasNonLoopbackExternalURL(evalLine)) {
 			return EvalDecision{
 				Gated:  true,
 				RuleID: "mutating_external_http",

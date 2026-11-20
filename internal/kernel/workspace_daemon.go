@@ -37,11 +37,12 @@ type WorkspaceMaintenanceReport struct {
 	Refreshed      int      `json:"refreshed,omitempty"`
 	RefreshErrors  int      `json:"refreshErrors,omitempty"`
 	LandedNotified int      `json:"landedNotified,omitempty"`
+	Forgotten      []string `json:"forgotten,omitempty"` // confirmed-missing attached ledger keys auto-dropped
 }
 
 // Changed reports whether the tick changed anything a console render would show.
 func (r WorkspaceMaintenanceReport) Changed() bool {
-	return len(r.Attached) > 0 || len(r.Bound) > 0 || r.Refreshed > 0 || r.RefreshErrors > 0 || r.LandedNotified > 0
+	return len(r.Attached) > 0 || len(r.Bound) > 0 || r.Refreshed > 0 || r.RefreshErrors > 0 || r.LandedNotified > 0 || len(r.Forgotten) > 0
 }
 
 // RunWorkspaceMaintenance runs one daemon maintenance tick bounded by DefaultWorkspaceMaintenanceBudget.
@@ -250,7 +251,14 @@ func refreshDueWorkspaces(ctx context.Context, vaultDir string, now time.Time, r
 	}
 	var queue []due
 	for key, e := range l.Entries {
-		if len(ix.liveBinders(e)) == 0 && !(e.OrphanedOpenChanges && e.Ownership == workspace.OwnershipOwned) {
+		isMissingAttached := e.Ownership == workspace.OwnershipAttached && e.Status.State == workspace.StateMissing
+		if len(ix.liveBinders(e)) == 0 && !(e.OrphanedOpenChanges && e.Ownership == workspace.OwnershipOwned) && !isMissingAttached {
+			continue
+		}
+		if isMissingAttached && isConfirmedMissingWorkspaceRoot(e.Root) {
+			if forgetMissingAttachedWorkspace(vaultDir, key) {
+				rep.Forgotten = append(rep.Forgotten, key)
+			}
 			continue
 		}
 		last, perr := time.Parse(time.RFC3339, strings.TrimSpace(e.Status.RefreshedAt))
@@ -267,6 +275,7 @@ func refreshDueWorkspaces(ctx context.Context, vaultDir string, now time.Time, r
 		queue = append(queue, due{key: key, refreshed: last})
 	}
 	if len(queue) == 0 {
+		sort.Strings(rep.Forgotten)
 		return
 	}
 	sort.Slice(queue, func(i, j int) bool {
@@ -303,9 +312,18 @@ func refreshDueWorkspaces(ctx context.Context, vaultDir string, now time.Time, r
 				return // tick budget expired; retry on the next tick instead of polluting status.error
 			}
 			_, applied, sent, aErr := applyWorkspaceStatusCASCounted(vaultDir, key, e.Status.RefreshedAt, info, callErr, now)
+			isMissing := (callErr == nil && info.State == workspace.StateMissing) || workspace.ErrorCode(callErr) == workspace.CodeNotFound
+			forgotten := false
+			if aErr == nil && applied && e.Ownership == workspace.OwnershipAttached && isMissing && isConfirmedMissingWorkspaceRoot(e.Root) {
+				forgotten = forgetMissingAttachedWorkspace(vaultDir, key)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if aErr != nil || !applied {
+				return
+			}
+			if forgotten {
+				rep.Forgotten = append(rep.Forgotten, key)
 				return
 			}
 			if callErr != nil && workspace.ErrorCode(callErr) != workspace.CodeNotFound {
@@ -317,4 +335,5 @@ func refreshDueWorkspaces(ctx context.Context, vaultDir string, now time.Time, r
 		}(d.key, e)
 	}
 	wg.Wait()
+	sort.Strings(rep.Forgotten)
 }

@@ -47,14 +47,15 @@ var RequiredPreToolMatchers = []string{
 
 // InstallOptions configures `hq plugin install` (project-scoped by default; `--global` opt-in).
 type InstallOptions struct {
-	SourceRepoDir    string
-	PluginSrcDir     string
-	ProjectDir       string
-	BinDir           string
-	VaultDir         string
-	GlobalVault      bool
-	GlobalScope      bool
-	SkipAttachSkills bool
+	SourceRepoDir         string
+	PluginSrcDir          string
+	ProjectDir            string
+	BinDir                string
+	VaultDir              string
+	GlobalVault           bool
+	GlobalScope           bool
+	InstallConsoleSidecar bool
+	SkipAttachSkills      bool
 }
 
 // InstallReport summarizes the actions performed by `hq plugin install`.
@@ -65,6 +66,7 @@ type InstallReport struct {
 	BinaryPath             string `json:"binaryPath"`
 	BinarySHA256           string `json:"binarySha256"`
 	PluginDir              string `json:"pluginDir"`
+	ConsoleSidecarDir      string `json:"consoleSidecarDir,omitempty"`
 	ProjectDir             string `json:"projectDir,omitempty"`
 	ProjectPluginsManifest string `json:"projectPluginsManifest,omitempty"`
 	ProjectSkillsManifest  string `json:"projectSkillsManifest,omitempty"`
@@ -802,8 +804,20 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 		}
 	}
 
-	// Clean up superseded pre-plugin standalone sidecar copy (~/.gemini/config/sidecars/agy-hq-console)
-	removedLegacySidecar := cleanupLegacyStandaloneSidecar()
+	// Either install the opt-in UI-only console sidecar (~/.gemini/config/sidecars/agy-hq-console) for
+	// project-scoped hosts that only discover sidecars under <ConfigDir>/sidecars/, or clean up any legacy copy.
+	var removedLegacySidecar, consoleSidecarDir string
+	if opts.InstallConsoleSidecar && !opts.GlobalScope {
+		if dst, lErr := DefaultLegacySidecarDir(); lErr == nil && dst != "" {
+			srcSidecar := filepath.Join(srcPluginDir, "sidecars", "agy-hq-console")
+			if sErr := syncPluginDirectory(srcSidecar, dst); sErr != nil {
+				return nil, fmt.Errorf("install console sidecar at %s: %w", dst, sErr)
+			}
+			consoleSidecarDir = dst
+		}
+	} else {
+		removedLegacySidecar = cleanupLegacyStandaloneSidecar()
+	}
 
 	// 3. Determine target Vault and persist ~/.gemini/antigravity/hq/config.json
 	var chosenVault string
@@ -839,9 +853,10 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 		}
 	}
 	if err := vault.SaveGlobalConfig(vault.GlobalConfig{
-		VaultDir:      chosenVault,
-		SourceRepoDir: saveRepo,
-		PluginScope:   scope,
+		VaultDir:                chosenVault,
+		SourceRepoDir:           saveRepo,
+		PluginScope:             scope,
+		ConsoleSidecarInstalled: consoleSidecarDir != "",
 	}); err != nil {
 		return nil, fmt.Errorf("save global hq config: %w", err)
 	}
@@ -876,6 +891,7 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 		BinaryPath:             targetBin,
 		BinarySHA256:           binSHA,
 		PluginDir:              activePluginDir,
+		ConsoleSidecarDir:      consoleSidecarDir,
 		ProjectDir:             resolvedProjectDir,
 		ProjectPluginsManifest: projectManifest,
 		ProjectSkillsManifest:  projectSkillsManifest,

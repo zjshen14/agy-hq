@@ -405,15 +405,17 @@ func checkGateH2CGlobalPluginBundle(rootDir string, runAgyCLI bool) (bool, strin
 		return false, err.Error()
 	}
 
-	pluginMain := filepath.Join(pluginDir, "sidecars", "agy-hq-console", "main.mjs")
-	tmplMain := filepath.Join(rootDir, "templates", "sidecars", "agy-hq-console", "main.mjs")
-	pBytes, pErr := os.ReadFile(pluginMain)
-	tBytes, tErr := os.ReadFile(tmplMain)
-	if pErr != nil || tErr != nil {
-		return false, fmt.Sprintf("missing sidecar main.mjs for parity check (pluginErr=%v, tmplErr=%v)", pErr, tErr)
-	}
-	if !bytes.Equal(bytes.TrimSpace(pBytes), bytes.TrimSpace(tBytes)) {
-		return false, ".agents/plugins/agy-hq/sidecars/agy-hq-console/main.mjs and templates/sidecars/agy-hq-console/main.mjs have drifted"
+	for _, rel := range []string{"main.mjs", "launch.sh", "sidecar.json"} {
+		pluginFile := filepath.Join(pluginDir, "sidecars", "agy-hq-console", rel)
+		tmplFile := filepath.Join(rootDir, "templates", "sidecars", "agy-hq-console", rel)
+		pBytes, pErr := os.ReadFile(pluginFile)
+		tBytes, tErr := os.ReadFile(tmplFile)
+		if pErr != nil || tErr != nil {
+			return false, fmt.Sprintf("missing sidecar %s for parity check (pluginErr=%v, tmplErr=%v)", rel, pErr, tErr)
+		}
+		if !bytes.Equal(bytes.TrimSpace(pBytes), bytes.TrimSpace(tBytes)) {
+			return false, fmt.Sprintf(".agents/plugins/agy-hq/sidecars/agy-hq-console/%s and templates/sidecars/agy-hq-console/%s have drifted", rel, rel)
+		}
 	}
 
 	if ref := strings.TrimSpace(os.Getenv("GITHUB_REF_NAME")); strings.HasPrefix(ref, "v") && len(ref) > 1 && ref[1] >= '0' && ref[1] <= '9' {

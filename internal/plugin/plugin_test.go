@@ -254,3 +254,57 @@ func TestAttachDetachProjectPluginAndSanitizedDaemonEnv(t *testing.T) {
 		t.Fatalf("expected empty solo plugins.json to be deleted on detach")
 	}
 }
+
+func TestInstallWithConsoleSidecarInProjectMode(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("HQ_HOME_DIR", fakeHome)
+	t.Setenv("HQ_SKIP_SYSTEMCTL", "1")
+	t.Setenv("HQ_SKIP_LAUNCHCTL", "1")
+
+	repoDir := filepath.Join(t.TempDir(), "src-repo")
+	plugSrc := filepath.Join(repoDir, ".agents", "plugins", "agy-hq")
+	sidecarSrc := filepath.Join(plugSrc, "sidecars", "agy-hq-console")
+	_ = os.MkdirAll(filepath.Join(plugSrc, "rules"), 0o755)
+	_ = os.MkdirAll(filepath.Join(plugSrc, "skills", "morning-brief"), 0o755)
+	_ = os.MkdirAll(sidecarSrc, 0o755)
+	_ = os.WriteFile(filepath.Join(plugSrc, "plugin.json"), []byte(`{"name":"agy-hq","version":"`+version.Version+`"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(plugSrc, "rules", "AGENTS.md"), []byte("# Rules\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(plugSrc, "skills", "morning-brief", "SKILL.md"), []byte("---\nname: morning-brief\ndescription: brief\n---\nRun `hq status`.\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(plugSrc, "hooks.json"), []byte(`{"hq-kernel":{"SessionStart":[{"type":"command","command":"hq hook session-start"}],"PreToolUse":[{"matcher":"run_command|edit_file|write_file|read_file|grep_search|find_by_name|invoke_subagent|manage_subagents|schedule|manage_task","hooks":[{"type":"command","command":"hq hook pre-tool"}]}],"Stop":[{"type":"command","command":"hq hook stop"}]}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(sidecarSrc, "sidecar.json"), []byte(`{"command":"sh","args":["launch.sh"],"has_web_ui":true}`), 0o644)
+	_ = os.WriteFile(filepath.Join(sidecarSrc, "launch.sh"), []byte("#!/bin/sh\nexec hq sidecar console\n"), 0o755)
+	_ = os.WriteFile(filepath.Join(sidecarSrc, "main.mjs"), []byte("// fallback\n"), 0o755)
+
+	vaultDir := filepath.Join(t.TempDir(), "vault")
+	binDir := filepath.Join(fakeHome, ".local", "bin")
+	res, err := Install(InstallOptions{
+		SourceRepoDir:         repoDir,
+		PluginSrcDir:          plugSrc,
+		BinDir:                binDir,
+		VaultDir:              vaultDir,
+		InstallConsoleSidecar: true,
+	})
+	if err != nil {
+		t.Fatalf("Install with console sidecar: %v", err)
+	}
+	if res.Scope != ScopeProject || res.ConsoleSidecarDir == "" {
+		t.Fatalf("expected project scope with ConsoleSidecarDir set, got %+v", res)
+	}
+	for _, rel := range []string{"sidecar.json", "launch.sh", "main.mjs"} {
+		info, sErr := os.Stat(filepath.Join(res.ConsoleSidecarDir, rel))
+		if sErr != nil {
+			t.Fatalf("expected installed sidecar file %s: %v", rel, sErr)
+		}
+		if rel == "launch.sh" && (info.Mode().Perm()&0o111) == 0 {
+			t.Fatalf("expected launch.sh to preserve executable bit, got %v", info.Mode())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fakeHome, ".gemini", "config", "plugins", "agy-hq")); !os.IsNotExist(err) {
+		t.Fatalf("project-scoped install must not install global plugin dir")
+	}
+	cfg, err := vault.LoadGlobalConfig()
+	if err != nil || cfg == nil || !cfg.ConsoleSidecarInstalled {
+		t.Fatalf("expected GlobalConfig.ConsoleSidecarInstalled=true, got %+v err=%v", cfg, err)
+	}
+}

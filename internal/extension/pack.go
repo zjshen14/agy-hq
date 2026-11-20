@@ -896,10 +896,19 @@ func EnablePack(ctx context.Context, vaultDir, packID, explicitPath string, useP
 				}
 			}
 		}
+		sourcePath := ""
+		if trimmed := strings.TrimSpace(explicitPath); trimmed != "" {
+			if abs, aErr := filepath.Abs(trimmed); aErr == nil && filepath.Clean(abs) != packDir {
+				sourcePath = filepath.Clean(abs)
+			}
+		} else if existing, ok := st.Packs[m.ID]; ok {
+			sourcePath = strings.TrimSpace(existing.SourcePath)
+		}
 		st.Packs[m.ID] = PackActivation{
 			Enabled:        true,
 			Version:        m.Version,
 			Path:           packDir,
+			SourcePath:     sourcePath,
 			UsePackRouting: usePackRouting,
 			RoutingTiers:   rtMap,
 			UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -927,6 +936,42 @@ func EnablePack(ctx context.Context, vaultDir, packID, explicitPath string, useP
 		return nil
 	})
 	return m, err
+}
+
+// RefreshPack re-resolves packID from explicitPath (or its persisted SourcePath / Path), validates and
+// re-enables it in extensions.json (preserving UsePackRouting unless overridden), and stages a fresh
+// SHA-256 trust proposal in one atomic workflow.
+func RefreshPack(ctx context.Context, vaultDir, packID, explicitPath string, usePackRoutingOverride *bool, convID string) (PackManifest, approvals.Proposal, TrustBundle, error) {
+	packID = strings.TrimSpace(packID)
+	if packID == "" {
+		return PackManifest{}, approvals.Proposal{}, TrustBundle{}, fmt.Errorf("pack ID is required")
+	}
+	targetPath := strings.TrimSpace(explicitPath)
+	usePackRouting := false
+	if st, err := LoadVaultState(vaultDir); err == nil {
+		if act, ok := st.Packs[packID]; ok {
+			usePackRouting = act.UsePackRouting
+			if targetPath == "" {
+				if strings.TrimSpace(act.SourcePath) != "" {
+					targetPath = strings.TrimSpace(act.SourcePath)
+				} else {
+					targetPath = strings.TrimSpace(act.Path)
+				}
+			}
+		}
+	}
+	if usePackRoutingOverride != nil {
+		usePackRouting = *usePackRoutingOverride
+	}
+	m, err := EnablePack(ctx, vaultDir, packID, targetPath, usePackRouting)
+	if err != nil {
+		return PackManifest{}, approvals.Proposal{}, TrustBundle{}, err
+	}
+	prop, bundle, err := StageTrustProposal(vaultDir, m.ID, "", convID)
+	if err != nil {
+		return m, approvals.Proposal{}, TrustBundle{}, err
+	}
+	return m, prop, bundle, nil
 }
 
 // DisablePack disables packID in <vault>/extensions.json without deleting schedule cursors.

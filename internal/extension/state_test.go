@@ -416,3 +416,60 @@ func TestOverlayWildcardAndExclusionScopes(t *testing.T) {
 		t.Fatalf("expected LintPack to reject exclusion-only scope, got %v", err)
 	}
 }
+
+func TestRefreshPackFollowsSymlinkSourcePath(t *testing.T) {
+	vaultDir := t.TempDir()
+	base := t.TempDir()
+	v1 := filepath.Join(base, "snap-100")
+	v2 := filepath.Join(base, "snap-200")
+	link := filepath.Join(base, "latest")
+
+	writePackFiles(t, v1, map[string]string{
+		"plugin.json":       `{"name":"acme-refresh","version":"1.0.0"}`,
+		"hq-extension.json": `{"schema_version":1,"id":"acme-refresh","version":"1.0.0","components":{}}`,
+	})
+	writePackFiles(t, v2, map[string]string{
+		"plugin.json":       `{"name":"acme-refresh","version":"1.1.0"}`,
+		"hq-extension.json": `{"schema_version":1,"id":"acme-refresh","version":"1.1.0","components":{}}`,
+	})
+	if err := os.Symlink(v1, link); err != nil {
+		t.Fatal(err)
+	}
+
+	m1, err := EnablePack(context.Background(), vaultDir, "acme-refresh", link, true)
+	if err != nil || m1.Version != "1.0.0" {
+		t.Fatalf("EnablePack v1: m=%+v err=%v", m1, err)
+	}
+	st1, err := LoadVaultState(vaultDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act1 := st1.Packs["acme-refresh"]
+	if act1.SourcePath != filepath.Clean(link) || act1.Path == act1.SourcePath || !act1.UsePackRouting {
+		t.Fatalf("expected SourcePath=%q distinct from resolved Path=%q with UsePackRouting=true, got %+v", link, act1.Path, act1)
+	}
+
+	// Flip the symlink to v2 and call RefreshPack without an explicit path.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(v2, link); err != nil {
+		t.Fatal(err)
+	}
+
+	m2, prop, bundle, err := RefreshPack(context.Background(), vaultDir, "acme-refresh", "", nil, "conv-refresh")
+	if err != nil {
+		t.Fatalf("RefreshPack v2: %v", err)
+	}
+	if m2.Version != "1.1.0" || prop.ID == "" || bundle.Target.SourceID != "pack:acme-refresh" {
+		t.Fatalf("unexpected RefreshPack result: m=%+v prop=%+v bundle=%+v", m2, prop, bundle.Target)
+	}
+	st2, err := LoadVaultState(vaultDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act2 := st2.Packs["acme-refresh"]
+	if act2.Version != "1.1.0" || !act2.UsePackRouting || act2.SourcePath != filepath.Clean(link) || !strings.HasSuffix(act2.Path, "snap-200") {
+		t.Fatalf("expected RefreshPack to preserve UsePackRouting & SourcePath and advance Path to snap-200, got %+v", act2)
+	}
+}

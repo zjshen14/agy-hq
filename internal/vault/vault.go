@@ -20,10 +20,11 @@ const AgyHQModulePath = "module github.com/zjshen14/agy-hq"
 // GlobalConfig stores the user's canonical Vault pointer at ~/.gemini/antigravity/hq/config.json
 // so CLI, Desktop, IDE, and background daemon sessions never suffer cross-surface split-brain.
 type GlobalConfig struct {
-	VaultDir      string `json:"vaultDir"`
-	SourceRepoDir string `json:"sourceRepoDir,omitempty"`
-	PluginScope   string `json:"pluginScope,omitempty"`
-	UpdatedAt     string `json:"updatedAt,omitempty"`
+	VaultDir                string `json:"vaultDir"`
+	SourceRepoDir           string `json:"sourceRepoDir,omitempty"`
+	PluginScope             string `json:"pluginScope,omitempty"`
+	ConsoleSidecarInstalled bool   `json:"consoleSidecarInstalled,omitempty"`
+	UpdatedAt               string `json:"updatedAt,omitempty"`
 }
 
 // Fact represents a bi-temporal fact entry in local/memory/facts.jsonl.

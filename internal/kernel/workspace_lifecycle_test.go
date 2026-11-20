@@ -481,3 +481,92 @@ func TestWorkspacePromptPreambleAndSpecParsing(t *testing.T) {
 		}
 	}
 }
+
+func TestMissingAttachedWorkspaceAutoPrunedOnlyWhenParentExists(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
+	fs := newFakeWS(t, vaultDir)
+
+	// Case A: parent directory exists on disk, workspace root was deleted externally -> auto-forgotten.
+	mountedParent := t.TempDir()
+	deletedRoot := filepath.Join(mountedParent, "ws-deleted")
+	keyDeleted := workspace.LedgerKey(fakeWSProviderID, "ws-deleted")
+
+	// Case B: parent directory itself does NOT exist (simulates unmounted network/FUSE root) -> MUST NOT be auto-forgotten.
+	unmountedRoot := filepath.Join(t.TempDir(), "unmounted-parent", "ws-unmounted")
+	keyUnmounted := workspace.LedgerKey(fakeWSProviderID, "ws-unmounted")
+
+	if err := RegisterTask(vaultDir, ActiveTask{
+		TaskSlug: "review-task", Title: "[Task:acme] Review", Kind: "task", ConversationID: "conv-review-prune",
+		Status: "active", CreatedAt: now.Format(time.RFC3339), LastUpdatedAt: now.Format(time.RFC3339),
+		Workspaces: []workspace.Binding{
+			{Key: keyDeleted, Provider: fakeWSProviderID, Root: deletedRoot, WorkDir: deletedRoot, Role: workspace.RoleSecondary},
+			{Key: keyUnmounted, Provider: fakeWSProviderID, Root: unmountedRoot, WorkDir: unmountedRoot, Role: workspace.RoleSecondary},
+		},
+	}); err != nil {
+		t.Fatalf("RegisterTask: %v", err)
+	}
+	if err := workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
+		l.Put(workspace.LedgerEntry{
+			Provider: fakeWSProviderID, WorkspaceID: "ws-deleted", Root: deletedRoot, WorkDir: deletedRoot,
+			Ownership: workspace.OwnershipAttached, WriterTask: "review-task", BoundTasks: []string{"review-task"},
+			Status: workspace.LedgerStatus{State: workspace.StateMissing, RefreshedAt: now.Format(time.RFC3339)},
+		})
+		l.Put(workspace.LedgerEntry{
+			Provider: fakeWSProviderID, WorkspaceID: "ws-unmounted", Root: unmountedRoot, WorkDir: unmountedRoot,
+			Ownership: workspace.OwnershipAttached, WriterTask: "review-task", BoundTasks: []string{"review-task"},
+			Status: workspace.LedgerStatus{State: workspace.StateMissing, RefreshedAt: now.Format(time.RFC3339)},
+		})
+		return true, nil
+	}); err != nil {
+		t.Fatalf("UpdateLedger: %v", err)
+	}
+
+	// RunWorkspaceMaintenance drops ws-deleted (and detaches its dead task binding) without calling Remove,
+	// while preserving ws-unmounted because its parent directory does not exist.
+	mRep, err := RunWorkspaceMaintenance(vaultDir, now)
+	if err != nil {
+		t.Fatalf("RunWorkspaceMaintenance: %v", err)
+	}
+	if len(mRep.Forgotten) != 1 || mRep.Forgotten[0] != keyDeleted {
+		t.Fatalf("expected only %s forgotten, got %+v", keyDeleted, mRep.Forgotten)
+	}
+	if _, ok := workspace.GetEntry(vaultDir, keyDeleted); ok {
+		t.Fatalf("expected %s dropped from ledger", keyDeleted)
+	}
+	if _, ok := workspace.GetEntry(vaultDir, keyUnmounted); !ok {
+		t.Fatalf("expected %s preserved when parent directory is unmounted", keyUnmounted)
+	}
+	if removed := fs.callsWith("remove:"); len(removed) != 0 {
+		t.Fatalf("forgetting a missing attached workspace must never invoke provider Remove, got %v", removed)
+	}
+	tk, ok := FindTaskByConversationID(vaultDir, "conv-review-prune")
+	if !ok || len(tk.Workspaces) != 1 || tk.Workspaces[0].Key != keyUnmounted {
+		t.Fatalf("expected dead binding removed and unmounted binding kept, got %+v", tk.Workspaces)
+	}
+
+	// Also verify PruneOrphanWorkspaces dry-run and live run forget a confirmed-missing attached workspace.
+	deletedRoot2 := filepath.Join(mountedParent, "ws-deleted-2")
+	keyDeleted2 := workspace.LedgerKey(fakeWSProviderID, "ws-deleted-2")
+	_ = workspace.UpdateLedger(vaultDir, func(l *workspace.Ledger) (bool, error) {
+		l.Put(workspace.LedgerEntry{
+			Provider: fakeWSProviderID, WorkspaceID: "ws-deleted-2", Root: deletedRoot2, WorkDir: deletedRoot2,
+			Ownership: workspace.OwnershipAttached, Status: workspace.LedgerStatus{State: workspace.StateMissing},
+		})
+		return true, nil
+	})
+	dryRep, err := PruneOrphanWorkspaces(vaultDir, PruneWorkspacesOptions{DryRun: true, Now: now})
+	if err != nil || len(dryRep.Forgotten) != 1 || dryRep.Forgotten[0] != keyDeleted2 {
+		t.Fatalf("expected dry-run PruneOrphanWorkspaces to report %s forgotten, got %+v err=%v", keyDeleted2, dryRep, err)
+	}
+	if _, ok := workspace.GetEntry(vaultDir, keyDeleted2); !ok {
+		t.Fatalf("dry-run must not drop %s", keyDeleted2)
+	}
+	liveRep, err := PruneOrphanWorkspaces(vaultDir, PruneWorkspacesOptions{DryRun: false, Now: now})
+	if err != nil || len(liveRep.Forgotten) != 1 || liveRep.Forgotten[0] != keyDeleted2 {
+		t.Fatalf("expected live PruneOrphanWorkspaces to forget %s, got %+v err=%v", keyDeleted2, liveRep, err)
+	}
+	if _, ok := workspace.GetEntry(vaultDir, keyDeleted2); ok {
+		t.Fatalf("expected %s dropped after live prune", keyDeleted2)
+	}
+}

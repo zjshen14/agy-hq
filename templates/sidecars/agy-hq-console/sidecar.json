@@ -1,6 +1,6 @@
 {
-  "command": "node",
-  "args": ["main.mjs"],
+  "command": "sh",
+  "args": ["launch.sh"],
   "restart_policy": "always",
   "display_name": "agy-hq Console",
   "description": "Live interactive control console, pending approvals, task board, and health monitor for agy-hq.",

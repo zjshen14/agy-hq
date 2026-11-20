@@ -140,6 +140,52 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 		fmt.Printf("Enabled companion extension pack %s@%s in extensions.json (run '%s extension trust %s' to pin SHA-256 trust)\n",
 			m.ID, m.Version, displayHQCmd(rootDir), m.ID)
 
+	case "refresh":
+		denyIfCallerTainted(vaultDir, "extension refresh")
+		pos, fl := splitPositionalAndFlags(rest)
+		fs := flag.NewFlagSet("extension refresh", flag.ExitOnError)
+		pathFlag := fs.String("path", "", "Optional explicit source path or symlink to re-resolve (defaults to remembered source_path/path)")
+		usePackRouting := fs.Bool("use-pack-routing", false, "Override opt-in for pack routing_defaults.tiers")
+		convFlag := fs.String("conv", "", "Optional conversation ID")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(fl)
+		if len(pos) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: hq extension refresh <pack-id> [--path=...] [--use-pack-routing] [--conv=...] [--json]")
+			os.Exit(1)
+		}
+		var routingOverride *bool
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "use-pack-routing" {
+				v := *usePackRouting
+				routingOverride = &v
+			}
+		})
+		convID := strings.TrimSpace(*convFlag)
+		if convID == "" {
+			convID = vault.ResolveConversationID()
+		}
+		m, prop, bundle, err := extension.RefreshPack(context.Background(), vaultDir, pos[0], *pathFlag, routingOverride, convID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq extension refresh failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]interface{}{
+				"manifest": m,
+				"proposal": prop,
+				"bundle":   bundle,
+			})
+			return
+		}
+		fmt.Printf("Refreshed %s@%s and staged trust proposal %s (sha256:%s)\n", m.ID, m.Version, prop.ID, prop.SHA256[:12])
+		for _, ln := range bundle.SummaryLines {
+			fmt.Printf("  %s\n", ln)
+		}
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+
 	case "disable":
 		denyIfCallerTainted(vaultDir, "extension disable")
 		pos, fl := splitPositionalAndFlags(rest)

@@ -47,6 +47,7 @@ type PackActivation struct {
 	Enabled        bool              `json:"enabled"`
 	Version        string            `json:"version,omitempty"`
 	Path           string            `json:"path,omitempty"`
+	SourcePath     string            `json:"source_path,omitempty"`
 	UsePackRouting bool              `json:"use_pack_routing,omitempty"`
 	RoutingTiers   map[string]string `json:"routing_tiers,omitempty"`
 	UpdatedAt      string            `json:"updated_at,omitempty"`

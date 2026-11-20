@@ -13,8 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
@@ -101,11 +103,62 @@ func mintSessionSecret() string {
 	return hex.EncodeToString(buf[:])
 }
 
+var (
+	daemonStartMu   sync.Mutex
+	lastDaemonStart time.Time
+)
+
+func tryStartManagedDaemonService() bool {
+	if os.Getenv("HQ_SKIP_SERVICE_MANAGER") == "1" {
+		return false
+	}
+	home, err := hostpaths.ResolveHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	switch runtime.GOOS {
+	case "linux":
+		unitPath := filepath.Join(home, ".config", "systemd", "user", "agy-hq.service")
+		if _, sErr := os.Stat(unitPath); sErr == nil {
+			if ctl, lErr := exec.LookPath("systemctl"); lErr == nil {
+				cmd := exec.Command(ctl, "--user", "start", "agy-hq.service")
+				cmd.Env = SanitizedDaemonEnv(os.Environ())
+				if cmd.Run() == nil {
+					return true
+				}
+			}
+		}
+	case "darwin":
+		plistPath := filepath.Join(home, "Library", "LaunchAgents", "com.antigravity.agy-hq.plist")
+		if _, sErr := os.Stat(plistPath); sErr == nil {
+			if ctl, lErr := exec.LookPath("launchctl"); lErr == nil {
+				cmd := exec.Command(ctl, "start", "com.antigravity.agy-hq")
+				cmd.Env = SanitizedDaemonEnv(os.Environ())
+				if cmd.Run() == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func ensureDaemonAlive(targetAddr string) {
 	client := &http.Client{Timeout: time.Second}
 	resp, err := client.Get("http://" + targetAddr + "/healthz")
 	if err == nil {
 		_ = resp.Body.Close()
+		return
+	}
+	daemonStartMu.Lock()
+	if time.Since(lastDaemonStart) < 8*time.Second {
+		daemonStartMu.Unlock()
+		return
+	}
+	lastDaemonStart = time.Now()
+	daemonStartMu.Unlock()
+
+	if tryStartManagedDaemonService() {
 		return
 	}
 	exe := ResolveSelfHQExecutable()

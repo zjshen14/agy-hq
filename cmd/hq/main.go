@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -287,7 +288,29 @@ func main() {
 			os.Exit(1)
 		}
 		if !vault.IsTempPath(targetBin) {
-			_ = exec.Command("systemctl", "--user", "try-restart", "agy-hq.service").Run()
+			switch runtime.GOOS {
+			case "linux":
+				if os.Getenv("HQ_SKIP_SYSTEMCTL") != "1" {
+					if ctl, lErr := exec.LookPath("systemctl"); lErr == nil {
+						if out, rErr := exec.Command(ctl, "--user", "try-restart", "agy-hq.service").CombinedOutput(); rErr != nil {
+							fmt.Printf("    [WARN] systemctl --user try-restart agy-hq.service failed: %v (%s)\n", rErr, strings.TrimSpace(string(out)))
+						} else if activeOut, aErr := exec.Command(ctl, "--user", "is-active", "agy-hq.service").Output(); aErr == nil && strings.TrimSpace(string(activeOut)) == "active" {
+							fmt.Println("    Restarted agy-hq.service (systemd user daemon)")
+						}
+					}
+				}
+			case "darwin":
+				if os.Getenv("HQ_SKIP_LAUNCHCTL") != "1" {
+					if ctl, lErr := exec.LookPath("launchctl"); lErr == nil {
+						target := fmt.Sprintf("gui/%d/com.antigravity.agy-hq", os.Getuid())
+						if out, rErr := exec.Command(ctl, "kickstart", "-k", target).CombinedOutput(); rErr == nil {
+							fmt.Println("    Restarted com.antigravity.agy-hq (launchd user daemon)")
+						} else if strings.TrimSpace(string(out)) != "" && !strings.Contains(strings.ToLower(string(out)), "could not find service") {
+							fmt.Printf("    [WARN] launchctl kickstart failed: %v (%s)\n", rErr, strings.TrimSpace(string(out)))
+						}
+					}
+				}
+			}
 		}
 
 		// 4. Re-exec the newly compiled binary's `migrate` subcommand so newly pulled migrations run
@@ -308,8 +331,12 @@ func main() {
 		if !vault.IsTempPath(targetBin) {
 			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && (st.GlobalPluginInstalled || st.SharedPluginInstalled || st.GlobalBinaryInstalled) {
 				syncArgs := []string{"plugin", "install", "--vault-dir=" + vaultDir}
-				if cfg, cErr := vault.LoadGlobalConfig(); cErr == nil && cfg != nil && cfg.PluginScope == plugin.ScopeGlobal && st.GlobalPluginInstalled {
-					syncArgs = append(syncArgs, "--global")
+				if cfg, cErr := vault.LoadGlobalConfig(); cErr == nil && cfg != nil {
+					if cfg.PluginScope == plugin.ScopeGlobal && st.GlobalPluginInstalled {
+						syncArgs = append(syncArgs, "--global")
+					} else if cfg.ConsoleSidecarInstalled {
+						syncArgs = append(syncArgs, "--console-sidecar")
+					}
 				}
 				syncCmd := exec.Command(targetBin, syncArgs...)
 				syncCmd.Dir = rootDir
@@ -3965,6 +3992,7 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		fs := flag.NewFlagSet("plugin install", flag.ExitOnError)
 		_ = fs.Bool("force", false, "Force reinstall even if already at the same version")
 		globalScope := fs.Bool("global", false, "Install into ~/.gemini/config/plugins/agy-hq/ across all projects (default: project-scoped)")
+		consoleSidecar := fs.Bool("console-sidecar", false, "Also install the UI-only agy-hq-console sidecar in ~/.gemini/config/sidecars/agy-hq-console/ (zero global hooks/rules)")
 		projectFlag := fs.String("project", "", "Optional target project directory to attach .agents/plugins.json and .agents/skills.json in project-scoped mode")
 		globalVault := fs.Bool("global-vault", false, "Use canonical global Vault (~/.gemini/antigravity/hq/vault)")
 		vaultFlag := fs.String("vault-dir", "", "Explicit default Vault directory to register in ~/.gemini/antigravity/hq/config.json")
@@ -3978,14 +4006,15 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 			targetVault = vaultDir
 		}
 		res, err := plugin.Install(plugin.InstallOptions{
-			SourceRepoDir:    rootDir,
-			PluginSrcDir:     *pluginSrcFlag,
-			ProjectDir:       *projectFlag,
-			BinDir:           *binDirFlag,
-			VaultDir:         targetVault,
-			GlobalVault:      *globalVault,
-			GlobalScope:      *globalScope,
-			SkipAttachSkills: !*attachSkills,
+			SourceRepoDir:         rootDir,
+			PluginSrcDir:          *pluginSrcFlag,
+			ProjectDir:            *projectFlag,
+			BinDir:                *binDirFlag,
+			VaultDir:              targetVault,
+			GlobalVault:           *globalVault,
+			GlobalScope:           *globalScope,
+			InstallConsoleSidecar: *consoleSidecar,
+			SkipAttachSkills:      !*attachSkills,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq plugin install failed: %v\n", err)
@@ -4008,6 +4037,9 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		fmt.Printf("Installed agy-hq plugin v%s (scope: %s · commit %s)\n", res.Version, res.Scope, res.Commit)
 		fmt.Printf("  Binary:       %s (sha256:%s)\n", res.BinaryPath, shaShort)
 		fmt.Printf("  Plugin Dir:   %s (%d files, bundle:%s)\n", res.PluginDir, res.FileCount, digShort)
+		if res.ConsoleSidecarDir != "" {
+			fmt.Printf("  Sidecar UI:   %s (sidecar://agy-hq-console/)\n", res.ConsoleSidecarDir)
+		}
 		if res.ProjectDir != "" {
 			fmt.Printf("  Project Root: %s\n", res.ProjectDir)
 		}
@@ -4343,7 +4375,7 @@ Commands:
   timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
   triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
   dispatch resolve <skill>            Resolve active core, Vault skill, or RSI overlay rules
-  extension <list|lint|enable|disable|trust|doctor>  Manage companion extension packs & trust hashes
+  extension <list|lint|enable|disable|refresh|trust|doctor>  Manage companion extension packs & trust hashes
   channel <list|status|test|pause|resume|audit|configure>  Manage Front Desk channel bridges & SHA-256 audit log
   connector <list|lint|migrate|doctor|test>  Manage modular JSON-RPC/CLI connectors & fixtures
   watch <precheck|read|query|ack>     Proactive watcher precheck, tainted read/query, and event ack
