@@ -23,7 +23,7 @@ import (
 
 // HarnessCheckResult captures the pass/fail result of a single harness contract gate.
 type HarnessCheckResult struct {
-	Gate   string `json:"gate"` // H1, H2, H3
+	Gate   string `json:"gate"` // H1, H2, H3, H4, H5
 	Name   string `json:"name"`
 	Passed bool   `json:"passed"`
 	Detail string `json:"detail"`
@@ -32,7 +32,8 @@ type HarnessCheckResult struct {
 const MaxGlobalFrontmatterTokens = 2500
 
 // CheckHarness executes Gates H1 (Skill Catalog & Frontmatter), H2 (Hook Parity & PreToolUse Matrix),
-// and H3 (Model Routing, Inbox Classification & Proactive Trigger Matrix) as specified in RFC-0011 §5.
+// H3 (Model Routing, Inbox Classification & Proactive Trigger Matrix), H4 (Go/Markdown Contracts),
+// and H5 (Code Quality & Anti-Slop Static Gate).
 func CheckHarness(rootDir string) ([]HarnessCheckResult, bool) {
 	var results []HarnessCheckResult
 	allOK := true
@@ -74,6 +75,11 @@ func CheckHarness(rootDir string) ([]HarnessCheckResult, bool) {
 	// Gate H4-B: Markdown Syntax, Relative Links & Docs Hub Index Integrity
 	h4bOK, h4bDetail := checkGateH4BMarkdownAndDocsIntegrity(rootDir)
 	add("H4-B", "Markdown Code Fences, Relative Links & Docs Index", h4bOK, h4bDetail)
+
+	// Gate H5: Code Quality & Anti-Slop Static Gate (H5-A .. H5-F)
+	for _, r := range checkGateH5Slop(rootDir) {
+		add(r.Gate, r.Name, r.Passed, r.Detail)
+	}
 
 	return results, allOK
 }

@@ -146,6 +146,15 @@ Scans every `.agents/plugins/agy-hq/skills/<slug>/SKILL.md` and verifies:
 1. **Gate H4-A (`checkGateH4AGoContract`):** Verifies that `go.mod` declares `module github.com/zjshen14/agy-hq`, contains **zero** external `require` directives (enforcing [ADR-0002](../decisions/0002-go-microkernel-binary.md) pure Go stdlib microkernel), has no `go.sum`, and that all `.go` files under `cmd/` and `internal/` pass `gofmt -s -l`.
 2. **Gate H4-B (`checkGateH4BMarkdownAndDocsIntegrity`):** Scans every tracked `.md` file in the repository to verify: (a) balanced fenced code blocks (` ``` ` / ` ```` ` / `~~~`), (b) zero git merge conflict markers (`<<<<<<<` / `>>>>>>>`), (c) valid relative links and HTML `<img src="...">` targets on disk, and (d) 100% index coverage of `docs/{design,product,decisions,research}/*.md` inside [docs/README.md](../README.md).
 
+### 5.5 Gate H5: Code Quality & Anti-Slop Static Gate (`H5-A` .. `H5-F`)
+Implemented purely on the Go standard library (`go/ast`, `go/build`, `go/parser`, `go/types`) in [`internal/ci/slop.go`](../../internal/ci/slop.go):
+1. **Gate H5-A (`checkGateH5ANoProdTestingImport`):** Verifies zero `"testing"` imports in non-`*_test.go` production files under `cmd/` and `internal/`.
+2. **Gate H5-B (`checkGateH5BDeadUnexportedSymbols`):** Runs `go/types` reachability across `cmd/` and `internal/` (respecting build tags via `build.Default.MatchFile`, skipping `init`, `_`, `*_test.go`, and methods satisfying live interfaces including promoted/generic implementations) to reject dead unexported functions, methods, types, vars, and consts.
+3. **Gate H5-C (`checkGateH5CNoUnlockedVaultWrites`):** Rejects raw `os.WriteFile` calls targeting lock-ranked Vault JSON stores (`tasks.json`, `quota_state.json`, `events.json`, `timers.json`, `goals.json`, `extensions.json`, `workspaces.json`, `pending_subagents.json`, `pending_nested_subagents.json`, `nested_conversations.json`) outside `internal/store`.
+4. **Gate H5-D (`checkGateH5DSidecarParity`):** Enforces full recursive file-set, exact byte, and executable mode parity between `.agents/plugins/agy-hq/sidecars/agy-hq-console/` and `templates/sidecars/agy-hq-console/`.
+5. **Gate H5-E (`checkGateH5ECUJDocParity`):** Parses `TestCUJ*` declarations in `internal/e2e/cuj_e2e_test.go` via `go/parser` and verifies every journey test is documented in [`docs/product/0003-critical-user-journeys.md`](../product/0003-critical-user-journeys.md).
+6. **Gate H5-F (`checkGateH5FMonolithLOCCeilings`):** Ratchets line-count ceilings on core monolith files (`internal/kernel/kernel.go`, `cmd/hq/main.go`, `internal/hooks/hooks.go`, `internal/webui/webui.go`, `internal/kernel/workspace_lifecycle.go`) so future changes cannot silently bloat them.
+
 ---
 
 ## 6. Workflow Triggers, Job Topologies, Caching & Developer Experience

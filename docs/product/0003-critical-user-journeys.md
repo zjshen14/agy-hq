@@ -48,6 +48,8 @@
 | **CUJ-35** | Two-Tier RSI, Vault Skills (`local/skills/`), Inline Overlays & Tier 2 Upstream Export | `hq skill`, `hq rsi`, `hq dispatch resolve` | `TestCUJ35_TwoTierRSIVaultSkillsAndOverlays` |
 | **CUJ-36** | Customizable Outbound Approval Policy, Native Coexistence & Lifecycle Hardening | `hq propose`, `hq hook pre-tool`, `hq approve`, `hq reject --dismiss` | `TestCUJ36_CustomizableApprovalPolicyAndUXHardening` |
 | **CUJ-38** | Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling | `hq channels`, `hq daemon`, `hq hook stop` | `TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling` |
+| **CUJ-39** | Memory v2 Orthogonal Vault, Scoped Playbooks, BM25 Search & Eval | `hq memory add-fact|search|dream-plan|eval|compact` | `TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval` |
+| **CUJ-40** | Layer-1 Task Board Isolation & Nested Child Filtering | `hq hook pre-tool|session-start|stop`, `hq adopt`, `hq tasks clean-nested` | `TestCUJ40_Layer1TaskBoardIsolationCLI` |
 | **CUJ-41** | Pluggable Workspace Providers: Pack Contract, Home-Placement Spawn, Provider-Delegated Archive & Workspace Hygiene | `hq extension lint`, `hq workspace`, `hq spawn --workspace`, `hq archive`, `hq hook pre-tool`, `hq hook session-start` | `TestCUJ41_PluggableWorkspaceProviders` |
 
 ---
@@ -204,7 +206,7 @@
 
 ## CUJ-18: Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate
 1. **Mathematical PII & Vault Boundary Scanner (`hq ci check-pii`):** Enforces all 6 invariants (P1 forbidden `local/` paths, P2 `.gitignore` & no gitlink submodule on `local/`, P3 workstation home path freedom, P4 secret/token/SSN regexes, P5 strict synthetic email allowlist, P6 contextual PII & real `spaces/<id>` guard) across staged diffs (`--staged`), the full tracked tree, and commit history (`--history`).
-2. **Agent Harness, Go & Markdown Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B/H2-C (single-source `.agents/plugins/agy-hq/hooks.json` contract, `plugin.json` == `version.Version` SemVer parity, sidecar `main.mjs` byte parity, and `PreToolUse` security/credential-guard/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), and Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage).
+2. **Agent Harness, Go, Markdown & Anti-Slop Regression Contracts (`hq ci check-harness`):** Verifies Gate H1 (Skill catalog, YAML frontmatter, `<=150` lines, `<!-- rsi:rule -->` schema), Gate H2-A/H2-B/H2-C (single-source `.agents/plugins/agy-hq/hooks.json` contract, `plugin.json` == `version.Version` SemVer parity, sidecar `main.mjs` byte parity, and `PreToolUse` security/credential-guard/quarantine/Front-Desk matrix), Gate H3 (`kernel.ResolveModel`, `kernel.ClassifyInboxFile`, and `templates/triggers.yaml` integrity), Gate H4-A (`gofmt -s` formatting + zero-external-dependency `go.mod` contract), Gate H4-B (balanced Markdown code fences, zero conflict markers, valid relative links/images across all tracked `.md` files, and 100% `docs/README.md` index coverage), and Gate H5 (`H5-A` zero production `"testing"` imports, `H5-B` zero dead unexported symbols via `go/types`, `H5-C` zero unlocked raw `os.WriteFile` on lock-ranked Vault JSON stores, `H5-D` full console sidecar byte/mode parity, `H5-E` `TestCUJ*` E2E-to-Doc parity, and `H5-F` monolith file LOC ceiling ratchet).
 3. **Local Git Hook Enforcement (`hq ci install-hooks` / `pre-commit` / `pre-push`):** Automatically installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` and rejects commits containing leaked PII/credentials, unformatted Go files, or broken Markdown links before they leave the developer workstation.
 
 ---
@@ -336,6 +338,12 @@
 ## CUJ-39: Memory v2 Orthogonal Vault, Scoped Playbooks, BM25 Search, Gatekeeper Dream-Plan & Eval ([RFC-0024](../design/0024-memory-v2-prediction-and-eval.md))
 1. **Orthogonal Scoped Context & Budget Envelopes (`hq hook session-start`, `hq memory add-fact`):** Enforces dual line + byte caps (`MEMORY.md <= 40L / 2.2 KB`, full `<= 12 KB`, `lean_auto <= 4.8 KB` with zero starvation, tainted `<= 800 B`), routes scoped `facts.jsonl` (`--scope`, `--expires`, `--pinned`) and 1:1 `Playbook-Owner` `## Active Playbook` sections (`0` on Front Desk), blocks unattended `[Auto]` direct writes, and guarantees `0`-token TTL expiration.
 2. **Full-Vault BM25 Recall, Gatekeeper Dreaming & 3-Layer Eval (`hq memory search|dream-plan|eval|compact`):** Retrieves allowlisted Vault memory layers with clickable `file://#Lstart-Lend` provenance while excluding `private/**` and tainted journals, gates nightly `sleep-consolidate` via `dream-plan --precheck` (`exit_zero_nonempty`) with commit-only cursor advancement, archives `> 14d` journals/briefs safely, and verifies `F1`–`F4` fixtures and M1–M4 metrics via `hq memory eval`.
+
+---
+
+## CUJ-40: Layer-1 Task Board Isolation & Nested Child Filtering
+1. **Nested & Workflow Child Exclusion (`hq hook pre-tool|session-start|stop`):** Tracks raw `agentapi new-conversation` spawns while exempting explicit `--title="[Task:...]` forks, keeps workflow-hidden children (`hideFromConversationList` / `run_workflow`), nested subagent trajectories (`nestingDepth >= 1`), and raw `agentapi` helper children off `local/memory/tasks.json`, and records them in `local/memory/nested_conversations.json`.
+2. **Layer-1 Preservation & Legacy Cleanup (`hq adopt`, `hq tasks clean-nested --json`):** Preserves top-level tasks, Front Desk helper subagents, standalone user chats, and explicitly adopted `[Task:...]` tasks on `tasks.json`, while sweeping leaked legacy `Kind: "task"` subagent entries into `nested_conversations.json`.
 
 ---
 
