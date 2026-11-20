@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
@@ -56,20 +58,24 @@ func SetSpaceOverride(vaultDir, id, mode string) error {
 	if mode != "pin" && mode != "hide" && mode != "auto" && mode != "" {
 		return fmt.Errorf("invalid space override mode %q (expected pin, hide, or auto)", mode)
 	}
-	overrides := loadSpaceOverrides(vaultDir)
-	if mode == "auto" || mode == "" {
-		delete(overrides, id)
-	} else {
-		overrides[id] = mode
-	}
-	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o700); err != nil {
+	memDir := filepath.Join(vaultDir, "memory")
+	if err := os.MkdirAll(memDir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(overrides, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(spaceOverridesPath(vaultDir), b, 0o600)
+	lockPath := filepath.Join(memDir, ".spaces.lock")
+	return store.With(context.Background(), store.RankMemory, lockPath, func(context.Context) error {
+		overrides := loadSpaceOverrides(vaultDir)
+		if mode == "auto" || mode == "" {
+			delete(overrides, id)
+		} else {
+			overrides[id] = mode
+		}
+		b, err := json.MarshalIndent(overrides, "", "  ")
+		if err != nil {
+			return err
+		}
+		return store.WriteAtomic(spaceOverridesPath(vaultDir), append(b, '\n'), 0o600)
+	})
 }
 
 func parseBracketStrings(raw string) []string {
@@ -359,8 +365,59 @@ func ListSpaces(vaultDir string, now time.Time) ([]ConsoleSpace, error) {
 	return out, nil
 }
 
+type spaceWidgetCache struct {
+	goals          []kernel.Goal
+	goalsLoaded    bool
+	ideas          []outbox.OutboxItem
+	ideasLoaded    bool
+	surfaceEntries []workspace.SurfaceEntry
+	surfaceLoaded  bool
+	layer1Tasks    []kernel.ActiveTask
+	tasksLoaded    bool
+}
+
+func (c *spaceWidgetCache) getGoals(vaultDir string) []kernel.Goal {
+	if !c.goalsLoaded {
+		c.goals, _ = kernel.ListGoals(vaultDir)
+		c.goalsLoaded = true
+	}
+	return c.goals
+}
+
+func (c *spaceWidgetCache) getIdeas(vaultDir string, now time.Time) []outbox.OutboxItem {
+	if !c.ideasLoaded {
+		c.ideas, _ = outbox.List(vaultDir, outbox.TierIdeasFeed, outbox.StatusPending, now)
+		c.ideasLoaded = true
+	}
+	return c.ideas
+}
+
+func (c *spaceWidgetCache) getSurfaceEntries(vaultDir string, now time.Time) []workspace.SurfaceEntry {
+	if !c.surfaceLoaded {
+		c.surfaceEntries = kernel.UnifiedSurfaceEntries(vaultDir, now)
+		c.surfaceLoaded = true
+	}
+	return c.surfaceEntries
+}
+
+func (c *spaceWidgetCache) getLayer1Tasks(vaultDir string) []kernel.ActiveTask {
+	if !c.tasksLoaded {
+		tasks, _ := kernel.ListTasks(vaultDir)
+		c.layer1Tasks = kernel.FilterLayer1Tasks(vaultDir, tasks)
+		c.tasksLoaded = true
+	}
+	return c.layer1Tasks
+}
+
 // ActiveSpaces returns all Console Spaces currently active (by schedule or pin override) with rendered widgets.
 func ActiveSpaces(vaultDir string, now time.Time) ([]ConsoleSpace, error) {
+	return activeSpacesWithCache(vaultDir, now, &spaceWidgetCache{})
+}
+
+func activeSpacesWithCache(vaultDir string, now time.Time, cache *spaceWidgetCache) ([]ConsoleSpace, error) {
+	if cache == nil {
+		cache = &spaceWidgetCache{}
+	}
 	all, err := ListSpaces(vaultDir, now)
 	if err != nil {
 		return nil, err
@@ -370,19 +427,19 @@ func ActiveSpaces(vaultDir string, now time.Time) ([]ConsoleSpace, error) {
 		if !sp.ActiveNow {
 			continue
 		}
-		sp.RenderedCards = renderSpaceWidgets(vaultDir, sp, now)
+		sp.RenderedCards = renderSpaceWidgets(vaultDir, sp, now, cache)
 		active = append(active, sp)
 	}
 	return active, nil
 }
 
-func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time) []SpaceWidgetOutput {
+func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time, cache *spaceWidgetCache) []SpaceWidgetOutput {
 	var cards []SpaceWidgetOutput
 	for _, w := range sp.Widgets {
 		kind := strings.ToLower(strings.TrimSpace(w))
 		switch kind {
 		case "goals_summary":
-			goals, _ := kernel.ListGoals(vaultDir)
+			goals := cache.getGoals(vaultDir)
 			var lines []string
 			for _, g := range goals {
 				if g.Status != "active" {
@@ -409,7 +466,7 @@ func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time) []Space
 			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Goals Summary", Lines: lines})
 
 		case "waiting_on_slas":
-			goals, _ := kernel.ListGoals(vaultDir)
+			goals := cache.getGoals(vaultDir)
 			var lines []string
 			for _, g := range goals {
 				if g.Status != "active" {
@@ -428,7 +485,7 @@ func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time) []Space
 			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Counterparty Waiting-On SLAs", Lines: lines})
 
 		case "ideas_feed":
-			ideas, _ := outbox.List(vaultDir, outbox.TierIdeasFeed, outbox.StatusPending, now)
+			ideas := cache.getIdeas(vaultDir, now)
 			var lines []string
 			for _, it := range ideas {
 				if sp.Scope != "" && it.Scope != "" && !strings.EqualFold(sp.Scope, it.Scope) {
@@ -445,7 +502,7 @@ func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time) []Space
 			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Proactive Ideas", Lines: lines})
 
 		case "worktree_git_status", "active_workspaces", "workspaces_status":
-			entries := kernel.UnifiedSurfaceEntries(vaultDir, now)
+			entries := cache.getSurfaceEntries(vaultDir, now)
 			var lines []string
 			for _, e := range entries {
 				label := e.DisplayName()
@@ -489,8 +546,7 @@ func renderSpaceWidgets(vaultDir string, sp ConsoleSpace, now time.Time) []Space
 			cards = append(cards, SpaceWidgetOutput{Kind: kind, Title: "Thesis Watchlist", Lines: lines})
 
 		case "tasks_scope":
-			tasks, _ := kernel.ListTasks(vaultDir)
-			layer1 := kernel.FilterLayer1Tasks(vaultDir, tasks)
+			layer1 := cache.getLayer1Tasks(vaultDir)
 			var lines []string
 			for _, t := range layer1 {
 				if t.EffectiveStatus(now) != "active" {

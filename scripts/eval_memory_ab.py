@@ -30,6 +30,28 @@ import time
 from datetime import datetime, timedelta, timezone
 
 
+def iso_utc(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def summarize_judge_subset(items):
+    scored = [
+        r["judge"]
+        for r in items
+        if r["judge"] and r["judge"]["score_baseline"] > 0 and r["judge"]["score_candidate"] > 0
+    ]
+    avg_a = round(sum(j["score_baseline"] for j in scored) / len(scored), 2) if scored else 0.0
+    avg_b = round(sum(j["score_candidate"] for j in scored) / len(scored), 2) if scored else 0.0
+    return {
+        "scored": len(scored),
+        "avg_baseline": avg_a,
+        "avg_candidate": avg_b,
+        "wins_candidate": sum(1 for j in scored if j["winner"] == "B"),
+        "wins_baseline": sum(1 for j in scored if j["winner"] == "A"),
+        "ties": sum(1 for j in scored if j["winner"] == "TIE"),
+    }
+
+
 def run_cmd(cmd, env=None, stdin_text=None, cwd=None, timeout=90):
     merged_env = os.environ.copy()
     if env:
@@ -87,9 +109,9 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             raise RuntimeError(f"candidate migrate failed: {out} {err}")
 
     now = datetime.now(timezone.utc)
-    yesterday_iso = (now - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    tomorrow_iso = (now + timedelta(hours=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    far_future_iso = (now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    yesterday_iso = iso_utc(now - timedelta(hours=30))
+    tomorrow_iso = iso_utc(now + timedelta(hours=20))
+    far_future_iso = iso_utc(now + timedelta(days=60))
 
     # Fresh per-run random private token so prior journals can never match it
     secret_token = f"PRIVATE_TAX_{hashlib.sha256(str(now.timestamp()).encode()).hexdigest()[:10].upper()}"
@@ -135,7 +157,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-guard-1",
             "topic": "comms",
             "statement": "Never include formal sign-offs like 'Best regards' or 'Sincerely' in team status updates; keep updates under 4 bullets.",
-            "valid_from": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=2)),
             "verified": True,
             "scopes": ["global"],
             "pinned": True,
@@ -144,7 +166,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-guard-2",
             "topic": "trading",
             "statement": "Never execute equity trades during the first 15 minutes after market open (6:30-6:45 AM PT opening-bell volatility guard).",
-            "valid_from": (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=3)),
             "verified": True,
             "scopes": ["domain:investing", "global"],
             "pinned": True,
@@ -153,7 +175,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-blogs-1",
             "topic": "blogs",
             "statement": "repo:blogs deploys automatically via GitHub Actions only from branch `release/site`, never from `main` directly.",
-            "valid_from": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=1)),
             "verified": True,
             "scopes": ["repo:blogs"],
         },
@@ -161,7 +183,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-payments-1",
             "topic": "payments",
             "statement": "repo:payments staging database port is 15432 and requires TLS mode `verify-full`.",
-            "valid_from": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=1)),
             "verified": True,
             "scopes": ["repo:payments"],
         },
@@ -169,7 +191,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-imminent-1",
             "topic": "schedule",
             "statement": "Q4 security audit freeze begins tomorrow at 09:00 PT; freeze all non-critical schema migrations.",
-            "valid_from": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=1)),
             "expires_at": tomorrow_iso,
             "verified": True,
             "scopes": ["global"],
@@ -178,7 +200,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-override-1",
             "topic": "schedule",
             "statement": "Updated standing rule: Weekly architecture sync moved permanently from Tuesdays 10:00 AM PT to Thursdays at 2:30 PM PT.",
-            "valid_from": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now),
             "expires_at": far_future_iso,
             "verified": True,
             "scopes": ["global"],
@@ -188,8 +210,8 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-old-api",
             "topic": "architecture",
             "statement": "Legacy analytics endpoint is v1/metrics-beta.",
-            "valid_from": (now - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "valid_to": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=10)),
+            "valid_to": iso_utc(now - timedelta(days=1)),
             "superseded_by": "eval-new-api",
             "verified": False,
             "scopes": ["global"],
@@ -198,7 +220,7 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-new-api",
             "topic": "architecture",
             "statement": "Canonical analytics endpoint is v3/telemetry-stream (replaces v1/metrics-beta).",
-            "valid_from": (now - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(hours=12)),
             "verified": True,
             "scopes": ["global"],
         },
@@ -206,14 +228,14 @@ def setup_clones(live_vault, v1_vault, v2_vault, v2_bin, synthetic_only=False, s
             "id": "eval-expired-1",
             "topic": "schedule",
             "statement": "Reminder: temporary VPN maintenance window freezes staging deploys today until 18:00 PT.",
-            "valid_from": (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valid_from": iso_utc(now - timedelta(days=5)),
             "expires_at": yesterday_iso,
             "verified": True,
             "scopes": ["global"],
         },
     ]
 
-    ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = iso_utc(now)
     cid_hash = hashlib.sha256(b"eval-conv-tainted").hexdigest()
 
     for vdir in (v1_vault, v2_vault):
@@ -564,7 +586,7 @@ def get_session_context(bin_path, vault_dir, task, try_search=True):
             steps = data.get("injectSteps", [])
             if steps:
                 ctx = steps[0].get("systemMessage", {}).get("systemMessage", "")
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, KeyError, IndexError):
             ctx = out
 
     search_blob = ""
@@ -657,7 +679,7 @@ def run_blinded_judge(judge_model, sandbox_dir, task, resp_a, resp_b, seed_idx):
                 if int(p.get("score_x", 0)) > 0 and int(p.get("score_y", 0)) > 0:
                     parsed = p
                     break
-            except Exception:
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
                 pass
 
     sx = int(parsed.get("score_x", 0))
@@ -777,33 +799,28 @@ def main():
         avg_ctx_b = round(sum(r["ctx_bytes_candidate"] for r in results) / max(1, n), 1)
         ctx_delta_pct = round(100.0 * (avg_ctx_b - avg_ctx_a) / max(1.0, avg_ctx_a), 1)
 
-        scored_j = [r["judge"] for r in results if r["judge"] and r["judge"]["score_baseline"] > 0 and r["judge"]["score_candidate"] > 0]
-        avg_j_a = round(sum(j["score_baseline"] for j in scored_j) / len(scored_j), 2) if scored_j else 0.0
-        avg_j_b = round(sum(j["score_candidate"] for j in scored_j) / len(scored_j), 2) if scored_j else 0.0
-        wins_b = sum(1 for j in scored_j if j["winner"] == "B")
-        wins_a = sum(1 for j in scored_j if j["winner"] == "A")
-        ties = sum(1 for j in scored_j if j["winner"] == "TIE")
+        global_j = summarize_judge_subset(results)
 
         by_cat = {}
         for r in results:
             by_cat.setdefault(r["category"], []).append(r)
         cat_summary = {}
         for c, items in sorted(by_cat.items()):
-            cj = [x["judge"] for x in items if x["judge"] and x["judge"]["score_baseline"] > 0 and x["judge"]["score_candidate"] > 0]
+            cj = summarize_judge_subset(items)
             cat_summary[c] = {
                 "count": len(items),
                 "det_pass_baseline": sum(1 for x in items if x["det_pass_baseline"]),
                 "det_pass_candidate": sum(1 for x in items if x["det_pass_candidate"]),
-                "scored_judge_pairs": len(cj),
-                "avg_score_baseline": round(sum(j["score_baseline"] for j in cj) / len(cj), 2) if cj else 0.0,
-                "avg_score_candidate": round(sum(j["score_candidate"] for j in cj) / len(cj), 2) if cj else 0.0,
-                "wins_candidate": sum(1 for j in cj if j["winner"] == "B"),
-                "wins_baseline": sum(1 for j in cj if j["winner"] == "A"),
-                "ties": sum(1 for j in cj if j["winner"] == "TIE"),
+                "scored_judge_pairs": cj["scored"],
+                "avg_score_baseline": cj["avg_baseline"],
+                "avg_score_candidate": cj["avg_candidate"],
+                "wins_candidate": cj["wins_candidate"],
+                "wins_baseline": cj["wins_baseline"],
+                "ties": cj["ties"],
             }
 
         summary = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": iso_utc(datetime.now(timezone.utc)),
             "baseline_bin": os.path.basename(args.baseline_bin),
             "candidate_bin": os.path.basename(args.candidate_bin),
             "arm_model": args.arm_model,
@@ -814,12 +831,12 @@ def main():
             "det_pass_candidate": det_b,
             "det_pass_rate_baseline_pct": round(100.0 * det_a / max(1, n), 1),
             "det_pass_rate_candidate_pct": round(100.0 * det_b / max(1, n), 1),
-            "scored_judge_pairs": len(scored_j),
-            "avg_judge_score_baseline": avg_j_a,
-            "avg_judge_score_candidate": avg_j_b,
-            "judge_wins_candidate": wins_b,
-            "judge_wins_baseline": wins_a,
-            "judge_ties": ties,
+            "scored_judge_pairs": global_j["scored"],
+            "avg_judge_score_baseline": global_j["avg_baseline"],
+            "avg_judge_score_candidate": global_j["avg_candidate"],
+            "judge_wins_candidate": global_j["wins_candidate"],
+            "judge_wins_baseline": global_j["wins_baseline"],
+            "judge_ties": global_j["ties"],
             "avg_ctx_bytes_baseline": avg_ctx_a,
             "avg_ctx_bytes_candidate": avg_ctx_b,
             "ctx_bytes_delta_pct": ctx_delta_pct,
@@ -835,7 +852,7 @@ def main():
         print(f"Elapsed: {summary['elapsed_seconds']}s | Tasks: {n} | Report: {args.out}", flush=True)
         print(f"Deterministic Rubric Pass: A={det_a}/{n} ({summary['det_pass_rate_baseline_pct']}%) -> B={det_b}/{n} ({summary['det_pass_rate_candidate_pct']}%)", flush=True)
         if not args.no_judge:
-            print(f"Blinded Judge ({args.judge_model}, {len(scored_j)}/{n} scored): A={avg_j_a}/5 -> B={avg_j_b}/5 | B wins={wins_b}, A wins={wins_a}, ties={ties}", flush=True)
+            print(f"Blinded Judge ({args.judge_model}, {global_j['scored']}/{n} scored): A={global_j['avg_baseline']}/5 -> B={global_j['avg_candidate']}/5 | B wins={global_j['wins_candidate']}, A wins={global_j['wins_baseline']}, ties={global_j['ties']}", flush=True)
         print(f"Avg SessionStart Context:  A={avg_ctx_a:.0f}B -> B={avg_ctx_b:.0f}B ({ctx_delta_pct:+.1f}%)", flush=True)
         for c, cs in cat_summary.items():
             print(

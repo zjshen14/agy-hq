@@ -282,15 +282,27 @@ func buildOutboxBriefCard(it outbox.OutboxItem) OutboxBriefCard {
 	return card
 }
 
+func newProposalAlert(p approvals.Proposal, status, ttlWarn string) ProposalAlert {
+	shaShort := p.SHA256
+	if len(shaShort) > 12 {
+		shaShort = shaShort[:12]
+	}
+	return ProposalAlert{
+		ID:          p.ID,
+		ActionType:  p.ActionType,
+		Summary:     watcher.SanitizeBoundedSubject(p.Summary, 160),
+		ExpiresAt:   p.ExpiresAt,
+		SHA256Short: shaShort,
+		Status:      status,
+		TTLWarning:  ttlWarn,
+	}
+}
+
 func collectProposalAlerts(vaultDir string, now time.Time) []ProposalAlert {
 	var alerts []ProposalAlert
 	seen := make(map[string]bool)
 	if pending, err := approvals.List(vaultDir); err == nil {
 		for _, p := range pending {
-			shaShort := p.SHA256
-			if len(shaShort) > 12 {
-				shaShort = shaShort[:12]
-			}
 			warn := ""
 			if expStr := strings.TrimSpace(p.ExpiresAt); expStr != "" {
 				if expAt, pErr := time.Parse(time.RFC3339, expStr); pErr == nil {
@@ -300,15 +312,7 @@ func collectProposalAlerts(vaultDir string, now time.Time) []ProposalAlert {
 					}
 				}
 			}
-			alerts = append(alerts, ProposalAlert{
-				ID:          p.ID,
-				ActionType:  p.ActionType,
-				Summary:     watcher.SanitizeBoundedSubject(p.Summary, 160),
-				ExpiresAt:   p.ExpiresAt,
-				SHA256Short: shaShort,
-				Status:      p.Status,
-				TTLWarning:  warn,
-			})
+			alerts = append(alerts, newProposalAlert(p, p.Status, warn))
 			seen[p.ID] = true
 		}
 	}
@@ -323,19 +327,7 @@ func collectProposalAlerts(vaultDir string, now time.Time) []ProposalAlert {
 			}
 			age := now.Sub(ts)
 			if age >= 0 && age <= 12*time.Hour {
-				shaShort := rec.Proposal.SHA256
-				if len(shaShort) > 12 {
-					shaShort = shaShort[:12]
-				}
-				alerts = append(alerts, ProposalAlert{
-					ID:          rec.Proposal.ID,
-					ActionType:  rec.Proposal.ActionType,
-					Summary:     watcher.SanitizeBoundedSubject(rec.Proposal.Summary, 160),
-					ExpiresAt:   rec.Proposal.ExpiresAt,
-					SHA256Short: shaShort,
-					Status:      "expired",
-					TTLWarning:  "expired_overnight",
-				})
+				alerts = append(alerts, newProposalAlert(rec.Proposal, "expired", "expired_overnight"))
 				seen[rec.Proposal.ID] = true
 			}
 		}
@@ -416,25 +408,24 @@ func extractQuarantinedJSONCountAndIDs(extID string, stdout []byte) (int, []stri
 		}
 	}
 
-	var arr []interface{}
-	if json.Unmarshal(trimmed, &arr) == nil {
-		for _, elem := range arr {
+	recordObjSlice := func(slice []interface{}) int {
+		for _, elem := range slice {
 			if m, ok := elem.(map[string]interface{}); ok {
 				recordObjID(m)
 			}
 		}
-		return len(arr), ids
+		return len(slice)
+	}
+
+	var arr []interface{}
+	if json.Unmarshal(trimmed, &arr) == nil {
+		return recordObjSlice(arr), ids
 	}
 
 	var obj map[string]interface{}
 	if json.Unmarshal(trimmed, &obj) == nil {
 		if rawItems, ok := obj["items"].([]interface{}); ok {
-			for _, elem := range rawItems {
-				if m, ok := elem.(map[string]interface{}); ok {
-					recordObjID(m)
-				}
-			}
-			return len(rawItems), ids
+			return recordObjSlice(rawItems), ids
 		}
 		recordObjID(obj)
 		return 1, ids
@@ -686,63 +677,49 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 	verifyBin := extension.VerifyTrustedBinaryReadOnly
 
 	extFiles := discoverBriefExtensionFiles(vaultDir)
+	extErrOutcome := func(id, sourceID, section, status, errMsg, warn string, quarantined bool) poolOutcome {
+		return poolOutcome{
+			extSec: ExtensionBriefSection{
+				ID:           id,
+				SourceID:     sourceID,
+				Section:      section,
+				Status:       status,
+				ErrorMessage: errMsg,
+				Quarantined:  quarantined,
+			},
+			warn: warn,
+		}
+	}
 	for _, ef := range extFiles {
 		ef := ef
 		jobs = append(jobs, func(jobCtx context.Context) poolOutcome {
 			raw, rErr := os.ReadFile(ef.absPath)
 			if rErr != nil {
-				return poolOutcome{
-					extSec: ExtensionBriefSection{
-						ID:           filepath.Base(ef.absPath),
-						SourceID:     ef.sourceID,
-						Section:      "Operations",
-						Status:       "offline",
-						ErrorMessage: rErr.Error(),
-						Quarantined:  true,
-					},
-				}
+				return extErrOutcome(filepath.Base(ef.absPath), ef.sourceID, "Operations", "offline", rErr.Error(), "", true)
 			}
 			spec, pErr := ParseBriefExtensionStrict(raw, ef.sourceID)
 			if pErr != nil {
-				return poolOutcome{
-					extSec: ExtensionBriefSection{
-						ID:           filepath.Base(ef.absPath),
-						SourceID:     ef.sourceID,
-						Section:      "Operations",
-						Status:       "untrusted",
-						ErrorMessage: pErr.Error(),
-						Quarantined:  true,
-					},
-					warn: fmt.Sprintf("rejected invalid brief extension %s (%s): %v", filepath.Base(ef.absPath), ef.sourceID, pErr),
-				}
+				return extErrOutcome(
+					filepath.Base(ef.absPath), ef.sourceID, "Operations", "untrusted", pErr.Error(),
+					fmt.Sprintf("rejected invalid brief extension %s (%s): %v", filepath.Base(ef.absPath), ef.sourceID, pErr),
+					true,
+				)
 			}
 			fileSHA, fErr := verifyFile(vaultDir, ef.sourceID, ef.absPath)
 			if fErr != nil {
-				return poolOutcome{
-					extSec: ExtensionBriefSection{
-						ID:           spec.ID,
-						SourceID:     ef.sourceID,
-						Section:      spec.Section,
-						Status:       "untrusted",
-						ErrorMessage: fErr.Error(),
-						Quarantined:  true,
-					},
-					warn: fmt.Sprintf("skipped unpinned brief extension %s (%s): run 'hq extension trust' first", spec.ID, ef.sourceID),
-				}
+				return extErrOutcome(
+					spec.ID, ef.sourceID, spec.Section, "untrusted", fErr.Error(),
+					fmt.Sprintf("skipped unpinned brief extension %s (%s): run 'hq extension trust' first", spec.ID, ef.sourceID),
+					true,
+				)
 			}
 			binPath, bErr := verifyBin(vaultDir, ef.sourceID, spec.Argv[0])
 			if bErr != nil {
-				return poolOutcome{
-					extSec: ExtensionBriefSection{
-						ID:           spec.ID,
-						SourceID:     ef.sourceID,
-						Section:      spec.Section,
-						Status:       "untrusted",
-						ErrorMessage: bErr.Error(),
-						Quarantined:  true,
-					},
-					warn: fmt.Sprintf("skipped brief extension %s (%s) with unpinned binary %q", spec.ID, ef.sourceID, spec.Argv[0]),
-				}
+				return extErrOutcome(
+					spec.ID, ef.sourceID, spec.Section, "untrusted", bErr.Error(),
+					fmt.Sprintf("skipped brief extension %s (%s) with unpinned binary %q", spec.ID, ef.sourceID, spec.Argv[0]),
+					true,
+				)
 			}
 
 			quarantined := isBriefExtQuarantined(vaultDir, ef.sourceID, ef.packID, spec, fileSHA)
@@ -761,16 +738,7 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 				Timeout:           perTimeout,
 			})
 			if runErr != nil {
-				return poolOutcome{
-					extSec: ExtensionBriefSection{
-						ID:           spec.ID,
-						SourceID:     ef.sourceID,
-						Section:      spec.Section,
-						Status:       "offline",
-						ErrorMessage: runErr.Error(),
-						Quarantined:  quarantined,
-					},
-				}
+				return extErrOutcome(spec.ID, ef.sourceID, spec.Section, "offline", runErr.Error(), "", quarantined)
 			}
 
 			extSec := ExtensionBriefSection{

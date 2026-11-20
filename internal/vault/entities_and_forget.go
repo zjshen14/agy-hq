@@ -113,23 +113,21 @@ func ParseEntityDossierFile(path string) (EntityDossier, error) {
 			d.Name = strings.TrimSpace(strings.TrimPrefix(line, "# "))
 			continue
 		}
-		if strings.HasPrefix(line, ">") {
-			meta := strings.TrimSpace(strings.TrimLeft(line, ">"))
-			lower := strings.ToLower(meta)
-			switch {
-			case strings.HasPrefix(lower, "**kind:**"):
-				d.Kind = strings.TrimSpace(meta[len("**kind:**"):])
-			case strings.HasPrefix(lower, "**emails:**"):
-				d.Emails = dedupCleanStrings(meta[len("**emails:**"):])
-			case strings.HasPrefix(lower, "**handles:**"):
-				d.Handles = dedupCleanStrings(meta[len("**handles:**"):])
-			case strings.HasPrefix(lower, "**spaces:**"):
-				d.Spaces = dedupCleanStrings(meta[len("**spaces:**"):])
-			case strings.HasPrefix(lower, "**context:**"):
-				d.Context = strings.TrimSpace(meta[len("**context:**"):])
-			case strings.HasPrefix(lower, "**updated:**"):
-				if u := strings.TrimSpace(meta[len("**updated:**"):]); u != "" {
-					d.UpdatedAt = u
+		if key, val, ok := parseBlockquoteMeta(line); ok {
+			switch key {
+			case "kind":
+				d.Kind = val
+			case "emails":
+				d.Emails = dedupCleanStrings(val)
+			case "handles":
+				d.Handles = dedupCleanStrings(val)
+			case "spaces":
+				d.Spaces = dedupCleanStrings(val)
+			case "context":
+				d.Context = val
+			case "updated":
+				if val != "" {
+					d.UpdatedAt = val
 				}
 			}
 			continue
@@ -307,23 +305,10 @@ func appendUniqueNote(notes []string, candidate string) []string {
 // ListEntities loads all entity dossiers from local/memory/entities/*.md sorted by slug.
 func ListEntities(vaultDir string) ([]EntityDossier, error) {
 	entDir := filepath.Join(vaultDir, "memory", "entities")
-	entries, err := os.ReadDir(entDir)
+	names, err := listSortedRegularFiles(entDir, ".md")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		if strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
 
 	var out []EntityDossier
 	for _, name := range names {

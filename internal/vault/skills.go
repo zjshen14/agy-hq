@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // CoreOSSkillSlugs lists the 3 channel-agnostic OS lifecycle skills shipped in the core plugin bundle.
@@ -107,7 +109,7 @@ func saveSkillBaselines(vaultDir string, baselines map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	return store.WriteAtomic(path, append(b, '\n'), 0o644)
 }
 
 func sha256HexTrimmed(s string) string {
@@ -326,15 +328,7 @@ func ListSkills(rootDir, vaultDir, templateDir string) ([]SkillInfo, error) {
 				desc = extractSkillDescription(string(b))
 			}
 		}
-		overlayPath := filepath.Join(vaultDir, "memory", "rsi", "rules", slug+".md")
-		overlayRules := 0
-		var dispOverlay string
-		if b, err := os.ReadFile(overlayPath); err == nil {
-			_, _, overlayRules = SplitSkillRSIRules(string(b))
-			if overlayRules > 0 {
-				dispOverlay = overlayPath
-			}
-		}
+		overlayRules, dispOverlay := readSkillOverlayInfo(vaultDir, slug)
 		out = append(out, SkillInfo{
 			Name:           slug,
 			Tier:           "core",
@@ -365,15 +359,7 @@ func ListSkills(rootDir, vaultDir, templateDir string) ([]SkillInfo, error) {
 			baseContent, _, inlineRules := SplitSkillRSIRules(string(b))
 			desc := extractSkillDescription(string(b))
 
-			overlayRules := 0
-			overlayPath := filepath.Join(vaultDir, "memory", "rsi", "rules", slug+".md")
-			var dispOverlay string
-			if ob, oErr := os.ReadFile(overlayPath); oErr == nil {
-				_, _, overlayRules = SplitSkillRSIRules(string(ob))
-				if overlayRules > 0 {
-					dispOverlay = overlayPath
-				}
-			}
+			overlayRules, dispOverlay := readSkillOverlayInfo(vaultDir, slug)
 
 			tier := "vault-custom"
 			modified := false
@@ -418,6 +404,19 @@ func ListSkills(rootDir, vaultDir, templateDir string) ([]SkillInfo, error) {
 	}
 
 	return out, nil
+}
+
+func readSkillOverlayInfo(vaultDir, slug string) (int, string) {
+	overlayPath := filepath.Join(vaultDir, "memory", "rsi", "rules", slug+".md")
+	b, err := os.ReadFile(overlayPath)
+	if err != nil {
+		return 0, ""
+	}
+	_, _, rules := SplitSkillRSIRules(string(b))
+	if rules > 0 {
+		return rules, overlayPath
+	}
+	return 0, ""
 }
 
 func extractSkillDescription(content string) string {

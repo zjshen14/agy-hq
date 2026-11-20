@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"bufio"
 	"bytes"
 	_ "embed"
 	"encoding/json"
@@ -138,16 +137,15 @@ func EvaluateMemory(vaultDir string, opts EvalOptions) (*MemoryEvalReport, error
 		since = now.AddDate(0, 0, -14)
 	}
 
-	audit, err := AuditMemory(vaultDir, nil)
+	audit, extra, err := auditMemoryInternal(vaultDir, nil, now)
 	if err != nil {
 		return nil, err
 	}
 
-	activeFacts, _, _, _ := LoadFactsStateAt(vaultDir, now)
 	scopedFacts := 0
 	globalFacts := 0
 	var factsText strings.Builder
-	for _, f := range activeFacts {
+	for _, f := range extra.activeFacts {
 		factsText.WriteString(f.Statement)
 		factsText.WriteByte('\n')
 		isScoped := false
@@ -179,11 +177,11 @@ func EvaluateMemory(vaultDir string, opts EvalOptions) (*MemoryEvalReport, error
 			layerTexts = append(layerTexts, string(b))
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(vaultDir, "USER.md")); err == nil {
-		layerTexts = append(layerTexts, string(b))
+	if len(extra.userBytes) > 0 {
+		layerTexts = append(layerTexts, string(extra.userBytes))
 	}
-	if b, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
-		layerTexts = append(layerTexts, string(b))
+	if len(extra.memBytes) > 0 {
+		layerTexts = append(layerTexts, string(extra.memBytes))
 	}
 	if factsText.Len() > 0 {
 		layerTexts = append(layerTexts, factsText.String())
@@ -332,30 +330,7 @@ func computeCrossLayerShingleOverlapPct(texts []string, n int) float64 {
 }
 
 func countInterventionsSince(vaultDir string, since time.Time) (approved, rejected, expired int) {
-	p := filepath.Join(vaultDir, "memory", "interventions.jsonl")
-	if !isRegularNonSymlinkFile(p) {
-		return 0, 0, 0
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		return 0, 0, 0
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var rec interventionLite
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		if ts, ok := parseAnyTimestamp(rec.Timestamp); ok && ts.Before(since) {
-			continue
-		}
+	scanInterventionsSince(vaultDir, since, func(rec interventionLite) {
 		switch strings.ToLower(strings.TrimSpace(rec.Decision)) {
 		case "approved":
 			approved++
@@ -364,7 +339,7 @@ func countInterventionsSince(vaultDir string, since time.Time) (approved, reject
 		case "expired":
 			expired++
 		}
-	}
+	})
 	return approved, rejected, expired
 }
 

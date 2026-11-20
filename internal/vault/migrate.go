@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -223,7 +224,7 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	}
 	if b, err := json.MarshalIndent(newState, "", "  "); err == nil {
 		_ = os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755)
-		_ = os.WriteFile(schemaFilePath(vaultDir), b, 0o644)
+		_ = store.WriteAtomic(schemaFilePath(vaultDir), b, 0o644)
 	}
 
 	return report, nil
@@ -264,32 +265,39 @@ func mergeGitignoreAdditiveBytes(tmplBytes, dstBytes []byte, dstPath string) int
 
 func normalizeLegacyTaskTitles(vaultDir string) int {
 	tasksPath := filepath.Join(vaultDir, "memory", "tasks.json")
-	data, err := os.ReadFile(tasksPath)
-	if err != nil {
-		return 0
-	}
-	var raw []map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if _, err := os.Stat(tasksPath); err != nil {
 		return 0
 	}
 	count := 0
-	for _, item := range raw {
-		title, _ := item["title"].(string)
-		slug, _ := item["taskSlug"].(string)
-		if title == "" {
-			continue
+	lockPath := filepath.Join(vaultDir, "memory", ".tasks.lock")
+	_ = store.With(context.Background(), store.RankTasks, lockPath, func(context.Context) error {
+		data, err := os.ReadFile(tasksPath)
+		if err != nil {
+			return nil
 		}
-		sanitized := sanitizeMigratedTitle(title, slug)
-		if sanitized != title {
-			item["title"] = sanitized
-			count++
+		var raw []map[string]interface{}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil
 		}
-	}
-	if count > 0 {
-		if b, err := json.MarshalIndent(raw, "", "  "); err == nil {
-			_ = os.WriteFile(tasksPath, b, 0o644)
+		for _, item := range raw {
+			title, _ := item["title"].(string)
+			slug, _ := item["taskSlug"].(string)
+			if title == "" {
+				continue
+			}
+			sanitized := sanitizeMigratedTitle(title, slug)
+			if sanitized != title {
+				item["title"] = sanitized
+				count++
+			}
 		}
-	}
+		if count > 0 {
+			if b, err := json.MarshalIndent(raw, "", "  "); err == nil {
+				return store.WriteAtomic(tasksPath, b, 0o644)
+			}
+		}
+		return nil
+	})
 	return count
 }
 
@@ -454,25 +462,20 @@ func upgradeV7ProactiveTriggers(vaultDir string) bool {
 }
 
 func migrateV5TaskBoardHierarchy(vaultDir string) (int, int) {
-	tasksPath := filepath.Join(vaultDir, "memory", "tasks.json")
-	tasks, err := kernel.ListTasks(vaultDir)
-	if err != nil || len(tasks) == 0 {
-		return 0, 0
-	}
 	backfilled := 0
-	for i := range tasks {
-		ek := tasks[i].EffectiveKind()
-		es := tasks[i].EffectiveScope()
-		if tasks[i].Kind != ek || tasks[i].Scope != es {
-			tasks[i].Kind = ek
-			tasks[i].Scope = es
-			backfilled++
+	if err := kernel.UpdateTasks(vaultDir, func(tasks []kernel.ActiveTask) ([]kernel.ActiveTask, bool, error) {
+		for i := range tasks {
+			ek := tasks[i].EffectiveKind()
+			es := tasks[i].EffectiveScope()
+			if tasks[i].Kind != ek || tasks[i].Scope != es {
+				tasks[i].Kind = ek
+				tasks[i].Scope = es
+				backfilled++
+			}
 		}
-	}
-	if backfilled > 0 {
-		if b, err := json.MarshalIndent(tasks, "", "  "); err == nil {
-			_ = os.WriteFile(tasksPath, b, 0o644)
-		}
+		return tasks, backfilled > 0, nil
+	}); err != nil {
+		return 0, 0
 	}
 	rep, err := kernel.CompactTasks(vaultDir, kernel.CompactTasksOptions{
 		IdleDormantArchiveAfter: 365 * 24 * time.Hour,

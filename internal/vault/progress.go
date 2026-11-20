@@ -158,19 +158,13 @@ func parseProgressMarkdown(slug, path, raw string) ProgressCheckpoint {
 
 // ListProgress returns all active task progress checkpoints sorted by UpdatedAt descending.
 func ListProgress(vaultDir string) ([]ProgressCheckpoint, error) {
-	entries, err := os.ReadDir(progressDir(vaultDir))
+	names, err := listSortedRegularFiles(progressDir(vaultDir), ".md")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
 	var out []ProgressCheckpoint
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		slug := strings.TrimSuffix(e.Name(), ".md")
+	for _, name := range names {
+		slug := strings.TrimSuffix(name, ".md")
 		if cp, _, ok, lErr := LoadProgress(vaultDir, slug); lErr == nil && ok {
 			out = append(out, cp)
 		}
@@ -222,16 +216,13 @@ func ArchiveProgressBatch(vaultDir string, slugs []string, now time.Time) []stri
 
 // SweepOrphanProgress archives any active local/memory/progress/<slug>.md file whose slug is not in activeSlugs.
 func SweepOrphanProgress(vaultDir string, activeSlugs map[string]bool, now time.Time) []string {
-	entries, err := os.ReadDir(progressDir(vaultDir))
+	names, err := listSortedRegularFiles(progressDir(vaultDir), ".md")
 	if err != nil {
 		return nil
 	}
 	var orphans []string
-	for _, e := range entries {
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(e.Name(), ".md") || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		slug := strings.TrimSuffix(e.Name(), ".md")
+	for _, name := range names {
+		slug := strings.TrimSuffix(name, filepath.Ext(name))
 		if !activeSlugs[strings.ToLower(slug)] {
 			orphans = append(orphans, slug)
 		}

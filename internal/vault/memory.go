@@ -782,31 +782,40 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 
 var reMDLinkTarget = regexp.MustCompile(`\[[^\]]+\]\(([^)]+)\)`)
 
+func parseBlockquoteMeta(line string) (string, string, bool) {
+	if !strings.HasPrefix(line, ">") {
+		return "", "", false
+	}
+	meta := strings.TrimSpace(strings.TrimLeft(line, ">"))
+	idx := strings.IndexByte(meta, ':')
+	if idx <= 0 {
+		return "", "", false
+	}
+	key := strings.ToLower(strings.TrimSpace(strings.Trim(meta[:idx], "*")))
+	if key == "" {
+		return "", "", false
+	}
+	val := strings.TrimSpace(strings.TrimPrefix(meta[idx+1:], "**"))
+	return key, val, true
+}
+
 // LoadTopicIndex discovers all markdown topic pages in local/memory/topics/*.md (lock-free),
 // extracting # Title, > **Summary:**, > **Scopes:**, > **Playbook-Owner:**, top ## Active Playbook,
 // and verifying local markdown links (Lstat non-symlink checked).
 func LoadTopicIndex(vaultDir string) ([]TopicPage, error) {
-	topicsDir := filepath.Join(vaultDir, "memory", "topics")
-	entries, err := os.ReadDir(topicsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
+	pages, _, err := loadTopicIndexInternal(vaultDir)
+	return pages, err
+}
 
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		if strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
-			names = append(names, e.Name())
-		}
+func loadTopicIndexInternal(vaultDir string) ([]TopicPage, []map[string]bool, error) {
+	topicsDir := filepath.Join(vaultDir, "memory", "topics")
+	names, err := listSortedRegularFiles(topicsDir, ".md")
+	if err != nil || len(names) == 0 {
+		return nil, nil, err
 	}
-	sort.Strings(names)
 
 	var pages []TopicPage
+	var topicStems []map[string]bool
 	for _, name := range names {
 		fullPath := filepath.Join(topicsDir, name)
 		fi, lErr := os.Lstat(fullPath)
@@ -855,40 +864,34 @@ func LoadTopicIndex(vaultDir string) ([]TopicPage, error) {
 				continue
 			}
 			if strings.HasPrefix(line, ">") {
-				clean := strings.TrimSpace(strings.TrimLeft(line, ">"))
-				lowerClean := strings.ToLower(clean)
-				if strings.HasPrefix(lowerClean, "**scopes:**") || strings.HasPrefix(lowerClean, "**scope:**") || strings.HasPrefix(lowerClean, "scopes:") || strings.HasPrefix(lowerClean, "scope:") {
-					if idx := strings.Index(clean, ":"); idx >= 0 {
-						val := strings.TrimSpace(strings.TrimPrefix(clean[idx+1:], "**"))
+				if key, val, ok := parseBlockquoteMeta(line); ok {
+					switch key {
+					case "scopes", "scope":
 						scopes = append(scopes, normalizeScopesList([]string{val})...)
-					}
-					continue
-				}
-				if strings.HasPrefix(lowerClean, "**playbook-owner:**") || strings.HasPrefix(lowerClean, "playbook-owner:") {
-					if idx := strings.Index(clean, ":"); idx >= 0 {
-						val := strings.TrimSpace(strings.TrimPrefix(clean[idx+1:], "**"))
-						list := normalizeScopesList([]string{val})
-						if len(list) > 0 {
+						continue
+					case "playbook-owner":
+						if list := normalizeScopesList([]string{val}); len(list) > 0 {
 							playbookOwner = list[0]
 						}
+						continue
+					case "updated":
+						continue
+					case "summary":
+						if !hasSummary {
+							summary = val
+							hasSummary = true
+						}
+						continue
 					}
-					continue
 				}
 				if !hasSummary {
+					clean := strings.TrimSpace(strings.TrimLeft(line, ">"))
+					lowerClean := strings.ToLower(clean)
 					if strings.HasPrefix(lowerClean, "**updated") || strings.HasPrefix(lowerClean, "updated:") {
 						continue
 					}
-					for _, prefix := range []string{"**Summary:**", "**Summary**:", "Summary:"} {
-						if strings.HasPrefix(lowerClean, strings.ToLower(prefix)) {
-							clean = strings.TrimSpace(clean[len(prefix):])
-							hasSummary = true
-							break
-						}
-					}
-					if !hasSummary {
-						hasSummary = true
-					}
 					summary = clean
+					hasSummary = true
 				}
 			}
 		}
@@ -951,6 +954,12 @@ func LoadTopicIndex(vaultDir string) ([]TopicPage, error) {
 			}
 		}
 
+		stSet := make(map[string]bool)
+		for _, st := range TokenizeStems(title + " " + rawStr) {
+			stSet[st] = true
+		}
+		topicStems = append(topicStems, stSet)
+
 		pages = append(pages, TopicPage{
 			Slug:           slug,
 			Title:          title,
@@ -967,7 +976,7 @@ func LoadTopicIndex(vaultDir string) ([]TopicPage, error) {
 			BrokenLinks:    brokenLinks,
 		})
 	}
-	return pages, nil
+	return pages, topicStems, nil
 }
 
 // SelectScopedPlaybooks collects Active Playbook slices from canonical 1:1 Playbook-Owner topics
@@ -1167,11 +1176,21 @@ func minInt(a, b int) int {
 	return b
 }
 
+type memoryAuditData struct {
+	activeFacts []Fact
+	memBytes    []byte
+	userBytes   []byte
+}
+
 // AuditMemory evaluates dual-cap MEMORY.md & USER.md budgets, Topic Wiki graph integrity
 // (broken links, header validity, duplicate Playbook-Owner claims, Jaccard >= 0.45 near-duplicates),
 // active/expired/missing-TTL facts, and stale task references (lock-free).
 func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusReport, error) {
-	now := time.Now().UTC()
+	rep, _, err := auditMemoryInternal(vaultDir, completedTaskSlugs, time.Now().UTC())
+	return rep, err
+}
+
+func auditMemoryInternal(vaultDir string, completedTaskSlugs []string, now time.Time) (*MemoryStatusReport, memoryAuditData, error) {
 	memPath := filepath.Join(vaultDir, "MEMORY.md")
 	memBytes, _ := os.ReadFile(memPath)
 	memContent := strings.TrimRight(strings.ReplaceAll(string(memBytes), "\r\n", "\n"), "\n")
@@ -1195,9 +1214,9 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 
 	userBytes, _ := os.ReadFile(filepath.Join(vaultDir, "USER.md"))
 
-	topics, err := LoadTopicIndex(vaultDir)
+	topics, topicStems, err := loadTopicIndexInternal(vaultDir)
 	if err != nil {
-		return nil, err
+		return nil, memoryAuditData{}, err
 	}
 	entities, _ := ListEntities(vaultDir)
 
@@ -1207,9 +1226,7 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 	ownerSeen := make(map[string]string)
 	topicsTotalBytes := 0
 
-	// Build stem sets for pairwise near-duplicate Jaccard check
-	topicStems := make([]map[string]bool, len(topics))
-	for i, tp := range topics {
+	for _, tp := range topics {
 		topicsTotalBytes += tp.ByteSize
 		if !tp.HasTitle || !tp.HasSummary {
 			invalidHeaders = append(invalidHeaders, tp.Slug)
@@ -1224,13 +1241,6 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 				ownerSeen[tp.PlaybookOwner] = tp.Slug
 			}
 		}
-		stSet := make(map[string]bool)
-		if raw, rErr := os.ReadFile(tp.Path); rErr == nil {
-			for _, st := range TokenizeStems(tp.Title + " " + string(raw)) {
-				stSet[st] = true
-			}
-		}
-		topicStems[i] = stSet
 	}
 
 	var nearDups []string
@@ -1257,7 +1267,7 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 
 	activeFacts, expiredFacts, rawFactLines, err := LoadFactsStateAt(vaultDir, now)
 	if err != nil {
-		return nil, err
+		return nil, memoryAuditData{}, err
 	}
 
 	overdueTTL := 0
@@ -1315,5 +1325,9 @@ func AuditMemory(vaultDir string, completedTaskSlugs []string) (*MemoryStatusRep
 		MissingTTLEventFacts:    missingTTLEvents,
 		RawFactLines:            rawFactLines,
 		StaleReferences:         staleRefs,
+	}, memoryAuditData{
+		activeFacts: activeFacts,
+		memBytes:    memBytes,
+		userBytes:   userBytes,
 	}, nil
 }

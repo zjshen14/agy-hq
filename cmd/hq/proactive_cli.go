@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
@@ -18,35 +18,13 @@ import (
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
-	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
-	"unicode/utf8"
 )
 
-func checkCallerTaintedEnv(vaultDir string) (taint.Record, bool) {
-	convID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
-	if convID == "" {
-		return taint.Record{}, false
-	}
-	return taint.Check(vaultDir, convID)
-}
-
-func denyIfCallerTainted(vaultDir, verb string) {
-	if rec, ok := checkCallerTaintedEnv(vaultDir); ok {
-		fmt.Fprintf(os.Stderr, "hq %s blocked: conversation %s is quarantined (%s)\n", verb, rec.ConvID, rec.Source)
-		os.Exit(1)
-	}
-}
-
 func runOutboxCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 	now := time.Now()
 
 	switch sub {
@@ -103,9 +81,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"item": item, "cooledDown": cooledDown})
+			printJSON(map[string]interface{}{"item": item, "cooledDown": cooledDown})
 			return
 		}
 		fmt.Printf("Added outbox item %s [tier=%s, status=%s, cooledDown=%v, downgradedBy=%s]\n", item.ID, item.Tier, item.Status, cooledDown, item.DowngradedBy)
@@ -122,9 +98,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(items)
+			printJSON(items)
 			return
 		}
 		if len(items) == 0 {
@@ -147,9 +121,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(drained)
+			printJSON(drained)
 			return
 		}
 		fmt.Printf("Drained %d brief_rollup item(s) for Morning Brief:\n", len(drained))
@@ -173,9 +145,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 		}
 		rep := outbox.RunEvalSuite(fixtures)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(rep)
+			printJSON(rep)
 			if !rep.AllThresholdsMet {
 				os.Exit(1)
 			}
@@ -202,12 +172,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 }
 
 func runIdeasCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 	now := time.Now()
 
 	switch sub {
@@ -226,9 +191,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(items)
+			printJSON(items)
 			return
 		}
 		if len(items) == 0 {
@@ -240,15 +203,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 		}
 
 	case "promote":
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("ideas promote", flag.ExitOnError)
 		spawn := fs.Bool("spawn", false, "Also spawn a dedicated Task Conversation from the promoted idea")
 		dryRun := fs.Bool("dry-run", false, "Dry-run spawn when --spawn is set")
@@ -293,9 +248,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"item": item, "spawnOutput": spawnOut})
+			printJSON(map[string]interface{}{"item": item, "spawnOutput": spawnOut})
 			return
 		}
 		fmt.Printf("Promoted idea %s (%s)\n", item.ID, item.Title)
@@ -304,15 +257,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 		}
 
 	case "snooze":
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("ideas snooze", flag.ExitOnError)
 		durStr := fs.String("duration", "24h", "Snooze duration (e.g. 24h, 72h)")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -332,23 +277,13 @@ func runIdeasCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(item)
+			printJSON(item)
 			return
 		}
 		fmt.Printf("Snoozed idea %s until %s\n", item.ID, item.SnoozeUntil)
 
 	case "dismiss":
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("ideas dismiss", flag.ExitOnError)
 		reason := fs.String("reason", "", "Optional dismissal reason for RSI feedback")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -364,9 +299,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(item)
+			printJSON(item)
 			return
 		}
 		fmt.Printf("Dismissed idea %s\n", item.ID)
@@ -378,12 +311,7 @@ func runIdeasCLI(vaultDir string, args []string) {
 }
 
 func runGoalsCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 	now := time.Now()
 
 	switch sub {
@@ -405,9 +333,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 			out = append(out, g)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(out)
+			printJSON(out)
 			return
 		}
 		if len(out) == 0 {
@@ -440,9 +366,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(g)
+			printJSON(g)
 			return
 		}
 		fmt.Printf("Saved goal %q (%s)\n", g.Slug, g.Title)
@@ -460,23 +384,13 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"goal": g, "milestone": ms})
+			printJSON(map[string]interface{}{"goal": g, "milestone": ms})
 			return
 		}
 		fmt.Printf("Added milestone %s (%s) to goal %s\n", ms.ID, ms.Title, g.Slug)
 
 	case "check-off", "check":
-		var pos []string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") {
-				pos = append(pos, a)
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		pos, flagArgs := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("goals check-off", flag.ExitOnError)
 		goalSlug := fs.String("goal", "", "Goal slug")
 		msTarget := fs.String("milestone", "", "Milestone ID or title substring")
@@ -495,9 +409,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(g)
+			printJSON(g)
 			return
 		}
 		fmt.Printf("Checked off milestone %q on goal %s\n", *msTarget, g.Slug)
@@ -540,23 +452,13 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"goal": g, "waitingOn": w})
+			printJSON(map[string]interface{}{"goal": g, "waitingOn": w})
 			return
 		}
 		fmt.Printf("Registered waiting-on %s for %s on goal %s (followUpAfter=%s)\n", w.ID, w.Counterparty, g.Slug, w.FollowUpAfter)
 
 	case "mark-replied":
-		var pos []string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") {
-				pos = append(pos, a)
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		pos, flagArgs := splitPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("goals mark-replied", flag.ExitOnError)
 		goalSlug := fs.String("goal", "", "Optional goal slug filter")
 		target := fs.String("target", "", "Waiting-on ID or counterparty name")
@@ -595,9 +497,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(g)
+			printJSON(g)
 			return
 		}
 		fmt.Printf("Marked waiting-on %q replied on goal %s\n", *target, g.Slug)
@@ -617,9 +517,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"dueGoals": dueGoals, "dueWaitingOn": dueWaits})
+			printJSON(map[string]interface{}{"dueGoals": dueGoals, "dueWaitingOn": dueWaits})
 			return
 		}
 		fmt.Printf("Goals Due / SLAs Expiring within %s: %d goal(s), %d waiting-on SLA(s)\n", within, len(dueGoals), len(dueWaits))
@@ -632,15 +530,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 
 	case "complete":
-		var goalSlug string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && goalSlug == "" {
-				goalSlug = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		goalSlug, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("goals complete", flag.ExitOnError)
 		slugFlag := fs.String("goal", "", "Goal slug")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -655,9 +545,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(g)
+			printJSON(g)
 			return
 		}
 		fmt.Printf("Completed goal %s (%s)\n", g.Slug, g.Title)
@@ -669,12 +557,7 @@ func runGoalsCLI(vaultDir string, args []string) {
 }
 
 func runSpacesCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 	now := time.Now()
 
 	switch sub {
@@ -688,9 +571,7 @@ func runSpacesCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(spaces)
+			printJSON(spaces)
 			return
 		}
 		if len(spaces) == 0 {
@@ -711,9 +592,7 @@ func runSpacesCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(spaces)
+			printJSON(spaces)
 			return
 		}
 		if len(spaces) == 0 {
@@ -746,27 +625,8 @@ func runSpacesCLI(vaultDir string, args []string) {
 	}
 }
 
-func parseOptionalNowFlag(raw string) time.Time {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return time.Now()
-	}
-	if t, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
-		return t
-	}
-	if t, err := time.Parse(time.RFC3339, trimmed); err == nil {
-		return t
-	}
-	return time.Now()
-}
-
 func runEventsCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 
 	switch sub {
 	case "enqueue", "add":
@@ -806,9 +666,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"event": ev, "deduplicated": deduped})
+			printJSON(map[string]interface{}{"event": ev, "deduplicated": deduped})
 			return
 		}
 		fmt.Printf("Enqueued event %s [scope=%s, status=%s, deduplicated=%v]\n", ev.ID, ev.ScopeKey, ev.Status, deduped)
@@ -826,9 +684,7 @@ func runEventsCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(items)
+			printJSON(items)
 			return
 		}
 		if len(items) == 0 {
@@ -841,15 +697,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		}
 
 	case "inspect":
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("events inspect", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
@@ -862,22 +710,12 @@ func runEventsCLI(vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq events inspect failed: %v\n", err)
 			os.Exit(1)
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(ev)
+		printJSON(ev)
 		_ = asJSON
 
 	case "retry":
 		denyIfCallerTainted(vaultDir, "events retry")
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("events retry", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
@@ -892,24 +730,14 @@ func runEventsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(ev)
+			printJSON(ev)
 			return
 		}
 		fmt.Printf("Reset event %s to pending\n", ev.ID)
 
 	case "drop":
 		denyIfCallerTainted(vaultDir, "events drop")
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("events drop", flag.ExitOnError)
 		reason := fs.String("reason", "Dropped via CLI", "Drop reason")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -925,9 +753,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(ev)
+			printJSON(ev)
 			return
 		}
 		fmt.Printf("Dropped event %s\n", ev.ID)
@@ -950,9 +776,7 @@ func runEventsCLI(vaultDir string, args []string) {
 		outboxCount, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"timersFired":     len(dueFired),
 				"actions":         actions,
 				"outboxDelivered": outboxCount,
@@ -979,9 +803,7 @@ func runEventsCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]string{"token": tok})
+			printJSON(map[string]string{"token": tok})
 			return
 		}
 		fmt.Println(tok)
@@ -993,12 +815,7 @@ func runEventsCLI(vaultDir string, args []string) {
 }
 
 func runTimersCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 
 	switch sub {
 	case "set", "add":
@@ -1121,9 +938,7 @@ func runTimersCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(tm)
+			printJSON(tm)
 			return
 		}
 		fmt.Printf("Armed %s timer %s [dueAt=%s, scope=%s, session=%s]\n", tm.Category, tm.ID, tm.DueAt, tm.ScopeKey, tm.SessionID)
@@ -1139,9 +954,7 @@ func runTimersCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(list)
+			printJSON(list)
 			return
 		}
 		if len(list) == 0 {
@@ -1155,15 +968,7 @@ func runTimersCLI(vaultDir string, args []string) {
 
 	case "cancel", "rm", "remove":
 		denyIfCallerTainted(vaultDir, "timers cancel")
-		var id string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && id == "" {
-				id = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("timers cancel", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
@@ -1178,9 +983,7 @@ func runTimersCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(tm)
+			printJSON(tm)
 			return
 		}
 		fmt.Printf("Cancelled timer %s\n", tm.ID)
@@ -1192,12 +995,7 @@ func runTimersCLI(vaultDir string, args []string) {
 }
 
 func runProgressCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 
 	resolveDefaultSlug := func(explicit string) string {
 		if s := strings.TrimSpace(explicit); s != "" {
@@ -1238,23 +1036,13 @@ func runProgressCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(cp)
+			printJSON(cp)
 			return
 		}
 		fmt.Printf("Saved progress checkpoint for %q (%s)\n", cp.TaskSlug, cp.Path)
 
 	case "show", "get":
-		var posSlug string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && posSlug == "" {
-				posSlug = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		posSlug, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("progress show", flag.ExitOnError)
 		taskSlug := fs.String("task", "", "Task slug")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -1277,9 +1065,7 @@ func runProgressCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(cp)
+			printJSON(cp)
 			return
 		}
 		fmt.Print(raw)
@@ -1294,9 +1080,7 @@ func runProgressCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(list)
+			printJSON(list)
 			return
 		}
 		if len(list) == 0 {
@@ -1308,15 +1092,7 @@ func runProgressCLI(vaultDir string, args []string) {
 		}
 
 	case "archive", "clear":
-		var posSlug string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && posSlug == "" {
-				posSlug = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		posSlug, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("progress archive", flag.ExitOnError)
 		taskSlug := fs.String("task", "", "Task slug")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -1335,9 +1111,7 @@ func runProgressCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]string{"taskSlug": slug, "archivedTo": dst})
+			printJSON(map[string]string{"taskSlug": slug, "archivedTo": dst})
 			return
 		}
 		fmt.Printf("Archived progress checkpoint %q -> %s\n", slug, dst)
@@ -1351,21 +1125,17 @@ func runProgressCLI(vaultDir string, args []string) {
 func runExecSandboxedCLI(vaultDir string, args []string) {
 	var flagPart []string
 	var cmdArgv []string
-	sepFound := false
 	for i, a := range args {
 		if a == "--" {
 			cmdArgv = args[i+1:]
-			sepFound = true
 			break
 		}
 		if !strings.HasPrefix(a, "-") {
 			cmdArgv = args[i:]
-			sepFound = true
 			break
 		}
 		flagPart = append(flagPart, a)
 	}
-	_ = sepFound
 
 	fs := flag.NewFlagSet("exec-sandboxed", flag.ExitOnError)
 	workDir := fs.String("workdir", "", "Optional working directory")
@@ -1381,9 +1151,7 @@ func runExecSandboxedCLI(vaultDir string, args []string) {
 		cfg := sandbox.LoadConfig(vaultDir)
 		cap := sandbox.DetectCapability()
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"mode":       cfg.Mode,
 				"capability": cap,
 			})
@@ -1417,12 +1185,7 @@ func runExecSandboxedCLI(vaultDir string, args []string) {
 }
 
 func runTriggersCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 	now := time.Now()
 
 	switch sub {
@@ -1435,9 +1198,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 			cfg = &kernel.TriggersConfig{}
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(cfg)
+			printJSON(cfg)
 			return
 		}
 		if len(cfg.Schedules) == 0 {
@@ -1462,15 +1223,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 
 	case "pause", "resume":
-		var targetID string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && targetID == "" {
-				targetID = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		targetID, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("triggers "+sub, flag.ExitOnError)
 		reason := fs.String("reason", "", "Optional pause reason")
 		catchUp := fs.String("catch-up", "", "Optional catch-up policy on resume (none or last)")
@@ -1497,9 +1250,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"fqid":          fqid,
 				"paused":        paused,
 				"override":      ov,
@@ -1514,15 +1265,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 
 	case "tick":
-		var targetID string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && targetID == "" {
-				targetID = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		targetID, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("triggers tick", flag.ExitOnError)
 		dryRun := fs.Bool("dry-run", false, "Simulate scheduled tick without spawning a live conversation")
 		asJSON := fs.Bool("json", false, "Output JSON")
@@ -1537,9 +1280,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"schedule":   targetID,
 				"skipped":    skipReason != "",
 				"skipReason": skipReason,
@@ -1555,15 +1296,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 
 	case "fire":
-		var targetID string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && targetID == "" {
-				targetID = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		targetID, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("triggers fire", flag.ExitOnError)
 		bypassPrecheck := fs.Bool("bypass-precheck", false, "Bypass 0-token precheck and enqueue immediately")
 		scheduled := fs.Bool("scheduled", false, "Respect pause/enabled state, cron schedule, and Front Desk lease (same as `hq triggers tick`)")
@@ -1581,9 +1314,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 				os.Exit(1)
 			}
 			if *asJSON {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				_ = enc.Encode(map[string]interface{}{
+				printJSON(map[string]interface{}{
 					"schedule":   targetID,
 					"skipped":    skipReason != "",
 					"skipReason": skipReason,
@@ -1605,9 +1336,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"schedule": targetID,
 				"actions":  actions,
 			})
@@ -1628,23 +1357,10 @@ func runTriggersCLI(vaultDir string, args []string) {
 }
 
 func runDispatchCLI(vaultDir string, args []string) {
-	sub := "resolve"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "resolve")
 	switch sub {
 	case "resolve":
-		var posSkill string
-		var flagArgs []string
-		for _, a := range rest {
-			if !strings.HasPrefix(a, "-") && posSkill == "" {
-				posSkill = a
-			} else {
-				flagArgs = append(flagArgs, a)
-			}
-		}
+		posSkill, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("dispatch resolve", flag.ExitOnError)
 		skillFlag := fs.String("skill", "", "Logical core skill name")
 		triggerFlag := fs.String("trigger", "", "Optional schedule trigger FQID (e.g. core/morning-brief)")
@@ -1723,9 +1439,7 @@ func runDispatchCLI(vaultDir string, args []string) {
 		res.Tier = rModel.LogicalTier
 		res.Model = rModel.ModelID
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(res)
+			printJSON(res)
 			return
 		}
 		stateTag := "enabled"

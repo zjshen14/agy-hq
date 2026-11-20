@@ -87,66 +87,67 @@ func SeedDemoData(vaultDir string) ([]string, error) {
 	}
 
 	// 3. Sample Layer-1 Task Board Entries: local/memory/tasks.json (only if absent or empty)
-	tasksPath := filepath.Join(vaultDir, "memory", "tasks.json")
-	existingTasks, _ := kernel.ListTasks(vaultDir)
-	if len(existingTasks) == 0 {
-		if err := os.MkdirAll(filepath.Dir(tasksPath), 0o755); err != nil {
-			return seeded, err
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		return seeded, err
+	}
+	demoTasks := []kernel.ActiveTask{
+		{
+			TaskSlug:       "sample-acme-q3-thesis-check",
+			Title:          "[Task:ACME] [Sample] Q3 10-Q Thesis & Supply-Chain Audit",
+			Kind:           "task",
+			Scope:          "ACME",
+			Tier:           "deep",
+			Model:          "gemini-4-carbon-high",
+			ConversationID: "demo-conv-task-acme-001",
+			TurnCount:      3,
+			Pinned:         true,
+			CreatedAt:      now.Add(-45 * time.Minute).Format(time.RFC3339),
+			LastUpdatedAt:  now.Add(-5 * time.Minute).Format(time.RFC3339),
+			LastSummary:    "[Sample] Verified ACME Q3 revenue (+28% YoY) and 64.2% gross margin; flagged 14-week substrate lead-time risk.",
+			Status:         "active",
+		},
+		{
+			TaskSlug:       "subagent-agy-hq-inbox-router-demo",
+			Title:          "[Subagent:inbox] [Sample] ACME 10-Q Filing Classifier [standard]",
+			Kind:           "subagent",
+			Scope:          "inbox",
+			Tier:           "standard",
+			Model:          "gemini-4-hydrogen-high",
+			ConversationID: "demo-conv-sub-inbox-002",
+			TurnCount:      1,
+			CreatedAt:      now.Add(-30 * time.Minute).Format(time.RFC3339),
+			LastUpdatedAt:  now.Add(-28 * time.Minute).Format(time.RFC3339),
+			CompletedAt:    now.Add(-28 * time.Minute).Format(time.RFC3339),
+			LastSummary:    "[Sample] Classified acme-corp-2026-10-Q.html as SEC Form 10-Q and staged digest approval.",
+			Status:         "completed",
+		},
+		{
+			TaskSlug:       "auto-morning-brief-demo",
+			Title:          "[Auto] [Sample] Morning Brief",
+			Kind:           "auto",
+			Scope:          "brief",
+			Tier:           "standard",
+			Model:          "gemini-4-hydrogen-high",
+			ConversationID: "demo-conv-auto-brief-003",
+			TurnCount:      1,
+			CreatedAt:      now.Add(-2 * time.Hour).Format(time.RFC3339),
+			LastUpdatedAt:  now.Add(-118 * time.Minute).Format(time.RFC3339),
+			CompletedAt:    now.Add(-118 * time.Minute).Format(time.RFC3339),
+			LastSummary:    "[Sample] Delivered daily digest: 1 new SEC 10-Q in inbox/, 1 pending approval, all CI gates green.",
+			Status:         "completed",
+		},
+	}
+	seededTasks := false
+	if err := kernel.UpdateTasks(vaultDir, func(existing []kernel.ActiveTask) ([]kernel.ActiveTask, bool, error) {
+		if len(existing) > 0 {
+			return nil, false, nil
 		}
-		demoTasks := []kernel.ActiveTask{
-			{
-				TaskSlug:       "sample-acme-q3-thesis-check",
-				Title:          "[Task:ACME] [Sample] Q3 10-Q Thesis & Supply-Chain Audit",
-				Kind:           "task",
-				Scope:          "ACME",
-				Tier:           "deep",
-				Model:          "gemini-4-carbon-high",
-				ConversationID: "demo-conv-task-acme-001",
-				TurnCount:      3,
-				Pinned:         true,
-				CreatedAt:      now.Add(-45 * time.Minute).Format(time.RFC3339),
-				LastUpdatedAt:  now.Add(-5 * time.Minute).Format(time.RFC3339),
-				LastSummary:    "[Sample] Verified ACME Q3 revenue (+28% YoY) and 64.2% gross margin; flagged 14-week substrate lead-time risk.",
-				Status:         "active",
-			},
-			{
-				TaskSlug:       "subagent-agy-hq-inbox-router-demo",
-				Title:          "[Subagent:inbox] [Sample] ACME 10-Q Filing Classifier [standard]",
-				Kind:           "subagent",
-				Scope:          "inbox",
-				Tier:           "standard",
-				Model:          "gemini-4-hydrogen-high",
-				ConversationID: "demo-conv-sub-inbox-002",
-				TurnCount:      1,
-				CreatedAt:      now.Add(-30 * time.Minute).Format(time.RFC3339),
-				LastUpdatedAt:  now.Add(-28 * time.Minute).Format(time.RFC3339),
-				CompletedAt:    now.Add(-28 * time.Minute).Format(time.RFC3339),
-				LastSummary:    "[Sample] Classified acme-corp-2026-10-Q.html as SEC Form 10-Q and staged digest approval.",
-				Status:         "completed",
-			},
-			{
-				TaskSlug:       "auto-morning-brief-demo",
-				Title:          "[Auto] [Sample] Morning Brief",
-				Kind:           "auto",
-				Scope:          "brief",
-				Tier:           "standard",
-				Model:          "gemini-4-hydrogen-high",
-				ConversationID: "demo-conv-auto-brief-003",
-				TurnCount:      1,
-				CreatedAt:      now.Add(-2 * time.Hour).Format(time.RFC3339),
-				LastUpdatedAt:  now.Add(-118 * time.Minute).Format(time.RFC3339),
-				CompletedAt:    now.Add(-118 * time.Minute).Format(time.RFC3339),
-				LastSummary:    "[Sample] Delivered daily digest: 1 new SEC 10-Q in inbox/, 1 pending approval, all CI gates green.",
-				Status:         "completed",
-			},
-		}
-		b, err := json.MarshalIndent(demoTasks, "", "  ")
-		if err != nil {
-			return seeded, err
-		}
-		if err := os.WriteFile(tasksPath, b, 0o644); err != nil {
-			return seeded, fmt.Errorf("write sample tasks.json: %w", err)
-		}
+		seededTasks = true
+		return demoTasks, true, nil
+	}); err != nil {
+		return seeded, fmt.Errorf("write sample tasks.json: %w", err)
+	}
+	if seededTasks {
 		seeded = append(seeded, filepath.ToSlash(filepath.Join("memory", "tasks.json"))+" (3 [Sample] tasks)")
 	}
 
@@ -186,45 +187,47 @@ func SeedDemoData(vaultDir string) ([]string, error) {
 
 	// 5. Sample Bi-Temporal Atomic Facts: local/memory/facts.jsonl (only if empty)
 	factsPath := filepath.Join(vaultDir, "memory", "facts.jsonl")
-	existingFactsBytes, _ := os.ReadFile(factsPath)
-	if len(strings.TrimSpace(string(existingFactsBytes))) == 0 {
-		sampleFacts := []Fact{
-			{
-				ID:         "fact-demo-vault-isolation",
-				Topic:      "architecture",
-				Statement:  "[Sample] Layer 2 private Vault (local/) is 100% git-ignored from the Layer 1 root repository and versioned in its own local/.git.",
-				SourceConv: "demo-conv-auto-brief-003",
-				Verified:   true,
-				ValidFrom:  nowStr,
-			},
-			{
-				ID:         "fact-demo-acme-margin-floor",
-				Topic:      "investing-acme",
-				Statement:  "[Sample] ACME Corp thesis requires GAAP gross margin >= 62.0% and single-customer concentration <= 25%.",
-				SourceConv: "demo-conv-task-acme-001",
-				Verified:   true,
-				ValidFrom:  nowStr,
-			},
-			{
-				ID:         "fact-demo-approval-gate",
-				Topic:      "security",
-				Statement:  "[Sample] All outbound mutations require ./bin/hq propose and deterministic SHA-256 verification before execution.",
-				SourceConv: "demo-conv-sub-inbox-002",
-				Verified:   true,
-				ValidFrom:  nowStr,
-			},
+	seededFacts := false
+	sampleFacts := []Fact{
+		{
+			ID:         "fact-demo-vault-isolation",
+			Topic:      "architecture",
+			Statement:  "[Sample] Layer 2 private Vault (local/) is 100% git-ignored from the Layer 1 root repository and versioned in its own local/.git.",
+			SourceConv: "demo-conv-auto-brief-003",
+			Verified:   true,
+			ValidFrom:  nowStr,
+		},
+		{
+			ID:         "fact-demo-acme-margin-floor",
+			Topic:      "investing-acme",
+			Statement:  "[Sample] ACME Corp thesis requires GAAP gross margin >= 62.0% and single-customer concentration <= 25%.",
+			SourceConv: "demo-conv-task-acme-001",
+			Verified:   true,
+			ValidFrom:  nowStr,
+		},
+		{
+			ID:         "fact-demo-approval-gate",
+			Topic:      "security",
+			Statement:  "[Sample] All outbound mutations require ./bin/hq propose and deterministic SHA-256 verification before execution.",
+			SourceConv: "demo-conv-sub-inbox-002",
+			Verified:   true,
+			ValidFrom:  nowStr,
+		},
+	}
+	if err := withMemoryLock(vaultDir, func() error {
+		existingFactsBytes, _ := os.ReadFile(factsPath)
+		if len(strings.TrimSpace(string(existingFactsBytes))) > 0 {
+			return nil
 		}
-		var lines []string
-		for _, f := range sampleFacts {
-			b, err := json.Marshal(f)
-			if err != nil {
-				return seeded, err
-			}
-			lines = append(lines, string(b))
+		if err := writeCanonicalFactsLocked(vaultDir, sampleFacts); err != nil {
+			return err
 		}
-		if err := os.WriteFile(factsPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-			return seeded, fmt.Errorf("write sample facts.jsonl: %w", err)
-		}
+		seededFacts = true
+		return nil
+	}); err != nil {
+		return seeded, fmt.Errorf("write sample facts.jsonl: %w", err)
+	}
+	if seededFacts {
 		seeded = append(seeded, filepath.ToSlash(filepath.Join("memory", "facts.jsonl"))+" (3 verified [Sample] facts)")
 	}
 

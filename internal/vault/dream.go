@@ -323,19 +323,17 @@ func countHotJournalDaysOlderThan(vaultDir string, cutoff time.Time) int {
 	return count
 }
 
-func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems int) []string {
+func scanInterventionsSince(vaultDir string, since time.Time, fn func(interventionLite)) {
 	p := filepath.Join(vaultDir, "memory", "interventions.jsonl")
 	if !isRegularNonSymlinkFile(p) {
-		return nil
+		return
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return nil
+		return
 	}
 	defer f.Close()
 
-	var items []string
-	seen := make(map[string]bool)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -347,15 +345,23 @@ func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems in
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(rec.Decision), "rejected") {
-			continue
-		}
 		if ts, ok := parseAnyTimestamp(rec.Timestamp); ok && ts.Before(since) {
 			continue
 		}
+		fn(rec)
+	}
+}
+
+func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems int) []string {
+	var items []string
+	seen := make(map[string]bool)
+	scanInterventionsSince(vaultDir, since, func(rec interventionLite) {
+		if !strings.EqualFold(strings.TrimSpace(rec.Decision), "rejected") {
+			return
+		}
 		summary := strings.TrimSpace(rec.Proposal.Summary)
 		if summary == "" {
-			continue
+			return
 		}
 		entry := fmt.Sprintf("[%s] %s", strings.TrimSpace(rec.Proposal.ActionType), truncateRunes(summary, 140))
 		key := strings.ToLower(entry)
@@ -363,7 +369,7 @@ func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems in
 			seen[key] = true
 			items = append(items, entry)
 		}
-	}
+	})
 	if len(items) > maxItems {
 		items = items[len(items)-maxItems:]
 	}

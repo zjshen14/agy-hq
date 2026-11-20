@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/templates"
 )
 
@@ -137,11 +139,32 @@ func SaveGlobalConfig(cfg GlobalConfig) error {
 	if err != nil {
 		return err
 	}
-	tmpPath := cfgPath + ".tmp"
-	if err := os.WriteFile(tmpPath, append(b, '\n'), 0o600); err != nil {
-		return err
+	return store.WriteAtomic(cfgPath, append(b, '\n'), 0o600)
+}
+
+// listSortedRegularFiles returns sorted filenames inside dir that are regular, non-symlink,
+// non-hidden files matching ext (case-insensitive, e.g. ".md"). Returns nil, nil when dir is absent.
+func listSortedRegularFiles(dir, ext string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return os.Rename(tmpPath, cfgPath)
+	lowerExt := strings.ToLower(ext)
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || e.Type()&os.ModeSymlink != 0 || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if lowerExt == "" || strings.HasSuffix(strings.ToLower(name), lowerExt) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // SanitizedGitEnv returns os.Environ() with parent git hook environment variables stripped

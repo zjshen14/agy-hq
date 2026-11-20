@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -21,33 +20,8 @@ import (
 	"github.com/zjshen14/agy-hq/internal/webui"
 )
 
-type repeatFlag []string
-
-func (rf *repeatFlag) String() string { return strings.Join(*rf, ",") }
-func (rf *repeatFlag) Set(val string) error {
-	*rf = append(*rf, val)
-	return nil
-}
-
-func splitPositionalAndFlags(args []string) ([]string, []string) {
-	var pos, fl []string
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			pos = append(pos, a)
-		} else {
-			fl = append(fl, a)
-		}
-	}
-	return pos, fl
-}
-
 func runExtensionCLI(rootDir, vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 
 	switch sub {
 	case "list":
@@ -60,9 +34,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(packs)
+			printJSON(packs)
 			return
 		}
 		if len(packs) == 0 {
@@ -88,8 +60,6 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 		}
 		warnings, err := extension.LintPack(targetDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
 			out := map[string]interface{}{
 				"ok":       err == nil,
 				"path":     targetDir,
@@ -98,7 +68,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 			if err != nil {
 				out["error"] = err.Error()
 			}
-			_ = enc.Encode(out)
+			printJSON(out)
 			if err != nil {
 				os.Exit(1)
 			}
@@ -132,9 +102,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(m)
+			printJSON(m)
 			return
 		}
 		fmt.Printf("Enabled companion extension pack %s@%s in extensions.json (run '%s extension trust %s' to pin SHA-256 trust)\n",
@@ -171,9 +139,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"manifest": m,
 				"proposal": prop,
 				"bundle":   bundle,
@@ -202,9 +168,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"id": pos[0], "enabled": false})
+			printJSON(map[string]interface{}{"id": pos[0], "enabled": false})
 			return
 		}
 		fmt.Printf("Disabled companion extension pack %s\n", pos[0])
@@ -232,9 +196,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"proposal": prop,
 				"bundle":   bundle,
 			})
@@ -279,9 +241,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 			}
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(items)
+			printJSON(items)
 			if hasFail {
 				os.Exit(1)
 			}
@@ -301,12 +261,7 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 }
 
 func runConnectorCLI(vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 
 	switch sub {
 	case "list":
@@ -319,9 +274,7 @@ func runConnectorCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(conns)
+			printJSON(conns)
 			return
 		}
 		for _, rc := range conns {
@@ -346,13 +299,11 @@ func runConnectorCLI(vaultDir string, args []string) {
 		}
 		m, lErr := connector.LintManifest(raw, *sourceID)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
 			out := map[string]interface{}{"ok": lErr == nil, "id": m.ID}
 			if lErr != nil {
 				out["error"] = lErr.Error()
 			}
-			_ = enc.Encode(out)
+			printJSON(out)
 			if lErr != nil {
 				os.Exit(1)
 			}
@@ -380,9 +331,7 @@ func runConnectorCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"target": target, "migrated": migrated})
+			printJSON(map[string]interface{}{"target": target, "migrated": migrated})
 			return
 		}
 		if len(migrated) == 0 {
@@ -410,9 +359,7 @@ func runConnectorCLI(vaultDir string, args []string) {
 			}
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(items)
+			printJSON(items)
 			if hasFail {
 				os.Exit(1)
 			}
@@ -441,9 +388,7 @@ func runConnectorCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(items)
+			printJSON(items)
 			return
 		}
 		fmt.Printf("Connector fixture test PASSED (%s): mapped %d NormalizedItem(s)\n", pos[0], len(items))
@@ -491,12 +436,7 @@ func runConnectorDriverCLI(vaultDir string, args []string) {
 }
 
 func runWatchCLI(vaultDir string, args []string) {
-	sub := "precheck"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "precheck")
 
 	switch sub {
 	case "status":
@@ -511,9 +451,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(rep)
+			printJSON(rep)
 			return
 		}
 		fmt.Printf("Channel Watcher Status (desktopLSReachable=%v, desktopScopeReady=%v):\n", rep.DesktopLSReachable, rep.DesktopScopeReady)
@@ -562,9 +500,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(sum)
+			printJSON(sum)
 			return
 		}
 		if sum.EnqueuedTotal == 0 && sum.RollupTotal == 0 {
@@ -609,8 +545,6 @@ func runWatchCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
 			payload := map[string]interface{}{
 				"fenced":  fenced,
 				"threads": threads,
@@ -618,7 +552,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			if len(threads) > 0 {
 				payload["thread"] = threads[0]
 			}
-			_ = enc.Encode(payload)
+			printJSON(payload)
 			return
 		}
 		fmt.Print(fenced)
@@ -657,9 +591,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		_ = asJSON
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(data)
+		printJSON(data)
 
 	case "ack":
 		var items repeatFlag
@@ -687,9 +619,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{"acked": n, "items": allIDs})
+			printJSON(map[string]interface{}{"acked": n, "items": allIDs})
 			return
 		}
 		fmt.Printf("Acknowledged %d watcher event(s)\n", n)
@@ -721,9 +651,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			_ = webui.SyncMarkdownConsole(vaultDir)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(rep)
+			printJSON(rep)
 			return
 		}
 		prefix := "Pruned watcher backlog"
@@ -749,9 +677,7 @@ func runWatchCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]interface{}{
+			printJSON(map[string]interface{}{
 				"cleared_items":  clearedItems,
 				"cleared_events": clearedEvents,
 			})
@@ -766,12 +692,7 @@ func runWatchCLI(vaultDir string, args []string) {
 }
 
 func runOfferCLI(vaultDir string, args []string) {
-	sub := "stage"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "stage")
 	if sub != "stage" {
 		fmt.Fprintf(os.Stderr, "unknown offer subcommand %q (expected stage)\n", sub)
 		os.Exit(1)
@@ -835,9 +756,7 @@ func runOfferCLI(vaultDir string, args []string) {
 	}
 	_ = webui.SyncMarkdownConsole(vaultDir)
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(prop)
+		printJSON(prop)
 		return
 	}
 	fmt.Printf("Staged offer proposal %s [connector=%s, thread=%s, sha256=%s]\n",
@@ -845,12 +764,7 @@ func runOfferCLI(vaultDir string, args []string) {
 }
 
 func runBriefCLI(vaultDir string, args []string) {
-	sub := "collect"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "collect")
 
 	switch sub {
 	case "collect":
@@ -883,9 +797,7 @@ func runBriefCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(pkt)
+			printJSON(pkt)
 			return
 		}
 		fmt.Printf("Morning Brief Packet [mode=%s, outbox=%d, proposals=%d, connectors=%d, extensions=%d, unurged=%d]\n",
@@ -909,9 +821,7 @@ func runBriefCLI(vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(res)
+			printJSON(res)
 			return
 		}
 		fmt.Printf("Committed brief lease (%d outbox item(s) marked delivered; brief=%s)\n", res.CommittedCount, res.BriefFile)
@@ -948,12 +858,7 @@ func runBriefCLI(vaultDir string, args []string) {
 }
 
 func runSidecarCLI(vaultDir string, args []string) {
-	sub := "console"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "console")
 	if sub != "console" {
 		fmt.Fprintf(os.Stderr, "unknown sidecar subcommand %q (expected console)\n", sub)
 		os.Exit(1)

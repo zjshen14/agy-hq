@@ -1,0 +1,383 @@
+package webui
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/timers"
+)
+
+func stripConsoleTimestampHeader(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 && strings.HasPrefix(s, "# ") {
+		return s[idx+1:]
+	}
+	return s
+}
+
+// SyncMarkdownConsole deterministically regenerates `local/CONSOLE.md` and (if present)
+// `<artifactDirectoryPath>/hq_console.md` from live Vault state in 0 LLM tokens.
+func SyncMarkdownConsole(vaultDir string) error {
+	invalidateStateCache(vaultDir)
+	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
+	_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", time.Now())
+	_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
+	state := loadState(vaultDir, "")
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "# 🏛️ agy-hq Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	b.WriteString("[🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n")
+
+	if len(state.Pending) > 0 {
+		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **Pending Approvals (`%d` item(s) waiting):**\n", len(state.Pending))
+		for _, p := range state.Pending {
+			short := p.SHA256
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			piiBadge := ""
+			if len(p.RiskFlags) > 0 {
+				piiBadge = fmt.Sprintf(" · ⚠️ **PII WARNING [%s]**", strings.Join(p.RiskFlags, ", "))
+			}
+			expBadge := ""
+			if p.ExpiresAt != "" {
+				expBadge = fmt.Sprintf(" · `expires:%s`", p.ExpiresAt)
+			}
+			fmt.Fprintf(&b, "> - **`%s`** (`%s` · `sha256:%s`%s%s): %s — `%s`\n", p.ID, p.ActionType, short, expBadge, piiBadge, p.Summary, p.Command)
+			payload := ""
+			if p.Metadata != nil {
+				if dp := p.Metadata["draftPayload"]; dp != "" {
+					payload = dp
+				} else if bp := p.Metadata["bodyPreview"]; bp != "" {
+					payload = bp
+				}
+			}
+			if payload != "" {
+				previewText := truncateRunes(payload, 600)
+				b.WriteString(">   > **Message Preview:**\n")
+				for _, line := range strings.Split(strings.TrimSpace(previewText), "\n") {
+					fmt.Fprintf(&b, ">   > %s\n", line)
+				}
+			}
+		}
+		b.WriteString("\n---\n\n")
+	} else {
+		b.WriteString("> [!NOTE]\n> **Pending Approvals (`0` items):** All staged actions have been resolved.\n\n---\n\n")
+	}
+
+	b.WriteString("## 📊 1. Front Desk Lease & Daily Quota\n")
+	if state.hasFrontDesk {
+		fd := state.frontDesk
+		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
+		pinStatus := "⚠️ Pending Turn-1 `write_file` pin"
+		if fd.ConsolePinned {
+			pinStatus = "✅ Pinned in UI"
+		}
+		fmt.Fprintf(&b, "- **Console Artifact Pin:** `%s`\n", pinStatus)
+		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
+		totalTriggers := len(armed) + len(unarmed)
+		if totalTriggers > 0 {
+			if kernel.IsDaemonActiveFast(vaultDir) {
+				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d active in hq daemon`\n", len(armed), totalTriggers)
+			} else {
+				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d armed in Front Desk`\n", len(armed), totalTriggers)
+			}
+		}
+		if len(fd.AdHocCrons) > 0 {
+			fmt.Fprintf(&b, "- **Ad-Hoc Conversation Crons (Front Desk):** `%d active`\n", len(fd.AdHocCrons))
+		}
+	} else {
+		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")
+	}
+	circuitBadge := "BUDGET OK"
+	if state.Quota.CircuitOpen {
+		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
+	}
+	gatekeeperNote := ""
+	if state.Quota.GatekeeperSavesToday > 0 {
+		gatekeeperNote = fmt.Sprintf(" · 0-Token Gatekeeper Skips: `%d`", state.Quota.GatekeeperSavesToday)
+	}
+	interNote := ""
+	if state.Quota.InteractiveSpawnsToday > 0 {
+		interNote = fmt.Sprintf(" · Interactive: `+%d`", state.Quota.InteractiveSpawnsToday)
+	}
+	fmt.Fprintf(&b, "- **Background Auto Spawns Today:** `%d / %d` (`%s`%s%s)\n", state.Quota.EffectiveAutoSpawns(), state.Quota.MaxDailySpawns, circuitBadge, interNote, gatekeeperNote)
+	if state.Observability.Budget.TokenCircuitDisabled {
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached):** `%s` (`budget guard disabled` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s`)\n",
+			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+			state.Observability.TodayCacheHitRatio*100.0,
+			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+		)
+	} else {
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
+			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
+			state.Observability.DailyBudgetPct,
+			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+			state.Observability.TodayCacheHitRatio*100.0,
+			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
+		)
+	}
+	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s / 256k` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
+		obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens),
+		state.Observability.FrontDeskContextStatus,
+		state.Observability.FrontDeskCompactions,
+		state.Observability.FrontDeskCacheHitRatio*100.0,
+	)
+	lastHB := state.Quota.LastStatus
+	if lastHB == "" {
+		lastHB = "Not run yet today"
+	}
+	evStats := events.GetSummaryStats(vaultDir, time.Now())
+	armedTimers, _ := timers.List(vaultDir, false)
+	if evStats.PendingCount > 0 || evStats.LeasedCount > 0 || evStats.Dropped24h > 0 || len(armedTimers) > 0 {
+		fmt.Fprintf(&b, "- **Durable Event Inbox & Timers:** `pending=%d` · `leased=%d` · `dropped24h=%d` · `armedTimers=%d`\n",
+			evStats.PendingCount, evStats.LeasedCount, evStats.Dropped24h, len(armedTimers))
+	}
+	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
+
+	now := time.Now()
+	sel := state.TaskSelection
+	wsByKey := surfaceEntriesByKey(state.Workspaces)
+
+	if state.Layer1Count == 0 && state.ColdTaskCount == 0 {
+		fmt.Fprintf(&b, "## 📋 2. Task Board (`0` Tracked Conversations)\n")
+		b.WriteString("- None registered in `local/memory/tasks.json`.\n\n---\n\n")
+	} else {
+		fmt.Fprintf(&b, "## 📋 2. Task Board (`%d` Active · `%d` Idle · `%d` Completed · `%d` Archived)\n",
+			sel.ActiveCount, sel.IdleCount, sel.CompletedCount, sel.ArchivedHotCount+sel.ArchivedColdCount)
+		if len(sel.VisibleRows) == 0 {
+			b.WriteString("- No active or recently completed tasks on the live board.\n")
+		} else {
+			b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
+			for _, t := range sel.VisibleRows {
+				cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
+				oneLine := truncateRunes(strings.ReplaceAll(strings.Join(strings.Fields(t.LastSummary), " "), "|", "\\|"), 130)
+				eff := t.EffectiveStatus(now)
+				badge := "🟢 `active`"
+				switch eff {
+				case "idle":
+					badge = "⏸️ `idle`"
+				case "stalled":
+					badge = "⚠️ `stalled`"
+				case "completed":
+					badge = "✅ `completed`"
+				case "cancelled":
+					badge = "🛑 `cancelled`"
+				case "archived":
+					badge = "📦 `archived`"
+				}
+				if t.Pinned && eff == "active" {
+					badge = "📌 🟢 `active`"
+				}
+				slugCell := fmt.Sprintf("`%s`", t.TaskSlug)
+				var metaParts []string
+				if age := t.FormatRelativeAge(now); age != "" {
+					metaParts = append(metaParts, age)
+				}
+				if existingWTs := t.ExistingWorktreeDirs(); len(existingWTs) == 1 {
+					metaParts = append(metaParts, "🌿 wt")
+				} else if len(existingWTs) > 1 {
+					metaParts = append(metaParts, fmt.Sprintf("🌿 %d wts", len(existingWTs)))
+				}
+				if wsBadge := taskWorkspaceBadge(t, wsByKey); wsBadge != "" {
+					metaParts = append(metaParts, wsBadge)
+				}
+				if tb, ok := state.Observability.TaskBadges[strings.ToLower(strings.TrimSpace(t.ConversationID))]; ok && tb.GrossTokens > 0 {
+					metaParts = append(metaParts, "🪙 "+obs.FormatTokensCompact(tb.TreeUncachedTokens))
+				}
+				if len(metaParts) > 0 {
+					slugCell += fmt.Sprintf(" · *%s*", strings.Join(metaParts, " · "))
+				}
+				fmt.Fprintf(&b, "| %s | **[%s](conversation://%s)** | %s | %s |\n", badge, cleanTitle, t.ConversationID, slugCell, oneLine)
+			}
+		}
+		if sel.ArchivedHotCount > 0 {
+			fmt.Fprintf(&b, "\n- *%d archived task(s) preserved in local/memory/tasks.json*\n", sel.ArchivedHotCount)
+		}
+		if sel.HiddenCompletedCount > 0 || sel.HiddenIdleCount > 0 || sel.ArchivedColdCount > 0 {
+			fmt.Fprintf(&b, "- *%d older completed, %d idle, and %d cold-archived task(s) omitted from live console — run `./bin/hq tasks --all` or `./bin/hq tasks --archive` to inspect.*\n",
+				sel.HiddenCompletedCount, sel.HiddenIdleCount, sel.ArchivedColdCount)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	b.WriteString(formatConsoleWorkspacesSection(state.Workspaces))
+	b.WriteString("\n---\n\n")
+
+	if len(state.ActiveSpaces) > 0 {
+		fmt.Fprintf(&b, "## 🗂️ Active Console Spaces (`%d` Active)\n", len(state.ActiveSpaces))
+		for _, sp := range state.ActiveSpaces {
+			pinTag := ""
+			if sp.OverrideMode == "pin" {
+				pinTag = " · `PINNED`"
+			}
+			fmt.Fprintf(&b, "- **%s** (`%s` · `%s`%s)\n", sp.Title, sp.ID, sp.Schedule, pinTag)
+			for _, card := range sp.RenderedCards {
+				fmt.Fprintf(&b, "  - *%s:* %s\n", card.Title, strings.Join(card.Lines, " | "))
+			}
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.Goals) > 0 || len(state.OverdueWaits) > 0 {
+		fmt.Fprintf(&b, "## 🎯 Active Goals & Counterparty SLAs (`%d` Goal(s) · `%d` Overdue Wait(s))\n", len(state.Goals), len(state.OverdueWaits))
+		for _, g := range state.Goals {
+			done := 0
+			for _, m := range g.Milestones {
+				if m.Done {
+					done++
+				}
+			}
+			dueTag := ""
+			if g.TargetDate != "" {
+				dueTag = fmt.Sprintf(" · target `%s`", g.TargetDate)
+			}
+			fmt.Fprintf(&b, "- **`%s`** — %s (`%d/%d` milestones%s)\n", g.Slug, g.Title, done, len(g.Milestones), dueTag)
+		}
+		for _, ow := range state.OverdueWaits {
+			fmt.Fprintf(&b, "- ⚠️ **Overdue SLA (`%s`):** Waiting on **%s** for *%s* (`%s` · deadline `%s`)\n", ow.GoalSlug, ow.Waiting.Counterparty, ow.Waiting.Summary, ow.Waiting.Channel, ow.Waiting.FollowUpAfter)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.Ideas) > 0 {
+		fmt.Fprintf(&b, "## 💡 Proactive Ideas Feed (`%d` Pending)\n", len(state.Ideas))
+		for _, it := range state.Ideas {
+			fmt.Fprintf(&b, "- **`%s`** (`%s`): **%s** — %s *(run `./bin/hq ideas promote %s` or `dismiss %s`)*\n", it.ID, it.SourceSkill, it.Title, it.Summary, it.ID, it.ID)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.Schedules) > 0 {
+		fmt.Fprintf(&b, "## ⏰ Scheduled Automations (`%d` Configured)\n", len(state.Schedules))
+		b.WriteString("| Schedule | Runner | Cron | Latest Activity |\n| :--- | :--- | :--- | :--- |\n")
+		for _, sc := range state.Schedules {
+			stateIcon := "🟢"
+			if !sc.Enabled {
+				stateIcon = "⏸️"
+			} else if sc.LastError != "" || (sc.LastStatus != "" && sc.LastStatus != "ok" && strings.Contains(sc.LastStatus, "error")) {
+				stateIcon = "⚠️"
+			} else if sc.LastStatus != "" && sc.LastStatus != "ok" {
+				stateIcon = "⏸️"
+			} else if sc.Kind == "conversation_cron" {
+				stateIcon = "🕒"
+			}
+			nameCell := fmt.Sprintf("%s **`%s`**", stateIcon, sc.ID)
+			if sc.Summary != "" {
+				sumClean := truncateRunes(strings.ReplaceAll(strings.Join(strings.Fields(sc.Summary), " "), "|", "\\|"), 70)
+				nameCell += " — " + sumClean
+			}
+			var actParts []string
+			if sc.LastTriggeredAt != "" {
+				actParts = append(actParts, "fired `"+sc.LastTriggeredAt+"`")
+			} else if sc.LastCheckedAt != "" {
+				actParts = append(actParts, "checked `"+sc.LastCheckedAt+"`")
+			}
+			if sc.SkipsCount > 0 {
+				actParts = append(actParts, fmt.Sprintf("`%d` skips", sc.SkipsCount))
+			}
+			if sc.LatestConvID != "" {
+				shortID := sc.LatestConvID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				actParts = append(actParts, fmt.Sprintf("[`%s`](conversation://%s)", shortID, sc.LatestConvID))
+			}
+			if sc.LastError != "" {
+				errClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.LastError), " "), "|", "\\|")
+				actParts = append(actParts, "⚠️ "+errClean)
+			} else if sc.LastStatus != "" && sc.LastStatus != "ok" {
+				stClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.LastStatus), " "), "|", "\\|")
+				actParts = append(actParts, "⏸️ "+stClean)
+			}
+			actCell := "—"
+			if len(actParts) > 0 {
+				actCell = strings.Join(actParts, " · ")
+			}
+			cronClean := strings.ReplaceAll(sc.Cron, "|", "\\|")
+			runnerClean := strings.ReplaceAll(sc.Runner, "|", "\\|")
+			fmt.Fprintf(&b, "| %s | `%s` | `%s` | %s |\n", nameCell, runnerClean, cronClean, actCell)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	b.WriteString("## 🕒 4. Recent Turn Activity (Today's Journal)\n")
+	if len(state.TodayTurns) == 0 {
+		b.WriteString("- No turns logged yet today.\n\n---\n\n")
+	} else {
+		limit := len(state.TodayTurns)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, j := range state.TodayTurns[:limit] {
+			rawPrompt := j.UserPrompt
+			if strings.TrimSpace(rawPrompt) == "" {
+				rawPrompt = j.ResponseSummary
+			}
+			prompt := truncateRunes(strings.Join(strings.Fields(rawPrompt), " "), 90)
+			shortConv := j.ConversationID
+			if len(shortConv) > 8 {
+				shortConv = shortConv[:8]
+			}
+			fmt.Fprintf(&b, "- `%s` · [`%s`](conversation://%s) (`%s`): %s\n", j.Timestamp, shortConv, j.ConversationID, j.ModelName, prompt)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	b.WriteString("## 🩺 5. System Health (`hq doctor`)\n")
+	b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
+	for _, h := range state.Health {
+		icon := "✅"
+		if h.Status != "PASS" {
+			icon = "⚠️"
+		}
+		fmt.Fprintf(&b, "| **%s** | %s `%s` | %s |\n", h.Name, icon, h.Status, h.Detail)
+	}
+
+	rendered := b.String()
+	content := []byte(rendered)
+	consolePath := filepath.Join(vaultDir, "CONSOLE.md")
+	unchangedBody := false
+	if prevBytes, rErr := os.ReadFile(consolePath); rErr == nil {
+		unchangedBody = stripConsoleTimestampHeader(string(prevBytes)) == stripConsoleTimestampHeader(rendered)
+	}
+	if !unchangedBody {
+		if err := store.WriteAtomic(consolePath, content, 0o644); err != nil {
+			return err
+		}
+	}
+
+	if state.hasFrontDesk && strings.TrimSpace(state.frontDesk.ArtifactDir) != "" {
+		artDir := strings.TrimSpace(state.frontDesk.ArtifactDir)
+		artConsole := filepath.Join(artDir, "hq_console.md")
+		artMeta := filepath.Join(artDir, "hq_console.md.metadata.json")
+		_, errArt := os.Stat(artConsole)
+		_, errMeta := os.Stat(artMeta)
+		if !unchangedBody || errArt != nil || errMeta != nil {
+			_ = os.MkdirAll(artDir, 0o755)
+			meta := map[string]interface{}{
+				"summary":         "Live [HQ] Front Desk Console — Pending Approvals, Task Board, Active Worktrees & Workspaces, Recent Turn Activity, and System Health.",
+				"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
+				"requestFeedback": false,
+				"userFacing":      true,
+			}
+			metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md"))
+			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"))
+			_ = store.WriteAtomic(artConsole, content, 0o644)
+			_ = store.WriteAtomic(artMeta, metaBytes, 0o644)
+		}
+	}
+	return nil
+}

@@ -459,20 +459,20 @@ func collectMarkdownSearchDocs(vaultDir, rootDir, layer string, includeArchive b
 		}
 
 		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-		docTitle := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
+		baseSlug := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
+		docTitle := baseSlug
 		var docScopes []string
 		for _, raw := range lines {
 			trimmed := strings.TrimSpace(raw)
-			if strings.HasPrefix(trimmed, "# ") && docTitle == strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)) {
+			if strings.HasPrefix(trimmed, "# ") && docTitle == baseSlug {
 				docTitle = strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
 			}
-			if strings.HasPrefix(trimmed, ">") {
-				meta := strings.TrimSpace(strings.TrimLeft(trimmed, ">"))
-				lower := strings.ToLower(meta)
-				if strings.HasPrefix(lower, "**scopes:**") {
-					docScopes = append(docScopes, ParseScopeList(meta[len("**scopes:**"):])...)
-				} else if strings.HasPrefix(lower, "**playbook-owner:**") {
-					if owner := NormalizeScope(meta[len("**playbook-owner:**"):]); owner != "" {
+			if key, val, ok := parseBlockquoteMeta(trimmed); ok {
+				switch key {
+				case "scopes", "scope":
+					docScopes = append(docScopes, ParseScopeList(val)...)
+				case "playbook-owner":
+					if owner := NormalizeScope(val); owner != "" {
 						docScopes = append(docScopes, owner)
 					}
 				}

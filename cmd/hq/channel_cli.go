@@ -39,12 +39,7 @@ func requireCLIDaemonAuth(vaultDir, verb, tokenFile, jsonToken string) {
 }
 
 func runChannelCLI(rootDir, vaultDir string, args []string) {
-	sub := "list"
-	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub = args[0]
-		rest = args[1:]
-	}
+	sub, rest := splitSubcommand(args, "list")
 	// Defense-in-depth: block all `hq channel` subcommands inside tainted/quarantined sessions.
 	denyIfCallerTainted(vaultDir, "channel "+sub)
 
@@ -59,9 +54,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(rows)
+			printJSON(rows)
 			return
 		}
 		if len(rows) == 0 {
@@ -92,9 +85,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(res)
+			printJSON(res)
 			return
 		}
 		if len(res) == 0 {
@@ -125,9 +116,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(res)
+			printJSON(res)
 			return
 		}
 		fmt.Printf("Channel bridge test PASSED for %s (dest:%s · deliveryId:%s · latency:%dms)\n",
@@ -155,9 +144,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		channels.InvalidateSyncMemo()
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(ov)
+			printJSON(ov)
 			return
 		}
 		fmt.Printf("Paused channel bridge %s\n", pos[0])
@@ -184,9 +171,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 		_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), false)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(ov)
+			printJSON(ov)
 			return
 		}
 		fmt.Printf("Resumed channel bridge %s\n", pos[0])
@@ -202,9 +187,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(entries)
+			printJSON(entries)
 			return
 		}
 		if len(entries) == 0 {
@@ -246,9 +229,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			channels.InvalidateSyncMemo()
 			_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), false)
 			if *asJSON {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				_ = enc.Encode(map[string]interface{}{
+				printJSON(map[string]interface{}{
 					"ok":              true,
 					"bridgeId":        fqid,
 					"destSha256Short": saved.DestSHA256Short,
@@ -275,9 +256,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(prop)
+			printJSON(prop)
 			return
 		}
 		fmt.Printf("Staged channel config proposal %s for %s (sha256:%s)\n", prop.ID, fqid, prop.SHA256[:12])
@@ -331,9 +310,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		channels.BestEffortFlushLoopback(vaultDir, 150*time.Millisecond)
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(res)
+		printJSON(res)
 
 	case "callback":
 		fs := flag.NewFlagSet("channel callback", flag.ExitOnError)
@@ -356,9 +333,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(res)
+		printJSON(res)
 
 	case "flush":
 		fs := flag.NewFlagSet("channel flush", flag.ExitOnError)
@@ -371,9 +346,7 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq channel flush failed: %v\n", err)
 			os.Exit(1)
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(rep)
+		printJSON(rep)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown channel subcommand: %s (expected list, status, test, pause, resume, audit, configure)\n", sub)

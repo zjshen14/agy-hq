@@ -74,15 +74,7 @@ func WalkJournals(vaultDir string, since time.Time, includeArchive bool, fn func
 
 	if includeArchive {
 		archDir := filepath.Join(journalRoot, "archive")
-		if archEntries, aErr := os.ReadDir(archDir); aErr == nil {
-			var archFiles []string
-			for _, ae := range archEntries {
-				if ae.IsDir() || ae.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(ae.Name(), ".jsonl") {
-					continue
-				}
-				archFiles = append(archFiles, ae.Name())
-			}
-			sort.Strings(archFiles)
+		if archFiles, aErr := listSortedRegularFiles(archDir, ".jsonl"); aErr == nil {
 			for _, af := range archFiles {
 				p := filepath.Join(archDir, af)
 				if fi, lErr := os.Lstat(p); lErr != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
@@ -124,18 +116,10 @@ func WalkJournals(vaultDir string, since time.Time, includeArchive bool, fn func
 
 	for _, dn := range hotDirNames {
 		subDir := filepath.Join(journalRoot, dn)
-		files, fErr := os.ReadDir(subDir)
+		names, fErr := listSortedRegularFiles(subDir, ".json")
 		if fErr != nil {
 			continue
 		}
-		var names []string
-		for _, fe := range files {
-			if fe.IsDir() || fe.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(fe.Name(), ".json") {
-				continue
-			}
-			names = append(names, fe.Name())
-		}
-		sort.Strings(names)
 		for _, name := range names {
 			p := filepath.Join(subDir, name)
 			if fi, lErr := os.Lstat(p); lErr != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
@@ -162,25 +146,22 @@ func WalkJournals(vaultDir string, since time.Time, includeArchive bool, fn func
 	return nil
 }
 
-// FindArchivedMaxStepCount returns the maximum recorded StepCount for convID in journal/archive/*.jsonl.
-// Used as a fallback by HandleStop when a long-lived conversation spans > 14d archival windows.
-func FindArchivedMaxStepCount(vaultDir, convID string) int {
+func walkArchivedConvRecords(vaultDir, convID string, reverse bool, onRecord func(JournalRecord), onFileEnd func() bool) {
 	convID = strings.TrimSpace(convID)
 	if convID == "" {
-		return 0
+		return
 	}
 	archDir := filepath.Join(vaultDir, "memory", "journal", "archive")
-	entries, err := os.ReadDir(archDir)
+	names, err := listSortedRegularFiles(archDir, ".jsonl")
 	if err != nil {
-		return 0
+		return
 	}
-	maxStep := 0
-	for _, e := range entries {
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
+	for i := 0; i < len(names); i++ {
+		idx := i
+		if reverse {
+			idx = len(names) - 1 - i
 		}
-		p := filepath.Join(archDir, e.Name())
-		f, oErr := os.Open(p)
+		f, oErr := os.Open(filepath.Join(archDir, names[idx]))
 		if oErr != nil {
 			continue
 		}
@@ -192,58 +173,40 @@ func FindArchivedMaxStepCount(vaultDir, convID string) int {
 				continue
 			}
 			var rec JournalRecord
-			if json.Unmarshal(raw, &rec) == nil && rec.ConversationID == convID && rec.StepCount > maxStep {
-				maxStep = rec.StepCount
+			if json.Unmarshal(raw, &rec) == nil && rec.ConversationID == convID {
+				onRecord(rec)
 			}
 		}
 		_ = f.Close()
+		if onFileEnd != nil && !onFileEnd() {
+			return
+		}
 	}
+}
+
+// FindArchivedMaxStepCount returns the maximum recorded StepCount for convID in journal/archive/*.jsonl.
+// Used as a fallback by HandleStop when a long-lived conversation spans > 14d archival windows.
+func FindArchivedMaxStepCount(vaultDir, convID string) int {
+	maxStep := 0
+	walkArchivedConvRecords(vaultDir, convID, false, func(rec JournalRecord) {
+		if rec.StepCount > maxStep {
+			maxStep = rec.StepCount
+		}
+	}, nil)
 	return maxStep
 }
 
 // FindArchivedTranscriptPath resolves the most recent transcriptPath for convID from journal/archive/*.jsonl.
 func FindArchivedTranscriptPath(vaultDir, convID string) string {
-	convID = strings.TrimSpace(convID)
-	if convID == "" {
-		return ""
-	}
-	archDir := filepath.Join(vaultDir, "memory", "journal", "archive")
-	entries, err := os.ReadDir(archDir)
-	if err != nil {
-		return ""
-	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 && strings.HasSuffix(e.Name(), ".jsonl") {
-			names = append(names, e.Name())
+	found := ""
+	walkArchivedConvRecords(vaultDir, convID, true, func(rec JournalRecord) {
+		if rec.TranscriptPath != "" {
+			found = rec.TranscriptPath
 		}
-	}
-	sort.Strings(names)
-	for i := len(names) - 1; i >= 0; i-- {
-		p := filepath.Join(archDir, names[i])
-		f, oErr := os.Open(p)
-		if oErr != nil {
-			continue
-		}
-		found := ""
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-		for scanner.Scan() {
-			raw := scanner.Bytes()
-			if !strings.Contains(string(raw), convID) {
-				continue
-			}
-			var rec JournalRecord
-			if json.Unmarshal(raw, &rec) == nil && rec.ConversationID == convID && rec.TranscriptPath != "" {
-				found = rec.TranscriptPath
-			}
-		}
-		_ = f.Close()
-		if found != "" {
-			return found
-		}
-	}
-	return ""
+	}, func() bool {
+		return found == ""
+	})
+	return found
 }
 
 // ArchiveOldJournals rolls hot memory/journal/YYYY-MM-DD/*.json folders older than hotDays
@@ -283,17 +246,10 @@ func ArchiveOldJournals(vaultDir string, hotDays int, now time.Time) (int, error
 			}
 			monthKey := d.Name()[:7]
 			subDir := filepath.Join(journalRoot, d.Name())
-			files, fErr := os.ReadDir(subDir)
+			names, fErr := listSortedRegularFiles(subDir, ".json")
 			if fErr != nil {
 				continue
 			}
-			var names []string
-			for _, fe := range files {
-				if !fe.IsDir() && fe.Type()&os.ModeSymlink == 0 && strings.HasSuffix(fe.Name(), ".json") {
-					names = append(names, fe.Name())
-				}
-			}
-			sort.Strings(names)
 			for _, name := range names {
 				raw, rErr := os.ReadFile(filepath.Join(subDir, name))
 				if rErr != nil {
