@@ -189,6 +189,48 @@ func hasSliceItem(items []string, want string) bool {
 	return false
 }
 
+// scanCompletedAskTranscriptSteps walks completed MODEL/GENERIC transcript steps strictly after
+// minStep from newest to oldest, lazily resolving truncated step content from transcript_full.jsonl
+// when needsFull returns true.
+func scanCompletedAskTranscriptSteps(transcriptPath string, minStep int, needsFull func(string) bool, visit func(stepIdx int, content string) (stop bool)) error {
+	tailBytes, err := readFileTail(transcriptPath, maxTranscriptTailBytes)
+	if err != nil {
+		return err
+	}
+	if len(tailBytes) == 0 {
+		return nil
+	}
+	lines := bytes.Split(tailBytes, []byte{'\n'})
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		var st transcriptStepLine
+		if json.Unmarshal(line, &st) != nil {
+			continue
+		}
+		if st.StepIndex <= minStep {
+			break
+		}
+		// Never trust USER_EXPLICIT / USER_INPUT steps (forgeable via SendUserCascadeMessage).
+		// Real ask_question user selections are recorded as MODEL + GENERIC + DONE tool results.
+		if st.Status != "DONE" || st.Source != "MODEL" || st.Type != "GENERIC" {
+			continue
+		}
+		content := st.Content
+		if needsFull != nil && needsFull(content) && hasSliceItem(st.TruncatedFields, "content") {
+			if full := lookupStepContentInFullTranscript(transcriptPath, st.StepIndex); full != "" {
+				content = full
+			}
+		}
+		if visit(st.StepIndex, content) {
+			break
+		}
+	}
+	return nil
+}
+
 // CleanupApprovalArtifacts best-effort removes pending ask/cap files when a proposal settles or expires.
 func CleanupApprovalArtifacts(vaultDir, propID string) {
 	if ValidateProposalID(propID) != nil {
@@ -351,40 +393,23 @@ func VerifyAskAndMintCap(vaultDir, propID, shaPrefix, convID, transcriptPath str
 		return "", "", fmt.Errorf("ask_question challenge for %s expired; re-prompt the user via ask_question", propID)
 	}
 
-	tailBytes, err := readFileTail(transcriptPath, maxTranscriptTailBytes)
-	if err != nil {
-		return "", "", fmt.Errorf("read transcript for human-presence proof: %w", err)
-	}
 	wantCodeToken := "code:" + ask.NonceCode
 	matchedStepIdx := -1
-	lines := bytes.Split(tailBytes, []byte{'\n'})
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
-		if len(line) == 0 {
-			continue
-		}
-		var st transcriptStepLine
-		if json.Unmarshal(line, &st) != nil {
-			continue
-		}
-		if st.StepIndex <= ask.AskStepMin {
-			break
-		}
-		// Never trust USER_EXPLICIT / USER_INPUT steps (forgeable via SendUserCascadeMessage).
-		// Real ask_question user selections are recorded as MODEL + GENERIC + DONE tool results.
-		if st.Status != "DONE" || st.Source != "MODEL" || st.Type != "GENERIC" {
-			continue
-		}
-		content := st.Content
-		if (!strings.Contains(content, propID) || !strings.Contains(content, wantCodeToken)) && hasSliceItem(st.TruncatedFields, "content") {
-			if full := lookupStepContentInFullTranscript(transcriptPath, st.StepIndex); full != "" {
-				content = full
+	if err := scanCompletedAskTranscriptSteps(
+		transcriptPath,
+		ask.AskStepMin,
+		func(content string) bool {
+			return !strings.Contains(content, propID) || !strings.Contains(content, wantCodeToken)
+		},
+		func(stepIdx int, content string) bool {
+			if strings.Contains(content, propID) && strings.Contains(content, wantCodeToken) {
+				matchedStepIdx = stepIdx
+				return true
 			}
-		}
-		if strings.Contains(content, propID) && strings.Contains(content, wantCodeToken) {
-			matchedStepIdx = st.StepIndex
-			break
-		}
+			return false
+		},
+	); err != nil {
+		return "", "", fmt.Errorf("read transcript for human-presence proof: %w", err)
 	}
 	if matchedStepIdx < 0 {
 		return "", "", fmt.Errorf("human-presence proof failed for %s: no completed ask_question user selection containing %s found after step %d", propID, wantCodeToken, ask.AskStepMin)
@@ -447,6 +472,33 @@ func ApproveFromTrustedDaemon(vaultDir, id, shaPrefix string) (string, error) {
 	return ApproveProposal(vaultDir, id, shaPrefix)
 }
 
+func claimCapJSON(capPath, claimedPath string, dst interface{}) (bool, error) {
+	if err := os.Rename(capPath, claimedPath); err != nil {
+		return false, err
+	}
+	defer func() { _ = os.Remove(claimedPath) }()
+	raw, err := os.ReadFile(claimedPath)
+	if err != nil {
+		return true, err
+	}
+	return true, json.Unmarshal(raw, dst)
+}
+
+func verifyCapExpiryTokenAndVault(label, expiresAt, rawTok, wantSHA, capVaultCanon, vaultDir string, now time.Time) error {
+	exp, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil || now.After(exp) {
+		return fmt.Errorf("%s expired at %s", label, expiresAt)
+	}
+	gotHash := sha256HexString(rawTok)
+	if len(gotHash) != len(wantSHA) || subtle.ConstantTimeCompare([]byte(gotHash), []byte(wantSHA)) != 1 {
+		return fmt.Errorf("%s token mismatch", label)
+	}
+	if capVaultCanon != canonicalVaultPath(vaultDir) {
+		return fmt.Errorf("%s vault mismatch", label)
+	}
+	return nil
+}
+
 // ApproveFromCLI enforces one-shot human-presence capability verification (`--cap`) for all live Vaults
 // and whenever HQ_FORCE_CAP_CHECK=1 or ANTIGRAVITY_CONVERSATION_ID is set.
 func ApproveFromCLI(vaultDir, id, shaPrefix, rawCap string) (string, error) {
@@ -469,33 +521,19 @@ func ApproveFromCLI(vaultDir, id, shaPrefix, rawCap string) (string, error) {
 	var rnd [6]byte
 	_, _ = rand.Read(rnd[:])
 	claimedCapPath := filepath.Join(capsDir, fmt.Sprintf(".claimed-%s-%s.json", id, hex.EncodeToString(rnd[:])))
-	if err := os.Rename(capPath, claimedCapPath); err != nil {
-		return "", fmt.Errorf("invalid or already-consumed approval capability for %s: %w", id, err)
-	}
-	defer func() { _ = os.Remove(claimedCapPath) }()
-
-	rawRec, err := os.ReadFile(claimedCapPath)
-	if err != nil {
-		return "", fmt.Errorf("read approval capability for %s: %w", id, err)
-	}
 	var capRec CapRecord
-	if err := json.Unmarshal(rawRec, &capRec); err != nil {
-		return "", fmt.Errorf("corrupt approval capability for %s", id)
+	if claimed, err := claimCapJSON(capPath, claimedCapPath, &capRec); err != nil {
+		if !claimed {
+			return "", fmt.Errorf("invalid or already-consumed approval capability for %s: %w", id, err)
+		}
+		return "", fmt.Errorf("corrupt or unreadable approval capability for %s: %w", id, err)
 	}
 	now := time.Now()
-	exp, err := time.Parse(time.RFC3339, capRec.ExpiresAt)
-	if err != nil || now.After(exp) {
-		return "", fmt.Errorf("approval capability for %s expired at %s", id, capRec.ExpiresAt)
-	}
-	gotCapHash := sha256HexString(rawCap)
-	if len(gotCapHash) != len(capRec.CapSHA256) || subtle.ConstantTimeCompare([]byte(gotCapHash), []byte(capRec.CapSHA256)) != 1 {
-		return "", fmt.Errorf("approval capability token mismatch for %s", id)
+	if err := verifyCapExpiryTokenAndVault("approval capability for "+id, capRec.ExpiresAt, rawCap, capRec.CapSHA256, capRec.VaultCanon, vaultDir, now); err != nil {
+		return "", err
 	}
 	if capRec.ProposalID != id {
 		return "", fmt.Errorf("approval capability proposal mismatch (%s != %s)", capRec.ProposalID, id)
-	}
-	if capRec.VaultCanon != canonicalVaultPath(vaultDir) {
-		return "", fmt.Errorf("approval capability vault mismatch for %s", id)
 	}
 
 	normPrefix := strings.ToLower(strings.TrimSpace(shaPrefix))
@@ -610,30 +648,15 @@ func VerifyAndConsumeWorkspaceExecApproval(vaultDir, actionType, key string) err
 	var rnd [6]byte
 	_, _ = rand.Read(rnd[:])
 	claimedPath := filepath.Join(capsDir, fmt.Sprintf(".exec-claimed-%s-%s.json", execID, hex.EncodeToString(rnd[:])))
-	if err := os.Rename(capPath, claimedPath); err != nil {
-		return fmt.Errorf("missing or already-consumed approval execution token for %s", actionType)
-	}
-	defer func() { _ = os.Remove(claimedPath) }()
-
-	raw, err := os.ReadFile(claimedPath)
-	if err != nil {
-		return fmt.Errorf("read approval execution token: %w", err)
-	}
 	var rec WorkspaceExecCapRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return fmt.Errorf("corrupt approval execution token")
+	if claimed, err := claimCapJSON(capPath, claimedPath, &rec); err != nil {
+		if !claimed {
+			return fmt.Errorf("missing or already-consumed approval execution token for %s", actionType)
+		}
+		return fmt.Errorf("corrupt or unreadable approval execution token: %w", err)
 	}
-	now := time.Now()
-	exp, err := time.Parse(time.RFC3339, rec.ExpiresAt)
-	if err != nil || now.After(exp) {
-		return fmt.Errorf("approval execution token expired")
-	}
-	gotHash := sha256HexString(execTok)
-	if len(gotHash) != len(rec.TokenSHA256) || subtle.ConstantTimeCompare([]byte(gotHash), []byte(rec.TokenSHA256)) != 1 {
-		return fmt.Errorf("approval execution token mismatch")
-	}
-	if rec.VaultCanon != canonicalVaultPath(vaultDir) {
-		return fmt.Errorf("approval execution token vault mismatch")
+	if err := verifyCapExpiryTokenAndVault("approval execution", rec.ExpiresAt, execTok, rec.TokenSHA256, rec.VaultCanon, vaultDir, time.Now()); err != nil {
+		return err
 	}
 	if rec.ActionType != actionType {
 		return fmt.Errorf("approval execution token action mismatch (%s != %s)", rec.ActionType, actionType)
@@ -660,18 +683,7 @@ func workspaceExecCommandMatches(rec WorkspaceExecCapRecord, actionType, key str
 		}
 	}
 	for _, toks := range segments {
-		// Strip leading VAR=val assignments and `env`.
-		for len(toks) > 0 {
-			if toks[0] == "env" {
-				toks = toks[1:]
-				continue
-			}
-			if eq := strings.IndexByte(toks[0], '='); eq > 0 && !strings.Contains(toks[0][:eq], "/") {
-				toks = toks[1:]
-				continue
-			}
-			break
-		}
+		toks = StripLeadingEnv(toks, true)
 		if len(toks) < 4 {
 			continue
 		}

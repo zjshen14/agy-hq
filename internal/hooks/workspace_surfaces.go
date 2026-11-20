@@ -271,12 +271,7 @@ func workspaceCountsLabel(s workspace.SurfaceEntry) string {
 	return "changes: " + s.Summary
 }
 
-// formatActiveWorkspacesSection renders the SessionStart "## Active Workspaces" section for ledger entries only.
-func formatActiveWorkspacesSection(l workspace.Ledger, layer1 []kernel.ActiveTask, now time.Time) string {
-	return formatUnifiedActiveWorkspacesSection(l, nil, layer1, now)
-}
-
-// formatUnifiedActiveWorkspacesSection renders the unified SessionStart "## Active Workspaces" section:
+// formatUnifiedActiveWorkspacesSection renders the SessionStart "## Active Workspaces" section:
 // managed git worktrees plus provider ledger entries bound to live (non-archived, non-cancelled) Layer-1
 // tasks, grouped by provider, with at most maxActiveWorkspaceLines body lines plus a
 // "(+N more: hq workspace list)" footer. Provider entries show IDs, enums, and counts only (RFC-0025 §11.3).

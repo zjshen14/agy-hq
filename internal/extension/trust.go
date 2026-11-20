@@ -230,8 +230,6 @@ func emitTrustMismatchNoticeOnce(vaultDir, sourceID, comp, detail string) {
 	}, time.Now())
 }
 
-// VerifyTrustedFile verifies that absPath resides canonically inside the pinned target root ("pack:<id>" or "vault")
-// and matches its SHA-256 pin in <vault>/private/trust.json.
 // VerifyTrustedFile verifies that absPath belongs to sourceID ("vault" or "pack:<id>") and matches its SHA-256 pin in <vault>/private/trust.json.
 func VerifyTrustedFile(vaultDir, sourceID, absPath string) (string, error) {
 	return verifyTrustedFileInternal(vaultDir, sourceID, absPath, true)
@@ -247,6 +245,10 @@ func verifyTrustedFileInternal(vaultDir, sourceID, absPath string, notifyOutbox 
 	if err != nil {
 		return "", err
 	}
+	return verifyTrustedFileWithRegistry(vaultDir, reg, sourceID, absPath, notifyOutbox)
+}
+
+func verifyTrustedFileWithRegistry(vaultDir string, reg TrustRegistry, sourceID, absPath string, notifyOutbox bool) (string, error) {
 	target, ok := reg.Targets[sourceID]
 	if !ok {
 		if notifyOutbox {
@@ -646,40 +648,32 @@ func BuildTrustBundle(vaultDir, targetSpec, explicitPath string) (TrustBundle, e
 		return sha, nil
 	}
 
-	for _, c := range manifest.Components.Connectors {
-		if _, err := pinRel(c); err != nil {
-			return TrustBundle{}, err
+	pinComponentJSON := func(rel string) error {
+		if _, err := pinRel(rel); err != nil {
+			return err
 		}
-		for _, binRef := range extractJSONBinaryRefs(filepath.Join(canonPack, filepath.FromSlash(c))) {
+		for _, binRef := range extractJSONBinaryRefs(filepath.Join(canonPack, filepath.FromSlash(rel))) {
 			pb, bErr := pinBinaryRef(binRef)
 			if bErr != nil {
-				return TrustBundle{}, bErr
+				return bErr
 			}
 			tt.Binaries[binRef] = pb
+		}
+		return nil
+	}
+	for _, list := range [][]string{
+		manifest.Components.Connectors,
+		manifest.Components.BriefExtensions,
+	} {
+		for _, rel := range list {
+			if err := pinComponentJSON(rel); err != nil {
+				return TrustBundle{}, err
+			}
 		}
 	}
-	for _, c := range manifest.Components.ConnectorDefaults {
-		if _, err := pinRel(c); err != nil {
+	for _, rel := range manifest.Components.ConnectorDefaults {
+		if err := pinComponentJSON(rel); err != nil {
 			return TrustBundle{}, err
-		}
-		for _, binRef := range extractJSONBinaryRefs(filepath.Join(canonPack, filepath.FromSlash(c))) {
-			pb, bErr := pinBinaryRef(binRef)
-			if bErr != nil {
-				return TrustBundle{}, bErr
-			}
-			tt.Binaries[binRef] = pb
-		}
-	}
-	for _, b := range manifest.Components.BriefExtensions {
-		if _, err := pinRel(b); err != nil {
-			return TrustBundle{}, err
-		}
-		for _, binRef := range extractJSONBinaryRefs(filepath.Join(canonPack, filepath.FromSlash(b))) {
-			pb, bErr := pinBinaryRef(binRef)
-			if bErr != nil {
-				return TrustBundle{}, bErr
-			}
-			tt.Binaries[binRef] = pb
 		}
 	}
 	for _, ov := range manifest.Components.FrontDeskOverlays {
@@ -707,37 +701,32 @@ func BuildTrustBundle(vaultDir, targetSpec, explicitPath string) (TrustBundle, e
 			tt.Binaries[sc.Precheck.Argv[0]] = pb
 		}
 	}
-	for _, cb := range manifest.Components.ChannelBridges {
-		if len(cb.Command) == 0 || strings.TrimSpace(cb.Command[0]) == "" {
-			return TrustBundle{}, fmt.Errorf("channel_bridge %q missing command[0]", cb.ID)
+	pinExecComponent := func(kind, id string, cmd []string) error {
+		if len(cmd) == 0 || strings.TrimSpace(cmd[0]) == "" {
+			return fmt.Errorf("%s %q missing command[0]", kind, id)
 		}
-		rawBin := strings.TrimSpace(cb.Command[0])
+		rawBin := strings.TrimSpace(cmd[0])
 		pb, bErr := pinPackOrSystemBinaryRef(canonPack, rawBin)
 		if bErr != nil {
-			return TrustBundle{}, fmt.Errorf("channel_bridge %q: %w", cb.ID, bErr)
+			return fmt.Errorf("%s %q: %w", kind, id, bErr)
 		}
 		tt.Binaries[rawBin] = pb
 		shaShort := pb.SHA256
 		if len(shaShort) > 12 {
 			shaShort = shaShort[:12]
 		}
-		lines = append(lines, fmt.Sprintf("channel_bridge %s/%s -> %s (sha256:%s)", manifest.ID, cb.ID, pb.ResolvedPath, shaShort))
+		lines = append(lines, fmt.Sprintf("%s %s/%s -> %s (sha256:%s)", kind, manifest.ID, id, pb.ResolvedPath, shaShort))
+		return nil
+	}
+	for _, cb := range manifest.Components.ChannelBridges {
+		if err := pinExecComponent("channel_bridge", cb.ID, cb.Command); err != nil {
+			return TrustBundle{}, err
+		}
 	}
 	for _, wp := range manifest.Components.WorkspaceProviders {
-		if len(wp.Command) == 0 || strings.TrimSpace(wp.Command[0]) == "" {
-			return TrustBundle{}, fmt.Errorf("workspace_provider %q missing command[0]", wp.ID)
+		if err := pinExecComponent("workspace_provider", wp.ID, wp.Command); err != nil {
+			return TrustBundle{}, err
 		}
-		rawBin := strings.TrimSpace(wp.Command[0])
-		pb, bErr := pinPackOrSystemBinaryRef(canonPack, rawBin)
-		if bErr != nil {
-			return TrustBundle{}, fmt.Errorf("workspace_provider %q: %w", wp.ID, bErr)
-		}
-		tt.Binaries[rawBin] = pb
-		shaShort := pb.SHA256
-		if len(shaShort) > 12 {
-			shaShort = shaShort[:12]
-		}
-		lines = append(lines, fmt.Sprintf("workspace_provider %s/%s -> %s (sha256:%s)", manifest.ID, wp.ID, pb.ResolvedPath, shaShort))
 		if skill := strings.TrimSpace(wp.Skill); skill != "" {
 			if _, err := pinRel(filepath.ToSlash(filepath.Join("skills", skill, "SKILL.md"))); err != nil {
 				return TrustBundle{}, fmt.Errorf("workspace_provider %q skill: %w", wp.ID, err)

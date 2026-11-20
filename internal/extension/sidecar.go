@@ -177,15 +177,20 @@ func ensureDaemonAlive(targetAddr string) {
 	}
 }
 
-// NewConsoleSidecarHandler builds the authenticated reverse-proxy HTTP handler for `hq sidecar console`.
-func NewConsoleSidecarHandler(opts ConsoleSidecarOptions) (http.Handler, error) {
-	targetAddr := strings.TrimSpace(opts.TargetAddr)
+func resolveDaemonTargetAddr(raw string) string {
+	targetAddr := strings.TrimSpace(raw)
 	if targetAddr == "" {
 		targetAddr = strings.TrimSpace(os.Getenv("HQ_DAEMON_ADDR"))
 	}
 	if targetAddr == "" {
 		targetAddr = defaultDaemonTargetAddr
 	}
+	return targetAddr
+}
+
+// NewConsoleSidecarHandler builds the authenticated reverse-proxy HTTP handler for `hq sidecar console`.
+func NewConsoleSidecarHandler(opts ConsoleSidecarOptions) (http.Handler, error) {
+	targetAddr := resolveDaemonTargetAddr(opts.TargetAddr)
 	targetURL, err := url.Parse("http://" + targetAddr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target daemon address %q: %w", targetAddr, err)
@@ -252,13 +257,7 @@ func NewConsoleSidecarHandler(opts ConsoleSidecarOptions) (http.Handler, error) 
 
 // RunConsoleSidecar starts the pure-Go `hq sidecar console` HTTP proxy and optional daemon supervisor.
 func RunConsoleSidecar(ctx context.Context, opts ConsoleSidecarOptions) error {
-	targetAddr := strings.TrimSpace(opts.TargetAddr)
-	if targetAddr == "" {
-		targetAddr = strings.TrimSpace(os.Getenv("HQ_DAEMON_ADDR"))
-	}
-	if targetAddr == "" {
-		targetAddr = defaultDaemonTargetAddr
-	}
+	targetAddr := resolveDaemonTargetAddr(opts.TargetAddr)
 	opts.TargetAddr = targetAddr
 	if opts.UIToken == "" {
 		opts.UIToken = os.Getenv("ANTIGRAVITY_SIDECAR_UI_TOKEN")

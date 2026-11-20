@@ -354,24 +354,16 @@ func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath 
 		return false
 	}
 
+	roots := hostpaths.Resolve(vaultDir)
+
 	// 1. Own conversation artifact directory (excluding .system_generated)
-	var allowedArtDirs []string
-	if strings.TrimSpace(payload.ArtifactDirectoryPath) != "" {
-		allowedArtDirs = append(allowedArtDirs, payload.ArtifactDirectoryPath)
-	}
-	if roots := hostpaths.Resolve(vaultDir); roots.BrainDir != "" && strings.TrimSpace(payload.ConversationID) != "" {
-		allowedArtDirs = append(allowedArtDirs, filepath.Join(roots.BrainDir, strings.TrimSpace(payload.ConversationID)))
-	}
-	for _, ad := range allowedArtDirs {
-		if _, ok := isSafePathUnderBase(vaultDir, ad, rawPath); ok {
-			return true
-		}
+	if isPathInAnyBase(vaultDir, allowedArtifactDirs(payload.CommonPayload, "", roots), rawPath) {
+		return true
 	}
 
 	// Never allow reading any file inside <vault>/ even if a directory inside <vault>/ mimics /.agents/plugins/.../skills/
 	if strings.TrimSpace(vaultDir) != "" {
-		canonVault := canonicalizeHookPath(vaultDir, vaultDir)
-		if canonVault != "" && (canonPath == canonVault || strings.HasPrefix(canonPath, canonVault+string(filepath.Separator))) {
+		if pathHasPrefix(canonPath, canonicalizeHookPath(vaultDir, vaultDir)) {
 			return false
 		}
 	}
@@ -382,7 +374,6 @@ func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath 
 			return true
 		}
 	}
-	roots := hostpaths.Resolve(vaultDir)
 	var trustedPluginBases []string
 	if roots.PluginsDir != "" {
 		trustedPluginBases = append(trustedPluginBases, roots.PluginsDir)

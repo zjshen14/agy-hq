@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -96,15 +97,7 @@ func (s VaultState) OrderedEnabledPacks() []string {
 			extra = append(extra, id)
 		}
 	}
-	if len(extra) > 1 {
-		for i := 0; i < len(extra); i++ {
-			for j := i + 1; j < len(extra); j++ {
-				if extra[j] < extra[i] {
-					extra[i], extra[j] = extra[j], extra[i]
-				}
-			}
-		}
-	}
+	sort.Strings(extra)
 	return append(out, extra...)
 }
 
@@ -423,6 +416,76 @@ func LoadGeneralOverlayRules(vaultDir string, maxRules int) []string {
 	return blocks
 }
 
+// ResolveActivePackSkillOverrides resolves all trusted, enabled companion pack skill overrides
+// in deterministic alphabetical order while reading extensions.json and private/trust.json at most once.
+func ResolveActivePackSkillOverrides(vaultDir string) []DispatchResolution {
+	st, err := LoadVaultState(vaultDir)
+	if err != nil || len(st.SkillOverrides) == 0 {
+		return nil
+	}
+	reg, regErr := LoadTrustRegistry(vaultDir)
+	if regErr != nil {
+		return nil
+	}
+	keys := make([]string, 0, len(st.SkillOverrides))
+	for k := range st.SkillOverrides {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []DispatchResolution
+	for _, k := range keys {
+		res := resolvePackSkillOverride(vaultDir, st, reg, strings.TrimSpace(strings.TrimPrefix(k, "/")))
+		if res.Overridden && res.Trust == "ok" && res.SkillPath != "" {
+			out = append(out, res)
+		}
+	}
+	return out
+}
+
+func resolvePackSkillOverride(vaultDir string, st VaultState, reg TrustRegistry, skill string) DispatchResolution {
+	res := DispatchResolution{
+		FQID:         "core/" + skill,
+		LogicalSkill: skill,
+		ActiveTarget: "core/" + skill,
+		Skill:        skill,
+		SkillOrigin:  "core",
+		Enabled:      true,
+		Trust:        "builtin",
+	}
+	if skill == "" || NonOverridableCoreSkills[skill] {
+		if NonOverridableCoreSkills[skill] {
+			res.Reason = "non_overridable_security_skill"
+		}
+		return res
+	}
+	target := strings.TrimSpace(st.SkillOverrides[skill])
+	if target == "" || target == "core" || target == "core/"+skill {
+		return res
+	}
+	parts := strings.SplitN(target, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return res
+	}
+	packID, targetSkill := parts[0], parts[1]
+	packAct, ok := st.Packs[packID]
+	if !ok || !packAct.Enabled || strings.TrimSpace(packAct.Path) == "" {
+		return res
+	}
+	cand := filepath.Join(packAct.Path, "skills", targetSkill, "SKILL.md")
+	if _, vErr := verifyTrustedFileWithRegistry(vaultDir, reg, "pack:"+packID, cand, false); vErr != nil {
+		res.Trust = "untrusted"
+		res.Reason = vErr.Error()
+		return res
+	}
+	res.ActiveTarget = target
+	res.Skill = targetSkill
+	res.SkillOrigin = "pack:" + packID
+	res.SkillPath = cand
+	res.Overridden = true
+	res.Trust = "ok"
+	return res
+}
+
 // ResolveSkillDispatch resolves whether logicalSkill should execute its core SKILL.md, a Vault SKILL.md,
 // or an enabled, trust-verified companion pack override (failing closed back to core if untrusted or tampered),
 // and composes active Tier 1B RSI overlay rules from <vault>/memory/rsi/rules/<skill>.md.
@@ -447,24 +510,14 @@ func ResolveSkillDispatch(vaultDir, logicalSkill string) DispatchResolution {
 
 	packResolved := false
 	if st, err := LoadVaultState(vaultDir); err == nil {
-		target := strings.TrimSpace(st.SkillOverrides[skill])
-		if target != "" && target != "core" && target != "core/"+skill {
-			parts := strings.SplitN(target, "/", 2)
-			if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-				packID, targetSkill := parts[0], parts[1]
-				if packAct, ok := st.Packs[packID]; ok && packAct.Enabled && strings.TrimSpace(packAct.Path) != "" {
-					cand := filepath.Join(packAct.Path, "skills", targetSkill, "SKILL.md")
-					if _, vErr := VerifyTrustedFileReadOnly(vaultDir, "pack:"+packID, cand); vErr != nil {
-						res.Trust = "untrusted"
-						res.Reason = vErr.Error()
-						return res
-					}
-					res.ActiveTarget = target
-					res.Skill = targetSkill
-					res.SkillOrigin = "pack:" + packID
-					res.SkillPath = cand
-					res.Overridden = true
-					res.Trust = "ok"
+		if target := strings.TrimSpace(st.SkillOverrides[skill]); target != "" && target != "core" && target != "core/"+skill {
+			if reg, regErr := LoadTrustRegistry(vaultDir); regErr == nil {
+				packRes := resolvePackSkillOverride(vaultDir, st, reg, skill)
+				if packRes.Trust == "untrusted" {
+					return packRes
+				}
+				if packRes.Overridden {
+					res = packRes
 					packResolved = true
 				}
 			}

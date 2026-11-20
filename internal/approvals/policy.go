@@ -827,23 +827,31 @@ func loadPolicyProposalTTL(vaultDir string) time.Duration {
 	return DefaultProposalTTL
 }
 
+func groupRuleIDsByMode(rules []Rule, backtick bool) (alwaysIDs, tpIDs, autoIDs []string) {
+	for _, r := range rules {
+		id := r.ID
+		if backtick {
+			id = "`" + id + "`"
+		}
+		switch r.Mode {
+		case ModeAlways:
+			alwaysIDs = append(alwaysIDs, id)
+		case ModeThirdPartyOnly:
+			tpIDs = append(tpIDs, id)
+		case ModeAutoOnly:
+			autoIDs = append(autoIDs, id)
+		}
+	}
+	return alwaysIDs, tpIDs, autoIDs
+}
+
 // DoctorCheck validates <vault>/config.yaml and pack approval rules for `hq doctor`.
 func DoctorCheck(vaultDir string) (status string, detail string) {
 	pol, warnings, err := LoadPolicy(vaultDir)
 	if err != nil {
 		return "FAIL", fmt.Sprintf("Invalid approvals policy in config.yaml: %v", err)
 	}
-	var alwaysIDs, tpIDs, autoIDs []string
-	for _, r := range pol.Rules {
-		switch r.Mode {
-		case ModeAlways:
-			alwaysIDs = append(alwaysIDs, r.ID)
-		case ModeThirdPartyOnly:
-			tpIDs = append(tpIDs, r.ID)
-		case ModeAutoOnly:
-			autoIDs = append(autoIDs, r.ID)
-		}
-	}
+	alwaysIDs, tpIDs, autoIDs := groupRuleIDsByMode(pol.Rules, false)
 	summary := fmt.Sprintf("%d rules active (always=[%s], third_party=[%s], auto_only=[%s], owned_repos=%d, ask_ttl=%s)",
 		len(pol.Rules),
 		strings.Join(alwaysIDs, ","),
@@ -870,17 +878,7 @@ func DoctorCheck(vaultDir string) (status string, detail string) {
 
 // FormatActivePolicySummary renders a compact SessionStart section so LLM instructions always match PreToolUse enforcement.
 func FormatActivePolicySummary(pol PolicyConfig) string {
-	var alwaysList, tpList, autoList []string
-	for _, r := range pol.Rules {
-		switch r.Mode {
-		case ModeAlways:
-			alwaysList = append(alwaysList, "`"+r.ID+"`")
-		case ModeThirdPartyOnly:
-			tpList = append(tpList, "`"+r.ID+"`")
-		case ModeAutoOnly:
-			autoList = append(autoList, "`"+r.ID+"`")
-		}
-	}
+	alwaysList, tpList, autoList := groupRuleIDsByMode(pol.Rules, true)
 	ownedNote := "none configured — fails closed to gated"
 	if len(pol.OwnedRepos) > 0 {
 		ownedNote = strings.Join(pol.OwnedRepos, ", ")
@@ -953,6 +951,19 @@ func sanitizedApprovalGitEnv() []string {
 	return out
 }
 
+func runApprovalGitCmd(dir string, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	fullArgs := append([]string{"-C", dir}, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Env = sanitizedApprovalGitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func gitRemoteOwnerRepo(workDir, remoteName string) string {
 	if strings.TrimSpace(remoteName) == "" {
 		remoteName = "origin"
@@ -966,15 +977,11 @@ func gitRemoteOwnerRepo(workDir, remoteName string) string {
 	if dir == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", remoteName)
-	cmd.Env = sanitizedApprovalGitEnv()
-	out, err := cmd.Output()
+	out, err := runApprovalGitCmd(dir, 50*time.Millisecond, "remote", "get-url", remoteName)
 	if err != nil {
 		return ""
 	}
-	return ParseOwnerRepoFromRemoteURL(string(out))
+	return ParseOwnerRepoFromRemoteURL(out)
 }
 
 func extractLeadingCDDir(cmdLine, fallbackDir string) string {
@@ -1541,78 +1548,32 @@ func splitPipelineStagesStrict(stmt string) ([]string, bool) {
 }
 
 func tokenizeSimpleShellWords(s string) ([]string, bool) {
-	var words []string
-	var cur strings.Builder
-	inWord := false
-	inSingle, inDouble, escaped := false, false, false
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if escaped {
-			cur.WriteByte(ch)
-			inWord = true
-			escaped = false
+	return TokenizeShellWords(s, false)
+}
+
+// StripLeadingEnv removes leading `VAR=val` assignments (and optionally bare `env` words) from toks.
+func StripLeadingEnv(toks []string, stripEnvCmd bool) []string {
+	i := 0
+	for i < len(toks) {
+		if stripEnvCmd && toks[i] == "env" {
+			i++
 			continue
 		}
-		if inSingle {
-			if ch == '\'' {
-				inSingle = false
-			} else {
-				cur.WriteByte(ch)
-			}
-			inWord = true
+		if isEnvAssignToken(toks[i]) {
+			i++
 			continue
 		}
-		if inDouble {
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == '"' {
-				inDouble = false
-			} else {
-				cur.WriteByte(ch)
-			}
-			inWord = true
-			continue
-		}
-		switch ch {
-		case '\\':
-			escaped = true
-			inWord = true
-		case '\'':
-			inSingle = true
-			inWord = true
-		case '"':
-			inDouble = true
-			inWord = true
-		case ' ', '\t':
-			if inWord {
-				words = append(words, cur.String())
-				cur.Reset()
-				inWord = false
-			}
-		default:
-			cur.WriteByte(ch)
-			inWord = true
-		}
+		break
 	}
-	if inSingle || inDouble || escaped {
-		return nil, false
-	}
-	if inWord {
-		words = append(words, cur.String())
-	}
-	return words, true
+	return toks[i:]
 }
 
 func firstNonAssignCommandWord(words []string) string {
-	for _, w := range words {
-		if isEnvAssignToken(w) {
-			continue
-		}
-		return w
+	rest := StripLeadingEnv(words, false)
+	if len(rest) == 0 {
+		return ""
 	}
-	return ""
+	return rest[0]
 }
 
 func isEnvAssignToken(tok string) bool {
@@ -1636,44 +1597,39 @@ func isEnvAssignToken(tok string) bool {
 	return true
 }
 
-func isPureReadOnlySearchCommand(words []string) bool {
-	idx := 0
-	for idx < len(words) && isEnvAssignToken(words[idx]) {
-		idx++
+func hasDisallowedPreDoubleDashFlag(args []string, exactOrPrefix ...string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		for _, flag := range exactOrPrefix {
+			if a == flag || (strings.HasPrefix(flag, "--") && strings.HasPrefix(a, flag+"=")) {
+				return true
+			}
+		}
 	}
-	if idx >= len(words) {
+	return false
+}
+
+func isPureReadOnlySearchCommand(words []string) bool {
+	words = StripLeadingEnv(words, false)
+	if len(words) == 0 {
 		return false
 	}
-	bin := words[idx]
+	bin := words[0]
 	if strings.ContainsAny(bin, "$*?") {
 		return false
 	}
 	base := strings.ToLower(filepath.Base(bin))
-	rest := words[idx+1:]
+	rest := words[1:]
 	switch base {
 	case "grep", "egrep", "fgrep":
 		return true
 	case "rg":
 		// ripgrep --pre executes arbitrary preprocessor binaries; fail closed if present.
-		for _, a := range rest {
-			if a == "--" {
-				break
-			}
-			if a == "--pre" || strings.HasPrefix(a, "--pre=") || a == "--pre-glob" || strings.HasPrefix(a, "--pre-glob=") {
-				return false
-			}
-		}
-		return true
+		return !hasDisallowedPreDoubleDashFlag(rest, "--pre", "--pre-glob")
 	case "ag", "ack":
-		for _, a := range rest {
-			if a == "--" {
-				break
-			}
-			if a == "--pager" || strings.HasPrefix(a, "--pager=") {
-				return false
-			}
-		}
-		return true
+		return !hasDisallowedPreDoubleDashFlag(rest, "--pager")
 	case "git":
 		// Only allow safe non-executing pre-flags (-C <dir>, --no-pager) before `grep`,
 		// and reject pager/diff-driver flags (-O / --open-files-in-pager / --ext-diff / --textconv).
@@ -1693,16 +1649,7 @@ func isPureReadOnlySearchCommand(words []string) bool {
 		if j >= len(rest) || rest[j] != "grep" {
 			return false
 		}
-		for _, a := range rest[j+1:] {
-			if a == "--" {
-				break
-			}
-			if a == "-O" || a == "--open-files-in-pager" || strings.HasPrefix(a, "--open-files-in-pager=") ||
-				a == "--ext-diff" || a == "--textconv" {
-				return false
-			}
-		}
-		return true
+		return !hasDisallowedPreDoubleDashFlag(rest[j+1:], "-O", "--open-files-in-pager", "--ext-diff", "--textconv")
 	default:
 		return false
 	}
@@ -1965,7 +1912,10 @@ func isHexDigit(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
-func shellTokensSimple(seg string) []string {
+// TokenizeShellWords splits seg on unquoted whitespace while decoding single/double quotes and
+// backslash escapes. When decodeANSIC is true, bash ANSI-C ($'...') and locale ($"...") quoting
+// are also decoded. The closed boolean reports whether all quotes and escapes were cleanly closed.
+func TokenizeShellWords(seg string, decodeANSIC bool) ([]string, bool) {
 	var out []string
 	var cur strings.Builder
 	inToken := false
@@ -2017,18 +1967,20 @@ func shellTokensSimple(seg string) []string {
 			inDouble = true
 			inToken = true
 		case '$':
-			if i+1 < len(seg) && seg[i+1] == '\'' {
-				decoded, endIdx := decodeANSICQuote(seg, i+2)
-				cur.WriteString(decoded)
-				i = endIdx
-				inToken = true
-				continue
-			}
-			if i+1 < len(seg) && seg[i+1] == '"' {
-				inDouble = true
-				inToken = true
-				i++
-				continue
+			if decodeANSIC && i+1 < len(seg) {
+				if seg[i+1] == '\'' {
+					decoded, endIdx := decodeANSICQuote(seg, i+2)
+					cur.WriteString(decoded)
+					i = endIdx
+					inToken = true
+					continue
+				}
+				if seg[i+1] == '"' {
+					inDouble = true
+					inToken = true
+					i++
+					continue
+				}
 			}
 			cur.WriteByte(ch)
 			inToken = true
@@ -2040,7 +1992,12 @@ func shellTokensSimple(seg string) []string {
 	if inToken {
 		out = append(out, cur.String())
 	}
-	return out
+	return out, !(inSingle || inDouble || escaped)
+}
+
+func shellTokensSimple(seg string) []string {
+	words, _ := TokenizeShellWords(seg, true)
+	return words
 }
 
 func isSegmentNoop(seg string, depth int) bool {
@@ -2051,20 +2008,7 @@ func isSegmentNoop(seg string, depth int) bool {
 	if s == "" || strings.HasPrefix(s, "#") {
 		return true
 	}
-	toks := shellTokensSimple(s)
-	// Strip leading VAR=val assignments or `env`
-	for len(toks) > 0 {
-		t := toks[0]
-		if t == "env" {
-			toks = toks[1:]
-			continue
-		}
-		if eq := strings.IndexByte(t, '='); eq > 0 && !strings.Contains(t[:eq], "/") {
-			toks = toks[1:]
-			continue
-		}
-		break
-	}
+	toks := StripLeadingEnv(shellTokensSimple(s), true)
 	if len(toks) == 0 {
 		return true
 	}

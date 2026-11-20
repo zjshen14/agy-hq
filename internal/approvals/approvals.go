@@ -466,6 +466,64 @@ func CreateWithOptions(vaultDir string, opts CreateOptions) (Proposal, error) {
 // RegisteredProposalCreatedHook is wired by internal/channels to enqueue optional task_blocked digests.
 var RegisteredProposalCreatedHook func(vaultDir string, prop Proposal)
 
+func cleanupPendingArtifacts(vaultDir string, p Proposal) {
+	removeIdemMarker(vaultDir, p.IdempotencyKey)
+	removePayloadArtifact(vaultDir, p.ID)
+	cleanupForwardTempDir(p)
+	CleanupApprovalArtifacts(vaultDir, p.ID)
+}
+
+func forEachPendingProposal(vaultDir string, fn func(fullPath string, p Proposal) bool) error {
+	pendingDir := filepath.Join(vaultDir, "memory", "pending")
+	entries, err := os.ReadDir(pendingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fileID := strings.TrimSuffix(e.Name(), ".json")
+		if ValidateProposalID(fileID) != nil {
+			continue
+		}
+		fullPath := filepath.Join(pendingDir, e.Name())
+		data, rErr := os.ReadFile(fullPath)
+		if rErr != nil {
+			continue
+		}
+		var p Proposal
+		if json.Unmarshal(data, &p) != nil || ValidateProposalID(p.ID) != nil || p.ID != fileID {
+			continue
+		}
+		if !fn(fullPath, p) {
+			break
+		}
+	}
+	return nil
+}
+
+func settlePendingProposal(vaultDir, fullPath string, p Proposal, status, decision, output, supersededBy string, now time.Time) (Proposal, bool) {
+	if os.Remove(fullPath) != nil {
+		return Proposal{}, false
+	}
+	cleanupPendingArtifacts(vaultDir, p)
+	p.Status = status
+	if supersededBy != "" {
+		p.SupersededBy = supersededBy
+	}
+	appendIntervention(vaultDir, InterventionRecord{
+		Timestamp: now.Format(time.RFC3339),
+		Decision:  decision,
+		Proposal:  p,
+		Output:    output,
+	})
+	return p, true
+}
+
 // SupersedeByThread atomically removes older pending proposals targeting the same (connector, account, threadKey)
 // and records `"superseded"` entries in interventions.jsonl so stale replies can never be double-approved.
 func SupersedeByThread(vaultDir, connector, account, threadKey, newPropID string, now time.Time) ([]Proposal, error) {
@@ -476,53 +534,22 @@ func SupersedeByThread(vaultDir, connector, account, threadKey, newPropID string
 	if now.IsZero() {
 		now = time.Now()
 	}
-	pendingDir := filepath.Join(vaultDir, "memory", "pending")
-	entries, err := os.ReadDir(pendingDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
+	trimConn := strings.TrimSpace(connector)
+	trimAcct := strings.TrimSpace(account)
 	var superseded []Proposal
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		fileID := strings.TrimSuffix(e.Name(), ".json")
-		if fileID == newPropID || ValidateProposalID(fileID) != nil {
-			continue
-		}
-		fullPath := filepath.Join(pendingDir, e.Name())
-		data, rErr := os.ReadFile(fullPath)
-		if rErr != nil {
-			continue
-		}
-		var p Proposal
-		if json.Unmarshal(data, &p) != nil || p.ID != fileID {
-			continue
-		}
-		if p.TargetConnector == strings.TrimSpace(connector) &&
-			p.TargetAccount == strings.TrimSpace(account) &&
+	err := forEachPendingProposal(vaultDir, func(fullPath string, p Proposal) bool {
+		if p.ID != newPropID &&
+			p.TargetConnector == trimConn &&
+			p.TargetAccount == trimAcct &&
 			p.TargetThreadKey == threadKey {
-			if os.Remove(fullPath) == nil {
-				removeIdemMarker(vaultDir, p.IdempotencyKey)
-				removePayloadArtifact(vaultDir, p.ID)
-				cleanupForwardTempDir(p)
-				CleanupApprovalArtifacts(vaultDir, p.ID)
-				p.Status = "superseded"
-				p.SupersededBy = newPropID
-				appendIntervention(vaultDir, InterventionRecord{
-					Timestamp: now.Format(time.RFC3339),
-					Decision:  "superseded",
-					Proposal:  p,
-					Output:    fmt.Sprintf("Superseded by newer proposal %s on thread %s", newPropID, threadKey),
-				})
-				superseded = append(superseded, p)
+			if settled, ok := settlePendingProposal(vaultDir, fullPath, p, "superseded", "superseded",
+				fmt.Sprintf("Superseded by newer proposal %s on thread %s", newPropID, threadKey), newPropID, now); ok {
+				superseded = append(superseded, settled)
 			}
 		}
-	}
-	return superseded, nil
+		return true
+	})
+	return superseded, err
 }
 
 // ExpireStaleProposals sweeps local/memory/pending/*.json for proposals past ExpiresAt,
@@ -531,83 +558,29 @@ func ExpireStaleProposals(vaultDir string, now time.Time) ([]Proposal, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	pendingDir := filepath.Join(vaultDir, "memory", "pending")
-	entries, err := os.ReadDir(pendingDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
 	var expired []Proposal
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		fileID := strings.TrimSuffix(e.Name(), ".json")
-		if ValidateProposalID(fileID) != nil {
-			continue
-		}
-		fullPath := filepath.Join(pendingDir, e.Name())
-		data, err := os.ReadFile(fullPath)
-		if err != nil {
-			continue
-		}
-		var p Proposal
-		if json.Unmarshal(data, &p) != nil || p.ID != fileID {
-			continue
-		}
+	err := forEachPendingProposal(vaultDir, func(fullPath string, p Proposal) bool {
 		if p.IsExpired(now) {
-			if os.Remove(fullPath) == nil {
-				removeIdemMarker(vaultDir, p.IdempotencyKey)
-				removePayloadArtifact(vaultDir, p.ID)
-				cleanupForwardTempDir(p)
-				CleanupApprovalArtifacts(vaultDir, p.ID)
-				p.Status = "expired"
-				appendIntervention(vaultDir, InterventionRecord{
-					Timestamp: now.Format(time.RFC3339),
-					Decision:  "expired",
-					Proposal:  p,
-					Output:    fmt.Sprintf("Proposal auto-expired at %s (TTL exceeded)", p.ExpiresAt),
-				})
-				expired = append(expired, p)
+			if settled, ok := settlePendingProposal(vaultDir, fullPath, p, "expired", "expired",
+				fmt.Sprintf("Proposal auto-expired at %s (TTL exceeded)", p.ExpiresAt), "", now); ok {
+				expired = append(expired, settled)
 			}
 		}
-	}
-	return expired, nil
+		return true
+	})
+	return expired, err
 }
 
 // List returns all active (non-expired) pending proposals sorted by creation time.
 func List(vaultDir string) ([]Proposal, error) {
 	_, _ = ExpireStaleProposals(vaultDir, time.Now())
-	pendingDir := filepath.Join(vaultDir, "memory", "pending")
-	entries, err := os.ReadDir(pendingDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
 	var out []Proposal
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		fileID := strings.TrimSuffix(e.Name(), ".json")
-		if ValidateProposalID(fileID) != nil {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(pendingDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var p Proposal
-		if err := json.Unmarshal(data, &p); err == nil {
-			if ValidateProposalID(p.ID) != nil || p.ID != fileID {
-				continue
-			}
-			out = append(out, p)
-		}
+	err := forEachPendingProposal(vaultDir, func(_ string, p Proposal) bool {
+		out = append(out, p)
+		return true
+	})
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
 		ti, ei := time.Parse(time.RFC3339Nano, out[i].CreatedAt)
@@ -716,9 +689,7 @@ func ApproveProposal(vaultDir, id, shaPrefix string) (string, error) {
 	now := time.Now()
 	if prop.IsExpired(now) {
 		_ = os.Remove(pendingPath)
-		removeIdemMarker(vaultDir, prop.IdempotencyKey)
-		removePayloadArtifact(vaultDir, prop.ID)
-		CleanupApprovalArtifacts(vaultDir, prop.ID)
+		cleanupPendingArtifacts(vaultDir, prop)
 		prop.Status = "expired"
 		appendIntervention(vaultDir, InterventionRecord{
 			Timestamp: now.Format(time.RFC3339),
@@ -887,10 +858,7 @@ func RejectProposalWithOptions(vaultDir, id string, opts RejectOptions) error {
 	now := time.Now()
 	prop.Status = "rejected"
 	_ = os.Remove(pendingPath)
-	removeIdemMarker(vaultDir, prop.IdempotencyKey)
-	removePayloadArtifact(vaultDir, prop.ID)
-	cleanupForwardTempDir(prop)
-	CleanupApprovalArtifacts(vaultDir, prop.ID)
+	cleanupPendingArtifacts(vaultDir, prop)
 
 	reason := opts.Reason
 	if strings.TrimSpace(reason) == "" {

@@ -463,36 +463,15 @@ func LintPack(packDir string) ([]string, error) {
 	seenBridgeIDs := make(map[string]bool)
 	for _, cb := range m.Components.ChannelBridges {
 		bid := strings.TrimSpace(cb.ID)
-		if !reValidPackID.MatchString(bid) {
-			return nil, fmt.Errorf("channel_bridges invalid id %q (expected lowercase kebab-case)", cb.ID)
+		if err := validateComponentCommandAndEnv("channel_bridges", bid, cb.Protocol, ChannelBridgeProtocolV1, cb.Command, cb.EnvAllow, cb.TimeoutMs, 15000, "a shell or generic interpreter wrapper"); err != nil {
+			return nil, err
 		}
 		if seenBridgeIDs[bid] {
 			return nil, fmt.Errorf("duplicate channel_bridges id %q in hq-extension.json", bid)
 		}
 		seenBridgeIDs[bid] = true
-		if strings.TrimSpace(cb.Protocol) != ChannelBridgeProtocolV1 {
-			return nil, fmt.Errorf("channel_bridges %q unsupported protocol %q (expected %q)", bid, cb.Protocol, ChannelBridgeProtocolV1)
-		}
-		if len(cb.Command) == 0 || strings.TrimSpace(cb.Command[0]) == "" {
-			return nil, fmt.Errorf("channel_bridges %q requires non-empty command", bid)
-		}
-		if isBlockedBridgeCommand0(cb.Command[0]) {
-			return nil, fmt.Errorf("channel_bridges %q command[0] %q cannot be a shell or generic interpreter wrapper (must point to a compiled SHA-256-pinnable executable)", bid, cb.Command[0])
-		}
-		if cb.TimeoutMs < 0 || cb.TimeoutMs > 15000 {
-			return nil, fmt.Errorf("channel_bridges %q timeout_ms=%d out of range [0, 15000]", bid, cb.TimeoutMs)
-		}
 		if cb.MaxBodyRunes != 0 && (cb.MaxBodyRunes < 80 || cb.MaxBodyRunes > 4000) {
 			return nil, fmt.Errorf("channel_bridges %q max_body_runes=%d out of range (expected 0 or [80, 4000])", bid, cb.MaxBodyRunes)
-		}
-		for _, envKey := range cb.EnvAllow {
-			ek := strings.TrimSpace(envKey)
-			if !reValidBridgeEnvKey.MatchString(ek) {
-				return nil, fmt.Errorf("channel_bridges %q invalid env_allow entry %q", bid, envKey)
-			}
-			if blockedBridgeEnv[ek] {
-				return nil, fmt.Errorf("channel_bridges %q env_allow cannot expose protected host variable %q", bid, ek)
-			}
 		}
 	}
 
@@ -523,6 +502,34 @@ func LintPack(packDir string) ([]string, error) {
 	return warnings, nil
 }
 
+func validateComponentCommandAndEnv(kind, id, protocol, wantProtocol string, cmd, envAllow []string, timeoutMs, maxTimeoutMs int, shellDetail string) error {
+	if !reValidPackID.MatchString(id) {
+		return fmt.Errorf("%s invalid id %q (expected lowercase kebab-case)", kind, id)
+	}
+	if strings.TrimSpace(protocol) != wantProtocol {
+		return fmt.Errorf("%s %q unsupported protocol %q (expected %q)", kind, id, protocol, wantProtocol)
+	}
+	if len(cmd) == 0 || strings.TrimSpace(cmd[0]) == "" {
+		return fmt.Errorf("%s %q requires non-empty command", kind, id)
+	}
+	if isBlockedBridgeCommand0(cmd[0]) {
+		return fmt.Errorf("%s %q command[0] %q cannot be %s (must point to a compiled SHA-256-pinnable executable)", kind, id, cmd[0], shellDetail)
+	}
+	for _, envKey := range envAllow {
+		ek := strings.TrimSpace(envKey)
+		if !reValidBridgeEnvKey.MatchString(ek) {
+			return fmt.Errorf("%s %q invalid env_allow entry %q", kind, id, envKey)
+		}
+		if blockedBridgeEnv[ek] {
+			return fmt.Errorf("%s %q env_allow cannot expose protected host variable %q", kind, id, ek)
+		}
+	}
+	if timeoutMs < 0 || timeoutMs > maxTimeoutMs {
+		return fmt.Errorf("%s %q timeout_ms=%d out of range [0, %d]", kind, id, timeoutMs, maxTimeoutMs)
+	}
+	return nil
+}
+
 // ValidateWorkspaceProviderSpec checks a single workspace_providers entry against RFC-0025 §5.2 rules 1-8
 // (except pack-level id uniqueness and the skill file's existence, which LintPack checks against the pack
 // directory). Runtime registries re-run it on every load, so a manifest that was re-trusted without being
@@ -535,26 +542,8 @@ func ValidateWorkspaceProviderSpec(packID string, wp WorkspaceProviderSpec) erro
 	if pid == "core" {
 		return fmt.Errorf("workspace_providers id %q is reserved", pid)
 	}
-	if strings.TrimSpace(wp.Protocol) != WorkspaceProviderProtocolV1 {
-		return fmt.Errorf("workspace_providers %q unsupported protocol %q (expected %q)", pid, wp.Protocol, WorkspaceProviderProtocolV1)
-	}
-	if len(wp.Command) == 0 || strings.TrimSpace(wp.Command[0]) == "" {
-		return fmt.Errorf("workspace_providers %q requires non-empty command", pid)
-	}
-	if isBlockedBridgeCommand0(wp.Command[0]) {
-		return fmt.Errorf("workspace_providers %q command[0] %q cannot be a shell, generic interpreter wrapper, or hq itself (must point to a compiled SHA-256-pinnable executable)", pid, wp.Command[0])
-	}
-	for _, envKey := range wp.EnvAllow {
-		ek := strings.TrimSpace(envKey)
-		if !reValidBridgeEnvKey.MatchString(ek) {
-			return fmt.Errorf("workspace_providers %q invalid env_allow entry %q", pid, envKey)
-		}
-		if blockedBridgeEnv[ek] {
-			return fmt.Errorf("workspace_providers %q env_allow cannot expose protected host variable %q", pid, ek)
-		}
-	}
-	if wp.TimeoutMs < 0 || wp.TimeoutMs > MaxWorkspaceProviderTimeoutMs {
-		return fmt.Errorf("workspace_providers %q timeout_ms=%d out of range [0, %d]", pid, wp.TimeoutMs, MaxWorkspaceProviderTimeoutMs)
+	if err := validateComponentCommandAndEnv("workspace_providers", pid, wp.Protocol, WorkspaceProviderProtocolV1, wp.Command, wp.EnvAllow, wp.TimeoutMs, MaxWorkspaceProviderTimeoutMs, "a shell, generic interpreter wrapper, or hq itself"); err != nil {
+		return err
 	}
 	if wp.StatusRefreshSeconds != 0 && (wp.StatusRefreshSeconds < MinWorkspaceStatusRefreshSeconds || wp.StatusRefreshSeconds > MaxWorkspaceStatusRefreshSeconds) {
 		return fmt.Errorf("workspace_providers %q status_refresh_seconds=%d out of range (expected 0 or [%d, %d])", pid, wp.StatusRefreshSeconds, MinWorkspaceStatusRefreshSeconds, MaxWorkspaceStatusRefreshSeconds)
@@ -773,7 +762,7 @@ func DiscoverPacks(vaultDir string) ([]DiscoveredPack, error) {
 			return
 		}
 		act := st.Packs[m.ID]
-		_, vErr := VerifyTrustedFileReadOnly(vaultDir, "pack:"+m.ID, filepath.Join(canon, "hq-extension.json"))
+		_, vErr := verifyTrustedFileWithRegistry(vaultDir, reg, "pack:"+m.ID, filepath.Join(canon, "hq-extension.json"), false)
 		if tt, hasT := reg.Targets["pack:"+m.ID]; !hasT || tt.ManifestSHA256 == "" {
 			vErr = fmt.Errorf("untrusted")
 		}
@@ -1000,11 +989,14 @@ func DisablePack(ctx context.Context, vaultDir, packID string) error {
 	})
 }
 
-// LoadActiveTrustedPacks returns enabled AND trust-verified PackManifests in deterministic priority order.
-func LoadActiveTrustedPacks(vaultDir string) []DiscoveredPack {
+func loadActiveTrustedPacksWithReg(vaultDir string) ([]DiscoveredPack, TrustRegistry) {
 	st, err := LoadVaultState(vaultDir)
 	if err != nil {
-		return nil
+		return nil, TrustRegistry{}
+	}
+	reg, regErr := LoadTrustRegistry(vaultDir)
+	if regErr != nil {
+		return nil, TrustRegistry{}
 	}
 	var out []DiscoveredPack
 	for _, packID := range st.OrderedEnabledPacks() {
@@ -1013,7 +1005,7 @@ func LoadActiveTrustedPacks(vaultDir string) []DiscoveredPack {
 			continue
 		}
 		idxFile := filepath.Join(act.Path, "hq-extension.json")
-		if _, vErr := VerifyTrustedFile(vaultDir, "pack:"+packID, idxFile); vErr != nil {
+		if _, vErr := verifyTrustedFileWithRegistry(vaultDir, reg, "pack:"+packID, idxFile, true); vErr != nil {
 			continue
 		}
 		m, mErr := LoadPackManifest(act.Path)
@@ -1029,7 +1021,13 @@ func LoadActiveTrustedPacks(vaultDir string) []DiscoveredPack {
 			Manifest: m,
 		})
 	}
-	return out
+	return out, reg
+}
+
+// LoadActiveTrustedPacks returns enabled AND trust-verified PackManifests in deterministic priority order.
+func LoadActiveTrustedPacks(vaultDir string) []DiscoveredPack {
+	packs, _ := loadActiveTrustedPacksWithReg(vaultDir)
+	return packs
 }
 
 func validateOverlayScopes(patterns []string) error {
@@ -1116,7 +1114,7 @@ func LoadActiveFrontDeskOverlays(vaultDir, roleScope string) []string {
 	if roleScope == "" {
 		return nil
 	}
-	packs := LoadActiveTrustedPacks(vaultDir)
+	packs, reg := loadActiveTrustedPacksWithReg(vaultDir)
 	var rendered []string
 	totalBytes := 0
 	for _, dp := range packs {
@@ -1125,7 +1123,7 @@ func LoadActiveFrontDeskOverlays(vaultDir, roleScope string) []string {
 				continue
 			}
 			full := filepath.Join(dp.Path, filepath.FromSlash(ov.Path))
-			if _, vErr := VerifyTrustedFile(vaultDir, "pack:"+dp.ID, full); vErr != nil {
+			if _, vErr := verifyTrustedFileWithRegistry(vaultDir, reg, "pack:"+dp.ID, full, true); vErr != nil {
 				continue
 			}
 			capBytes := MaxOverlayBytes

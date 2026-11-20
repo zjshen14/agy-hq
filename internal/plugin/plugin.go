@@ -148,14 +148,47 @@ func DefaultBinDir() (string, error) {
 	return filepath.Join(home, ".local", "bin"), nil
 }
 
-// DefaultSharedPluginsParentDir returns <AppDataDir>/hq/plugins (default ~/.gemini/antigravity/hq/plugins,
-// outside global <PluginsDir> so unrelated projects are never auto-injected unless they opt in via .agents/plugins.json).
-func DefaultSharedPluginsParentDir() (string, error) {
-	roots := hostpaths.Resolve("")
+func isExistingFile(p string) bool {
+	if strings.TrimSpace(p) == "" {
+		return false
+	}
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
+}
+
+func isExistingDir(p string) bool {
+	if strings.TrimSpace(p) == "" {
+		return false
+	}
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
+}
+
+func sharedPluginsParentFromRoots(roots hostpaths.Roots) (string, error) {
 	if roots.AppDataDir == "" {
 		return "", fmt.Errorf("resolve Antigravity appDataDir: empty host root")
 	}
 	return filepath.Join(roots.AppDataDir, "hq", "plugins"), nil
+}
+
+func globalPluginDirFromRoots(roots hostpaths.Roots) (string, error) {
+	if roots.PluginsDir == "" {
+		return "", fmt.Errorf("resolve Antigravity pluginsDir: empty host root")
+	}
+	return filepath.Join(roots.PluginsDir, PluginSlug), nil
+}
+
+func legacySidecarDirFromRoots(roots hostpaths.Roots) (string, error) {
+	if roots.ConfigDir == "" {
+		return "", fmt.Errorf("resolve Antigravity configDir: empty host root")
+	}
+	return filepath.Join(roots.ConfigDir, "sidecars", "agy-hq-console"), nil
+}
+
+// DefaultSharedPluginsParentDir returns <AppDataDir>/hq/plugins (default ~/.gemini/antigravity/hq/plugins,
+// outside global <PluginsDir> so unrelated projects are never auto-injected unless they opt in via .agents/plugins.json).
+func DefaultSharedPluginsParentDir() (string, error) {
+	return sharedPluginsParentFromRoots(hostpaths.Resolve(""))
 }
 
 // DefaultSharedPluginDir returns <AppDataDir>/hq/plugins/agy-hq.
@@ -169,20 +202,12 @@ func DefaultSharedPluginDir() (string, error) {
 
 // DefaultGlobalPluginDir returns <PluginsDir>/agy-hq (used only when --global is explicitly set).
 func DefaultGlobalPluginDir() (string, error) {
-	roots := hostpaths.Resolve("")
-	if roots.PluginsDir == "" {
-		return "", fmt.Errorf("resolve Antigravity pluginsDir: empty host root")
-	}
-	return filepath.Join(roots.PluginsDir, PluginSlug), nil
+	return globalPluginDirFromRoots(hostpaths.Resolve(""))
 }
 
 // DefaultLegacySidecarDir returns the pre-plugin standalone sidecar path <ConfigDir>/sidecars/agy-hq-console.
 func DefaultLegacySidecarDir() (string, error) {
-	roots := hostpaths.Resolve("")
-	if roots.ConfigDir == "" {
-		return "", fmt.Errorf("resolve Antigravity configDir: empty host root")
-	}
-	return filepath.Join(roots.ConfigDir, "sidecars", "agy-hq-console"), nil
+	return legacySidecarDirFromRoots(hostpaths.Resolve(""))
 }
 
 // IsDirOnPATH reports whether targetDir appears in the current PATH environment variable.
@@ -411,6 +436,29 @@ type pluginsManifestEntry struct {
 	Exclude     []string `json:"exclude,omitempty"`
 }
 
+func isHQPluginsEntryPath(rawPath, cleanSharedSlash string) bool {
+	slash := filepath.ToSlash(rawPath)
+	if strings.HasSuffix(slash, "/.gemini/antigravity/hq/plugins") {
+		return true
+	}
+	return cleanSharedSlash != "" && filepath.ToSlash(filepath.Clean(rawPath)) == cleanSharedSlash
+}
+
+func writeJSONManifestAtomic(manifestPath string, v interface{}) error {
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		return err
+	}
+	outBytes, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := manifestPath + ".tmp"
+	if err := os.WriteFile(tmpPath, append(outBytes, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, manifestPath)
+}
+
 // AttachProjectPlugin writes or updates `<projectDir>/.agents/plugins.json` so Antigravity loads
 // `agy-hq` strictly inside `projectDir` without installing globally into `~/.gemini/config/plugins/`.
 // If `<projectDir>/.agents/plugins/agy-hq/plugin.json` already exists (e.g., inside the `agy-hq` source checkout),
@@ -423,7 +471,7 @@ func AttachProjectPlugin(projectDir, sharedPluginsParent string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if _, sErr := os.Stat(filepath.Join(absProj, ".agents", "plugins", PluginSlug, "plugin.json")); sErr == nil {
+	if isExistingFile(filepath.Join(absProj, ".agents", "plugins", PluginSlug, "plugin.json")) {
 		return "", nil
 	}
 	if strings.TrimSpace(sharedPluginsParent) == "" {
@@ -451,8 +499,7 @@ func AttachProjectPlugin(projectDir, sharedPluginsParent string) (string, error)
 	cleanSharedSlash := filepath.ToSlash(filepath.Clean(sharedPluginsParent))
 	for i := range cfg.Entries {
 		e := &cfg.Entries[i]
-		eSlash := filepath.ToSlash(filepath.Clean(e.Path))
-		if e.Path == entryPath || eSlash == cleanSharedSlash || strings.HasSuffix(filepath.ToSlash(e.Path), "/.gemini/antigravity/hq/plugins") {
+		if e.Path == entryPath || isHQPluginsEntryPath(e.Path, cleanSharedSlash) {
 			e.Path = entryPath
 			hasSlug := false
 			for _, inc := range e.IncludeOnly {
@@ -476,18 +523,7 @@ func AttachProjectPlugin(projectDir, sharedPluginsParent string) (string, error)
 			IncludeOnly: []string{PluginSlug},
 		})
 	}
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
-		return "", err
-	}
-	outBytes, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	tmpPath := manifestPath + ".tmp"
-	if err := os.WriteFile(tmpPath, append(outBytes, '\n'), 0o644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmpPath, manifestPath); err != nil {
+	if err := writeJSONManifestAtomic(manifestPath, cfg); err != nil {
 		return "", err
 	}
 	return manifestPath, nil
@@ -532,18 +568,7 @@ func AttachProjectVaultSkills(projectDir, vaultDir string) (string, error) {
 	}
 
 	cfg.Entries = append(cfg.Entries, pluginsManifestEntry{Path: entryPath})
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
-		return "", err
-	}
-	outBytes, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	tmpPath := manifestPath + ".tmp"
-	if err := os.WriteFile(tmpPath, append(outBytes, '\n'), 0o644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmpPath, manifestPath); err != nil {
+	if err := writeJSONManifestAtomic(manifestPath, cfg); err != nil {
 		return "", err
 	}
 	return manifestPath, nil
@@ -579,10 +604,7 @@ func DetachProjectPlugin(projectDir string) (bool, error) {
 		cleanSharedSlash = filepath.ToSlash(filepath.Clean(sharedParent))
 	}
 	for _, e := range cfg.Entries {
-		eSlash := filepath.ToSlash(filepath.Clean(e.Path))
-		isHQPath := strings.HasSuffix(filepath.ToSlash(e.Path), "/.gemini/antigravity/hq/plugins") ||
-			(cleanSharedSlash != "" && eSlash == cleanSharedSlash)
-		if isHQPath {
+		if isHQPluginsEntryPath(e.Path, cleanSharedSlash) {
 			var remInc []string
 			for _, inc := range e.IncludeOnly {
 				if inc != PluginSlug {
@@ -609,11 +631,10 @@ func DetachProjectPlugin(projectDir string) (bool, error) {
 		return true, nil
 	}
 	cfg.Entries = kept
-	outBytes, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
+	if err := writeJSONManifestAtomic(manifestPath, cfg); err != nil {
 		return false, err
 	}
-	return true, os.WriteFile(manifestPath, append(outBytes, '\n'), 0o644)
+	return true, nil
 }
 
 // SanitizedDaemonEnv strips session- and sidecar-scoped Antigravity environment variables
@@ -663,12 +684,13 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	sharedPluginsParent, err := DefaultSharedPluginsParentDir()
+	roots := hostpaths.Resolve("")
+	sharedPluginsParent, err := sharedPluginsParentFromRoots(roots)
 	if err != nil {
 		return nil, err
 	}
 	sharedPluginDir := filepath.Join(sharedPluginsParent, PluginSlug)
-	globalPluginDir, err := DefaultGlobalPluginDir()
+	globalPluginDir, err := globalPluginDirFromRoots(roots)
 	if err != nil {
 		return nil, err
 	}
@@ -933,6 +955,37 @@ func ProbeDaemonHealth(addr string) (bool, string, string) {
 	return true, body.Version, body.Commit
 }
 
+func isDaemonSkewed(dVer, dCommit string) bool {
+	if dVer == "" || dVer != version.Version {
+		return true
+	}
+	if eff := version.EffectiveCommit(); eff != "dev" && dCommit != "" && dCommit != "dev" && dCommit != eff {
+		return true
+	}
+	return false
+}
+
+func inspectPluginBundle(dir string) (installed bool, ver, digest string) {
+	if !isExistingDir(dir) {
+		return false, "", ""
+	}
+	if m, mErr := version.ReadPluginManifest(dir); mErr == nil {
+		ver = m.Version
+	}
+	digest, _, _ = ComputeBundleDigest(dir)
+	return true, ver, digest
+}
+
+func inspectConsoleSidecar(cfg *vault.GlobalConfig, scope, legacySidecarDir string) (installed, legacyFound bool, dir string) {
+	if !isExistingDir(legacySidecarDir) {
+		return false, false, ""
+	}
+	if cfg != nil && cfg.ConsoleSidecarInstalled && scope == ScopeProject {
+		return true, false, legacySidecarDir
+	}
+	return false, true, legacySidecarDir
+}
+
 // EnsureDaemonSynced checks whether a local `hq daemon` is skewed (or forceRestart is set)
 // and restarts it cleanly using targetBin and SanitizedDaemonEnv().
 func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) bool {
@@ -946,12 +999,8 @@ func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) 
 	}
 	reachable, dVer, dCommit := ProbeDaemonHealth(addr)
 	skewed := forceRestart
-	if reachable && !skewed {
-		if dVer == "" || dVer != version.Version {
-			skewed = true
-		} else if eff := version.EffectiveCommit(); eff != "dev" && dCommit != "" && dCommit != "dev" && dCommit != eff {
-			skewed = true
-		}
+	if reachable && !skewed && isDaemonSkewed(dVer, dCommit) {
+		skewed = true
 	}
 	if !skewed {
 		return false
@@ -1014,12 +1063,17 @@ func Status(vaultDir, rootDir string) (*StatusReport, error) {
 	if vaultDir != "" && filepath.Clean(vaultDir) != filepath.Clean(resolvedVault) {
 		resolvedVault = vaultDir
 	}
+	roots := hostpaths.Resolve("")
 	cfgPath, _ := vault.GlobalConfigPath()
 	binDir, _ := DefaultBinDir()
 	globalBin := filepath.Join(binDir, "hq")
-	sharedPlugDir, _ := DefaultSharedPluginDir()
-	globalPlugDir, _ := DefaultGlobalPluginDir()
-	legacySidecarDir, _ := DefaultLegacySidecarDir()
+	sharedParent, _ := sharedPluginsParentFromRoots(roots)
+	sharedPlugDir := ""
+	if sharedParent != "" {
+		sharedPlugDir = filepath.Join(sharedParent, PluginSlug)
+	}
+	globalPlugDir, _ := globalPluginDirFromRoots(roots)
+	legacySidecarDir, _ := legacySidecarDirFromRoots(roots)
 
 	cfg, _ := vault.LoadGlobalConfig()
 	scope := ScopeProject
@@ -1041,16 +1095,12 @@ func Status(vaultDir, rootDir string) (*StatusReport, error) {
 		GlobalPluginDir:       globalPlugDir,
 	}
 
-	if legacySidecarDir != "" {
-		if st, sErr := os.Stat(legacySidecarDir); sErr == nil && st.IsDir() {
-			if cfg != nil && cfg.ConsoleSidecarInstalled && scope == ScopeProject {
-				rep.ConsoleSidecarInstalled = true
-				rep.ConsoleSidecarDir = legacySidecarDir
-			} else {
-				rep.LegacySidecarFound = true
-				rep.LegacySidecarDir = legacySidecarDir
-			}
-		}
+	if okSidecar, okLegacy, sDir := inspectConsoleSidecar(cfg, scope, legacySidecarDir); okSidecar {
+		rep.ConsoleSidecarInstalled = true
+		rep.ConsoleSidecarDir = sDir
+	} else if okLegacy {
+		rep.LegacySidecarFound = true
+		rep.LegacySidecarDir = sDir
 	}
 
 	sourceRepo := ""
@@ -1061,47 +1111,37 @@ func Status(vaultDir, rootDir string) (*StatusReport, error) {
 	}
 	rep.SourceRepoDir = sourceRepo
 
-	if st, sErr := os.Stat(globalBin); sErr == nil && !st.IsDir() {
+	if isExistingFile(globalBin) {
 		rep.GlobalBinaryInstalled = true
 		rep.GlobalBinarySHA256, _ = ComputeFileSHA256(globalBin)
 	}
 	if sourceRepo != "" {
 		repoBin := filepath.Join(sourceRepo, "bin", "hq")
-		if st, sErr := os.Stat(repoBin); sErr == nil && !st.IsDir() {
+		if isExistingFile(repoBin) {
 			rep.SourceBinarySHA256, _ = ComputeFileSHA256(repoBin)
 		}
 	}
 	rep.BinaryInSync = rep.GlobalBinaryInstalled && (rep.SourceBinarySHA256 == "" || rep.GlobalBinarySHA256 == rep.SourceBinarySHA256)
 
-	if st, sErr := os.Stat(sharedPlugDir); sErr == nil && st.IsDir() {
-		rep.SharedPluginInstalled = true
-		if m, mErr := version.ReadPluginManifest(sharedPlugDir); mErr == nil {
-			rep.SharedPluginVersion = m.Version
-		}
-		rep.SharedBundleDigest, _, _ = ComputeBundleDigest(sharedPlugDir)
-	}
-	if st, sErr := os.Stat(globalPlugDir); sErr == nil && st.IsDir() {
+	rep.SharedPluginInstalled, rep.SharedPluginVersion, rep.SharedBundleDigest = inspectPluginBundle(sharedPlugDir)
+	if ok, ver, dig := inspectPluginBundle(globalPlugDir); ok {
 		rep.GlobalPluginInstalled = true
 		rep.Scope = ScopeGlobal
-		if m, mErr := version.ReadPluginManifest(globalPlugDir); mErr == nil {
-			rep.GlobalPluginVersion = m.Version
-		}
-		rep.GlobalBundleDigest, _, _ = ComputeBundleDigest(globalPlugDir)
+		rep.GlobalPluginVersion = ver
+		rep.GlobalBundleDigest = dig
 	}
 	if sourceRepo != "" {
 		srcPlugDir := filepath.Join(sourceRepo, ".agents", "plugins", PluginSlug)
-		if st, sErr := os.Stat(srcPlugDir); sErr == nil && st.IsDir() {
-			rep.SourceBundleDigest, _, _ = ComputeBundleDigest(srcPlugDir)
+		if ok, ver, dig := inspectPluginBundle(srcPlugDir); ok {
 			rep.WorkspacePluginFound = true
 			rep.WorkspacePluginDir = srcPlugDir
-			if m, mErr := version.ReadPluginManifest(srcPlugDir); mErr == nil {
-				rep.WorkspacePluginVer = m.Version
-			}
+			rep.WorkspacePluginVer = ver
+			rep.SourceBundleDigest = dig
 		}
 	}
 	if wd, wErr := os.Getwd(); wErr == nil && wd != "" {
 		candManifest := filepath.Join(wd, ".agents", "plugins.json")
-		if st, sErr := os.Stat(candManifest); sErr == nil && !st.IsDir() {
+		if isExistingFile(candManifest) {
 			rep.ProjectPluginsManifest = candManifest
 		}
 	}
@@ -1123,11 +1163,7 @@ func Status(vaultDir, rootDir string) (*StatusReport, error) {
 			rep.DaemonRunning = true
 			rep.DaemonVersion = dVer
 			rep.DaemonCommit = dCom
-			if dVer == "" || dVer != version.Version {
-				rep.DaemonSkewed = true
-			} else if eff := version.EffectiveCommit(); eff != "dev" && dCom != "" && dCom != "dev" && dCom != eff {
-				rep.DaemonSkewed = true
-			}
+			rep.DaemonSkewed = isDaemonSkewed(dVer, dCom)
 		}
 	}
 

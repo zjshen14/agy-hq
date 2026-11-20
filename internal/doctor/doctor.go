@@ -156,7 +156,8 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 
 	// 4. Check Front Desk Intake Lease & Console Artifact
 	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
-	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID != "" {
+	fd, hasFD := kernel.GetFrontDesk(vaultDir)
+	if hasFD && fd.ConversationID != "" {
 		results = append(results, CheckResult{
 			Name:   "Front Desk Intake Lease",
 			Status: "PASS",
@@ -209,7 +210,7 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 	armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
 	totalTriggers := len(armed) + len(unarmed)
 	adHocNote := ""
-	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && len(fd.AdHocCrons) > 0 {
+	if hasFD && len(fd.AdHocCrons) > 0 {
 		adHocNote = fmt.Sprintf(", %d ad-hoc conversation cron(s) in Front Desk", len(fd.AdHocCrons))
 	}
 	if dInfo.SupervisorWarning != "" {
@@ -353,60 +354,36 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 	} else {
 		obsSum = obs.BuildDashboardSummary(vaultDir, time.Time{})
 	}
-	if obsSum.Budget.TokenCircuitDisabled {
-		status := "PASS"
+	todayUncachedStr := obs.FormatTokensCompact(obsSum.TodayUncachedTokens)
+	dailyBudgetStr := obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget)
+	fdCtxStr := obs.FormatTokensCompact(obsSum.FrontDeskContextTokens)
+	chrPct := obsSum.TodayCacheHitRatio * 100.0
+	var tokStatus, tokDetail string
+	switch {
+	case obsSum.Budget.TokenCircuitDisabled:
+		tokStatus = "PASS"
 		if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.FrontDeskContextStatus == "WARN" {
-			status = "WARN"
+			tokStatus = "WARN"
 		}
-		results = append(results, CheckResult{
-			Name:   "Token Budget & Context Health",
-			Status: status,
-			Detail: fmt.Sprintf("Today uncached %s (budget circuit disabled), CHR %.1f%%, Front Desk context %s / 256k (%s)",
-				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
-				obsSum.TodayCacheHitRatio*100.0,
-				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
-				obsSum.FrontDeskContextStatus,
-			),
-		})
-	} else if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100 {
-		results = append(results, CheckResult{
-			Name:   "Token Budget & Context Health",
-			Status: "WARN",
-			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), Front Desk context %s / 256k (%s); run 'hq obs anomalies' or '/compact'",
-				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
-				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
-				obsSum.DailyBudgetPct,
-				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
-				obsSum.FrontDeskContextStatus,
-			),
-		})
-	} else if obsSum.FrontDeskContextStatus == "WARN" || obsSum.DailyBudgetPct >= 80 || obsSum.DeepBudgetPct >= 80 {
-		results = append(results, CheckResult{
-			Name:   "Token Budget & Context Health",
-			Status: "WARN",
-			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), CHR %.1f%%, Front Desk context %s / 256k (%s)",
-				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
-				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
-				obsSum.DailyBudgetPct,
-				obsSum.TodayCacheHitRatio*100.0,
-				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
-				obsSum.FrontDeskContextStatus,
-			),
-		})
-	} else {
-		results = append(results, CheckResult{
-			Name:   "Token Budget & Context Health",
-			Status: "PASS",
-			Detail: fmt.Sprintf("Today uncached %s / %s (%.1f%%), CHR %.1f%%, Front Desk context %s / 256k (%s)",
-				obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
-				obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget),
-				obsSum.DailyBudgetPct,
-				obsSum.TodayCacheHitRatio*100.0,
-				obs.FormatTokensCompact(obsSum.FrontDeskContextTokens),
-				obsSum.FrontDeskContextStatus,
-			),
-		})
+		tokDetail = fmt.Sprintf("Today uncached %s (budget circuit disabled), CHR %.1f%%, Front Desk context %s / 256k (%s)",
+			todayUncachedStr, chrPct, fdCtxStr, obsSum.FrontDeskContextStatus)
+	case obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100:
+		tokStatus = "WARN"
+		tokDetail = fmt.Sprintf("Today uncached %s / %s (%.1f%%), Front Desk context %s / 256k (%s); run 'hq obs anomalies' or '/compact'",
+			todayUncachedStr, dailyBudgetStr, obsSum.DailyBudgetPct, fdCtxStr, obsSum.FrontDeskContextStatus)
+	default:
+		tokStatus = "PASS"
+		if obsSum.FrontDeskContextStatus == "WARN" || obsSum.DailyBudgetPct >= 80 || obsSum.DeepBudgetPct >= 80 {
+			tokStatus = "WARN"
+		}
+		tokDetail = fmt.Sprintf("Today uncached %s / %s (%.1f%%), CHR %.1f%%, Front Desk context %s / 256k (%s)",
+			todayUncachedStr, dailyBudgetStr, obsSum.DailyBudgetPct, chrPct, fdCtxStr, obsSum.FrontDeskContextStatus)
 	}
+	results = append(results, CheckResult{
+		Name:   "Token Budget & Context Health",
+		Status: tokStatus,
+		Detail: tokDetail,
+	})
 
 	// 11. Check Plugin & Binary Sync (RFC-0015 — project-scoped by default, --global opt-in)
 	if pSt, pErr := plugin.Status(vaultDir, rootDir); pErr == nil && pSt != nil {

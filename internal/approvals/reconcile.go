@@ -1,12 +1,9 @@
 package approvals
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,50 +29,17 @@ func SupersedeByConvAndType(vaultDir, convID, actionType, newPropID string, now 
 	if now.IsZero() {
 		now = time.Now()
 	}
-	pendingDir := filepath.Join(vaultDir, "memory", "pending")
-	entries, err := os.ReadDir(pendingDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
 	var superseded []Proposal
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		fileID := strings.TrimSuffix(e.Name(), ".json")
-		if fileID == newPropID || ValidateProposalID(fileID) != nil {
-			continue
-		}
-		fullPath := filepath.Join(pendingDir, e.Name())
-		data, rErr := os.ReadFile(fullPath)
-		if rErr != nil {
-			continue
-		}
-		var p Proposal
-		if json.Unmarshal(data, &p) != nil || p.ID != fileID {
-			continue
-		}
-		if p.ConversationID == convID && p.ActionType == actionType {
-			if os.Remove(fullPath) == nil {
-				removeIdemMarker(vaultDir, p.IdempotencyKey)
-				removePayloadArtifact(vaultDir, p.ID)
-				CleanupApprovalArtifacts(vaultDir, p.ID)
-				p.Status = "superseded"
-				p.SupersededBy = newPropID
-				appendIntervention(vaultDir, InterventionRecord{
-					Timestamp: now.Format(time.RFC3339),
-					Decision:  "superseded",
-					Proposal:  p,
-					Output:    fmt.Sprintf("superseded by newer proposal %s in same conversation (%s)", newPropID, actionType),
-				})
-				superseded = append(superseded, p)
+	err := forEachPendingProposal(vaultDir, func(fullPath string, p Proposal) bool {
+		if p.ID != newPropID && p.ConversationID == convID && p.ActionType == actionType {
+			if settled, ok := settlePendingProposal(vaultDir, fullPath, p, "superseded", "superseded",
+				fmt.Sprintf("superseded by newer proposal %s in same conversation (%s)", newPropID, actionType), newPropID, now); ok {
+				superseded = append(superseded, settled)
 			}
 		}
-	}
-	return superseded, nil
+		return true
+	})
+	return superseded, err
 }
 
 // ReconcileAskRejections scans active AskRecords and transitions proposals to `rejected` (with SuppressResume=true, 0 LLM tokens)
@@ -134,46 +98,28 @@ func ReconcileAskRejections(vaultDir, convID, transcriptPath string, now time.Ti
 		if tPath == "" {
 			continue
 		}
-		tailBytes, tErr := readFileTail(tPath, maxTranscriptTailBytes)
-		if tErr != nil || len(tailBytes) == 0 {
-			continue
-		}
 
 		wantRejectParen := "Reject (" + ask.ProposalID + ")"
 		wantRejectSpace := "Reject " + ask.ProposalID
 		codeTok := "code:" + ask.NonceCode
 		rejectedInTranscript := false
-
-		lines := bytes.Split(tailBytes, []byte{'\n'})
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := bytes.TrimSpace(lines[i])
-			if len(line) == 0 {
-				continue
-			}
-			var st transcriptStepLine
-			if json.Unmarshal(line, &st) != nil {
-				continue
-			}
-			if st.StepIndex <= ask.AskStepMin {
-				break
-			}
-			if st.Status != "DONE" || st.Source != "MODEL" || st.Type != "GENERIC" {
-				continue
-			}
-			content := st.Content
-			if !strings.Contains(content, ask.ProposalID) && hasSliceItem(st.TruncatedFields, "content") {
-				if full := lookupStepContentInFullTranscript(tPath, st.StepIndex); full != "" {
-					content = full
+		if sErr := scanCompletedAskTranscriptSteps(
+			tPath,
+			ask.AskStepMin,
+			func(content string) bool { return !strings.Contains(content, ask.ProposalID) },
+			func(_ int, content string) bool {
+				if strings.Contains(content, codeTok) {
+					// User approved rather than rejected
+					return true
 				}
-			}
-			if strings.Contains(content, codeTok) {
-				// User approved rather than rejected
-				break
-			}
-			if strings.Contains(content, wantRejectParen) || strings.Contains(content, wantRejectSpace) {
-				rejectedInTranscript = true
-				break
-			}
+				if strings.Contains(content, wantRejectParen) || strings.Contains(content, wantRejectSpace) {
+					rejectedInTranscript = true
+					return true
+				}
+				return false
+			},
+		); sErr != nil {
+			continue
 		}
 
 		if rejectedInTranscript {
@@ -196,31 +142,15 @@ func localGitRefSHA(dir, ref string) string {
 	if st, err := os.Stat(filepath.Join(dir, ".git")); err != nil || st == nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref)
-	cmd.Env = sanitizedApprovalGitEnv()
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return localBareRepoRefSHA(dir, ref)
 }
 
 func localGitRemotePath(dir, remote string) string {
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(remote) == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", remote)
-	cmd.Env = sanitizedApprovalGitEnv()
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	u := strings.TrimSpace(string(out))
-	if u == "" || strings.Contains(u, "://") || strings.Contains(u, "@") {
+	u, err := runApprovalGitCmd(dir, 20*time.Millisecond, "remote", "get-url", remote)
+	if err != nil || u == "" || strings.Contains(u, "://") || strings.Contains(u, "@") {
 		return ""
 	}
 	if !filepath.IsAbs(u) {
@@ -236,15 +166,11 @@ func localBareRepoRefSHA(bareOrWorkDir, ref string) string {
 	if strings.TrimSpace(bareOrWorkDir) == "" || strings.TrimSpace(ref) == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", bareOrWorkDir, "rev-parse", "--verify", "--quiet", ref)
-	cmd.Env = sanitizedApprovalGitEnv()
-	out, err := cmd.Output()
+	out, err := runApprovalGitCmd(bareOrWorkDir, 20*time.Millisecond, "rev-parse", "--verify", "--quiet", ref)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return out
 }
 
 func parseGitTargetsFromCommand(cmdDisplay string) (remote, branch, tag string) {
@@ -327,34 +253,8 @@ func ReconcileLocalGitProposals(vaultDir string, now time.Time) ([]Proposal, err
 	if now.IsZero() {
 		now = time.Now()
 	}
-	pendingDir := filepath.Join(vaultDir, "memory", "pending")
-	entries, err := os.ReadDir(pendingDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
 	var reconciled []Proposal
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		fileID := strings.TrimSuffix(e.Name(), ".json")
-		if ValidateProposalID(fileID) != nil {
-			continue
-		}
-		fullPath := filepath.Join(pendingDir, e.Name())
-		data, rErr := os.ReadFile(fullPath)
-		if rErr != nil {
-			continue
-		}
-		var p Proposal
-		if json.Unmarshal(data, &p) != nil || p.ID != fileID {
-			continue
-		}
-
+	err := forEachPendingProposal(vaultDir, func(fullPath string, p Proposal) bool {
 		effDir := ""
 		if p.Metadata != nil {
 			effDir = strings.TrimSpace(p.Metadata["gitEffDir"])
@@ -363,7 +263,7 @@ func ReconcileLocalGitProposals(vaultDir string, now time.Time) ([]Proposal, err
 			effDir = extractLeadingCDDir(p.Command, p.WorkDir)
 		}
 		if effDir == "" {
-			continue
+			return true
 		}
 
 		remote, branch, tag := parseGitTargetsFromCommand(p.Command)
@@ -379,7 +279,7 @@ func ReconcileLocalGitProposals(vaultDir string, now time.Time) ([]Proposal, err
 			}
 		}
 		if branch == "" && tag == "" {
-			continue
+			return true
 		}
 
 		landedReason := ""
@@ -394,11 +294,11 @@ func ReconcileLocalGitProposals(vaultDir string, now time.Time) ([]Proposal, err
 				preRemTagSHA = p.Metadata["gitPreRemoteTagSHA"]
 			}
 			if hasPreKey && preTagSHA == "" && curTagSHA != "" {
-				landedReason = fmt.Sprintf("local git tag %s (%s) already created externally", tag, curTagSHA[:minInt(12, len(curTagSHA))])
+				landedReason = fmt.Sprintf("local git tag %s (%s) already created externally", tag, curTagSHA[:min(12, len(curTagSHA))])
 			} else if localRem := localGitRemotePath(effDir, remote); localRem != "" {
 				curRemTagSHA := localBareRepoRefSHA(localRem, "refs/tags/"+tag)
 				if curRemTagSHA != "" && (preRemTagSHA == "" || curRemTagSHA == curTagSHA) {
-					landedReason = fmt.Sprintf("remote git tag %s/%s (%s) already pushed externally", remote, tag, curRemTagSHA[:minInt(12, len(curRemTagSHA))])
+					landedReason = fmt.Sprintf("remote git tag %s/%s (%s) already pushed externally", remote, tag, curRemTagSHA[:min(12, len(curRemTagSHA))])
 				}
 			} else if remTagTrack := localGitRefSHA(effDir, "refs/remotes/"+remote+"/tags/"+tag); remTagTrack != "" {
 				landedReason = fmt.Sprintf("remote tracking tag %s/%s already present locally", remote, tag)
@@ -422,32 +322,16 @@ func ReconcileLocalGitProposals(vaultDir string, now time.Time) ([]Proposal, err
 				}
 			}
 			if targetSHA != "" && curRemoteSHA == targetSHA && (preRemoteSHA == "" || preRemoteSHA != targetSHA) {
-				landedReason = fmt.Sprintf("git branch %s/%s already at target commit %s", remote, branch, curRemoteSHA[:minInt(12, len(curRemoteSHA))])
+				landedReason = fmt.Sprintf("git branch %s/%s already at target commit %s", remote, branch, curRemoteSHA[:min(12, len(curRemoteSHA))])
 			}
 		}
 
 		if landedReason != "" {
-			if os.Remove(fullPath) == nil {
-				removeIdemMarker(vaultDir, p.IdempotencyKey)
-				removePayloadArtifact(vaultDir, p.ID)
-				CleanupApprovalArtifacts(vaultDir, p.ID)
-				p.Status = "reconciled_external"
-				appendIntervention(vaultDir, InterventionRecord{
-					Timestamp: now.Format(time.RFC3339),
-					Decision:  "reconciled_external",
-					Proposal:  p,
-					Output:    landedReason,
-				})
-				reconciled = append(reconciled, p)
+			if settled, ok := settlePendingProposal(vaultDir, fullPath, p, "reconciled_external", "reconciled_external", landedReason, "", now); ok {
+				reconciled = append(reconciled, settled)
 			}
 		}
-	}
-	return reconciled, nil
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+		return true
+	})
+	return reconciled, err
 }
