@@ -39,14 +39,14 @@ type monolithCeiling struct {
 	maxLOC  int
 }
 
-// monolithLOCCeilings ratchets monolith source files at or below their baseline line count
-// so future PRs cannot silently bloat them further.
+// monolithLOCCeilings ratchets monolith source files tightly near their post-cleanup baselines
+// (1993 / 595 / 396 / 1093 / 1056 LOC, with a <=22 LOC headroom) so future PRs cannot re-bloat them.
 var monolithLOCCeilings = []monolithCeiling{
-	{relPath: "internal/kernel/kernel.go", maxLOC: 5829},
-	{relPath: "cmd/hq/main.go", maxLOC: 4446},
-	{relPath: "internal/hooks/hooks.go", maxLOC: 3713},
-	{relPath: "internal/webui/webui.go", maxLOC: 2624},
-	{relPath: "internal/kernel/workspace_lifecycle.go", maxLOC: 1765},
+	{relPath: "internal/kernel/kernel.go", maxLOC: 2015},
+	{relPath: "cmd/hq/main.go", maxLOC: 615},
+	{relPath: "internal/hooks/hooks.go", maxLOC: 415},
+	{relPath: "internal/webui/webui.go", maxLOC: 1115},
+	{relPath: "internal/kernel/workspace_lifecycle.go", maxLOC: 1075},
 }
 
 var reTestCUJToken = regexp.MustCompile(`\bTestCUJ[A-Za-z0-9_]*\b`)

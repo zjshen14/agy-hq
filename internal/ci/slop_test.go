@@ -260,8 +260,14 @@ func TestGateH5F_MonolithLOCCeilings(t *testing.T) {
 		t.Fatalf("expected H5-F pass below ceiling, got: %s", detail)
 	}
 
-	// Exceeding internal/kernel/workspace_lifecycle.go ceiling must fail.
-	bloated := "package kernel\n" + strings.Repeat("// line\n", 1800)
+	// Exact ceiling boundary passes, while +1 line above ceiling fails.
+	atLimit := "package kernel\n" + strings.Repeat("// line\n", 1074)
+	writeTestFile(t, root, "internal/kernel/workspace_lifecycle.go", atLimit, 0o644)
+	if ok, detail := checkGateH5FMonolithLOCCeilings(root); !ok {
+		t.Fatalf("expected H5-F pass at exact ceiling, got: %s", detail)
+	}
+
+	bloated := "package kernel\n" + strings.Repeat("// line\n", 1075)
 	writeTestFile(t, root, "internal/kernel/workspace_lifecycle.go", bloated, 0o644)
 	if ok, detail := checkGateH5FMonolithLOCCeilings(root); ok || !strings.Contains(detail, "internal/kernel/workspace_lifecycle.go") {
 		t.Fatalf("expected H5-F failure when workspace_lifecycle.go exceeds ceiling, got ok=%v detail=%q", ok, detail)
