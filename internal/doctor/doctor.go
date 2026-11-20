@@ -461,11 +461,15 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 					pSt.GlobalPluginDir, pSt.GlobalPluginVersion, pSt.VaultResolutionSource),
 			})
 		case pSt.SharedPluginInstalled:
+			sidecarSuffix := ""
+			if pSt.ConsoleSidecarInstalled {
+				sidecarSuffix = " · consoleSidecar=installed"
+			}
 			results = append(results, CheckResult{
 				Name:   "Plugin & Binary Sync",
 				Status: "PASS",
-				Detail: fmt.Sprintf("Project-scoped mode active (v%s · binary=%s · vaultSource=%s; zero global leakage to unrelated projects)",
-					pSt.SharedPluginVersion, pSt.GlobalBinaryPath, pSt.VaultResolutionSource),
+				Detail: fmt.Sprintf("Project-scoped mode active (v%s · binary=%s · vaultSource=%s%s; zero global leakage to unrelated projects)",
+					pSt.SharedPluginVersion, pSt.GlobalBinaryPath, pSt.VaultResolutionSource, sidecarSuffix),
 			})
 		default:
 			results = append(results, CheckResult{

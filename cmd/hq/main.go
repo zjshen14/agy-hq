@@ -4114,6 +4114,9 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 		if st.ProjectPluginsManifest != "" {
 			fmt.Printf("  Project Manifest:  %s\n", st.ProjectPluginsManifest)
 		}
+		if st.ConsoleSidecarInstalled {
+			fmt.Printf("  Console Sidecar:   %s (sidecar://agy-hq-console/)\n", st.ConsoleSidecarDir)
+		}
 		if st.LegacySidecarFound {
 			fmt.Printf("  Legacy Sidecar:    %s (superseded — run 'hq plugin install' to tidy)\n", st.LegacySidecarDir)
 		}

@@ -307,4 +307,11 @@ func TestInstallWithConsoleSidecarInProjectMode(t *testing.T) {
 	if err != nil || cfg == nil || !cfg.ConsoleSidecarInstalled {
 		t.Fatalf("expected GlobalConfig.ConsoleSidecarInstalled=true, got %+v err=%v", cfg, err)
 	}
+	st, err := Status(vaultDir, repoDir)
+	if err != nil {
+		t.Fatalf("Status after console sidecar install: %v", err)
+	}
+	if !st.ConsoleSidecarInstalled || st.LegacySidecarFound {
+		t.Fatalf("expected ConsoleSidecarInstalled=true and LegacySidecarFound=false, got %+v", st)
+	}
 }

@@ -111,12 +111,14 @@ type StatusReport struct {
 	BundleInSync          bool   `json:"bundleInSync"`
 	VersionInSync         bool   `json:"versionInSync"`
 
-	WorkspacePluginFound   bool   `json:"workspacePluginFound"`
-	WorkspacePluginDir     string `json:"workspacePluginDir,omitempty"`
-	WorkspacePluginVer     string `json:"workspacePluginVersion,omitempty"`
-	ProjectPluginsManifest string `json:"projectPluginsManifest,omitempty"`
-	LegacySidecarFound     bool   `json:"legacySidecarFound"`
-	LegacySidecarDir       string `json:"legacySidecarDir,omitempty"`
+	WorkspacePluginFound    bool   `json:"workspacePluginFound"`
+	WorkspacePluginDir      string `json:"workspacePluginDir,omitempty"`
+	WorkspacePluginVer      string `json:"workspacePluginVersion,omitempty"`
+	ProjectPluginsManifest  string `json:"projectPluginsManifest,omitempty"`
+	ConsoleSidecarInstalled bool   `json:"consoleSidecarInstalled,omitempty"`
+	ConsoleSidecarDir       string `json:"consoleSidecarDir,omitempty"`
+	LegacySidecarFound      bool   `json:"legacySidecarFound"`
+	LegacySidecarDir        string `json:"legacySidecarDir,omitempty"`
 
 	DaemonRunning bool   `json:"daemonRunning"`
 	DaemonVersion string `json:"daemonVersion,omitempty"`
@@ -1041,8 +1043,13 @@ func Status(vaultDir, rootDir string) (*StatusReport, error) {
 
 	if legacySidecarDir != "" {
 		if st, sErr := os.Stat(legacySidecarDir); sErr == nil && st.IsDir() {
-			rep.LegacySidecarFound = true
-			rep.LegacySidecarDir = legacySidecarDir
+			if cfg != nil && cfg.ConsoleSidecarInstalled && scope == ScopeProject {
+				rep.ConsoleSidecarInstalled = true
+				rep.ConsoleSidecarDir = legacySidecarDir
+			} else {
+				rep.LegacySidecarFound = true
+				rep.LegacySidecarDir = legacySidecarDir
+			}
 		}
 	}
 
