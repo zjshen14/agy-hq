@@ -1,148 +1,152 @@
-# Research 21: Declarative Scoped Delegates, Capability Attenuation & Safe Peer-to-Task Dispatch Audit
+# Research 21: Unified Session Authorization Spectrum, Live Quarantine Hardening & Declarative Scoped Delegates Audit
 
-- **Status:** Complete
+- **Status:** Complete (v2 — Incorporates 3 Independent Adversarial Reviews)
 - **Date:** 2026-11-20
-- **Companion RFC:** [RFC-0026: Declarative Scoped Delegates](../design/0026-declarative-scoped-delegates.md)
-- **Prior Specs Reviewed:** [RFC-0003](../design/0003-approval-bound-execution.md), [RFC-0014](../design/0014-proactive-engine-and-living-context.md), [RFC-0017a](../design/0017a-connector-protocol-and-watcher-engine.md), [RFC-0017b](../design/0017b-provenance-taint-and-offer-gateway.md), [RFC-0017d](../design/0017d-enterprise-extensibility-and-portability.md), [RFC-0018](../design/0018-always-on-agent-runtime-hardening.md), [RFC-0021](../design/0021-customizable-approval-policy-and-ux.md), [RFC-0023](../design/0023-front-desk-channel-bridge.md), [RFC-0025](../design/0025-pluggable-workspace-providers.md)
+- **Companion RFC:** [RFC-0026: Unified Session Authorization Lattice & Declarative Scoped Delegates](../design/0026-declarative-scoped-delegates.md)
+- **Prior Specs Reviewed:** [RFC-0003](../design/0003-approval-bound-execution.md), [RFC-0014](../design/0014-proactive-engine-and-living-context.md), [RFC-0017a](../design/0017a-connector-protocol-and-watcher-engine.md), [RFC-0017b](../design/0017b-provenance-taint-and-offer-gateway.md), [RFC-0017c](../design/0017c-lease-based-morning-brief-and-extensions.md), [RFC-0017d](../design/0017d-enterprise-extensibility-and-portability.md), [RFC-0018](../design/0018-always-on-agent-runtime-hardening.md), [RFC-0021](../design/0021-customizable-approval-policy-and-ux.md), [RFC-0023](../design/0023-front-desk-channel-bridge.md), [RFC-0025](../design/0025-pluggable-workspace-providers.md)
 
 ---
 
-## 1. Executive Summary & The "Bespoke Adapter Trap"
+## 1. Executive Summary & Root Architectural Diagnosis
 
-`agy-hq` provides strong, mechanically enforced isolation for two opposite ends of the trust spectrum:
+When teammates or always-on peer team agents send requests to a user's `agy-hq` instance — *"What is the CI status of `billing-v2`?"* or *"Can you prioritize reviewing change `#482910`?"* — companion packs today fall into the **Bespoke Adapter Trap**:
 
-1. **Full-privilege personal sessions** (interactive `[HQ] Front Desk`, Task Conversations, and untainted `[Auto]` workers) that hold read/write access to the user's private Vault, all Task Board conversations, local workspaces, and authenticated external CLIs — gated on outbound side effects by `hq propose` ([RFC-0003](../design/0003-approval-bound-execution.md), [RFC-0021](../design/0021-customizable-approval-policy-and-ux.md)).
-2. **Quarantined Reader sessions** (`TaintOnSpawn: true`, [RFC-0017b](../design/0017b-provenance-taint-and-offer-gateway.md)) that ingest untrusted external messages from email or chat, withhold all private Vault memory, block every file write and external CLI, and restrict the worker solely to staging proposals (`hq offer stage`) or passive alerts (`hq outbox add`).
+- Full-privilege personal sessions hold ambient authority over `USER.md`, `MEMORY.md`, confidential tasks (`q4-calibration`, `personal-taxes`), workspaces, and external CLIs — unsafe for untrusted peer ingress.
+- Quarantined Reader sessions ([RFC-0017b](../design/0017b-provenance-taint-and-offer-gateway.md)) withhold all Vault memory and restrict tools to hardcoded inbox-triage subcommands, escalating everything else to `[HQ] Front Desk` as passive `TierInterrupt` alerts where Front Desk rules prohibit autonomous execution.
+- As a result, pack authors end up hardcoding bespoke Go handlers and rebuilding + re-pinning binaries for every incremental team-facing capability.
 
-This binary split works well for **single-player personal triage** (an owner reviewing their own inbox or messaging their own `[HQ] Front Desk` through an owner-authenticated channel bridge under [RFC-0023](../design/0023-front-desk-channel-bridge.md)). It breaks down immediately when **other people or peer team agents** need to interact with a user's `agy-hq` instance — for example:
+A deeper forensic audit of `agy-hq` — informed by three independent adversarial reviews (Security, Systems Architecture, and Implementation Feasibility/DX) — reveals that **the Bespoke Adapter Trap is a symptom of a more fundamental design gap**:
 
-- A teammate asks an always-on team bot *"What is the current CI/rollout status of `billing-v2`?"* while the user is away or in deep focus.
-- A colleague asks *"Can you prioritize reviewing change `#482910` today?"* when the user already has a dedicated, rule-governed `task:code-review` session running.
-- A project lead asks for the latest milestone progress on an explicitly shared workstream without ever exposing unrelated confidential tasks (e.g., performance calibration, HR notes, or personal finances) that sit on the exact same Task Board.
+1. **`agy-hq` does not have "two profiles"; it already has five ad-hoc session archetypes** (`quarantined_reader`, `unattended_auto`, `subagent`, `front_desk`, and `interactive_task`) computed via scattered boolean flags across `pre_tool.go`, `session_start.go`, and `stop.go`. Bolting a sixth and seventh special case (`scoped_delegate`, `classifier`) onto `if ctx.tainted()` would accumulate fragile one-off guardrails and invite privilege-composition bugs.
+2. **Quarantined Reader (`⊥`) and Full-Privilege Interactive (`⊤`) are two extremes of ONE generic, partial-order Capability Lattice (`internal/authz`).** Crucially, `quarantined_reader` (private inbox reads + zero auto-egress) and `scoped_delegate` (curated shareable reads + egress-filtered auto-reply) are **incomparable siblings** in that lattice — never unioned, because unioning them re-opens Willison's Lethal Trifecta.
+3. **The audit uncovered four live-codebase security bugs in the current Quarantine implementation** (`triage-result` path traversal, `hq watch read` empty-`ItemKeys` fail-open, `hq status`/`hq memory lookup` taint leaks, and `brief format-quarantined --file` unguarded read) that must be fixed alongside unifying session authorization.
 
-Because `agy-hq` has **no middle tier** between full privilege and blind quarantine, companion extension packs fall into the **Bespoke Adapter Trap**:
-
-- Every new team-facing capability forces the pack author to write custom Go handler code inside a trusted binary, bypass the LLM entirely with rigid hardcoded keyword parsers, rebuild the binary, re-approve a new SHA-256 trust pin in `<vault>/private/trust.json`, and often redeploy the remote peer bot as well.
-- Anything that falls outside those hardcoded handlers drops into `[HQ] Front Desk` as a passive `TierInterrupt` alert — where Front Desk safety rules explicitly forbid taking autonomous action on alert text, stalling the request until the owner manually intervenes.
-
-This audit inspects seven architectural seams (`D1`–`D7`) in `agy-hq`, grounds the solution in prompt-injection defense and capability security literature (CaMeL control/data-flow separation and Object-Capability attenuation), and derives the requirements (`SD1`–`SD9`) for **RFC-0026: Declarative Scoped Delegates**.
+This research documents eight forensic findings (`D1`–`D8`), establishes the formal Capability Lattice and four Non-Interference Invariants (`NI-1`–`NI-4`), and derives requirements `UA1`–`UA10` for **RFC-0026 (v2)**.
 
 ---
 
-## 2. Forensic Codebase Audit: Seven Delegation Seams (`D1`–`D7`)
+## 2. Forensic Codebase Audit (`D1`–`D8`)
 
-### `D1` — Binary Taint Enforcement Leaves No Scoped Capability Tier (`internal/hooks/pre_tool.go`, `internal/hooks/quarantine.go`)
+### `D1` — Scattered 5-Boolean Ad-Hoc Role Model (`pre_tool.go`, `session_start.go`, `stop.go`)
 
-- [`HandlePreToolUse`](../../internal/hooks/pre_tool.go#L309-L333) branches on a single boolean (`ctx.tainted()`). Once a session is marked tainted in `<vault>/private/taint/<sha256(convID)>.json` ([`taint.Mark`](../../internal/taint/taint.go#L110-L241)), every tool except `update_focus`, a narrow `read_file` allowlist, and `run_command` is unconditionally denied.
-- [`validateTaintedHQArgv`](../../internal/hooks/quarantine.go#L366-L429) restricts `run_command` to **nine** hardcoded canonical `hq` subcommands (`status`, `watch read|query|ack`, `offer stage`, `outbox add`, `timers set`, `goals mark-replied`, `memory lookup`, `brief format-quarantined`, and `gmail|gchat read-quarantined|read|triage-result`).
-- There is no mechanism to attach a **narrow, caller-authorized capability grant** (e.g., *"read progress of task `billing-v2` only"*, *"run read-only `ci-cli status`"*, *"emit a parameterized nudge to `task:code-review`"*, or *"send an egress-filtered auto-reply"*) while keeping the rest of the Quarantine deny-by-default wall intact.
+Session permissions are currently re-derived independently in three hook handlers:
+- [`internal/hooks/pre_tool.go`](../../internal/hooks/pre_tool.go#L88-L110) caches `isAuto()`, `isSubagent()`, and `tainted()`, then computes `isFrontDesk` at [`L368`](../../internal/hooks/pre_tool.go#L368) and [`L445`](../../internal/hooks/pre_tool.go#L445), branching across `L310`, `L347`, `L352`, `L448`, `L466`, `L476`, `L498`, `L594`, and `L628`.
+- [`internal/hooks/session_start.go`](../../internal/hooks/session_start.go#L85-L196) independently computes `isTaintedStart`, `isSubagent`, `isAutoWorker`, `leanAuto`, and `isFrontDesk`.
+- [`internal/hooks/stop.go`](../../internal/hooks/stop.go#L49-L95) independently checks `isFrontDesk` and `isTainted`.
+- [`validateTaintedHQArgv`](../../internal/hooks/quarantine.go#L366-L429) hardcodes a single 9-subcommand allowlist for every tainted session regardless of purpose.
 
-### `D2` — Quarantined Read Allowlist Misses Companion Pack `SKILL.md` Roots (`internal/hooks/quarantine.go`)
+Adding delegated workers and classifiers as more `if` branches on top of `if ctx.tainted()` creates split-brain policy logic and directly caused a **P0 composition bug** in RFC-0026 v1 (inheriting `validateTaintedHQArgv` alongside `auto_reply`).
 
-- [`isAllowedTaintedReadPath`](../../internal/hooks/quarantine.go#L431-L485) allows a tainted session to call `read_file` only on:
-  1. Its own conversation artifact directory (excluding `.system_generated`),
-  2. `$PLUGIN_ROOT/skills/`, and
-  3. `<base>/*/skills/` under `roots.PluginsDir`, `<AppDataDir>/hq/plugins`, or `<repo>/.agents/plugins`.
-- However, companion extension packs registered in `<vault>/extensions.json` and SHA-256-pinned in `<vault>/private/trust.json` ([`internal/extension/pack.go`](../../internal/extension/pack.go#L244-L268)) may reside at any canonical path on disk (for instance, a mounted enterprise plugin directory or a user-managed pack checkout).
-- When [`resolveScheduleDispatch`](../../internal/kernel/gatekeeper.go#L86-L107) injects `Companion Skill Override: Activate <skill> at <SkillPath>` into a tainted background worker, the worker's first `read_file` on that trusted pack's `SKILL.md` is **denied** by `isAllowedTaintedReadPath`, wasting turns or aborting the run.
+### `D2` — Four Live-Codebase Quarantine Security Bugs & Taint-Leak Surfaces
 
-### `D3` — No Allowlist-Scoped Cross-Task Read Isolation (`internal/hooks/session_start.go`, `internal/vault/progress.go`)
+Auditing every verb currently permitted to tainted sessions exposed four concrete defects in `main` that must be remediated as Phase 2A prerequisites:
 
-- A user's active Task Board (`<vault>/memory/tasks.json`), progress checkpoints ([`vault.LoadProgress`](../../internal/vault/progress.go#L100-L117) at `<vault>/memory/progress/<slug>.md`), and workspace status cache (`<vault>/memory/workspaces.json`) hold **mixed-confidentiality tasks** side by side: shareable engineering workstreams (`billing-v2`, `checkout-latency`) coexist with strictly private threads (`q4-calibration`, `hiring-notes`, `personal-taxes`).
-- In [`HandleSessionStart`](../../internal/hooks/session_start.go#L325-L329), any tainted session early-returns with a `<= 800B` banner (`vault.MaxSessionTaintBytes`), withholding all Vault memory layers and all task metadata. Furthermore, [`isAllowedTaintedReadPath`](../../internal/hooks/quarantine.go#L453-L458) unconditionally blocks all reads inside `<vault>/`.
-- Conversely, an untainted session receives `MEMORY.md`, `USER.md`, topic indexes, and full read access to `tasks.json`.
-- There is no Ring-0 read mediator that exposes **strictly allowlisted** tasks' sanitized progress checkpoints and cached workspace states while keeping every non-allowlisted task physically unaddressable (and undetectable even by existence/title leakage).
+1. **Path Traversal in `hq gmail|gchat triage-result`:**
+   - [`internal/gmail/gmail.go`](../../internal/gmail/gmail.go#L1109-L1152) and [`internal/gchat/gchat.go`](../../internal/gchat/gchat.go#L1203-L1249) write `filepath.Join(dir, batchID+".json")` and `filepath.Join(notesDir, batchID+".md")` with **zero validation on `batchID`** (while `strictArgv` allows `.` and `/`). A prompt-injected tainted session passing `--batch=../../USER` overwrites `<vault>/USER.md`, `--batch=../../MEMORY` overwrites `<vault>/MEMORY.md`, and `--batch=../../../extensions` overwrites `<vault>/extensions.json`.
+2. **Fail-Open Fallthrough in `hq watch read`:**
+   - [`itemAllowedByLeasedOrTaintedScope`](../../internal/watcher/watcher.go#L1061-L1100) checks `if alreadyTainted && len(rec.ItemKeys) > 0` (`L1085`) and falls through to `return nil` (`L1099`). Any tainted session whose `taint.Record` has empty `ItemKeys` (or no `connector` event metadata) passes unchecked and can read arbitrary Gmail/GChat threads across any connector/account.
+3. **Private Data Leaks in `hq status`, `hq memory lookup`, and `hq brief format-quarantined`:**
+   - [`cmd/hq/main.go`](../../cmd/hq/main.go#L353-L381) (`hq status`) performs zero taint check and prints the host `vaultDir` path, active bridges, and **every pending approval proposal's `ID`, `Summary`, `ActionType`, and `SHA256[:12]`**.
+   - [`LookupEntities`](../../internal/vault/entities_and_forget.go#L325-L356) returns the entire contact directory (`ListEntities`) when `query == ""`, and `entityMatchesQuery` (`L343-L356`) matches against **unredacted `Context`, `Spaces`, and `Notes` before** CLI redaction — creating a boolean search oracle over private notes.
+   - [`cmd/hq/extensions_cli.go`](../../cmd/hq/extensions_cli.go#L829-L842) (`hq brief format-quarantined --file=<path>`) performs an unguarded `os.ReadFile(*fileIn)` outside `protectedPrivateSubs`.
+4. **Raw Tainted Output & Uncurated Auto-Checkpoints Flowing Across Trust Boundaries:**
+   - [`internal/hooks/stop.go`](../../internal/hooks/stop.go#L247-L288) writes `tm.LastResponse` verbatim into `ActiveTask.LastSummary` even for tainted sessions, which `SessionStart` then injects into untainted `[HQ] Front Desk`.
+   - [`internal/hooks/stop.go`](../../internal/hooks/stop.go#L364-L393) auto-writes raw `summary` and raw host `filesModified` paths into `memory/progress/<slug>.md` at 120k context tokens — proving that neither `ActiveTask.LastSummary` nor raw `memory/progress/<slug>.md` is curated for external peer disclosure.
 
-### `D4` — No Safe Control/Data Boundary Into Existing Specialized Tasks (`internal/kernel/events_dispatch.go`, `internal/channels/inbound.go`)
+### `D3` — Quarantined Read Allowlist Misses Companion Pack `SKILL.md` Roots (`quarantine.go`, `trust.go`)
 
-- `agy-hq` already provides deterministic message delivery into an existing Antigravity conversation via [`DeliverMessageToSession`](../../internal/kernel/events_dispatch.go#L26-L57) (LanguageServer `SendUserCascadeMessage` with `agentapi send-message` fallback) and [`DispatchPendingEvents`](../../internal/kernel/events_dispatch.go#L210-L231).
-- [RFC-0023](../design/0023-front-desk-channel-bridge.md) uses this in [`channels.HandleInbound`](../../internal/channels/inbound.go#L128-L220) to route inbound messages to `[HQ] Front Desk` or a matched task session (`findActiveTaskConversation`). Critically, RFC-0023's threat model assumes the sender is the **verified owner** talking to themselves in a 1:1 channel — never a third-party colleague.
-- Routing raw prose from a third-party peer into an existing privileged task (such as `task:code-review`, which holds VCS/review CLI authority) would inject untrusted external text directly into an untainted write-capable context — a textbook indirect prompt injection vector.
-- Conversely, escalating third-party requests as passive Front Desk `TierInterrupt` cards hits the passive-alert safety invariant: `[HQ] Front Desk` must not execute actions from alert text without a fresh owner turn, so valid, routine peer requests (like *"please move change `#482910` to the top of the review queue"*) sit idle until the human returns.
+- [`isAllowedTaintedReadPath`](../../internal/hooks/quarantine.go#L431-L485) permits `read_file` only under the conversation's own artifact dir, `$PLUGIN_ROOT/skills`, `<PluginsDir>/*/skills`, `<AppDataDir>/hq/plugins/*/skills`, and `<repo>/.agents/plugins/*/skills`.
+- Companion extension packs registered via `<vault>/extensions.json` and pinned in `<vault>/private/trust.json` ([`internal/extension/pack.go`](../../internal/extension/pack.go#L244-L268)) may reside at arbitrary canonical roots, causing [`resolveScheduleDispatch`](../../internal/kernel/gatekeeper.go#L86-L107) skill overrides to fail on Turn 1 in tainted runs.
+- Crucially, `internal/extension/trust.go` currently hashes `SKILL.md` files only for `SkillOverrides`, not all declared `<pack>/skills/` directories — so fixing `D3` requires pinning declared skill files in `TrustedTarget.Files` and restricting Scoped Delegates strictly to their granted `Skills`.
 
-### `D5` — No Vendor-Neutral Peer/Delegate Transport Seam (`internal/extension/pack.go`, `internal/channels/protocol.go`)
+### `D4` — No Curated, Allowlist-Scoped Cross-Task & Workspace Projection (`session_start.go`, `progress.go`, `workspaces.json`)
 
-- Companion packs currently support three SHA-256-pinned executable seams in [`PackComponents`](../../internal/extension/pack.go#L244-L257):
-  1. `connectors` ([RFC-0017a](../design/0017a-connector-protocol-and-watcher-engine.md)) — personal inbox polling (email/chat read-only watch + quarantine).
-  2. `channel_bridges` ([RFC-0023](../design/0023-front-desk-channel-bridge.md), [`internal/channels/protocol.go`](../../internal/channels/protocol.go#L19-L216)) — 1:1 owner Front Desk mirror (`bind-desk`, `notify`, `status`).
-  3. `workspace_providers` ([RFC-0025](../design/0025-pluggable-workspace-providers.md)) — non-git VCS workspace lifecycle (`probe`, `list`, `create`, `status`, `remove`).
-- None of these models a **multi-caller peer delegation transport**: polling authenticated requests originated by *other principals* (`caller_id`, `caller_groups`), delivering structured `reply` / `ack` payloads keyed by `request_id`, and optionally pushing sanitized offline read-only snapshots (`publish_snapshot`) so an always-on cloud/team peer agent can answer basic status questions even when the owner's workstation is asleep.
-- Without a permanent, domain-agnostic transport contract (`hq-delegate-transport/v1`), packs overload `daemon_gatekeeper` schedules (`precheck_cmd`) and bake domain business logic directly into compiled binaries.
+- `<vault>/memory/tasks.json`, `<vault>/memory/progress/<slug>.md` ([`vault.LoadProgress`](../../internal/vault/progress.go#L100-L117)), and `<vault>/memory/workspaces.json` mix team-shareable projects (`billing-v2`) with strictly confidential tasks (`q4-calibration`, `personal-taxes`).
+- `LedgerEntry` in `memory/workspaces.json` contains host paths (`Root`, `CanonicalRoot`, `WorkDir`), raw stderr (`Status.Error`), `WriterTask`, and `BoundTasks` (which can list co-bound non-granted confidential task slugs).
+- Tainted sessions withhold everything (`MaxSessionTaintBytes = 800` in [`session_start.go`](../../internal/hooks/session_start.go#L325-L329)), while untainted sessions read everything. A Ring-0 read mediator must project **only explicitly curated shareable fields** (`## Public Status` + projected workspace change states, never `LastSummary`, never host paths, never `BoundTasks`).
 
-### `D6` — No Ring-0 Egress Privacy/Commitment Gateway or Delegate Policy Self-Tamper Guard (`internal/hooks/pre_tool.go`)
+### `D5` — Unattended Interactive Escalation & 2nd-Order Prompt Injection in Peer-to-Task Dispatch (`events_dispatch.go`, `pre_tool.go`)
 
-- [`protectedPrivateSubs`](../../internal/hooks/pre_tool.go#L28-L31) and [`protectedStores`](../../internal/hooks/pre_tool.go#L567-L587) lock down credentials, taint markers, `trust.json`, channels, and workspace ledgers, while [`handlePreToolProtectedWrites`](../../internal/hooks/pre_tool.go#L592-L624) and [`handlePreToolRunCommand`](../../internal/hooks/pre_tool.go#L499-L510) block `[Auto]` sessions from modifying `config.yaml` or `hq-extension.json`.
-- However, `agy-hq` has no Ring-0 **egress gateway** for automated peer replies that deterministically checks outbound text for:
-  - Vault `private/pii-denylist.txt` tokens and host home paths,
-  - **Cross-task leakage** (titles or slugs of *non-allowlisted* tasks in `tasks.json`),
-  - Internal harness control tokens (`[hq-spawn:...]`, `prop-...`, `bca_...`, `bcr_...`),
-  - User-configured `blocked_patterns` (e.g., blocking an automated delegate from making unilateral deadline promises, LGTM/merge commitments, or HR/compensation disclosures),
-  - Per-policy and global hourly auto-reply rate limits.
-- Nor is `<vault>/delegates.yaml` or `<vault>/private/delegates/` currently covered by `protectedPrivateSubs` / `protectedStores` against policy self-tampering.
+- [`DeliverMessageToSession`](../../internal/kernel/events_dispatch.go#L26-L57) and [RFC-0023](../design/0023-front-desk-channel-bridge.md) [`channels.HandleInbound`](../../internal/channels/inbound.go#L128-L220) assume an **owner-authenticated 1:1 sender**.
+- Directly waking an existing interactive `kind: "task"` session (e.g., `task:code-review`) from a peer request — even via a static CaMeL template — hits **two critical hazards**:
+  1. **`isAuto == false` bypass:** `isAutoConversation()` returns `false` for `kind: "task"`, so [`HandlePreToolUse`](../../internal/hooks/pre_tool.go#L512-L553) evaluates `approvals.EvaluateCommand` with `isAuto = false`, **disabling `ModeAutoOnly` approval gates** (`git push`, `gh pr review/comment`, `workspace_auto_guard`) while the owner is away!
+  2. **2nd-order prompt injection via referenced objects:** A validated `change_id=482910` points to untrusted external content (PR/CL description, diffs, review comments). Driving untrusted objects unattended into an interactive write-enabled task re-introduces remote code/action injection.
+- Therefore, CaMeL-safe peer nudges MUST either (a) **`queue_only`** into a durable per-task priority queue read on the owner's next interactive turn, or (b) dispatch via `events.Enqueue` into a dedicated **`unattended_auto`** worker where `NI-3` guarantees `isAuto == true` and all `ModeAutoOnly` / `hq propose` gates remain locked!
 
-### `D7` — Monolith LOC Ceilings & Lock-Rank Ordering (`internal/ci/slop.go`, `internal/store/store.go`)
+### `D6` — No Vendor-Neutral Peer/Delegate Transport Seam (`extension/pack.go`, `channels/protocol.go`)
 
-- CI Gate `H5-F` ([`monolithLOCCeilings`](../../internal/ci/slop.go#L44-L50)) enforces tight ceilings on five core files: `internal/kernel/kernel.go` (`2015` LOC), `cmd/hq/main.go` (`615` LOC), `internal/hooks/hooks.go` (`415` LOC), `internal/webui/webui.go` (`1115` LOC), and `internal/kernel/workspace_lifecycle.go` (`1075` LOC). Any new delegation subsystem must live in a standalone package (`internal/delegates/`) wired through thin, focused adapter files (`cmd/hq/delegate_cmd.go`, `internal/hooks/delegate_hooks.go`, `internal/kernel/delegate_daemon.go`).
-- [`internal/store/store.go`](../../internal/store/store.go#L23-L38) defines a strict increasing lock-rank ladder:
-  `RankExtensions (10)` → `RankTriggerCur (20)` → `RankWatcher (30)` → `RankTimers (35)` → `RankEvents (40)` → `RankGoals (50)` → `RankOutbox (60)` → `RankChannels (65)` → `RankTaint (70)` → `RankTasks (75)` → `RankWorkspaces (76)` → `RankMemory (78)` → `RankSubagentQueue (80)` → `RankQuota (85)`.
-- A clean gap exists at **`RankDelegates = 72`** (between `RankTaint` and `RankTasks`), and keeping `RankDelegates` a **pure leaf lock** (zero nested store acquisitions inside the lock callback, mirroring `RankWorkspaces = 76` and `RankMemory = 78`) eliminates any possibility of lock-rank inversions with `events.Enqueue (40)`, `outbox.Add (60)`, or `taint.Mark (70)`.
+- [`PackComponents`](../../internal/extension/pack.go#L244-L257) defines `connectors` (personal inbox watch), `channel_bridges` (1:1 owner Front Desk mirror, [`internal/channels/protocol.go`](../../internal/channels/protocol.go#L19-L216)), and `workspace_providers` (non-git VCS workspaces).
+- `channel_bridges` carries owner-equivalent trust and Front Desk shift-binding, so it MUST remain distinct from multi-caller untrusted peers.
+- A permanent, domain-agnostic `hq-delegate-transport/v1` (`poll`, `reply`, `publish_snapshot`, `status`) — reusing `connector.RunSubprocess` and `extension.VerifyTrustedBinary` — ends per-capability Go binary rewrites while keeping owner bridges strictly isolated.
+
+### `D7` — Pure-Go Stdlib Config Format, Policy Sovereignty & `strictArgv` Mechanics (`Gate H4-A`, `quarantine.go`, `pre_tool.go`)
+
+1. **Zero-dep YAML parser hazard:** Under `ADR-0002` / `Gate H4-A` (0 external Go dependencies), `internal/approvals/policy.go` already requires **359 LOC** of bespoke state-machine parsing for a 2-level YAML schema. Hand-rolling a 6-level YAML parser (nested command arg lists, arbitrary maps, `template: |` block scalars, `#` inside regexes) for a **Ring-0 security policy** would take 800–1,200+ LOC and risk silent privilege escalation on indentation/quoting bugs. By contrast, **JSONC** (`encoding/json` + `DisallowUnknownFields()` + ~45-LOC quote-aware comment/trailing-comma stripper + `string | []string` multiline templates) matches `hq-extension.json`, `private/channels/*.json`, and `memory/workspaces.json`.
+2. **Policy file sovereignty:** Placing policy at `<vault>/delegates.yaml` (writable by any untainted interactive coding session without `hq propose`) allows a prompt-injected coding session reading an untrusted repo/web page to add `attacker@evil.com` + `cat ~/.ssh/id_rsa` (`IsBlockedComponentCommand0` blocks shells/interpreters, not `cat`/`curl`). Moving policy to LLM-invisible **`<vault>/private/delegates/policy.json`** (`0600`) managed via **`hq delegate configure --file=<draft>`** → `hq propose` (`rsi_apply`) 1-tap diff approval (mirroring RFC-0023's `hq channel configure`) + requiring **SHA-256 pinning** of `commands[].command[0]` and `preflight.command[0]` in `private/trust.json` (matching RFC-0017c `brief.d`) closes both holes while keeping 10-second chat-assisted editing!
+3. **`strictArgv` multiline reply bottleneck:** [`strictArgv`](../../internal/hooks/quarantine.go#L232-L314) forbids raw `\n`/`\r`, `\n` escapes, `$`, `` ` ``, and single-quote escapes, while `write_file` is denied in delegates. Supporting `--body-b64=<rfc4648>` (decoded in Go *before* Ring-0 egress checks) enables rich multiline markdown replies with zero filesystem write surface.
+
+### `D8` — Exact Monolith Ceilings (`Gate H5-F`), Import Cycles & Unified Ring-0 Storage (`slop.go`, `store.go`, `taint.go`)
+
+- **Monolith LOC ceilings** ([`internal/ci/slop.go`](../../internal/ci/slop.go#L44-L50), measured on current `main`):
+  - `internal/hooks/hooks.go`: **405 / 415** (**10 LOC** headroom → add 0 LOC; put hook helpers in `internal/hooks/authz_hooks.go` / `delegate_hooks.go`)
+  - `internal/kernel/workspace_lifecycle.go`: **1056 / 1075** (**19 LOC** headroom → add 0 LOC)
+  - `cmd/hq/main.go`: **595 / 615** (**20 LOC** headroom → add <= 4 LOC; put CLI in `cmd/hq/delegate_cmd.go`)
+  - `internal/webui/webui.go`: **1093 / 1115** (**22 LOC** headroom → add <= 8 LOC; put UI handlers in `internal/webui/delegates_ui.go`)
+  - `internal/kernel/kernel.go`: **1991 / 2015** (**24 LOC** headroom → add <= 4 LOC; put daemon hook in `internal/kernel/delegate_daemon.go`)
+- **Import-cycle hazard:** `internal/ci/pii.go` shares `package ci` with `slop.go` (importing `go/types`) and `harness.go` (importing `internal/hooks`, `internal/kernel`, `internal/workspace`). Runtime packages MUST NEVER import `internal/ci`; pure-stdlib secret/PII regexes must move into a zero-dep leaf package **`internal/redact`**.
+- **Single Ring-0 session grant store (no split-brain):** [`internal/taint/taint.go`](../../internal/taint/taint.go#L25-L36) ALREADY implements `O_EXCL` `0600` per-conversation capability records under [`RankTaint = 70`](../../internal/store/store.go#L32) with append-only `ledger.jsonl` failover and symlink refusal. Extending `taint.Record` to `SchemaVersion: 2` (`Grant *SessionGrant`, `nil` = legacy `quarantined_reader`) eliminates duplicate grant stores and guarantees atomic binding across BOTH [`events_dispatch.go`](../../internal/kernel/events_dispatch.go#L312-L337) (`bindSpawnedConv`) and [`quarantine.go`](../../internal/hooks/quarantine.go#L107-L228) (`bindSpawnTokenFromTranscript`). Transport state (`memory/delegates_state.json`) claims pure leaf lock **`RankDelegates = 66`** right beside `RankChannels = 65`.
+- **SessionStart budget:** `vault.MaxSessionTaintBytes = 800` ([`session_start.go`](../../internal/hooks/session_start.go#L325-L329)) must be paired with a dedicated `vault.MaxSessionDelegateBytes = 2048` so Scoped Delegate grant banners are never silently truncated.
 
 ---
 
-## 3. Security Literature & Theoretical Grounding
+## 3. Theoretical Grounding: Capability Lattice & Non-Interference
 
-### 3.1 CaMeL: Separating Control Flow from Data Flow (Debenedetti et al., 2025)
+### 3.1 Why a Partial-Order Capability Lattice (Not a 1D Linear Spectrum)
 
-In *"Defeating Prompt Injections by Design"* (Debenedetti, Shumailov, Carlini, Tramèr et al., March 2025), the authors demonstrate that prompt-injection defenses based solely on prompting or classifier heuristics remain bypassable when untrusted data can alter control flow or invoke arbitrary tools. CaMeL's core architectural insight has two pillars:
+Classical Object-Capability theory (Hardy 1988; Miller 2006), CaMeL (*"Defeating Prompt Injections by Design"*, Debenedetti et al., 2025), and Willison's Lethal Trifecta ([RFC-0003](../design/0003-approval-bound-execution.md)) together establish why session authorization in `agy-hq` is a **5-axis partial-order lattice** (`⊥` → `⊤`):
 
-1. **Control-flow / data-flow separation:** Untrusted data may be processed by a **Quarantined LLM** with *no privileged tools* to extract structured, schema-typed values — while a **Trusted Controller** (deterministic code or a separate privileged execution path) consumes only validated structured fields, never letting raw untrusted text dictate arbitrary tool calls.
-2. **Runtime capability policies:** Every tool invocation and data flow is checked by a deterministic policy engine enforcing provenance and least-privilege constraints before execution.
+- **Top (`⊤`) — `interactive_task`:** Owner present (`IngressTrust: owner_interactive`), full Vault memory, leased workspace edits, interactive `approvals.rules`, and human-presence `hq approve`.
+- **Upper-Middle — `front_desk`, `unattended_auto`, `subagent`:** Owner-initiated but progressively attenuated along explicit axes (no code edits / 3-lookup cap for Front Desk; no `ask_question` / no `hq approve` / `ModeAutoOnly` fail-closed for `unattended_auto` and `subagent`).
+- **Incomparable Middle Siblings — `quarantined_reader` vs. `scoped_delegate`:**
+  - `quarantined_reader` (RFC-0017b) reads **private personal inbox data** (`bound_batch`) and has **zero auto-egress** (only human-gated `offer stage` / `outbox add`).
+  - `scoped_delegate` (RFC-0026) reads **explicitly curated shareable data** (`Public Status` + pinned read-only CLIs) and may emit **egress-filtered auto-reply** (or typed static nudges).
+  - Their join (`quarantined_reader ∪ scoped_delegate`) is **illegal** because it combines private inbox reads + untrusted ingress + automated egress!
+- **Bottom (`⊥`) — `classifier`:** Zero data reads beyond the single request envelope, zero writes, zero egress — permitted solely to emit `hq delegate route --request=<id> --policy=<id|escalate>`.
 
-**Direct application to `agy-hq`:**
-- For **Read-Only Peer Queries** (*"What is the CI status of `billing-v2`?"*), a **Scoped Delegate** worker stays monotonically tainted (`taint.Mark`), cannot touch private Vault memory or write tools, and receives a Ring-0 **Capability Grant** limited strictly to explicitly opted-in tasks, declared read-only CLI verbs (`strictArgv` + typed arg validators), and an egress-filtered `hq delegate reply` gateway.
-- For **Actions Affecting Privileged Tasks** (*"Prioritize reviewing change `#482910`"*), raw peer prose **never** enters `task:code-review`. Instead, either a 0-token regex matcher or a Quarantined Parameter Extractor produces `{change_id: "482910", urgency: "high"}`; Ring-0 Go validates types/patterns, optionally executes a deterministic read-only preflight probe (e.g., verifying change `#482910` is open and assigned to the user), and delivers a **100% static Go-rendered template** into `task:code-review` via `DeliverMessageToSession`. Even a fully adversarial prompt injection in the peer's message body cannot smuggle a single unvalidated character into the target task!
+### 3.2 Four Mechanical Non-Interference Invariants (`NI-1`–`NI-4`)
 
-### 3.2 Object-Capability (ocap) Attenuation & Confused Deputy Defense
+Rather than hoping individual hooks remember every security rule, `authz.ValidateProfile(p)` mechanically enforces four invariants across **all** profiles at load time and bind time:
 
-Classical Object-Capability theory (Hardy 1988, *"The Confused Deputy"*; Miller 2006) establishes that **ambient authority** is the root cause of confused-deputy bugs: when a deputy (the user's agent) holds ambient access to all tasks and tools while acting on behalf of an external caller, the caller can trick the deputy into misusing authority the caller was never granted.
+1. **`NI-1` (Lethal Trifecta Exclusion):** If `IngressTrust ∈ {untrusted_inbox, untrusted_peer}`, the profile MUST NOT combine any `private_read ∈ {host_fs, vault_memory, inbox_bound_batch, inbox_low_query, entity_routing, pending_proposals}` with any `auto_egress ∈ {egress_filtered_single_reply, interactive_approval_policy}`.
+2. **`NI-2` (Untrusted Execution Containment):** If `IngressTrust ∈ {untrusted_inbox, untrusted_peer}`, then `ContextProjection ∉ {full_vault, lean_vault}`, `Writes` excludes `{workspace_edits_leased, vault_memory_write}`, tools are deny-by-default (`update_focus`, bounded `read_file`, `strictArgv` canonical `hq`-only `run_command`), and IPC env vars are scrubbed.
+3. **`NI-3` (Human-Presence Top-of-Lattice Divider):** `human_presence_approve` (`hq approve`, proposal `ask_question`) and `interactive_approval_policy` (`ModeAutoOnly` bypass) are valid **ONLY** when `IngressTrust == owner_interactive`.
+4. **`NI-4` (Ring-0 Sovereign Ceiling Above `⊤`):** `<vault>/private/**` (including `trust.json`, `channels/`, `delegates/`, `taint/`) and `.system_generated/**` are unreadable/unwritable across ALL profiles (`⊥`..`⊤`), mutating solely via human terminal CLI or `hq propose` (`rsi_apply`) + human-presence `hq approve`.
 
-`agy-hq` breaks ambient authority for peer delegation through **Cryptographically Bound Per-Session Capability Grants**:
-- Capabilities are **never** ambient; they are attenuated per `(transport, caller_id, policy_id)` before spawn.
-- The grant is written once (`O_EXCL`, `0600`) to an LLM-invisible Ring-0 file (`<vault>/private/delegates/grants/<sha256(convID)>.json`) bound via `[hq-spawn:<token>]` at `SessionStart`.
-- Because `PreToolUse` checks the Ring-0 grant file rather than trusting any prompt text or CLI flag supplied by the worker, a prompt-injected delegate cannot escalate from `billing-v2` to `q4-calibration`, cannot pass unapproved flags to a read-only CLI, and cannot bypass the egress filter.
-
-### 3.3 Breaking the Lethal Trifecta (Willison / RFC-0003 / RFC-0017b)
-
-Simon Willison's **Lethal Trifecta** warns against combining (1) access to private data, (2) exposure to untrusted external content, and (3) an external communication channel in one agent context.
-
-RFC-0026 preserves the Trifecta invariant by **eliminating leg (1) — general private data**:
-- Every Scoped Delegate session has **zero** access to `USER.md`, `MEMORY.md`, `facts.jsonl`, `topics/`, `private/`, or non-allowlisted tasks.
-- The *only* data readable inside the session is data the owner explicitly marked as **shareable with that caller group** (`grants.tasks`, `grants.workspaces`, `grants.readonly_commands`).
-- Even within that explicitly shareable slice, every outbound reply is still scanned by the deterministic Ring-0 Egress Gateway (`pii-denylist.txt`, non-allowlisted task leak check, local path scrub, commitment regexes, and rate caps) before leaving the host.
+Dynamic tainting (e.g., an interactive session calling `hq watch read`) is simply **monotonic downward attenuation** (`profile' = Attenuate(profile, TaintCeiling)`), guaranteed never to widen authority.
 
 ---
 
 ## 4. Comparative Design Space
 
-| Option | How Adding a New Capability Works | Security Against Prompt Injection | Cross-Task Isolation | Maintenance Burden | Verdict |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **A. Bespoke Go Handlers in Companion Pack** *(current workaround)* | Write Go parser + RPC client + formatter per feature; rebuild binary; re-approve SHA-256 trust pin | High (deterministic Go), but zero LLM flexibility for phrasings | Manual per handler | High — every capability is a code change & redeploy | **Rejected** (the Bespoke Adapter Trap) |
-| **B. Full-Privilege Peer-to-Agent Messaging** | Forward colleague messages directly into `[HQ] Front Desk` or target Task Conversations | **Broken** — direct indirect prompt injection into write-enabled sessions | **Broken** — ambient access to confidential tasks & Vault memory | Low | **Rejected** (violates RFC-0003 / Lethal Trifecta) |
-| **C. Pure Quarantined Reader + Front Desk Escalation** *(current `agy-hq` core)* | Always escalate to Front Desk `TierInterrupt` | Strong | Strong (withholds everything) | Low, but **deadlocks** — requires manual human action for every routine request | **Baseline fallback** only |
-| **D. Declarative Scoped Delegates + Parameterized Task Nudges** *(proposed)* | Add a 10–20 line policy block in `<vault>/delegates.yaml` (no Go rebuild, no binary re-pin, no bot redeploy) | **Strong** — monotonic taint + Ring-0 ocap grant + CaMeL static-template task nudges + Ring-0 egress gateway | **Strong** — explicit opt-in allowlist; unlisted tasks physically unreachable & egress-scrubbed | **Low** — write transport binary once, declare policies in YAML | **Recommended** |
+| Option | Generalizes Across All Sessions? | Prevents Lethal Trifecta & AI Slop? | Effort to Add a New Peer Capability | Verdict |
+| :--- | :--- | :--- | :--- | :--- |
+| **A. Bespoke Pack Go Handlers** *(status quo)* | No | Manual per handler | Rewrite Go + rebuild + re-pin binary | **Rejected** |
+| **B. Ad-Hoc Delegates Bolted Onto `if ctx.tainted()`** *(RFC-0026 v1)* | No — adds 3 more special cases on top of 5 existing booleans | **Broken** (`P0-1` inherited `validateTaintedHQArgv` leaks approvals/inbox/contacts) | Edit YAML (fragile stdlib parser) | **Rejected** |
+| **C. Unified `internal/authz` 5-Axis Capability Lattice + Declarative JSONC Delegates** *(RFC-0026 v2)* | **Yes** — unifies all 7 profiles (`classifier ⊥` through `interactive_task ⊤`) in one table-driven engine | **Strong** — `NI-1`..`NI-4` enforced mechanically; `taint.Record` v2 single store; `private/delegates/policy.json` + 1-tap `configure` | Add a ~15-line JSONC policy + 1-tap `hq delegate configure` approval (0 Go rebuilds) | **Recommended** |
 
 ---
 
-## 5. Derived Requirements (`SD1`–`SD9`)
+## 5. Derived Requirements (`UA1`–`UA10`)
 
-| ID | Requirement | Seam Addressed |
+| ID | Requirement | Finding(s) |
 | :--- | :--- | :--- |
-| **SD1** | **Permanent, domain-agnostic peer transport protocol (`hq-delegate-transport/v1`):** Companion packs declare `components.delegate_transports` in `hq-extension.json`, SHA-256-pinned in `private/trust.json`, speaking minimal JSON-over-stdio verbs (`poll`, `reply`, `publish_snapshot`, `status`). Adding a capability never requires modifying or rebuilding the transport binary. | `D5` |
-| **SD2** | **Declarative policy & capability schema (`<vault>/delegates.yaml`):** Users declare `caller_groups`, `policies[]` (`scoped_worker`, `parameterized_nudge`, `quarantined_escalate`), explicit opt-in `grants`, `egress` policies, and optional `snapshots` in plain YAML (with optional read-only pack templates). Zero ambient grants by default. | `D1`, `D5` |
-| **SD3** | **Monotonic taint + Ring-0 immutable capability grants:** Every delegated session remains monotonically tainted (`taint.Mark`), omits all general private Vault memory at `SessionStart`, and is bound via `[hq-spawn:<token>]` to an `O_EXCL` `0600` LLM-invisible grant file under `private/delegates/grants/`. | `D1`, `D3`, `D6` |
-| **SD4** | **Allowlist-scoped task & workspace read mediation:** Expose only explicitly allowlisted tasks' `memory/progress/<slug>.md`, sanitized task status, and cached `memory/workspaces.json` state via `hq delegate read-task` / `read-workspace`. Non-allowlisted tasks remain physically unaddressable. | `D3` |
-| **SD5** | **Strict read-only command execution (`hq delegate run`):** Execute declared read-only CLI verbs with pinned non-shell `command[0]`, fixed prefix argv, strictly typed parameter validation, zero shell metacharacters (`strictArgv`), scrubbed environment, and bounded timeouts. | `D1` |
-| **SD6** | **CaMeL-safe parameterized task nudges (`hq delegate nudge`):** Deliver peer action requests into opted-in existing specialized tasks ONLY as 100% static Go-rendered templates populated exclusively with schema-validated typed parameters and verified caller metadata (plus optional deterministic read-only preflight probe) — zero raw untrusted prose crossing the boundary. Support a 0-LLM-token fast path when `match.regex` extracts all required params deterministically. | `D4` |
-| **SD7** | **Ring-0 Egress Gateway & policy self-tamper protection:** Every automated reply via `hq delegate reply` passes PII denylist, local/Vault path scrub, non-allowlisted task title/slug leak detection, harness token scrub, `blocked_patterns`, and sliding-window rate limits — failing closed to `stage_approval` or Front Desk `TierInterrupt` on any violation, with mandatory `brief_rollup` audit trail. Protect `delegates.yaml` and `private/delegates/` in `PreToolUse`. | `D6` |
-| **SD8** | **Fix trusted companion pack `SKILL.md` reads in tainted sessions:** Extend `isAllowedTaintedReadPath` to permit read-only access to `skills/` subdirectories of enabled, SHA-256-trusted companion packs (verified against `private/trust.json`), closing `D2` for both Quarantined Readers and Scoped Delegates. | `D2` |
-| **SD9** | **Pure Go stdlib, modular architecture, conflict-free lock rank & zero vendor leaks:** Keep `go.mod` at 0 external dependencies (`Gate H4-A`), isolate implementation in `internal/delegates/` under `Gate H5-F` ceilings, assign leaf `store.RankDelegates = 72`, and keep 100% of core code/docs/tests vendor-neutral (`P1`–`P6`). | `D7` |
+| **UA1** | **Phase 2A-0 Live Quarantine Hardening:** Fix `triage-result` `batchID` path traversal, `hq watch read` empty-`ItemKeys` fail-open, `hq status` / `hq memory lookup` taint leaks, `brief format-quarantined --file` under taint, and `stop.go` tainted `LastSummary` redaction before enabling any delegated auto-egress. | `D2` |
+| **UA2** | **Unified `internal/authz` Capability Lattice:** Replace scattered role booleans across `pre_tool.go`, `session_start.go`, and `stop.go` with one table-driven `SessionPolicy` covering all 7 profiles (`classifier` ⊥ → `interactive_task` ⊤), verified by `NI-1`–`NI-4`, with monotonic downward attenuation and 100% RFC-0017b backward compatibility. | `D1` |
+| **UA3** | **Single Ring-0 Grant Store (`taint.Record` v2):** Extend `internal/taint` (`SchemaVersion: 2`, `Grant *SessionGrant`, `private/taint/pending/`) under `RankTaint = 70` with one atomic bind helper called from both `events_dispatch.go` and `quarantine.go`; claim pure leaf `RankDelegates = 66` for `memory/delegates_state.json`. | `D8` |
+| **UA4** | **Permanent Dumb Peer Transport (`hq-delegate-transport/v1`):** Register under `hq-extension.json` `components.delegate_transports` (SHA-256 pinned, `poll`/`reply`/`publish_snapshot`/`status`, `auth_method: "platform_verified_sender"`, canonical ASCII `caller_id`, origin-thread binding). Keep strictly separate from RFC-0023 owner `channel_bridges`. | `D6` |
+| **UA5** | **Sovereign JSONC Policy (`<vault>/private/delegates/policy.json`):** Zero-dep JSONC (`DisallowUnknownFields()`, `string | []string` templates), top-level hoisted `commands:` (all `command[0]` SHA-256 pinned in `private/trust.json`), orthogonal `grants:` + `egress:` (no `mode:` enum), `match.sources` (`transport:<fqid>`, future `connector:<id>`), no `composable: true` in v1, edited via `hq delegate configure --file=<draft>` → `rsi_apply` 1-tap approval. | `D7` |
+| **UA6** | **Curated Shareable Reads & Opaque Peer Ingress:** `hq delegate read-task` exposes ONLY `{taskSlug, status, lastUpdatedAt}` + curated `## Public Status` (`hq progress save --public-status`, never written by 120k auto-checkpoint) + projected workspace state (no host paths, no `BoundTasks`, no `LastSummary`). Peer request bodies stay in `private/delegates/requests/` read via nonce-fenced `hq delegate read-request` (never raw in `events.json` or `journal/`). | `D2`, `D4` |
+| **UA7** | **Safe CaMeL Parameterized Task Nudges:** Never wake interactive (`isAuto == false`) tasks unattended and never allow `spawn_if_missing: true`. Support `queue_only` (default per-task priority queue surfaced on owner's next interactive turn) OR opt-in `auto_worker` (dispatched via `events.Enqueue` into `unattended_auto` where `NI-3` keeps `ModeAutoOnly` / `hq propose` active). Support `target_task_scope`, pre-preflight rate limits/cooldowns, uniform opaque failure acks, and 0-token regex fast path. | `D5` |
+| **UA8** | **Multiline Egress Gateway, Escalation & Shared `internal/redact`:** Extract leaf `internal/redact` (zero `internal/ci` runtime import). Support `hq delegate reply --body-b64` (keeps `write_file` denied) + first-class `hq delegate escalate`. Reframe egress scanning as defense-in-depth behind input isolation (Unicode `Cf`/bidi strip, high-entropy blob block, exact word-boundary non-granted slugs minus granted tokens + `pii-denylist.txt` + `sensitive_terms`, commitment regexes, rate limits, FD3 `HashVersion: 2` `hq delegate apply-reply` staging on fail-closed). | `D7`, `D8` |
+| **UA9** | **Verified Companion Pack `SKILL.md` Reads (`D3`):** Pin declared pack skill files in `TrustedTarget.Files` and allow read-only reads of verified skill paths in `authz.SessionPolicy.IsAllowedReadPath` (restricted to `grant.Skills` for Scoped Delegates). | `D3` |
+| **UA10** | **Strict Gate `H4-A` / `H5-F` / `P1`–`P6` Hygiene:** Pure Go stdlib (`go.mod` 0 external deps), `MaxSessionDelegateBytes = 2048`, zero monolith ceiling breaches (`hooks.go` +0 LOC, `webui.go` <= 8 LOC), and 100% vendor-neutral core code/docs/tests. | `D8` |
