@@ -1302,7 +1302,7 @@ func auditMemoryInternal(vaultDir string, completedTaskSlugs []string, now time.
 		}
 	}
 
-	return &MemoryStatusReport{
+	rep := &MemoryStatusReport{
 		MemoryLines:             memLines,
 		MemoryMaxLines:          MaxMemoryIndexLines,
 		MemoryBytes:             len(memBytes),
@@ -1325,9 +1325,11 @@ func auditMemoryInternal(vaultDir string, completedTaskSlugs []string, now time.
 		MissingTTLEventFacts:    missingTTLEvents,
 		RawFactLines:            rawFactLines,
 		StaleReferences:         staleRefs,
-	}, memoryAuditData{
+	}
+	data := memoryAuditData{
 		activeFacts: activeFacts,
 		memBytes:    memBytes,
 		userBytes:   userBytes,
-	}, nil
+	}
+	return rep, data, nil
 }
