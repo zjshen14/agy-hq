@@ -116,6 +116,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	isAutoWorker := false
 
 	promptText := strings.TrimSpace(payload.LastUserInput)
+	firstUserInputRaw := readFirstUserInputContent(payload.TranscriptPath)
 	if promptText == "" && strings.TrimSpace(payload.TranscriptPath) != "" {
 		promptText = readFirstUserPromptFromTranscript(payload.TranscriptPath)
 	}
@@ -124,13 +125,24 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		existing, ok := kernel.GetFrontDesk(vaultDir)
 		fdState, hasFDState = existing, ok
 		isFrontDeskExisting := ok && strings.EqualFold(existing.ConversationID, payload.ConversationID)
+		hasQueuedArchive := kernel.HasQueuedSidebarArchive(vaultDir, payload.ConversationID)
+		attemptSuperseded := false
 
 		isSubagent = kernel.IsSubagentConversation(vaultDir, payload.ConversationID)
 		if !isSubagent {
 			if t, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, payload.ConversationID); alreadyTracked {
 				matchedTask = t
 				hasMatchedTask = true
-			} else if !isFrontDeskExisting {
+			} else if attemptTask, _, superseded, foundAttempt := kernel.FindTaskAttemptAnywhere(vaultDir, payload.ConversationID); foundAttempt &&
+				(superseded || attemptTask.EffectiveKind() == "auto" || attemptTask.EffectiveKind() == "subagent") {
+				matchedTask = attemptTask
+				hasMatchedTask = true
+				attemptSuperseded = superseded
+				if attemptTask.EffectiveKind() == "subagent" || strings.HasPrefix(attemptTask.TaskSlug, "subagent-") || strings.HasPrefix(attemptTask.Title, "[Subagent:") {
+					isSubagent = true
+				}
+			} else if !isFrontDeskExisting && !hasQueuedArchive &&
+				!hasAutoOrSpawnEvidence(vaultDir, payload.ConversationID, firstUserInputRaw, promptText) {
 				nested, _, lin, hasLS := detectNestedDescendant(vaultDir, payload.ConversationID, promptText, existing.ConversationID, 3*time.Minute)
 				if nested {
 					// Known nested descendant subagent or workflow/agentapi worker: do NOT register into tasks.json!
@@ -175,9 +187,10 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 
 		isAutoWorker = (hasMatchedTask && matchedTask.EffectiveKind() == "auto") ||
-			(!hasMatchedTask && !isSubagent && strings.HasPrefix(strings.ToLower(strings.TrimSpace(promptText)), "[auto]"))
-		leanAuto = isSubagent || isAutoWorker || isTaintedStart
-		isFrontDesk = !leanAuto && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
+			(!hasMatchedTask && !isSubagent && !isFrontDeskExisting &&
+				hasAutoOrSpawnEvidence(vaultDir, payload.ConversationID, firstUserInputRaw, promptText))
+		leanAuto = isSubagent || isAutoWorker || isTaintedStart || attemptSuperseded
+		isFrontDesk = !leanAuto && !hasQueuedArchive && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
 		if isTaintedStart {
 			zone2Sections = append(zone2Sections, "## 🛡️ Active Role: Quarantined Triage Worker (TAINTED)\n- Untrusted external channel content is in scope. Private Vault memory (`MEMORY.md`, wiki topics, facts) is withheld, and outbound commands are restricted to `hq offer stage` and `hq outbox add`.")
 		}
@@ -297,7 +310,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				))
 			}
 		}
-	} else if payload.ArtifactDirectoryPath != "" && shouldAutoClaimVacantFrontDesk(payload, vaultDir) {
+	} else if payload.ArtifactDirectoryPath != "" && shouldAutoClaimVacantFrontDesk(payload, vaultDir) &&
+		!hasAutoOrSpawnEvidence(vaultDir, "", firstUserInputRaw, promptText) {
 		if existing, ok := kernel.GetFrontDesk(vaultDir); !ok {
 			writeActiveArtifactDir(vaultDir, payload.ArtifactDirectoryPath)
 		} else {

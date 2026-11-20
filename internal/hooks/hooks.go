@@ -10,6 +10,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 const PreCompactionFlushTokens int64 = 120000
@@ -40,7 +41,7 @@ type StopPayload struct {
 	ExecutionNum      int    `json:"executionNum"`
 	TerminationReason string `json:"terminationReason"`
 	Error             string `json:"error"`
-	FullyIdle         bool   `json:"fullyIdle"`
+	FullyIdle         *bool  `json:"fullyIdle,omitempty"`
 	LastResponse      string `json:"lastResponse,omitempty"`
 }
 
@@ -289,8 +290,16 @@ func isAutoConversation(vaultDir, convID string) bool {
 	if convID == "" {
 		return false
 	}
-	t, ok := kernel.FindTaskByConversationID(vaultDir, convID)
-	return ok && t.EffectiveKind() == "auto"
+	if t, _, _, ok := kernel.FindTaskAttemptAnywhere(vaultDir, convID); ok {
+		return t.EffectiveKind() == "auto"
+	}
+	if hasSpawnMarker(vaultDir, convID) {
+		return true
+	}
+	if rec, ok := taint.Check(vaultDir, convID); ok && strings.HasPrefix(rec.Source, "spawn_batch") {
+		return true
+	}
+	return false
 }
 
 func resetFrontDeskTurnState(vaultDir, convID string) {

@@ -1946,3 +1946,450 @@ func TestSessionStartOverlayFullLengthWildcardAndExclusion(t *testing.T) {
 		t.Fatalf("expected !task:repo-core exclusion to prevent overlay injection, got:\n%s", outCore.String())
 	}
 }
+
+func TestAutoInboxTriageBackgroundTaskWaitingMultiTurn(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Now().UTC()
+	conv1 := "11111111-1111-4111-8111-111111111101"
+
+	// Anchor Front Desk to avoid vacant auto-claim interference.
+	_ = kernel.SetFrontDesk(vaultDir, "00000000-0000-4000-8000-000000000001", t.TempDir())
+
+	ev, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:       "watcher",
+		DedupKey:     "watch:mail:work:item-bg-1",
+		ScopeKey:     "watch:mail:work",
+		Skill:        "inbox-triage",
+		Title:        "[Auto] Channel Triage",
+		Prompt:       "Triage thread",
+		TaintOnSpawn: true,
+		Metadata: map[string]string{
+			"requires_ack": "1",
+			"connector":    "mail",
+			"account":      "work",
+			"item_id":      "item-bg-1",
+			"item_key":     "item-bg-1",
+			"thread_key":   "thread-bg-1",
+		},
+	}, now)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batches, _, err := events.LeaseNextBatches(vaultDir, now, events.DefaultLeaseTTL)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("LeaseNextBatches: %+v (%v)", batches, err)
+	}
+	spawnTok := batches[0].SpawnToken
+	_ = events.BindBatchConversation(vaultDir, []string{ev.ID}, conv1, now, events.DefaultLeaseTTL)
+
+	autoSlug := "auto-watch-mail-bg"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       autoSlug,
+		Title:          "[Auto] Channel Triage",
+		Kind:           "auto",
+		Scope:          "watch:mail:work",
+		ConversationID: conv1,
+		EventIDs:       []string{ev.ID},
+		Status:         "active",
+		CreatedAt:      now.Format(time.RFC3339),
+		LastUpdatedAt:  now.Format(time.RFC3339),
+	})
+
+	longPrompt := strings.Repeat("Process inbox item details carefully. ", 18) + "\n\n[hq-spawn:" + spawnTok + "]"
+	tPath := filepath.Join(t.TempDir(), "bg-transcript.jsonl")
+	turn1Lines := strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": longPrompt}),
+		mustJSONLine(map[string]interface{}{"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []map[string]interface{}{{"name": "run_command", "args": map[string]interface{}{"CommandLine": "hq outbox add --tier=brief_rollup --summary=Done"}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 2, "type": "GENERIC", "status": "RUNNING", "content": fmt.Sprintf("Created At: 2026-11-20T01:45:57Z\nTool is running as a background task with task id: %s/task-6\nTask Description: outbox", conv1)}),
+		// Ensure unrelated Cron generic steps are never treated as waiting background tasks.
+		mustJSONLine(map[string]interface{}{"step_index": 3, "type": "GENERIC", "status": "RUNNING", "content": fmt.Sprintf("Tool is running as a background task with task id: %s/task-99\nTask Description: Cron: 0 * * * *, Prompt: Periodic watch", conv1)}),
+		mustJSONLine(map[string]interface{}{"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Waiting for command to finish."}),
+	}, "\n") + "\n"
+	if err := os.WriteFile(tPath, []byte(turn1Lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1 Stop (omitted fullyIdle, pending background task-6 in transcript): MUST keep autoSlug active and preserve LeaseConvID!
+	var stopOut bytes.Buffer
+	stopTurn1, _ := json.Marshal(map[string]interface{}{
+		"conversationId":    conv1,
+		"executionNum":      1,
+		"transcriptPath":    tPath,
+		"terminationReason": "NO_TOOL_CALL",
+		"lastResponse":      "Waiting for command to finish.",
+	})
+	if err := HandleStop(bytes.NewReader(stopTurn1), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop Turn 1: %v", err)
+	}
+	afterT1 := mustFindHotTaskBySlug(t, vaultDir, autoSlug)
+	if afterT1.Status != "active" {
+		t.Fatalf("expected %s to remain active while background task-6 is running, got %+v", autoSlug, afterT1)
+	}
+	if kernel.HasQueuedSidebarArchive(vaultDir, conv1) {
+		t.Fatalf("expected no sidebar archive queued while Turn 1 awaits background task")
+	}
+	leased, err := events.ListLeasedByConversation(vaultDir, conv1)
+	if err != nil || len(leased) != 1 || leased[0].LeaseConvID != conv1 || leased[0].AttemptCount != 0 {
+		t.Fatalf("expected event %s to stay leased to %s (AttemptCount=0), got %+v (%v)", ev.ID, conv1, leased, err)
+	}
+
+	// Turn 2: background task finishes, agent acks watcher event, Turn 2 completes cleanly -> archives autoSlug & completes event.
+	turn2Lines := strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 5, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": fmt.Sprintf("sender=%s/task-6\nTask id \"%s/task-6\" finished with result:\nCommand exited with code 0.", conv1, conv1)}),
+		mustJSONLine(map[string]interface{}{"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Triaged and acknowledged."}),
+	}, "\n") + "\n"
+	f, err := os.OpenFile(tPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(turn2Lines)
+	_ = f.Close()
+
+	acked, ackErr := events.AckWatcherEvents(vaultDir, conv1, []string{"item-bg-1"}, now.Add(5*time.Second))
+	if ackErr != nil || acked != 1 {
+		t.Fatalf("expected Turn 2 AckWatcherEvents to acknowledge 1 event via preserved LeaseConvID, got acked=%d err=%v", acked, ackErr)
+	}
+
+	stopOut.Reset()
+	stopTurn2, _ := json.Marshal(map[string]interface{}{
+		"conversationId":    conv1,
+		"executionNum":      2,
+		"transcriptPath":    tPath,
+		"terminationReason": "NO_TOOL_CALL",
+		"lastResponse":      "Triaged and acknowledged.",
+	})
+	if err := HandleStop(bytes.NewReader(stopTurn2), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop Turn 2: %v", err)
+	}
+	afterT2 := mustFindHotTaskBySlug(t, vaultDir, autoSlug)
+	if afterT2.Status != "archived" {
+		t.Fatalf("expected %s archived after Turn 2 completion, got %+v", autoSlug, afterT2)
+	}
+	if !kernel.HasQueuedSidebarArchive(vaultDir, conv1) {
+		t.Fatalf("expected auto_stop_deferred queued after Turn 2 archive")
+	}
+	activeAfterT2, _ := events.List(vaultDir, "", false, 0)
+	if len(activeAfterT2) != 0 {
+		t.Fatalf("expected event finalized out of inbox after Turn 2, got %+v", activeAfterT2)
+	}
+
+	// Sub-check A: Explicit fullyIdle=false pauses even without transcript task-N, whereas terminationReason=ERROR does NOT pause.
+	convExplicit := "22222222-2222-4222-8222-222222222202"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "auto-explicit-idle", Title: "[Auto] Explicit Idle", Kind: "auto", ConversationID: convExplicit, Status: "active",
+		CreatedAt: now.Format(time.RFC3339), LastUpdatedAt: now.Format(time.RFC3339),
+	})
+	stopOut.Reset()
+	stopExplicitPause, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convExplicit, "executionNum": 1, "terminationReason": "NO_TOOL_CALL", "fullyIdle": false,
+	})
+	_ = HandleStop(bytes.NewReader(stopExplicitPause), &stopOut, vaultDir)
+	if stTask := mustFindHotTaskBySlug(t, vaultDir, "auto-explicit-idle"); stTask.Status != "active" {
+		t.Fatalf("expected fullyIdle=false to keep auto task active, got %+v", stTask)
+	}
+	stopOut.Reset()
+	stopAbortErr, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convExplicit, "executionNum": 2, "terminationReason": "ERROR", "fullyIdle": false, "error": "executor aborted",
+	})
+	_ = HandleStop(bytes.NewReader(stopAbortErr), &stopOut, vaultDir)
+	if stTask := mustFindHotTaskBySlug(t, vaultDir, "auto-explicit-idle"); stTask.Status != "archived" {
+		t.Fatalf("expected ERROR termination NOT to stay paused even with fullyIdle=false, got %+v", stTask)
+	}
+
+	// Sub-check B: Standalone Cron background step with no regular task-6 must NOT keep [Auto] paused.
+	convCronOnly := "33333333-3333-4333-8333-333333333303"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "auto-cron-only", Title: "[Auto] Cron Exclusion", Kind: "auto", ConversationID: convCronOnly, Status: "active",
+		CreatedAt: now.Format(time.RFC3339), LastUpdatedAt: now.Format(time.RFC3339),
+	})
+	cronTranscript := filepath.Join(t.TempDir(), "cron-only.jsonl")
+	_ = os.WriteFile(cronTranscript, []byte(
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "[Auto] Nightly"})+"\n"+
+			mustJSONLine(map[string]interface{}{"step_index": 1, "type": "GENERIC", "status": "RUNNING", "content": fmt.Sprintf("Tool is running as a background task with task id: %s/task-7\nTask Description: Cron: 0 * * * *, Prompt: Watch", convCronOnly)})+"\n",
+	), 0o600)
+	stopOut.Reset()
+	stopCron, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convCronOnly, "executionNum": 1, "transcriptPath": cronTranscript, "terminationReason": "NO_TOOL_CALL",
+	})
+	_ = HandleStop(bytes.NewReader(stopCron), &stopOut, vaultDir)
+	if stCron := mustFindHotTaskBySlug(t, vaultDir, "auto-cron-only"); stCron.Status != "archived" {
+		t.Fatalf("expected Cron-only background notice NOT to pause [Auto] task, got %+v", stCron)
+	}
+}
+
+func TestSupersededAutoRetryLateTurn2StopDoesNotAutoAdoptOrPurgeSidebarSync(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Now().UTC()
+	fdConv := "00000000-0000-4000-8000-000000000001"
+	conv1 := "44444444-4444-4444-8444-444444444401"
+	conv2 := "55555555-5555-4555-8555-555555555502"
+
+	_ = kernel.SetFrontDesk(vaultDir, fdConv, t.TempDir())
+	// Unrelated interactive pending spawn slot must never be stolen by conv1.
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "interactive-slot",
+		Title:    "[Task:core] User Interactive Task",
+		Kind:     "task",
+		Status:   "active",
+	})
+
+	ev, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:       "watcher",
+		DedupKey:     "watch:mail:work:item-retry-1",
+		ScopeKey:     "watch:mail:work",
+		Skill:        "inbox-triage",
+		Title:        "[Auto] Channel Triage",
+		Prompt:       strings.Repeat("Triage incoming thread carefully. ", 20), // >600 runes, no [Auto] prefix
+		TaintOnSpawn: true,
+		Metadata: map[string]string{
+			"requires_ack": "1",
+			"connector":    "mail",
+			"account":      "work",
+			"item_id":      "item-retry-1",
+		},
+	}, now)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batches1, _, err := events.LeaseNextBatches(vaultDir, now, events.DefaultLeaseTTL)
+	if err != nil || len(batches1) != 1 {
+		t.Fatalf("LeaseNextBatches 1: %+v (%v)", batches1, err)
+	}
+	tok1 := batches1[0].SpawnToken
+	prompt1 := ev.Prompt + "\n\n[hq-spawn:" + tok1 + "]"
+	autoSlug := "auto-watch-mail-retry"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: autoSlug, Title: "[Auto] Channel Triage", Kind: "auto", ConversationID: conv1,
+		EventIDs: []string{ev.ID}, Status: "active", CreatedAt: now.Format(time.RFC3339), LastUpdatedAt: now.Format(time.RFC3339),
+	})
+	_ = events.BindBatchConversation(vaultDir, []string{ev.ID}, conv1, now, events.DefaultLeaseTTL)
+
+	// conv1 Turn 1 starts: transcript has prompt >512 chars ending with [hq-spawn:<tok1>].
+	tPath1 := filepath.Join(t.TempDir(), "conv1-transcript.jsonl")
+	_ = os.WriteFile(tPath1, []byte(
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": prompt1})+"\n"+
+			mustJSONLine(map[string]interface{}{"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Background work finished late."})+"\n",
+	), 0o600)
+
+	var ssOut bytes.Buffer
+	_ = HandleSessionStart(strings.NewReader(mustJSONLine(map[string]interface{}{
+		"conversationId": conv1, "transcriptPath": tPath1,
+	})), &ssOut, vaultDir)
+
+	// Simulate lease expiry / unacked Turn 1 requeue -> fresh lease -> retry supersession by conv2!
+	if _, _, _, fErr := events.FinalizeByConversation(vaultDir, conv1, now.Add(30*time.Second)); fErr != nil {
+		t.Fatalf("FinalizeByConversation conv1: %v", fErr)
+	}
+	batches2, _, b2Err := events.LeaseNextBatches(vaultDir, now.Add(2*time.Minute), events.DefaultLeaseTTL)
+	if b2Err != nil || len(batches2) != 1 {
+		t.Fatalf("LeaseNextBatches 2: batches=%+v err=%v", batches2, b2Err)
+	}
+	if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: autoSlug, Title: "[Auto] Channel Triage", Kind: "auto", ConversationID: conv2,
+		EventIDs: []string{ev.ID}, Status: "active", LastUpdatedAt: now.Add(2 * time.Minute).Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("RegisterTask conv2: %v", err)
+	}
+	if err := events.BindBatchConversation(vaultDir, []string{ev.ID}, conv2, now.Add(2*time.Minute), events.DefaultLeaseTTL); err != nil {
+		t.Fatalf("BindBatchConversation conv2: %v", err)
+	}
+	_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
+		ConversationID:  conv1,
+		TaskSlug:        autoSlug,
+		DesiredArchived: true,
+		NextRetryAt:     now.Add(-time.Second).UTC().Format(time.RFC3339),
+		LastError:       "superseded_by_retry",
+	}, now)
+
+	// After supersession:
+	// 1) isAutoConversation(conv1) must still return true.
+	if !isAutoConversation(vaultDir, conv1) {
+		t.Fatalf("expected superseded conv1 to remain classified as [Auto]")
+	}
+	// 2) PreToolUse on conv1 must still enforce [Auto] claim-desk/config guardrails.
+	var preOut bytes.Buffer
+	preReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": conv1,
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{"CommandLine": "hq claim-desk --conv=" + conv1},
+		},
+	})
+	_ = HandlePreToolUse(bytes.NewReader(preReq), &preOut, vaultDir)
+	if !strings.Contains(preOut.String(), `"decision":"deny"`) {
+		t.Fatalf("expected superseded [Auto] conv1 PreToolUse to deny hq claim-desk, got %s", preOut.String())
+	}
+	// 3) Late Turn 2 SessionStart on conv1 stays lean (not Front Desk) and does not steal interactive-slot.
+	ssOut.Reset()
+	_ = HandleSessionStart(strings.NewReader(mustJSONLine(map[string]interface{}{
+		"conversationId": conv1, "transcriptPath": tPath1,
+	})), &ssOut, vaultDir)
+	if strings.Contains(ssOut.String(), "Active Role: [HQ] Front Desk") {
+		t.Fatalf("superseded conv1 must never receive Front Desk role in SessionStart: %s", ssOut.String())
+	}
+
+	// 4) Late Turn 2 HandleStop on conv1 MUST NOT create conv-* or clobber conv2 or purge sidebar_sync_queue or finalize conv2's event!
+	var stopOut bytes.Buffer
+	stopReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId":    conv1,
+		"executionNum":      2,
+		"transcriptPath":    tPath1,
+		"terminationReason": "NO_TOOL_CALL",
+		"lastResponse":      "Late Turn 2 complete",
+	})
+	if err := HandleStop(bytes.NewReader(stopReq), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop late Turn 2: %v", err)
+	}
+	allTasks, _ := kernel.ListTasks(vaultDir)
+	for _, tk := range allTasks {
+		if strings.HasPrefix(tk.TaskSlug, "conv-") || tk.ConversationID == conv1 {
+			t.Fatalf("late Turn 2 HandleStop must NEVER create conv-* orphan or rebind %s, got tasks=%+v", conv1, allTasks)
+		}
+	}
+	if activeAuto := mustFindHotTaskBySlug(t, vaultDir, autoSlug); activeAuto.ConversationID != conv2 {
+		t.Fatalf("expected %s still bound to conv2, got %+v", autoSlug, activeAuto)
+	}
+	if slot := mustFindHotTaskBySlug(t, vaultDir, "interactive-slot"); slot.ConversationID != "" {
+		t.Fatalf("expected interactive-slot untouched, got %+v", slot)
+	}
+	if leasedConv2, _ := events.ListLeasedByConversation(vaultDir, conv2); len(leasedConv2) != 1 || leasedConv2[0].LeaseConvID != conv2 {
+		t.Fatalf("expected conv2 event lease untouched by conv1 late Stop, got %+v", leasedConv2)
+	}
+
+	q := kernel.LoadSidebarSyncQueue(vaultDir)
+	it, exists := q.Items[conv1]
+	if !exists || !it.DesiredArchived || it.LastError != "superseded_by_retry" || it.Attempts != 0 {
+		t.Fatalf("expected superseded_by_retry queue item preserved with Attempts=0, got exists=%v item=%+v", exists, it)
+	}
+
+	// 5) DrainSidebarSyncQueue against mock LS archives conv1 instead of purging it!
+	archivedInLS := make(map[string]bool)
+	lsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"trajectorySummaries": map[string]interface{}{
+					conv1: map[string]interface{}{
+						"status":      "CASCADE_RUN_STATUS_IDLE",
+						"annotations": map[string]interface{}{"title": "Late Turn 2", "archived": archivedInLS[conv1]},
+					},
+				},
+			})
+		case "/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations":
+			var req struct {
+				CascadeID   string   `json:"cascadeId"`
+				CascadeIDs  []string `json:"cascadeIds"`
+				Annotations struct {
+					Archived bool `json:"archived"`
+				} `json:"annotations"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			targets := req.CascadeIDs
+			if len(targets) == 0 && req.CascadeID != "" {
+				targets = []string{req.CascadeID}
+			}
+			if req.Annotations.Archived {
+				for _, cid := range targets {
+					if cid != "" {
+						archivedInLS[cid] = true
+					}
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer lsSrv.Close()
+	rep, dErr := kernel.DrainSidebarSyncQueue(vaultDir, 5*time.Second, kernel.SidebarSyncConfig{
+		BaseURL:        lsSrv.URL,
+		CSRFToken:      "csrf-late-drain",
+		CallerOverride: true,
+		Now:            func() time.Time { return now.Add(2 * time.Minute) },
+	})
+	if dErr != nil || rep.ArchivedCount != 1 || !archivedInLS[conv1] {
+		t.Fatalf("expected DrainSidebarSyncQueue to archive conv1 in LS, got rep=%+v archived=%+v err=%v", rep, archivedInLS, dErr)
+	}
+}
+
+func TestLateStopOnColdAutoSpawnTokenOrVacantDeskNeverAdopts(t *testing.T) {
+	// Subcase A: [hq-spawn:<tok>] past 512 chars with no tasks.json row and VACANT Front Desk must NEVER claim Front Desk or create conv-*.
+	vaultA := t.TempDir()
+	convSpawn := "66666666-6666-4666-8666-666666666601"
+	tPathA := filepath.Join(t.TempDir(), "spawn-no-row.jsonl")
+	tokHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	longSpawnPrompt := strings.Repeat("Investigate channel batch items. ", 20) + "\n\n[hq-spawn:" + tokHex + "]"
+	_ = os.WriteFile(tPathA, []byte(
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": longSpawnPrompt})+"\n",
+	), 0o600)
+
+	t.Setenv("HQ_AUTO_CLAIM_DESK", "1")
+	var ssOut bytes.Buffer
+	_ = HandleSessionStart(strings.NewReader(mustJSONLine(map[string]interface{}{
+		"conversationId": convSpawn, "transcriptPath": tPathA, "artifactDirectoryPath": t.TempDir(),
+	})), &ssOut, vaultA)
+	if _, hasFD := kernel.GetFrontDesk(vaultA); hasFD {
+		t.Fatalf("expected [hq-spawn:...] conversation NEVER to claim vacant Front Desk in SessionStart")
+	}
+	if _, err := os.Stat(filepath.Join(vaultA, "memory", "active_artifact_dir.txt")); err == nil {
+		t.Fatalf("expected [hq-spawn:...] SessionStart NOT to write active_artifact_dir.txt")
+	}
+
+	var stopOut bytes.Buffer
+	_ = HandleStop(strings.NewReader(mustJSONLine(map[string]interface{}{
+		"conversationId": convSpawn, "executionNum": 1, "transcriptPath": tPathA, "terminationReason": "NO_TOOL_CALL",
+	})), &stopOut, vaultA)
+	if _, hasFD := kernel.GetFrontDesk(vaultA); hasFD {
+		t.Fatalf("expected [hq-spawn:...] conversation NEVER to claim vacant Front Desk in HandleStop")
+	}
+	if tasksA, _ := kernel.ListTasks(vaultA); len(tasksA) != 0 {
+		t.Fatalf("expected [hq-spawn:...] HandleStop with no tasks.json row NEVER to auto-adopt conv-*, got %+v", tasksA)
+	}
+	if !kernel.HasQueuedSidebarArchive(vaultA, convSpawn) {
+		t.Fatalf("expected [hq-spawn:...] HandleStop without active task to queue auto_stop_deferred sidebar archive")
+	}
+
+	// Subcase B: Cold-archived [Auto] task in tasks_archive.jsonl with empty queue must NEVER auto-adopt as conv-*.
+	vaultB := t.TempDir()
+	_ = kernel.SetFrontDesk(vaultB, "00000000-0000-4000-8000-000000000001", t.TempDir())
+	convCold := "77777777-7777-4777-8777-777777777702"
+	_ = kernel.AppendTasksToColdArchive(vaultB, []kernel.ActiveTask{{
+		TaskSlug:       "auto-cold-worker",
+		Title:          "[Auto] Cold Worker",
+		Kind:           "auto",
+		ConversationID: convCold,
+		Status:         "archived",
+	}})
+	stopOut.Reset()
+	_ = HandleStop(strings.NewReader(mustJSONLine(map[string]interface{}{
+		"conversationId": convCold, "executionNum": 2, "terminationReason": "NO_TOOL_CALL", "lastUserInput": "Background finished",
+	})), &stopOut, vaultB)
+	if tasksB, _ := kernel.ListTasks(vaultB); len(tasksB) != 0 {
+		t.Fatalf("expected cold-archived [Auto] HandleStop NEVER to auto-adopt into hot tasks.json, got %+v", tasksB)
+	}
+	if !kernel.HasQueuedSidebarArchive(vaultB, convCold) {
+		t.Fatalf("expected cold-archived [Auto] late Stop to enqueue sidebar archive")
+	}
+}
+
+func mustFindHotTaskBySlug(t *testing.T, vaultDir, slug string) kernel.ActiveTask {
+	t.Helper()
+	tasks, err := kernel.ListTasks(vaultDir)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	for _, tk := range tasks {
+		if tk.TaskSlug == slug {
+			return tk
+		}
+	}
+	t.Fatalf("task %q not found in hot tasks.json (got %+v)", slug, tasks)
+	return kernel.ActiveTask{}
+}
+
+func mustJSONLine(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}

@@ -309,13 +309,52 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 			spawnPrompt = spawnPrompt + "\n\n[hq-spawn:" + batch.SpawnToken + "]"
 		}
 
-		out, spawnErr := SpawnTask(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, effectiveModel, dryRun)
-		if spawnErr != nil {
-			if !dryRun && !hadPrev && head.Source != "channel_inbound" {
-				RemoveUnboundTaskBySlug(vaultDir, autoSlug)
+		bindSpawnedConv := func(cid string) {
+			_ = RegisterTask(vaultDir, ActiveTask{
+				TaskSlug:       autoSlug,
+				Title:          batch.Title,
+				Kind:           "auto",
+				Scope:          batch.ScopeKey,
+				Tier:           inferTierFromModel(effectiveModel),
+				Model:          effectiveModel,
+				EventIDs:       ids,
+				ConversationID: cid,
+				LastUpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+				Status:         "active",
+			})
+			_ = events.BindBatchConversation(vaultDir, ids, cid, now, events.DefaultLeaseTTL)
+			if batch.TaintOnSpawn {
+				_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{
+					ConvID:    cid,
+					Source:    "spawn_batch:" + head.Source,
+					Connector: headMetaVal(head, "connector"),
+					Account:   headMetaVal(head, "account"),
+					BatchID:   batch.LeaseID,
+					EventIDs:  ids,
+					ItemKeys:  batchItemKeys(batch.Events),
+				})
 			}
+		}
+
+		var linkedConvID string
+		spawnOpts := SpawnTaskOptions{}
+		if !dryRun && head.Source != "channel_inbound" {
+			spawnOpts.OnCascadeCreated = func(cascadeID string) {
+				cid := strings.TrimSpace(cascadeID)
+				if cid == "" {
+					return
+				}
+				linkedConvID = cid
+				bindSpawnedConv(cid)
+			}
+		}
+
+		out, spawnErr := SpawnTaskWithOptions(vaultDir, trigger, batch.Skill, batch.Title, spawnPrompt, effectiveModel, dryRun, spawnOpts)
+		if spawnErr != nil {
+			failedConvID := ""
 			if !dryRun {
-				if failedConvID := ExtractUUID(out); failedConvID != "" && (!hadPrev || prevTask.ConversationID != failedConvID) {
+				failedConvID = ExtractUUID(out)
+				if failedConvID != "" && (!hadPrev || prevTask.ConversationID != failedConvID) && !HasQueuedSidebarArchive(vaultDir, failedConvID) {
 					_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
 						ConversationID:  failedConvID,
 						TaskSlug:        autoSlug,
@@ -323,6 +362,17 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 						NextRetryAt:     now.Add(3 * time.Second).UTC().Format(time.RFC3339),
 						LastError:       "spawn_step1_error",
 					}, now)
+				}
+			}
+			if !dryRun && head.Source != "channel_inbound" {
+				if !hadPrev {
+					if linkedConvID != "" {
+						removeTaskBySlugAny(vaultDir, autoSlug)
+					} else {
+						RemoveUnboundTaskBySlug(vaultDir, autoSlug)
+					}
+				} else if linkedConvID != "" || failedConvID != "" {
+					restoreAutoTaskAfterFailedSpawn(vaultDir, prevTask, linkedConvID, failedConvID)
 				}
 			}
 			newlyDropped, _ := events.DeferBatchOnSpawnError(vaultDir, ids, spawnErr.Error(), isQuotaDeferralError(spawnErr), now)
@@ -342,7 +392,7 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 				actions = append(actions, fmt.Sprintf("%s (bootstrapped Front Desk %s)", label, uuid))
 				continue
 			}
-			if hadPrev && prevTask.ConversationID != "" && prevTask.ConversationID != uuid && !prevTask.Pinned {
+			if hadPrev && prevTask.ConversationID != "" && prevTask.ConversationID != uuid && !prevTask.Pinned && !HasQueuedSidebarArchive(vaultDir, prevTask.ConversationID) {
 				_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
 					ConversationID:  prevTask.ConversationID,
 					TaskSlug:        autoSlug,
@@ -351,29 +401,8 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 					LastError:       "superseded_by_retry",
 				}, now)
 			}
-			_ = RegisterTask(vaultDir, ActiveTask{
-				TaskSlug:       autoSlug,
-				Title:          batch.Title,
-				Kind:           "auto",
-				Scope:          batch.ScopeKey,
-				Tier:           inferTierFromModel(effectiveModel),
-				Model:          effectiveModel,
-				EventIDs:       ids,
-				ConversationID: uuid,
-				LastUpdatedAt:  time.Now().UTC().Format(time.RFC3339),
-				Status:         "active",
-			})
-			_ = events.BindBatchConversation(vaultDir, ids, uuid, now, events.DefaultLeaseTTL)
-			if batch.TaintOnSpawn {
-				_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{
-					ConvID:    uuid,
-					Source:    "spawn_batch:" + head.Source,
-					Connector: headMetaVal(head, "connector"),
-					Account:   headMetaVal(head, "account"),
-					BatchID:   batch.LeaseID,
-					EventIDs:  ids,
-					ItemKeys:  batchItemKeys(batch.Events),
-				})
+			if linkedConvID != uuid {
+				bindSpawnedConv(uuid)
 			}
 		}
 		actions = append(actions, fmt.Sprintf("%s (%s)", label, out))

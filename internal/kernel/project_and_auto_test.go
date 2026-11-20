@@ -570,3 +570,199 @@ func TestSpawnSubagentWorkspaceProjectVerificationAndConcurrentTaskLocking(t *te
 		t.Fatalf("expected SpawnsToday=%d without lost concurrent updates, got %d", workers+2, q.SpawnsToday)
 	}
 }
+
+func TestSupersededConversationIDsAccumulationRollbackAndAutoAdoptRefusal(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+
+	u1 := "11111111-1111-4111-8111-111111111101"
+	u2Fail := "22222222-2222-4222-8222-222222222202"
+	u3 := "33333333-3333-4333-8333-333333333303"
+	pendingSpawnSlug := "interactive-spawn-slot"
+
+	// Register an unrelated interactive `hq spawn` slot to verify superseded/queued IDs can never steal it.
+	if err := RegisterTask(vaultDir, ActiveTask{
+		TaskSlug: pendingSpawnSlug,
+		Title:    "[Task:core] Interactive Task",
+		Kind:     "task",
+		Status:   "active",
+	}); err != nil {
+		t.Fatalf("RegisterTask interactive slot: %v", err)
+	}
+
+	spawnAttempt := 0
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"clientModelConfigs": []map[string]interface{}{
+					{
+						"modelId": "gemini-4-hydrogen-low",
+						"modelOrAlias": map[string]interface{}{
+							"model": "MODEL_PLACEHOLDER_TEST",
+						},
+					},
+				},
+			})
+		case "/exa.language_server_pb.LanguageServerService/StartCascade":
+			spawnAttempt++
+			cid := u1
+			switch spawnAttempt {
+			case 2:
+				cid = u2Fail
+			case 3:
+				cid = u3
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"cascadeId": cid})
+		case "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{})
+		case "/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory":
+			var req struct {
+				CascadeID string `json:"cascadeId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.CascadeID == u2Fail {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"status":        "CASCADE_RUN_STATUS_IDLE",
+					"numTotalSteps": 2,
+					"trajectory": map[string]interface{}{
+						"steps": []map[string]interface{}{
+							{"type": "CORTEX_STEP_TYPE_USER_INPUT", "status": "CORTEX_STEP_STATUS_DONE"},
+							{
+								"type":   "CORTEX_STEP_TYPE_ERROR_MESSAGE",
+								"status": "CORTEX_STEP_STATUS_ERROR",
+								"errorMessage": map[string]interface{}{
+									"error": map[string]interface{}{"shortError": "failed to construct executor: transient error"},
+								},
+							},
+						},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":        "CASCADE_RUN_STATUS_RUNNING",
+				"numTotalSteps": 2,
+				"trajectory": map[string]interface{}{
+					"steps": []map[string]interface{}{
+						{"type": "CORTEX_STEP_TYPE_USER_INPUT", "status": "CORTEX_STEP_STATUS_DONE"},
+						{"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE", "status": "CORTEX_STEP_STATUS_RUNNING"},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", strings.TrimPrefix(srv.URL, "http://"))
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-superseded")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
+
+	ev, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:   "watcher",
+		ScopeKey: "watch:mail:work",
+		Skill:    "inbox-triage",
+		Title:    "[Auto] Channel Triage",
+		Prompt:   "Triage item",
+		Model:    "gemini-4-hydrogen-low",
+	}, now)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	autoSlug := "auto-" + slugify("watch:mail:work-"+ev.ID)
+
+	// Attempt 1 binds u1.
+	if _, err := DispatchPendingEvents(vaultDir, now, false); err != nil {
+		t.Fatalf("Attempt 1 DispatchPendingEvents: %v", err)
+	}
+
+	// Lease expires -> Attempt 2 spawns u2Fail and fails at step 1 -> must restore u1 as ConversationID and record u2Fail as superseded!
+	tReap := now.Add(events.DefaultLeaseTTL + time.Minute)
+	_, _ = DispatchPendingEvents(vaultDir, tReap, false)
+	tRetry2 := tReap.Add(2 * time.Minute)
+	acts2, err := DispatchPendingEvents(vaultDir, tRetry2, false)
+	if err != nil || len(acts2) != 1 || !strings.Contains(acts2[0], "deferred:") {
+		t.Fatalf("expected Attempt 2 deferral on step1 error, got acts=%v err=%v", acts2, err)
+	}
+	afterFail2, locFail2, ok := FindTaskAnywhere(vaultDir, autoSlug)
+	if !ok || locFail2 != "hot" || afterFail2.ConversationID != u1 || !afterFail2.HasSupersededConversationID(u2Fail) {
+		t.Fatalf("expected Attempt 2 rollback to restore %s and keep %s superseded, got %+v (loc=%q ok=%v)", u1, u2Fail, afterFail2, locFail2, ok)
+	}
+
+	// Attempt 3 succeeds with u3 -> SupersededConversationIDs must include both u1 and u2Fail, and u1 must be queued for archive.
+	tRetry3 := tRetry2.Add(2 * time.Minute)
+	acts3, err := DispatchPendingEvents(vaultDir, tRetry3, false)
+	if err != nil || len(acts3) != 1 || !strings.Contains(acts3[0], u3) {
+		t.Fatalf("expected Attempt 3 to spawn %s, got acts=%v err=%v", u3, acts3, err)
+	}
+	afterAttempt3, loc3, ok := FindTaskAnywhere(vaultDir, autoSlug)
+	if !ok || loc3 != "hot" || afterAttempt3.ConversationID != u3 || !afterAttempt3.HasSupersededConversationID(u1) || !afterAttempt3.HasSupersededConversationID(u2Fail) {
+		t.Fatalf("expected u3 active with [u1, u2Fail] superseded, got %+v (loc=%q)", afterAttempt3, loc3)
+	}
+
+	// RegisterTask auto-adoption with empty slug or conv-* slug MUST refuse u1 and u2Fail, and must NOT steal pendingSpawnSlug!
+	for _, orphanID := range []string{u1, u2Fail} {
+		if err := RegisterTask(vaultDir, ActiveTask{
+			Title:          "Orphan Late Stop",
+			Kind:           "task",
+			ConversationID: orphanID,
+			Status:         "active",
+		}); err != nil {
+			t.Fatalf("RegisterTask(%s): %v", orphanID, err)
+		}
+		if err := RegisterTask(vaultDir, ActiveTask{
+			TaskSlug:       "conv-" + orphanID[:8],
+			Title:          "Explicit conv-* orphan",
+			Kind:           "task",
+			ConversationID: orphanID,
+			Status:         "active",
+		}); err != nil {
+			t.Fatalf("RegisterTask explicit conv-*(%s): %v", orphanID, err)
+		}
+		if _, linked := LinkPendingSpawnTask(vaultDir, orphanID, ""); linked {
+			t.Fatalf("expected LinkPendingSpawnTask to refuse superseded/queued %s", orphanID)
+		}
+	}
+	if slot, locSlot, sOk := FindTaskAnywhere(vaultDir, pendingSpawnSlug); !sOk || locSlot != "hot" || slot.ConversationID != "" {
+		t.Fatalf("expected interactive pending slot untouched, got %+v (loc=%q)", slot, locSlot)
+	}
+	if all, _ := ListTasks(vaultDir); len(all) != 2 {
+		t.Fatalf("expected only pendingSpawnSlug + autoSlug (no conv-* orphans), got %+v", all)
+	}
+
+	// Archive autoSlug -> compact to cold tasks_archive.jsonl -> remove queue -> RegisterTask with u1 must STILL refuse!
+	RemoveSidebarSyncQueueItem(vaultDir, u1, tRetry3)
+	RemoveSidebarSyncQueueItem(vaultDir, u2Fail, tRetry3)
+	_ = UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		for i := range tasks {
+			if tasks[i].TaskSlug == autoSlug {
+				tasks[i].Status = "archived"
+				tasks[i].ArchivedAt = tRetry3.Add(-48 * time.Hour).Format(time.RFC3339)
+				tasks[i].LastUpdatedAt = tasks[i].ArchivedAt
+			}
+		}
+		return tasks, true, nil
+	})
+	if _, err := CompactTasks(vaultDir, CompactTasksOptions{
+		Now:                tRetry3,
+		ArchivedColdMaxAge: 24 * time.Hour,
+		NoSidebar:          true,
+		NoWorktreePrune:    true,
+	}); err != nil {
+		t.Fatalf("CompactTasks: %v", err)
+	}
+	att, loc, sup, found := FindTaskAttemptAnywhere(vaultDir, u1)
+	if !found || loc != "cold" || !sup || att.TaskSlug != autoSlug {
+		t.Fatalf("expected cold superseded lookup for u1, got found=%v loc=%q sup=%v task=%+v", found, loc, sup, att)
+	}
+	_ = RegisterTask(vaultDir, ActiveTask{ConversationID: u1, Title: "Very late u1", Kind: "task", Status: "active"})
+	_ = RegisterTask(vaultDir, ActiveTask{ConversationID: u3, Title: "Late cold u3", Kind: "task", Status: "active"})
+	if allAfterCold, _ := ListTasks(vaultDir); len(allAfterCold) != 1 || allAfterCold[0].TaskSlug != pendingSpawnSlug {
+		t.Fatalf("expected cold superseded u1 and cold auto u3 to never auto-adopt, got %+v", allAfterCold)
+	}
+}

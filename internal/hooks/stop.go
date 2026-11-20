@@ -48,7 +48,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	isFrontDesk := hasFD && payload.ConversationID != "" && fd.ConversationID == payload.ConversationID
 
-	if payload.ArtifactDirectoryPath != "" && (isFrontDesk || !hasFD) {
+	if payload.ArtifactDirectoryPath != "" && (isFrontDesk || (!hasFD && shouldAutoClaimVacantFrontDesk(payload.CommonPayload, vaultDir) && payload.ConversationID == "")) {
 		writeActiveArtifactDir(vaultDir, payload.ArtifactDirectoryPath)
 	}
 
@@ -139,9 +139,16 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				_ = os.WriteFile(filepath.Join(dateDir, fileName), data, 0o644)
 			}
 
+			termReason := strings.ToUpper(strings.TrimSpace(payload.TerminationReason))
+			cleanTurnPause := strings.TrimSpace(payload.Error) == "" && (termReason == "" || termReason == "NO_TOOL_CALL")
+			awaitingBackgroundTurn := cleanTurnPause && ((payload.FullyIdle != nil && !*payload.FullyIdle) || tm.HasPendingBackgroundTasks)
+			attemptSuperseded := false
+			skipAutoAdopt := false
+
 			var matchedTask *kernel.ActiveTask
 			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
 			if !isFrontDesk {
+				bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
 				alreadyTracked := false
 				for i := range existingTasks {
 					if existingTasks[i].ConversationID == payload.ConversationID {
@@ -151,23 +158,36 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 				}
 
+				var attemptTask kernel.ActiveTask
+				var attemptLoc string
+				var hasAttempt bool
+				var hasQueuedArchive bool
+				var autoOrSpawnEvidence bool
+				if !alreadyTracked {
+					attemptTask, attemptLoc, attemptSuperseded, hasAttempt = kernel.FindTaskAttemptAnywhere(vaultDir, payload.ConversationID)
+					hasQueuedArchive = kernel.HasQueuedSidebarArchive(vaultDir, payload.ConversationID)
+					autoOrSpawnEvidence = hasAutoOrSpawnEvidence(vaultDir, payload.ConversationID, tm.FirstUserPromptRaw, userPrompt)
+					skipAutoAdopt = (hasAttempt && (attemptSuperseded || attemptTask.EffectiveKind() == "auto" || attemptTask.EffectiveKind() == "subagent")) ||
+						hasQueuedArchive || autoOrSpawnEvidence
+				}
+
 				vacatedMarker := filepath.Join(vaultDir, "memory", ".vacated")
 				_, vacatedExists := os.Stat(vacatedMarker)
 
 				isNested := kernel.IsNestedSubagentConversation(vaultDir, payload.ConversationID)
 				var lsLineage kernel.LSConversationLineage
 				var hasLSLineage bool
-				if !alreadyTracked && !isNested {
+				if !alreadyTracked && !isNested && !skipAutoAdopt {
 					isNested, _, lsLineage, hasLSLineage = detectNestedDescendant(vaultDir, payload.ConversationID, payload.LastUserInput, fd.ConversationID, 60*time.Minute)
 				}
 
-				if !hasFD && !isNested && shouldAutoClaimVacantFrontDesk(payload.CommonPayload, vaultDir) && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
+				if !hasFD && !isNested && !skipAutoAdopt && shouldAutoClaimVacantFrontDesk(payload.CommonPayload, vaultDir) && !alreadyTracked && len(existingTasks) == 0 && os.IsNotExist(vacatedExists) {
 					// In-session bootstrap fallback: fresh Vault with no tracked tasks, front_desk is vacant,
 					// and no explicit release-desk marker exists. Claim Front Desk instead of registering [Task:general]!
 					_ = kernel.SetFrontDesk(vaultDir, payload.ConversationID, payload.ArtifactDirectoryPath)
 					kernel.ReconcileFrontDeskFromTranscript(vaultDir, payload.TranscriptPath)
 				} else {
-					if !alreadyTracked && !isNested {
+					if !alreadyTracked && !isNested && !skipAutoAdopt {
 						// Subagent fallback: match against pending queue or LS trajectory metadata if not yet registered
 						if sub, found := kernel.PopPendingSubagentForCaller(vaultDir, payload.ConversationID, payload.LastUserInput, 60*time.Minute); found {
 							modelName := sub.Model
@@ -209,13 +229,15 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 
 					if alreadyTracked && matchedTask != nil {
-						// Subagent & [Auto] worker lifecycle transition: mark completed (or immediately archived for unpinned [Auto] workers) unless awaiting a resumable human approval
+						// Subagent & [Auto] worker lifecycle transition: mark completed (or immediately archived for unpinned [Auto] workers) unless paused on background tasks or awaiting a resumable human approval
 						isSubagent := matchedTask.EffectiveKind() == "subagent" || strings.HasPrefix(matchedTask.TaskSlug, "subagent-") || strings.HasPrefix(matchedTask.Title, "[Subagent:")
 						isAuto := matchedTask.EffectiveKind() == "auto"
 						newStatus := matchedTask.Status
 						if isSubagent && matchedTask.Status == "active" {
-							newStatus = "completed"
-						} else if isAuto && !hasPendingResumableApproval(vaultDir, payload.ConversationID) && matchedTask.Status == "active" {
+							if !awaitingBackgroundTurn {
+								newStatus = "completed"
+							}
+						} else if isAuto && !awaitingBackgroundTurn && !hasPendingResumableApproval(vaultDir, payload.ConversationID) && matchedTask.Status == "active" {
 							if matchedTask.Pinned {
 								newStatus = "completed"
 							} else {
@@ -240,35 +262,37 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							archivedAt = nowISO
 						}
 						updatedTask := kernel.ActiveTask{
-							TaskSlug:             matchedTask.TaskSlug,
-							Title:                matchedTask.Title,
-							Kind:                 matchedTask.EffectiveKind(),
-							Scope:                matchedTask.EffectiveScope(),
-							ParentConversationID: matchedTask.ParentConversationID,
-							Tier:                 matchedTask.Tier,
-							Model:                matchedTask.Model,
-							WorktreeDir:          matchedTask.WorktreeDir,
-							WorktreeDirs:         matchedTask.WorktreeDirs,
-							RepoRoot:             matchedTask.RepoRoot,
-							ConversationID:       payload.ConversationID,
-							EventIDs:             matchedTask.EventIDs,
-							Status:               newStatus,
-							TurnCount:            matchedTask.TurnCount + 1,
-							Pinned:               matchedTask.Pinned,
-							CreatedAt:            matchedTask.CreatedAt,
-							LastUpdatedAt:        nowISO,
-							CompletedAt:          completedAt,
-							ArchivedAt:           archivedAt,
-							SidebarArchived:      matchedTask.SidebarArchived,
-							SidebarSyncedAt:      matchedTask.SidebarSyncedAt,
-							LastSummary:          newSummary,
+							TaskSlug:                  matchedTask.TaskSlug,
+							Title:                     matchedTask.Title,
+							Kind:                      matchedTask.EffectiveKind(),
+							Scope:                     matchedTask.EffectiveScope(),
+							ParentConversationID:      matchedTask.ParentConversationID,
+							Tier:                      matchedTask.Tier,
+							Model:                     matchedTask.Model,
+							WorktreeDir:               matchedTask.WorktreeDir,
+							WorktreeDirs:              matchedTask.WorktreeDirs,
+							RepoRoot:                  matchedTask.RepoRoot,
+							ConversationID:            payload.ConversationID,
+							SupersededConversationIDs: matchedTask.SupersededConversationIDs,
+							EventIDs:                  matchedTask.EventIDs,
+							Status:                    newStatus,
+							TurnCount:                 matchedTask.TurnCount + 1,
+							Pinned:                    matchedTask.Pinned,
+							CreatedAt:                 matchedTask.CreatedAt,
+							LastUpdatedAt:             nowISO,
+							CompletedAt:               completedAt,
+							ArchivedAt:                archivedAt,
+							SidebarArchived:           matchedTask.SidebarArchived,
+							SidebarSyncedAt:           matchedTask.SidebarSyncedAt,
+							LastSummary:               newSummary,
 						}
 						_ = kernel.RegisterTask(vaultDir, updatedTask)
 						matchedTask = &updatedTask
 						if newStatus == "archived" && matchedTask.TaskSlug != "" {
 							kernel.ReleaseTaskWorkspaceLeases(vaultDir, matchedTask.TaskSlug)
 						}
-						if isAuto && newStatus == "archived" && !matchedTask.Pinned && !matchedTask.SidebarArchived {
+						if isAuto && newStatus == "archived" && !matchedTask.Pinned && !matchedTask.SidebarArchived &&
+							!kernel.HasQueuedSidebarArchive(vaultDir, payload.ConversationID) {
 							_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
 								ConversationID:  payload.ConversationID,
 								TaskSlug:        matchedTask.TaskSlug,
@@ -278,26 +302,62 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							}, nowTime)
 						}
 					} else if !alreadyTracked && !isNested {
-						title := ""
-						if strings.TrimSpace(userPrompt) != "" {
-							title = kernel.SanitizeTaskTitle(userPrompt, "")
+						if skipAutoAdopt {
+							// Never auto-adopt a superseded, cold-archived auto/subagent, queued-archive, or [hq-spawn:]/[Auto] conversation as conv-* (`kind="task"`).
+							nowTime := time.Now()
+							switch {
+							case attemptSuperseded:
+								if !attemptTask.Pinned && kernel.IsCanonicalUUID(payload.ConversationID) && !hasQueuedArchive {
+									_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
+										ConversationID:  payload.ConversationID,
+										TaskSlug:        attemptTask.TaskSlug,
+										DesiredArchived: true,
+										NextRetryAt:     nowTime.Add(3 * time.Second).UTC().Format(time.RFC3339),
+										LastError:       "superseded_by_retry",
+									}, nowTime)
+								}
+							case hasAttempt && attemptLoc == "cold":
+								if attemptTask.EffectiveKind() == "auto" && !attemptTask.Pinned && !attemptTask.SidebarArchived &&
+									kernel.IsCanonicalUUID(payload.ConversationID) && !hasQueuedArchive {
+									_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
+										ConversationID:  payload.ConversationID,
+										TaskSlug:        attemptTask.TaskSlug,
+										DesiredArchived: true,
+										NextRetryAt:     nowTime.Add(3 * time.Second).UTC().Format(time.RFC3339),
+										LastError:       "auto_stop_deferred",
+									}, nowTime)
+								}
+							case !hasQueuedArchive && autoOrSpawnEvidence && !awaitingBackgroundTurn &&
+								!hasPendingResumableApproval(vaultDir, payload.ConversationID) && kernel.IsCanonicalUUID(payload.ConversationID):
+								_ = kernel.EnqueueSidebarSync(vaultDir, kernel.SidebarSyncQueueItem{
+									ConversationID:  payload.ConversationID,
+									DesiredArchived: true,
+									NextRetryAt:     nowTime.Add(3 * time.Second).UTC().Format(time.RFC3339),
+									LastError:       "auto_stop_deferred",
+								}, nowTime)
+							}
+						} else {
+							title := ""
+							if strings.TrimSpace(userPrompt) != "" {
+								title = kernel.SanitizeTaskTitle(userPrompt, "")
+							}
+							_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+								Title:          title,
+								Kind:           "task",
+								Model:          payload.ModelName,
+								ConversationID: payload.ConversationID,
+								TurnCount:      1,
+								LastUpdatedAt:  time.Now().Format(time.RFC3339),
+								LastSummary:    summary,
+							})
 						}
-						_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
-							Title:          title,
-							Kind:           "task",
-							Model:          payload.ModelName,
-							ConversationID: payload.ConversationID,
-							TurnCount:      1,
-							LastUpdatedAt:  time.Now().Format(time.RFC3339),
-							LastSummary:    summary,
-						})
 					}
 				}
 			}
 
 			// RFC-0025 §7.3 / §16.8: bind provider workspaces written this turn to the owning task (ledger hits) or
 			// queue daemon probe candidates (root_patterns hits). Ledger/tasks reads only; no provider calls.
-			if !isFrontDesk && !isTainted && !tm.TaintedCmdSeen {
+			if !isFrontDesk && !isTainted && !tm.TaintedCmdSeen && !attemptSuperseded {
 				autoBindWorkspacesFromStop(vaultDir, payload.ConversationID, tm.TurnFilesModified)
 			}
 
@@ -334,7 +394,9 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			if obsTurn.CompactionCount > 0 {
 				_ = os.Remove(compactionNudgeMarkerPath(vaultDir, payload.ConversationID))
 			}
-			_, _ = kernel.CompleteConversationEvents(vaultDir, payload.ConversationID, time.Now())
+			if !awaitingBackgroundTurn && !attemptSuperseded {
+				_, _ = kernel.CompleteConversationEvents(vaultDir, payload.ConversationID, time.Now())
+			}
 			_, _ = approvals.ReconcileAskRejections(vaultDir, payload.ConversationID, payload.TranscriptPath, time.Now())
 			_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
 

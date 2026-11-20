@@ -15,7 +15,11 @@ import (
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
-var reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
+var (
+	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
+	reBgTaskNoticeLine   = regexp.MustCompile(`(?im)^Tool is running as a background task with task id:\s*([0-9a-zA-Z_-]+/task-\d+)\b`)
+	reBgTaskFinishedLine = regexp.MustCompile(`(?i)(?:Task id\s+"([0-9a-zA-Z_-]+/task-\d+)"\s+(?:finished|was canceled|canceled|failed|completed|exited)|sender=([0-9a-zA-Z_-]+/task-\d+))`)
+)
 
 // isReadOnlyFileViewerOutput returns true if the tool output step is a file viewer (`read_file`)
 // or if the preceding planner step only invoked non-command tools (preventing string literals like
@@ -96,20 +100,22 @@ func isTransientExternalError(content string) bool {
 }
 
 type transcriptTurnMetrics struct {
-	ToolsUsed               []string
-	FilesModified           []string
-	TurnFilesModified       []string // write_file / edit_file paths from the current turn only (sorted)
-	LastResponse            string
-	CurrentTurnFullResponse string
-	CurrentTurnStartedAt    time.Time
-	LastUserPrompt          string
-	StepCount               int
-	ToolErrorCount          int
-	TurnStepCount           int
-	TurnErrorCount          int
-	TransientErrors         int
-	PreToolDenials          int
-	TaintedCmdSeen          bool
+	ToolsUsed                 []string
+	FilesModified             []string
+	TurnFilesModified         []string // write_file / edit_file paths from the current turn only (sorted)
+	LastResponse              string
+	CurrentTurnFullResponse   string
+	CurrentTurnStartedAt      time.Time
+	FirstUserPromptRaw        string
+	LastUserPrompt            string
+	StepCount                 int
+	ToolErrorCount            int
+	TurnStepCount             int
+	TurnErrorCount            int
+	TransientErrors           int
+	PreToolDenials            int
+	TaintedCmdSeen            bool
+	HasPendingBackgroundTasks bool
 }
 
 func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transcriptTurnMetrics, obs.TurnMetrics) {
@@ -126,6 +132,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 	toolSet := make(map[string]bool)
 	fileSet := make(map[string]bool)
 	turnFileSet := make(map[string]bool)
+	pendingBgTasks := make(map[string]bool)
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -140,6 +147,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 		obsAcc.ObserveLine(rawLine)
 		var step struct {
 			Type      string `json:"type"`
+			Source    string `json:"source"`
 			Status    string `json:"status"`
 			Content   string `json:"content"`
 			CreatedAt string `json:"created_at"`
@@ -174,7 +182,41 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 		if inCurrentTurn && !isReadOnlyFileViewerOutput(step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) && isPreToolDenialStep(step.Status, step.Content) {
 			tm.PreToolDenials++
 		}
+		if step.Type == "GENERIC" {
+			stUpper := strings.ToUpper(strings.TrimSpace(step.Status))
+			isTerminalGeneric := stUpper == "DONE" || stUpper == "CORTEX_STEP_STATUS_DONE" ||
+				stUpper == "ERROR" || stUpper == "CORTEX_STEP_STATUS_ERROR"
+			if !isTerminalGeneric &&
+				!isReadOnlyFileViewerOutput(step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) &&
+				!strings.HasPrefix(step.Content, "Command output:") &&
+				!strings.Contains(step.Content, "\nCommand output:\n") &&
+				!strings.Contains(step.Content, "\nTask Description: Cron:") {
+				for _, m := range reBgTaskNoticeLine.FindAllStringSubmatch(step.Content, -1) {
+					if len(m) == 2 {
+						if tid := strings.TrimSpace(m[1]); tid != "" {
+							pendingBgTasks[tid] = true
+						}
+					}
+				}
+			}
+		}
+		if step.Type == "SYSTEM_MESSAGE" {
+			for _, srcText := range []string{step.Content, step.Source} {
+				for _, m := range reBgTaskFinishedLine.FindAllStringSubmatch(srcText, -1) {
+					for _, grp := range m[1:] {
+						if tid := strings.TrimSpace(grp); tid != "" {
+							delete(pendingBgTasks, tid)
+						}
+					}
+				}
+			}
+		}
 		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
+			if tm.FirstUserPromptRaw == "" {
+				if firstCleaned := cleanUserPrompt(step.Content); firstCleaned != "" {
+					tm.FirstUserPromptRaw = firstCleaned
+				}
+			}
 			cleaned := strings.ReplaceAll(step.Content, "<USER_REQUEST>", "")
 			cleaned = strings.ReplaceAll(cleaned, "</USER_REQUEST>", "")
 			cleaned = strings.TrimSpace(cleaned)
@@ -223,6 +265,15 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 					}
 				}
 			}
+			if tc.Name == "manage_task" {
+				if rawAct, ok := tc.Args["Action"].(string); ok && strings.EqualFold(strings.Trim(strings.TrimSpace(rawAct), "\""), "kill") {
+					if rawTID, ok := tc.Args["TaskId"].(string); ok {
+						if tid := strings.Trim(strings.TrimSpace(rawTID), "\""); tid != "" {
+							delete(pendingBgTasks, tid)
+						}
+					}
+				}
+			}
 			if tc.Name == "send_message" {
 				if rawMsg, ok := tc.Args["Message"].(string); ok {
 					msg := strings.Trim(strings.TrimSpace(rawMsg), "\"")
@@ -239,6 +290,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 		}
 	}
 
+	tm.HasPendingBackgroundTasks = len(pendingBgTasks) > 0
 	if tm.StepCount > stepStartIdx {
 		tm.TurnStepCount = tm.StepCount - stepStartIdx
 	}

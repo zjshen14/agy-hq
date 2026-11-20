@@ -97,29 +97,30 @@ const (
 // ActiveTask tracks a dedicated multi-turn Task Conversation or background Subagent
 // in local/memory/tasks.json (hot working set) and local/memory/tasks_archive.jsonl (cold ledger).
 type ActiveTask struct {
-	TaskSlug             string   `json:"taskSlug"`
-	Title                string   `json:"title"`
-	Kind                 string   `json:"kind,omitempty"`  // "task" | "subagent" | "auto"
-	Scope                string   `json:"scope,omitempty"` // e.g. "agy-hq", "brand", "NVDA", "personal"
-	Tier                 string   `json:"tier"`            // "quick" | "standard" | "deep"
-	Model                string   `json:"model"`
-	ParentConversationID string   `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
-	WorktreeDir          string   `json:"worktreeDir,omitempty"`
-	WorktreeDirs         []string `json:"worktreeDirs,omitempty"`
-	RepoRoot             string   `json:"repoRoot,omitempty"`
-	ConversationID       string   `json:"conversationId,omitempty"`
-	TurnCount            int      `json:"turnCount,omitempty"`
-	Pinned               bool     `json:"pinned,omitempty"`
-	Ephemeral            bool     `json:"ephemeral,omitempty"`
-	CreatedAt            string   `json:"createdAt"`
-	LastUpdatedAt        string   `json:"lastUpdatedAt"`
-	CompletedAt          string   `json:"completedAt,omitempty"`
-	ArchivedAt           string   `json:"archivedAt,omitempty"`
-	SidebarArchived      bool     `json:"sidebarArchived,omitempty"`
-	SidebarSyncedAt      string   `json:"sidebarSyncedAt,omitempty"`
-	EventIDs             []string `json:"eventIds,omitempty"`
-	LastSummary          string   `json:"lastSummary,omitempty"`
-	Status               string   `json:"status"` // active, idle, completed, archived, cancelled
+	TaskSlug                  string   `json:"taskSlug"`
+	Title                     string   `json:"title"`
+	Kind                      string   `json:"kind,omitempty"`  // "task" | "subagent" | "auto"
+	Scope                     string   `json:"scope,omitempty"` // e.g. "agy-hq", "brand", "NVDA", "personal"
+	Tier                      string   `json:"tier"`            // "quick" | "standard" | "deep"
+	Model                     string   `json:"model"`
+	ParentConversationID      string   `json:"parentConversationId,omitempty"` // Links nested subagent to parent Task or Front Desk
+	WorktreeDir               string   `json:"worktreeDir,omitempty"`
+	WorktreeDirs              []string `json:"worktreeDirs,omitempty"`
+	RepoRoot                  string   `json:"repoRoot,omitempty"`
+	ConversationID            string   `json:"conversationId,omitempty"`
+	SupersededConversationIDs []string `json:"supersededConversationIds,omitempty"`
+	TurnCount                 int      `json:"turnCount,omitempty"`
+	Pinned                    bool     `json:"pinned,omitempty"`
+	Ephemeral                 bool     `json:"ephemeral,omitempty"`
+	CreatedAt                 string   `json:"createdAt"`
+	LastUpdatedAt             string   `json:"lastUpdatedAt"`
+	CompletedAt               string   `json:"completedAt,omitempty"`
+	ArchivedAt                string   `json:"archivedAt,omitempty"`
+	SidebarArchived           bool     `json:"sidebarArchived,omitempty"`
+	SidebarSyncedAt           string   `json:"sidebarSyncedAt,omitempty"`
+	EventIDs                  []string `json:"eventIds,omitempty"`
+	LastSummary               string   `json:"lastSummary,omitempty"`
+	Status                    string   `json:"status"` // active, idle, completed, archived, cancelled
 	// Workspaces holds RFC-0025 provider workspace bindings (pack providers only; git worktrees stay in
 	// WorktreeDir/WorktreeDirs). RegisterTask unions it by Key, so field-by-field rebuilds never drop bindings.
 	Workspaces []workspace.Binding `json:"workspaces,omitempty"`
@@ -676,12 +677,15 @@ func FindTaskAnywhere(vaultDir, target string) (ActiveTask, string, bool) {
 // LinkPendingSpawnTask links an active task in local/memory/tasks.json that was registered
 // with an empty ConversationID (e.g., during `hq spawn`) to convID.
 func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
-	if convID == "" {
+	if convID == "" || shouldRejectPendingSpawnLink(vaultDir, convID) {
 		return ActiveTask{}, false
 	}
 	var matched ActiveTask
 	linked := false
 	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
+		if taskListHasSupersededConvID(tasks, convID) {
+			return tasks, false, nil
+		}
 		for i := len(tasks) - 1; i >= 0; i-- {
 			if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
 				// Never allow an interactive session to bind to an event-leased batch;
@@ -710,31 +714,6 @@ func LinkPendingSpawnTask(vaultDir, convID, model string) (ActiveTask, bool) {
 	return matched, true
 }
 
-func isHexSlugSuffix(s string) bool {
-	hexCount := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
-			hexCount++
-			continue
-		}
-		if c == '-' {
-			continue
-		}
-		return false
-	}
-	return hexCount >= 6
-}
-
-func isAutoConvSlug(slug, convID string) bool {
-	if !strings.HasPrefix(slug, "conv-") {
-		return false
-	}
-	suffix := strings.ToLower(strings.TrimPrefix(slug, "conv-"))
-	cid := normalizeUUID(convID)
-	return cid == "" || strings.HasPrefix(cid, suffix) || strings.HasPrefix(suffix, cid) || isHexSlugSuffix(suffix)
-}
-
 // IsExplicitTopLevelTask reports whether t is an explicitly created or adopted Layer-1 Task
 // (Kind=="task", non-auto-adopted conv- slug, non-subagent slug/title, and either an explicit
 // [Task:...] title or empty ParentConversationID). Explicitly adopted [Task:...] conversations
@@ -755,6 +734,7 @@ func IsExplicitTopLevelTask(t ActiveTask) bool {
 // RegisterTask records or updates a dedicated Task Conversation in local/memory/tasks.json.
 func RegisterTask(vaultDir string, task ActiveTask) error {
 	explicitTaskPromotion := IsExplicitTopLevelTask(task) && strings.EqualFold(strings.TrimSpace(task.Kind), "task")
+	autoAdoptCandidate, rejectAutoAdopt := shouldRejectAutoAdoptCandidate(vaultDir, task)
 	var bindEventIDs []string
 	var removeNestedIDs []string
 	err := UpdateTasks(vaultDir, func(tasks []ActiveTask) ([]ActiveTask, bool, error) {
@@ -762,6 +742,7 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 		updated := false
 		for i := range tasks {
 			if (inTask.TaskSlug != "" && tasks[i].TaskSlug == inTask.TaskSlug) || (inTask.ConversationID != "" && tasks[i].ConversationID == inTask.ConversationID) {
+				prevConvID := tasks[i].ConversationID
 				effKind := strings.ToLower(strings.TrimSpace(inTask.Kind))
 				if effKind == "" {
 					effKind = tasks[i].EffectiveKind()
@@ -774,6 +755,12 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				if inTask.ConversationID == "" {
 					inTask.ConversationID = tasks[i].ConversationID
 				}
+				inTask.SupersededConversationIDs = mergeSupersededConversationIDs(
+					tasks[i].SupersededConversationIDs,
+					inTask.SupersededConversationIDs,
+					prevConvID,
+					inTask.ConversationID,
+				)
 				if inTask.Title == "" {
 					inTask.Title = tasks[i].Title
 				}
@@ -846,7 +833,8 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 				break
 			}
 		}
-		if !updated && inTask.TaskSlug == "" && inTask.ConversationID != "" {
+		if !updated && inTask.TaskSlug == "" && inTask.ConversationID != "" &&
+			!rejectAutoAdopt && !taskListHasSupersededConvID(tasks, inTask.ConversationID) {
 			// If a task was just spawned via `hq spawn` with ConversationID=="" and is active, link it to this first Stop hook
 			for i := len(tasks) - 1; i >= 0; i-- {
 				if tasks[i].ConversationID == "" && tasks[i].Status == "active" {
@@ -878,6 +866,9 @@ func RegisterTask(vaultDir string, task ActiveTask) error {
 			}
 		}
 		if !updated {
+			if autoAdoptCandidate && (rejectAutoAdopt || taskListHasSupersededConvID(tasks, inTask.ConversationID)) {
+				return tasks, false, nil
+			}
 			if inTask.TaskSlug == "" && inTask.ConversationID != "" {
 				shortID := inTask.ConversationID
 				if len(shortID) > 8 {
@@ -1406,6 +1397,7 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 			}
 			rep.AutoArchivedSlugs = append(rep.AutoArchivedSlugs, t.TaskSlug)
 			addSidebarCandidate(t.ConversationID)
+			addSupersededSidebarCandidates(*t, addSidebarCandidate)
 		}
 	}
 
@@ -1465,13 +1457,19 @@ func CompactTasks(vaultDir string, opts CompactTasksOptions) (*CompactTasksRepor
 			}
 			rotatedCold = append(rotatedCold, t)
 			rep.RotatedColdSlugs = append(rep.RotatedColdSlugs, t.TaskSlug)
-			if !t.SidebarArchived {
-				addSidebarCandidate(t.ConversationID)
+			if !t.Pinned {
+				if !t.SidebarArchived {
+					addSidebarCandidate(t.ConversationID)
+				}
+				addSupersededSidebarCandidates(t, addSidebarCandidate)
 			}
 		} else {
 			keptHot = append(keptHot, t)
 			if st == "archived" && !t.SidebarArchived {
 				addSidebarCandidate(t.ConversationID)
+			}
+			if !t.Pinned {
+				addSupersededSidebarCandidates(t, addSidebarCandidate)
 			}
 		}
 	}

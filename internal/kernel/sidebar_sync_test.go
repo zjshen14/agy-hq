@@ -863,3 +863,128 @@ func TestJetboxUnloadedHistoricalBackfillAndSubtrajectoryFilter(t *testing.T) {
 		t.Fatalf("expected uUnloaded1 to be unarchived after cold reopen")
 	}
 }
+
+func TestSyncSidebarPreservesSupersededAutoArchiveAndBackfillsSupersededIDs(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+
+	u1 := "aaaaaaaa-1111-4111-8111-111111111101"
+	u2 := "bbbbbbbb-2222-4222-8222-222222222202"
+	u3Cold := "cccccccc-3333-4333-8333-333333333303"
+	u4ColdCurrent := "dddddddd-4444-4444-8444-444444444404"
+
+	archivedCalls := make(map[string]bool)
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(lsGetAllTrajectoriesResponse{
+				TrajectorySummaries: map[string]LSTrajectorySummary{
+					u1: {
+						Status:      "CASCADE_RUN_STATUS_IDLE",
+						Annotations: LSConversationAnnotations{Title: "Attempt 1 orphan"},
+					},
+					u3Cold: {
+						Status:      "CASCADE_RUN_STATUS_IDLE",
+						Annotations: LSConversationAnnotations{Title: "Cold superseded"},
+					},
+					u4ColdCurrent: {
+						Status:      "CASCADE_RUN_STATUS_IDLE",
+						Annotations: LSConversationAnnotations{Title: "Cold current"},
+					},
+				},
+			})
+		case "/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations":
+			var req lsUpdateAnnotationsRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			targets := req.CascadeIDs
+			if len(targets) == 0 && req.CascadeID != "" {
+				targets = []string{req.CascadeID}
+			}
+			if req.Annotations.Archived != nil && *req.Annotations.Archived {
+				for _, cid := range targets {
+					if cid != "" {
+						archivedCalls[normalizeUUID(cid)] = true
+					}
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := SidebarSyncConfig{
+		BaseURL:        srv.URL,
+		CSRFToken:      "csrf-sync-sup",
+		CallerOverride: true,
+		Now:            func() time.Time { return now },
+	}
+
+	// Simulate an auto task whose retry moved ConversationID to u2, plus a pre-fix legacy conv-* orphan row for u1
+	// and a queued superseded_by_retry archive item. SyncSidebar must NOT purge the queue item and MUST archive u1.
+	_ = saveTasksUnlocked(vaultDir, []ActiveTask{
+		{
+			TaskSlug:                  "auto-watch-1",
+			Title:                     "[Auto] Channel Triage",
+			Kind:                      "auto",
+			ConversationID:            u2,
+			SupersededConversationIDs: []string{u1},
+			Status:                    "active",
+			CreatedAt:                 now.Add(-time.Hour).Format(time.RFC3339),
+			LastUpdatedAt:             now.Format(time.RFC3339),
+		},
+		{
+			TaskSlug:       "conv-" + u1[:8],
+			Title:          "Orphan late Turn 2",
+			Kind:           "task",
+			ConversationID: u1,
+			Status:         "active",
+			CreatedAt:      now.Add(-time.Minute).Format(time.RFC3339),
+			LastUpdatedAt:  now.Format(time.RFC3339),
+		},
+	})
+	_ = EnqueueSidebarSync(vaultDir, SidebarSyncQueueItem{
+		ConversationID:  u1,
+		TaskSlug:        "auto-watch-1",
+		DesiredArchived: true,
+		NextRetryAt:     now.Add(-time.Second).UTC().Format(time.RFC3339),
+		LastError:       "superseded_by_retry",
+	}, now)
+
+	// Also seed cold archive with u4ColdCurrent superseding u3Cold.
+	_ = AppendTasksToColdArchive(vaultDir, []ActiveTask{
+		{
+			TaskSlug:                  "auto-watch-cold",
+			Title:                     "[Auto] Cold Triage",
+			Kind:                      "auto",
+			ConversationID:            u4ColdCurrent,
+			SupersededConversationIDs: []string{u3Cold},
+			Status:                    "archived",
+		},
+	})
+
+	rep, err := SyncSidebar(vaultDir, SyncSidebarOptions{
+		Now:          now,
+		Backfill:     true,
+		ClientConfig: cfg,
+	})
+	if err != nil {
+		t.Fatalf("SyncSidebar: %v", err)
+	}
+	if rep.ArchivedCount != 3 {
+		t.Fatalf("expected 3 archived (u1 superseded queue, u3Cold superseded backfill, u4ColdCurrent backfill), got %+v", rep)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, wantID := range []string{u1, u3Cold, u4ColdCurrent} {
+		if !archivedCalls[wantID] {
+			t.Fatalf("expected LS archive call for %s, got %+v", wantID, archivedCalls)
+		}
+	}
+}

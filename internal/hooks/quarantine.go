@@ -1,10 +1,12 @@
 package hooks
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +29,76 @@ var (
 func spawnCheckMarkerPath(vaultDir, convID string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(convID)))
 	return filepath.Join(vaultDir, "private", "taint", ".checked-"+hex.EncodeToString(sum[:16]))
+}
+
+func spawnMarkerPath(vaultDir, convID string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(convID))))
+	return filepath.Join(vaultDir, "private", "taint", ".spawn-"+hex.EncodeToString(sum[:16]))
+}
+
+func hasSpawnMarker(vaultDir, convID string) bool {
+	convID = strings.TrimSpace(convID)
+	if convID == "" || strings.TrimSpace(vaultDir) == "" {
+		return false
+	}
+	st, err := os.Lstat(spawnMarkerPath(vaultDir, convID))
+	return err == nil && st.Mode().IsRegular()
+}
+
+// readFirstUserInputContent reads the untruncated cleaned content of the first USER_INPUT step
+// from the initial 64 KiB of transcriptPath so tail tags like `[hq-spawn:<token>]` are preserved.
+func readFirstUserInputContent(transcriptPath string) string {
+	transcriptPath = strings.TrimSpace(transcriptPath)
+	if transcriptPath == "" {
+		return ""
+	}
+	st, err := os.Lstat(transcriptPath)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	lr := io.LimitReader(f, 64*1024)
+	scanner := bufio.NewScanner(lr)
+	scanner.Buffer(make([]byte, 0, 4096), 64*1024)
+	for scanner.Scan() {
+		var step struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &step) != nil {
+			continue
+		}
+		if step.Type == "USER_INPUT" && strings.TrimSpace(step.Content) != "" {
+			return cleanUserPrompt(step.Content)
+		}
+	}
+	return ""
+}
+
+func hasAutoOrSpawnEvidence(vaultDir, convID, firstUserInput, fallbackPrompt string) bool {
+	for _, s := range []string{firstUserInput, fallbackPrompt} {
+		trimmed := strings.TrimSpace(s)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(trimmed), "[auto]") || reSpawnTokenTag.MatchString(s) {
+			return true
+		}
+	}
+	if hasSpawnMarker(vaultDir, convID) {
+		return true
+	}
+	if strings.TrimSpace(convID) != "" && strings.TrimSpace(vaultDir) != "" {
+		if rec, ok := taint.Check(vaultDir, convID); ok && strings.HasPrefix(rec.Source, "spawn_batch") {
+			return true
+		}
+	}
+	return false
 }
 
 // bindSpawnTokenFromTranscript inspects lastUserInput and the first 64 KiB of transcriptPath for `[hq-spawn:<token>]`,
@@ -57,8 +129,12 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, lastUserInput, transcriptPat
 		}
 	}
 
+	userInputHasSpawn := false
 	if lastUserInput != "" {
 		addMatches([]byte(lastUserInput))
+		if reSpawnTokenTag.MatchString(lastUserInput) {
+			userInputHasSpawn = true
+		}
 	}
 
 	scannedTranscript := false
@@ -70,6 +146,16 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, lastUserInput, transcriptPat
 				if rErr == nil && len(head) > 0 {
 					scannedTranscript = true
 					addMatches(head)
+					for _, rawLine := range bytes.Split(head, []byte("\n")) {
+						var step struct {
+							Type    string `json:"type"`
+							Content string `json:"content"`
+						}
+						if json.Unmarshal(rawLine, &step) == nil && step.Type == "USER_INPUT" && reSpawnTokenTag.MatchString(step.Content) {
+							userInputHasSpawn = true
+							break
+						}
+					}
 				}
 			}
 		}
@@ -133,6 +219,9 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, lastUserInput, transcriptPat
 		}
 	}
 
+	if boundAny || userInputHasSpawn {
+		_ = store.WriteAtomic(spawnMarkerPath(vaultDir, convID), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+	}
 	if boundAny || scannedTranscript {
 		_ = store.WriteAtomic(checkMarker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 	}

@@ -803,6 +803,31 @@ func EnqueueSidebarSync(vaultDir string, item SidebarSyncQueueItem, now time.Tim
 	return saveSidebarSyncQueueUnlocked(vaultDir, q, now)
 }
 
+// HasQueuedSidebarArchive reports whether convID currently has a pending archive entry in sidebar_sync_queue.json.
+func HasQueuedSidebarArchive(vaultDir, convID string) bool {
+	cid := normalizeUUID(convID)
+	if cid == "" || !HasPendingSidebarSyncQueue(vaultDir) {
+		return false
+	}
+	sidebarQueueMu.Lock()
+	defer sidebarQueueMu.Unlock()
+	q := loadSidebarSyncQueueUnlocked(vaultDir)
+	it, ok := q.Items[cid]
+	return ok && it.DesiredArchived
+}
+
+func isRetryOrAutoQueueReason(it SidebarSyncQueueItem) bool {
+	if strings.HasPrefix(strings.TrimSpace(it.TaskSlug), "auto-") {
+		return true
+	}
+	switch strings.TrimSpace(it.LastError) {
+	case "superseded_by_retry", "spawn_step1_error", "auto_stop_deferred",
+		"reconcile_auto_step1_error", "reconcile_auto_completed":
+		return true
+	}
+	return false
+}
+
 // RemoveSidebarSyncQueueItem deletes convID from the retry queue if present.
 func RemoveSidebarSyncQueueItem(vaultDir, convID string, now time.Time) {
 	cid := normalizeUUID(convID)
@@ -1099,9 +1124,21 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 	hotTasks, _ := ListTasks(vaultDir)
 	hotIdxByConv := make(map[string]int, len(hotTasks))
 	activeInHot := make(map[string]bool)
+	supersededInHot := make(map[string]bool)
+	autoConvHot := make(map[string]bool)
+	explicitHot := make(map[string]bool)
 	pinnedInVault := make(map[string]bool)
 	slugByConv := make(map[string]string)
 	titleByConv := make(map[string]string)
+
+	for _, t := range hotTasks {
+		for _, scid := range t.SupersededConversationIDs {
+			norm := normalizeUUID(scid)
+			if IsCanonicalUUID(norm) {
+				supersededInHot[norm] = true
+			}
+		}
+	}
 
 	for i, t := range hotTasks {
 		cid := normalizeUUID(t.ConversationID)
@@ -1118,8 +1155,14 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 		if t.Pinned {
 			pinnedInVault[cid] = true
 		}
+		if IsExplicitTopLevelTask(t) {
+			explicitHot[cid] = true
+		}
+		if isAutoConvSlug(t.TaskSlug, cid) {
+			autoConvHot[cid] = true
+		}
 		eff := t.EffectiveStatus(now)
-		if eff == "active" || eff == "idle" || eff == "stalled" {
+		if (eff == "active" || eff == "idle" || eff == "stalled") && !(supersededInHot[cid] && !explicitHot[cid]) {
 			activeInHot[cid] = true
 		}
 	}
@@ -1137,6 +1180,11 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 			continue
 		}
 		if it.DesiredArchived && activeInHot[cid] {
+			if autoConvHot[cid] && isRetryOrAutoQueueReason(it) {
+				// Auto-adopted conv-* orphan must not purge or block a queued [Auto] retry/step1 archive.
+				activeInHot[cid] = false
+				continue
+			}
 			if !opts.DryRun {
 				delete(queue.Items, cid)
 				queueMutated = true
@@ -1247,6 +1295,21 @@ func SyncSidebar(vaultDir string, opts SyncSidebarOptions) (*SyncSidebarReport, 
 				DesiredArchived: true,
 				Source:          "cold_backfill",
 			})
+			if !ct.Pinned {
+				for _, rawSCID := range ct.SupersededConversationIDs {
+					scid := normalizeUUID(rawSCID)
+					if !IsCanonicalUUID(scid) || scid == cid {
+						continue
+					}
+					addCandidate(SidebarCandidate{
+						ConversationID:  scid,
+						TaskSlug:        ct.TaskSlug,
+						Title:           ct.Title,
+						DesiredArchived: true,
+						Source:          "cold_backfill",
+					})
+				}
+			}
 		}
 	}
 

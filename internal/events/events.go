@@ -617,6 +617,10 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 					ev.UpdatedAt = nowStr
 					if ev.AttemptCount >= ev.MaxAttempts {
 						ev.Status = StatusDropped
+						ev.LeaseID = ""
+						ev.LeaseConvID = ""
+						ev.LeaseExpiresAt = ""
+						ev.SpawnTokenHash = ""
 						if ev.LastError == "" {
 							ev.LastError = fmt.Sprintf("worker lease expired after %d attempts", ev.AttemptCount)
 						}
@@ -627,6 +631,7 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 					ev.LeaseID = ""
 					ev.LeaseConvID = ""
 					ev.LeaseExpiresAt = ""
+					ev.SpawnTokenHash = ""
 					ev.AvailableAt = now.Add(retryBackoff(ev.AttemptCount)).UTC().Format(time.RFC3339)
 					ev.LastError = "worker lease expired; requeued for retry"
 				}
@@ -1123,6 +1128,7 @@ func DeferBatchOnSpawnError(vaultDir string, eventIDs []string, reason string, q
 			ev.LeaseID = ""
 			ev.LeaseConvID = ""
 			ev.LeaseExpiresAt = ""
+			ev.SpawnTokenHash = ""
 			if quotaDeferred {
 				ev.Status = StatusPending
 				ev.AvailableAt = now.Add(30 * time.Second).UTC().Format(time.RFC3339)
@@ -1385,6 +1391,7 @@ func Retry(vaultDir, id string, now time.Time) (Event, error) {
 				active[i].LeaseID = ""
 				active[i].LeaseConvID = ""
 				active[i].LeaseExpiresAt = ""
+				active[i].SpawnTokenHash = ""
 				active[i].UpdatedAt = nowStr
 				updated = active[i]
 				return saveActiveUnlocked(vaultDir, active)
@@ -1399,6 +1406,7 @@ func Retry(vaultDir, id string, now time.Time) (Event, error) {
 				arch.LeaseID = ""
 				arch.LeaseConvID = ""
 				arch.LeaseExpiresAt = ""
+				arch.SpawnTokenHash = ""
 				arch.UpdatedAt = nowStr
 				active = append(active, arch)
 				updated = arch
