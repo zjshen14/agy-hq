@@ -11,22 +11,22 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
-	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 var (
-	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:gmail|gchat|credentials|connectors|channels|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/(?:channels|workspaces\.json|\.workspaces\.lock))|workspaces\.json|\.workspaces\.lock|workspaces\.jso\S*)(?:[\s"'/]|$)`)
+	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:gmail|gchat|credentials|connectors|channels|delegates|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/(?:channels|delegates_queues|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl|workspaces\.json|\.workspaces\.lock))|workspaces\.json|\.workspaces\.lock|workspaces\.jso\S*|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl)(?:[\s"'/]|$)`)
 	reHeavyBuildTest       = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL      = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 	reHQClaimDesk          = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
 )
 
 var protectedPrivateSubs = []string{
-	"gmail", "gchat", "credentials", "connectors", "channels", "runtime", "taint", "exec-cache",
+	"gmail", "gchat", "credentials", "connectors", "channels", "delegates", "runtime", "taint", "exec-cache",
 	"trust.json", "approval_asks", "approval_caps", "approval_bridge_caps", "pii-denylist.txt", "daemon_token",
 }
 
@@ -49,9 +49,8 @@ type preToolSessionCtx struct {
 	hasSubagent bool
 	subagentVal bool
 
-	hasTaint    bool
-	taintReason string
-	taintVal    bool
+	hasAuthz    bool
+	authzPolVal authz.SessionPolicy
 }
 
 func (c *preToolSessionCtx) canonVault() string {
@@ -101,23 +100,35 @@ func (c *preToolSessionCtx) isSubagent() bool {
 	return c.subagentVal
 }
 
-func (c *preToolSessionCtx) tainted() (string, bool) {
-	if !c.hasTaint {
-		c.taintReason, c.taintVal = taint.IsTainted(c.vaultDir, c.convID)
-		c.hasTaint = true
+func (c *preToolSessionCtx) authzPolicy() authz.SessionPolicy {
+	if !c.hasAuthz {
+		c.authzPolVal = authz.Resolve(c.vaultDir, c.convID, authz.ResolveHints{
+			IsSubagent:   c.isSubagent(),
+			IsAutoWorker: c.isAuto(),
+		})
+		c.hasAuthz = true
 	}
-	return c.taintReason, c.taintVal
+	return c.authzPolVal
 }
 
-func protectedCredentialTargets(canonVault string, extra []string, includeWorkspaceLedger bool) []string {
+func (c *preToolSessionCtx) tainted() (string, bool) {
+	pol := c.authzPolicy()
+	return pol.TaintReason, pol.Tainted
+}
+
+func protectedCredentialTargets(canonVault string, extra []string, includeLedgers bool) []string {
 	targets := []string{
 		filepath.Join(canonVault, "approvals"),
 		filepath.Join(canonVault, "memory", "channels"),
 	}
-	if includeWorkspaceLedger {
+	if includeLedgers {
 		targets = append(targets,
 			filepath.Join(canonVault, "memory", "workspaces.json"),
 			filepath.Join(canonVault, "memory", ".workspaces.lock"),
+			filepath.Join(canonVault, "memory", "delegates_queues"),
+			filepath.Join(canonVault, "memory", "delegates_state.json"),
+			filepath.Join(canonVault, "memory", ".delegates.lock"),
+			filepath.Join(canonVault, "memory", "delegates_audit.jsonl"),
 		)
 	}
 	for _, sub := range protectedPrivateSubs {
@@ -160,6 +171,10 @@ func matchesProtectedShellTarget(vaultDir, canonVault string, extraCred []string
 		}
 		if strings.Contains(cmdLine, filepath.Join(vBase, "approvals")) ||
 			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "channels")) ||
+			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "delegates_queues")) ||
+			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "delegates_state.json")) ||
+			strings.Contains(cmdLine, filepath.Join(vBase, "memory", ".delegates.lock")) ||
+			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "delegates_audit.jsonl")) ||
 			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "workspaces.json")) ||
 			strings.Contains(cmdLine, filepath.Join(vBase, "memory", ".workspaces.lock")) {
 			return true
@@ -269,6 +284,10 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 
 	ctx := &preToolSessionCtx{vaultDir: vaultDir, convID: convID}
 
+	if authzPol := ctx.authzPolicy(); authzPol.Profile == authz.ProfileFailClosed {
+		return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq Fail-Closed session policy (%s): all tools are disabled because the session authorization grant expired, failed verification, or could not be restored.", authzPol.TaintReason))
+	}
+
 	if payload.ToolCall.Name == "run_command" {
 		if handled, err := handlePreToolRunCommand(w, vaultDir, payload, ctx); handled || err != nil {
 			return err
@@ -306,29 +325,33 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		}
 	}
 
-	// Enforce Strict Deny-by-Default Quarantined Worker Profile on sessions that have ingested untrusted external channel content (RFC-0017b §3)
-	if taintReason, tainted := ctx.tainted(); tainted {
+	// Enforce Unified Session Authorization Lattice on all tainted profiles (RFC-0026 §3.4 & RFC-0017b §3)
+	if authzPol := ctx.authzPolicy(); authzPol.Tainted {
 		switch payload.ToolCall.Name {
 		case "update_focus":
 			return writePreToolAllow(w)
 		case "read_file":
 			pathArg, _ := payload.ToolCall.Args["Path"].(string)
-			if !isAllowedTaintedReadPath(vaultDir, payload, pathArg) {
-				return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): read_file in tainted sessions is restricted to SKILL.md instructions and this conversation's own artifact directory.", taintReason))
+			if !isAllowedAuthzReadPath(vaultDir, payload, authzPol, pathArg) {
+				return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq %s policy (%s): read_file in tainted sessions is restricted to authorized SKILL.md instructions and this conversation's own artifact directory.", authzPol.Profile, authzPol.TaintReason))
 			}
 			return writePreToolAllow(w)
 		case "run_command":
 			cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
 			argv, aErr := strictArgv(cmdLine)
 			if aErr != nil {
-				return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): %v. Invoke single canonical 'hq ...' commands directly without shell loops, ';', '&&', or pipes (use comma-separated --thread=t1,t2 on 'hq watch read' and --all or --item=i1,i2 on 'hq watch ack').", taintReason, aErr))
+				return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq %s policy (%s): %v. Invoke single canonical 'hq ...' commands directly without shell loops, ';', '&&', or pipes (use comma-separated --thread=t1,t2 on 'hq watch read' and --all or --item=i1,i2 on 'hq watch ack').", authzPol.Profile, authzPol.TaintReason, aErr))
 			}
-			if vErr := validateTaintedHQArgv(argv); vErr != nil {
-				return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): %v", taintReason, vErr))
+			if vErr := authzPol.EvalHQArgv(argv); vErr != nil {
+				return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq %s policy (%s): %v", authzPol.Profile, authzPol.TaintReason, vErr))
 			}
-			return writePreToolAllowOverwrite(w, map[string]interface{}{"CommandLine": wrapScrubbedArgvCommand(argv)})
+			scrubbed := map[string]interface{}{"CommandLine": wrapScrubbedArgvCommand(argv)}
+			if apprPol, _, _ := approvals.LoadPolicy(vaultDir); authzPol.Exec.PreToolAutoApproveHQ && (apprPol.HostPresetBridge || apprPol.InteractiveGateMode == approvals.InteractiveGateNativeForceAsk) {
+				return writePreToolAutoApproveOverwrite(w, scrubbed)
+			}
+			return writePreToolAllowOverwrite(w, scrubbed)
 		default:
-			return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq Quarantined Reader policy (%s): tool %q is disabled in tainted sessions (deny-by-default).", taintReason, payload.ToolCall.Name))
+			return writePreToolDeny(w, fmt.Sprintf("Blocked by agy-hq %s policy (%s): tool %q is disabled in tainted sessions (deny-by-default).", authzPol.Profile, authzPol.TaintReason, payload.ToolCall.Name))
 		}
 	}
 
@@ -463,6 +486,9 @@ func handlePreToolRunCommand(w io.Writer, vaultDir string, payload ToolCallPaylo
 	if isBlockedChannelGatewayShell(cmdLine) {
 		return true, writePreToolDeny(w, "Blocked by agy-hq Channel Bridge policy: `hq channel inbound|callback|flush|apply-config` and `/api/channels/*` are daemon/approval-only gateways and may never be invoked directly by an LLM session (use `hq channel configure` to stage config updates).")
 	}
+	if isBlockedDelegateGatewayShell(cmdLine) {
+		return true, writePreToolDeny(w, "Blocked by agy-hq Scoped Delegate policy: `hq delegate poll|sync-snapshots|apply-policy|apply-reply` are daemon/approval-only gateways and may never be invoked directly by an LLM session (use `hq delegate configure` to update delegate policies).")
+	}
 	if reHQClaimDesk.MatchString(cmdLine) && (ctx.isSubagent() || ctx.isAuto()) {
 		return true, writePreToolDeny(w, "Blocked by Front Desk Lease Subagent Invariant: subagents and autonomous background workers are ephemeral processes. They must never attempt to claim, adopt, or modify the Front Desk intake lease (claim-desk is strictly prohibited for subagents).")
 	}
@@ -529,9 +555,13 @@ func handlePreToolRunCommand(w io.Writer, vaultDir string, payload ToolCallPaylo
 	if len(payload.WorkspacePaths) > 0 {
 		workDir = payload.WorkspacePaths[0]
 	}
-	if eval := approvals.EvaluateCommand(pol, checkLine, isAuto, workDir); eval.Gated {
+	isRestricted := isAuto || ctx.isSubagent()
+	if _, isTaintedCaller := ctx.tainted(); isTaintedCaller {
+		isRestricted = true
+	}
+	if eval := approvals.EvaluateCommand(pol, checkLine, isRestricted, workDir); eval.Gated {
 		var reason string
-		if isAuto {
+		if isRestricted {
 			reason = fmt.Sprintf(
 				"Blocked by agy-hq Unattended [Auto] policy (%s): autonomous background runs may not execute external mutating command %q directly. Stage it via `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` for human review.",
 				eval.RuleID, cmdLine, eval.RuleID, cmdLine,
@@ -546,6 +576,9 @@ func handlePreToolRunCommand(w io.Writer, vaultDir string, payload ToolCallPaylo
 				"Blocked by agy-hq approval policy (%s): irreversible outbound command %q must not be executed directly. Stage it using `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` and ask the user via `ask_question`.",
 				eval.RuleID, cmdLine, eval.RuleID, cmdLine,
 			)
+		}
+		if !isRestricted && pol.InteractiveGateMode == approvals.InteractiveGateNativeForceAsk && eval.RuleID != "rsi_apply" {
+			return true, writePreToolForceAsk(w, fmt.Sprintf("Approval required (%s): %s", eval.RuleID, eval.Reason))
 		}
 		return true, writePreToolDeny(w, reason)
 	}
@@ -584,6 +617,10 @@ func handlePreToolProtectedWrites(w io.Writer, vaultDir string, payload ToolCall
 		filepath.Join(canonVault, "memory", "tasks.json"),
 		filepath.Join(canonVault, "memory", "workspaces.json"),
 		filepath.Join(canonVault, "memory", ".workspaces.lock"),
+		filepath.Join(canonVault, "memory", "delegates_queues"),
+		filepath.Join(canonVault, "memory", "delegates_state.json"),
+		filepath.Join(canonVault, "memory", ".delegates.lock"),
+		filepath.Join(canonVault, "memory", "delegates_audit.jsonl"),
 	}
 	if matchesAnyPathPrefix(canonPath, protectedStores) {
 		return true, writePreToolDeny(w, "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, extension state, RSI hypotheses, durable event/timer/outbox/watcher stores, task/workspace ledgers, or intervention audit logs are prohibited.")

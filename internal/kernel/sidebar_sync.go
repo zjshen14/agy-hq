@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/store"
 )
 
@@ -108,13 +109,14 @@ type lsJetboxSummariesFrame struct {
 	Updates map[string]LSTrajectorySummary `json:"updates"`
 }
 
-// LSConversationAnnotations models exa.jetski_cortex_pb.ConversationAnnotations on read responses.
+// LSConversationAnnotations models ConversationAnnotations on read responses.
 type LSConversationAnnotations struct {
 	Title                   string `json:"title,omitempty"`
 	Archived                bool   `json:"archived"`
 	ArchivalStatusTimestamp string `json:"archivalStatusTimestamp,omitempty"`
 	Starred                 bool   `json:"starred"`
 	Pinned                  bool   `json:"pinned"`
+	PermissionPreset        string `json:"permissionPreset,omitempty"`
 }
 
 type lsGetAllTrajectoriesRequest struct {
@@ -140,6 +142,7 @@ type lsConversationPatch struct {
 	Archived                *bool  `json:"archived,omitempty"`
 	ArchivalStatusTimestamp string `json:"archivalStatusTimestamp,omitempty"`
 	Pinned                  *bool  `json:"pinned,omitempty"`
+	PermissionPreset        string `json:"permissionPreset,omitempty"`
 }
 
 type sidebarRPCError struct {
@@ -499,6 +502,40 @@ func (c *SidebarSyncClient) UpdateConversationAnnotations(ctx context.Context, c
 		MergeAnnotations: true,
 	}
 	return c.doJSONRPC(ctx, "UpdateConversationAnnotations", req, nil, timeout)
+}
+
+// SetConversationPermissionPreset applies a host permission preset annotation to a root conversation (RFC-0026 §3.7).
+func (c *SidebarSyncClient) SetConversationPermissionPreset(ctx context.Context, cascadeID string, preset authz.HostPermissionPreset) error {
+	cascadeID = strings.TrimSpace(cascadeID)
+	enumVal := preset.ProtoEnum()
+	if cascadeID == "" || enumVal == "" {
+		return nil
+	}
+	return c.UpdateConversationAnnotations(ctx, cascadeID, nil, lsConversationPatch{
+		PermissionPreset: enumVal,
+	}, DefaultSidebarUnaryTimeout)
+}
+
+// SyncConversationPermissionPreset best-effort applies a host permission preset on cascadeID
+// using live LanguageServerService credentials (no-op when LS credentials are unavailable or unsupported).
+func SyncConversationPermissionPreset(vaultDir, cascadeID string, preset authz.HostPermissionPreset) error {
+	cascadeID = strings.TrimSpace(cascadeID)
+	if cascadeID == "" || preset.ProtoEnum() == "" {
+		return nil
+	}
+	client := NewSidebarSyncClient(SidebarSyncConfig{})
+	if !client.Available() {
+		if creds, ok := discoverLSCredentials(vaultDir); ok {
+			client = NewSidebarSyncClient(SidebarSyncConfig{
+				BaseURL:   creds.BaseURL,
+				CSRFToken: creds.CSRFToken,
+			})
+		}
+	}
+	if !client.Available() {
+		return nil
+	}
+	return client.SetConversationPermissionPreset(context.Background(), cascadeID, preset)
 }
 
 // SidebarSafetyAction classifies the outcome of EvaluateSidebarArchiveSafety.

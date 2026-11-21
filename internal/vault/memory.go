@@ -19,22 +19,23 @@ import (
 
 const (
 	// RFC-0024 Dual Line + Byte Budgets
-	MaxMemoryIndexLines   = 40
-	MaxMemoryIndexBytes   = 2200
-	MaxMemoryLineBytes    = 180
-	MaxUserAdvisoryBytes  = 2000
-	MaxFactStatementRunes = 240
-	MaxHotActiveFacts     = 50
-	MaxTopicPages         = 25
-	MaxTopicLines         = 120
-	MaxTopicBytes         = 6000
-	MaxTopicsTotalBytes   = 100000
-	MaxPlaybookLines      = 25
-	MaxPlaybookBytes      = 1200
-	MaxSessionFullBytes   = 12000
-	MaxSessionLeanBytes   = 4800
-	MaxSessionTaintBytes  = 800
-	ImminentExpiryWindow  = 72 * time.Hour
+	MaxMemoryIndexLines     = 40
+	MaxMemoryIndexBytes     = 2200
+	MaxMemoryLineBytes      = 180
+	MaxUserAdvisoryBytes    = 2000
+	MaxFactStatementRunes   = 240
+	MaxHotActiveFacts       = 50
+	MaxTopicPages           = 25
+	MaxTopicLines           = 120
+	MaxTopicBytes           = 6000
+	MaxTopicsTotalBytes     = 100000
+	MaxPlaybookLines        = 25
+	MaxPlaybookBytes        = 1200
+	MaxSessionFullBytes     = 12000
+	MaxSessionLeanBytes     = 4800
+	MaxSessionDelegateBytes = 2048
+	MaxSessionTaintBytes    = 800
+	ImminentExpiryWindow    = 72 * time.Hour
 )
 
 // TopicPage represents a single Knowledge Wiki page discovered in local/memory/topics/<slug>.md.

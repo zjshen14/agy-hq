@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
-	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/workspace"
@@ -82,7 +82,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	_ = hostpaths.PersistFromLiveEnv(vaultDir)
 	_ = kernel.RecordLiveLSSession(vaultDir)
 	bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
-	_, isTaintedStart := taint.Check(vaultDir, payload.ConversationID)
+	authzPol := authz.Resolve(vaultDir, payload.ConversationID, authz.ResolveHints{})
+	isTaintedStart := authzPol.Tainted
 
 	// Zero-touch auto-bootstrap: if USER.md does not exist yet in the target Vault,
 	// automatically initialize the private Vault from disk templates/ or embedded templates.FS.
@@ -191,7 +192,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				hasAutoOrSpawnEvidence(vaultDir, payload.ConversationID, firstUserInputRaw, promptText))
 		leanAuto = isSubagent || isAutoWorker || isTaintedStart || attemptSuperseded
 		isFrontDesk = !leanAuto && !hasQueuedArchive && (existing.ConversationID == payload.ConversationID || (!ok && shouldAutoClaimVacantFrontDesk(payload, vaultDir)))
-		if isTaintedStart {
+		if isTaintedStart && authzPol.Profile == authz.ProfileQuarantinedReader {
 			zone2Sections = append(zone2Sections, "## 🛡️ Active Role: Quarantined Triage Worker (TAINTED)\n- Untrusted external channel content is in scope. Private Vault memory (`MEMORY.md`, wiki topics, facts) is withheld, and outbound commands are restricted to `hq offer stage` and `hq outbox add`.")
 		}
 
@@ -322,9 +323,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 	now := time.Now().UTC()
 	scopeCtx := ResolveSessionScopes(vaultDir, payload, matchedTask, hasMatchedTask, isFrontDesk, isSubagent, isAutoWorker, leanAuto, promptText)
 
-	// Quarantined Tainted Session: hard <= 800B cap; omit all private Vault memory layers.
+	// Tainted Session (fail_closed / classifier / quarantined_reader / scoped_delegate): omit all private Vault memory layers.
 	if isTaintedStart {
-		msg := capSessionEnvelope("[agy-hq Session Context Loaded]\n\n"+strings.Join(zone2Sections, "\n\n"), vault.MaxSessionTaintBytes)
+		msg, _ := renderAuthzTaintedSessionBanner(authzPol, zone2Sections)
 		return writeSessionStartMessage(w, msg)
 	}
 

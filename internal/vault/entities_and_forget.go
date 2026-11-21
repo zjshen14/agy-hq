@@ -340,6 +340,44 @@ func LookupEntities(vaultDir, query string) ([]EntityDossier, error) {
 	return matches, nil
 }
 
+// LookupEntitiesRedacted performs a taint-safe lookup that rejects empty queries, matches ONLY against
+// public routing fields (Slug, Name, Emails, Handles — never Context, Spaces, or Notes), and strips
+// private Context, Notes, Spaces, and Path fields from every returned dossier (RFC-0026 Phase 2A-0).
+func LookupEntitiesRedacted(vaultDir, query string) ([]EntityDossier, error) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil, fmt.Errorf("non-empty query is required in quarantined sessions")
+	}
+	all, err := ListEntities(vaultDir)
+	if err != nil {
+		return nil, err
+	}
+	var matches []EntityDossier
+	for _, d := range all {
+		if entityMatchesRedactedQuery(d, q) {
+			d.Context = ""
+			d.Notes = nil
+			d.Spaces = nil
+			d.Path = ""
+			matches = append(matches, d)
+		}
+	}
+	return matches, nil
+}
+
+func entityMatchesRedactedQuery(d EntityDossier, qLower string) bool {
+	fields := []string{d.Slug, d.Name}
+	fields = append(fields, d.Emails...)
+	fields = append(fields, d.Handles...)
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), qLower) {
+			return true
+		}
+	}
+	slugQ := SanitizeEntitySlug(qLower)
+	return slugQ != "" && strings.Contains(d.Slug, slugQ)
+}
+
 func entityMatchesQuery(d EntityDossier, qLower string) bool {
 	fields := []string{d.Slug, d.Name, d.Kind, d.Context}
 	fields = append(fields, d.Emails...)

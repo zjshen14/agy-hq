@@ -525,3 +525,92 @@ func TestReadOnlySearchSegmentFilteringAndAdversarialBypassDefense(t *testing.T)
 		}
 	}
 }
+
+func TestInteractivePresetsAndGateModes(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	// Register a synthetic companion pack contributing a non-core wsd-* rule.
+	prevProvider := approvals.RegisteredExtensionApprovalRulesProvider
+	approvals.RegisteredExtensionApprovalRulesProvider = func(string) []approvals.ExtensionPackRules {
+		return []approvals.ExtensionPackRules{
+			{
+				PackID: "acme-work-pack",
+				Rules: []approvals.Rule{
+					{
+						ID:          "wsd-delete-workspace",
+						Description: "Pack destructive workspace delete",
+						Mode:        approvals.ModeAlways,
+						Commands:    []string{`\bws-cli\s+delete\b`},
+					},
+				},
+			},
+		}
+	}
+	t.Cleanup(func() { approvals.RegisteredExtensionApprovalRulesProvider = prevProvider })
+
+	// 1. low_friction + native_force_ask in config.yaml
+	cfg := `approvals:
+  interactive_preset: low_friction
+  interactive_gate_mode: native_force_ask
+`
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	pol, _, err := approvals.LoadPolicy(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+	if pol.InteractivePreset != approvals.InteractivePresetLowFriction {
+		t.Fatalf("expected low_friction preset, got %q", pol.InteractivePreset)
+	}
+	if pol.InteractiveGateMode != approvals.InteractiveGateNativeForceAsk {
+		t.Fatalf("expected native_force_ask gate mode, got %q", pol.InteractiveGateMode)
+	}
+
+	// Interactive owner (isAuto=false): wsd-*, workspace_own, workspace_remove relax to 0 popups.
+	for _, cmd := range []string{
+		"ws-cli delete dev-01",
+		"hq workspace own acme/p:ws1",
+		"hq workspace remove acme/p:ws1 --force",
+	} {
+		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); dec.Gated {
+			t.Fatalf("expected low_friction to allow %q in interactive mode, got %+v", cmd, dec)
+		}
+		// Below top of lattice (isAuto=true): MUST STILL BE 100% GATED!
+		if dec := approvals.EvaluateCommand(pol, cmd, true, ""); !dec.Gated {
+			t.Fatalf("SECURITY REGRESSION: low_friction leaked into unattended/auto mode for %q", cmd)
+		}
+	}
+
+	// Core irreversible boundaries MUST remain gated even in interactive low_friction mode.
+	for _, cmd := range []string{
+		"hq gmail send --to=alice@example.com --subject=hi --body=hi",
+		"gh release create v1.0.0",
+		"hq delegate apply-policy /tmp/draft.json",
+		"hq delegate apply-reply /tmp/reply.json",
+	} {
+		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); !dec.Gated {
+			t.Fatalf("expected core rule to remain gated under low_friction for %q", cmd)
+		}
+	}
+
+	// 2. strict preset gates forge_git even interactively.
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte("approvals:\n  interactive_preset: strict\n"), 0o600); err != nil {
+		t.Fatalf("write strict config: %v", err)
+	}
+	strictPol, _, err := approvals.LoadPolicy(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadPolicy strict: %v", err)
+	}
+	if dec := approvals.EvaluateCommand(strictPol, "git push origin main", false, ""); !dec.Gated {
+		t.Fatalf("expected strict preset to gate git push interactively")
+	}
+
+	// 3. Invalid values fail validation cleanly.
+	if _, err := approvals.ValidateConfigYAML("approvals:\n  interactive_preset: turbo_yolo\n"); err == nil {
+		t.Fatalf("expected invalid interactive_preset to error")
+	}
+	if _, err := approvals.ValidateConfigYAML("approvals:\n  interactive_gate_mode: magic\n"); err == nil {
+		t.Fatalf("expected invalid interactive_gate_mode to error")
+	}
+}

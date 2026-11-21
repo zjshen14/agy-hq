@@ -408,6 +408,7 @@ func runGmailCLI(rootDir, vaultDir string, args []string) {
 		fmt.Printf("Recorded %d triaged Gmail thread(s) for batch %s\n", len(items), *batchID)
 
 	case "attachment-quarantine":
+		denyIfCallerTainted(vaultDir, "gmail attachment-quarantine")
 		fs := flag.NewFlagSet("gmail attachment-quarantine", flag.ExitOnError)
 		filePath := fs.String("file", "", "Path to downloaded attachment file")
 		fromHdr := fs.String("from", "", "Sender From header")

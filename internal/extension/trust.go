@@ -733,6 +733,28 @@ func BuildTrustBundle(vaultDir, targetSpec, explicitPath string) (TrustBundle, e
 			}
 		}
 	}
+	for _, dt := range manifest.Components.DelegateTransports {
+		if err := pinExecComponent("delegate_transport", dt.ID, dt.Command); err != nil {
+			return TrustBundle{}, err
+		}
+	}
+	// RFC-0026 D3: SHA-256-pin all pack-declared skills/<name>/SKILL.md files so
+	// tainted sessions may read only verified skill instructions from trusted packs.
+	if skillEntries, sErr := os.ReadDir(filepath.Join(canonPack, "skills")); sErr == nil {
+		for _, ent := range skillEntries {
+			if !ent.IsDir() || !reValidPackSkillDir.MatchString(ent.Name()) {
+				continue
+			}
+			relSkill := filepath.ToSlash(filepath.Join("skills", ent.Name(), "SKILL.md"))
+			if _, already := tt.Files[relSkill]; already {
+				continue
+			}
+			fullSkill := filepath.Join(canonPack, filepath.FromSlash(relSkill))
+			if st, lErr := os.Lstat(fullSkill); lErr == nil && st.Mode().IsRegular() && st.Mode()&os.ModeSymlink == 0 {
+				_, _ = pinRel(relSkill)
+			}
+		}
+	}
 	for _, reqBin := range manifest.Requires.Bins {
 		ref := reqBin.Name
 		if len(reqBin.ProbeArgv) > 0 && strings.TrimSpace(reqBin.ProbeArgv[0]) != "" {
@@ -881,6 +903,80 @@ func StageTrustProposal(vaultDir, targetSpec, explicitPath, convID string) (appr
 	return prop, bundle, err
 }
 
+// PinExternalBinary resolves and SHA-256-hashes an external CLI binary (rejecting shells/interpreters/hq).
+func PinExternalBinary(rawBin string) (PinnedBinary, error) {
+	rawBin = strings.TrimSpace(rawBin)
+	if rawBin == "" || IsBlockedComponentCommand0(rawBin) {
+		return PinnedBinary{}, fmt.Errorf("binary %q cannot be empty, a shell/interpreter, or hq itself", rawBin)
+	}
+	return pinBinaryRef(rawBin)
+}
+
+// VerifyTrustedPackSkillFile reports whether absPath is a SHA-256-verified SKILL.md
+// inside an active trusted companion pack's skills/ directory, returning its logical
+// "<packID>/<skillName>" identifier when valid. Performs zero writes.
+func VerifyTrustedPackSkillFile(vaultDir, absPath string) (string, bool) {
+	if strings.TrimSpace(vaultDir) == "" || strings.TrimSpace(absPath) == "" {
+		return "", false
+	}
+	canonFile, err := canonicalDir(absPath)
+	if err != nil {
+		return "", false
+	}
+	packs, reg := loadActiveTrustedPacksWithReg(vaultDir)
+	for _, dp := range packs {
+		canonPack, cErr := canonicalDir(dp.Path)
+		if cErr != nil {
+			continue
+		}
+		rel, rErr := filepath.Rel(canonPack, canonFile)
+		if rErr != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		relSlash := filepath.ToSlash(rel)
+		parts := strings.Split(relSlash, "/")
+		if len(parts) != 3 || parts[0] != "skills" || parts[2] != "SKILL.md" {
+			continue
+		}
+		if _, vErr := verifyTrustedFileWithRegistry(vaultDir, reg, "pack:"+dp.ID, canonFile, false); vErr == nil {
+			return dp.ID + "/" + parts[1], true
+		}
+	}
+	return "", false
+}
+
+// UpsertTrustTarget atomically updates a single TrustedTarget entry (e.g. "delegates")
+// in <vault>/private/trust.json under store.RankExtensions.
+func UpsertTrustTarget(vaultDir string, target TrustedTarget) error {
+	if strings.TrimSpace(vaultDir) == "" {
+		return fmt.Errorf("vaultDir is required")
+	}
+	if strings.TrimSpace(target.SourceID) == "" || strings.TrimSpace(target.CanonicalRoot) == "" {
+		return fmt.Errorf("trust target missing source_id or canonical_root")
+	}
+	return store.With(context.Background(), store.RankExtensions, trustLockPath(vaultDir), func(_ context.Context) error {
+		reg, err := LoadTrustRegistry(vaultDir)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if reg.Targets == nil {
+			reg.Targets = make(map[string]TrustedTarget)
+		}
+		target.ApprovedAt = time.Now().UTC().Format(time.RFC3339)
+		reg.Targets[target.SourceID] = target
+		reg.SchemaVersion = TrustSchemaVersion
+		reg.UpdatedAt = target.ApprovedAt
+		out, err := json.MarshalIndent(reg, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(trustFilePath(vaultDir)), 0o700); err != nil {
+			return err
+		}
+		return store.WriteAtomic(trustFilePath(vaultDir), append(out, '\n'), 0o600)
+	})
+}
+
 // ApplyTrustBundle persists a verified TrustBundle into <vault>/private/trust.json (0600).
 func ApplyTrustBundle(vaultDir string, rawBundle []byte) error {
 	if strings.TrimSpace(vaultDir) == "" {
@@ -892,28 +988,5 @@ func ApplyTrustBundle(vaultDir string, rawBundle []byte) error {
 	if err := dec.Decode(&bundle); err != nil {
 		return fmt.Errorf("invalid trust bundle JSON: %w", err)
 	}
-	if strings.TrimSpace(bundle.Target.SourceID) == "" || strings.TrimSpace(bundle.Target.CanonicalRoot) == "" {
-		return fmt.Errorf("trust bundle missing source_id or canonical_root")
-	}
-	return store.With(context.Background(), store.RankExtensions, trustLockPath(vaultDir), func(_ context.Context) error {
-		reg, err := LoadTrustRegistry(vaultDir)
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if reg.Targets == nil {
-			reg.Targets = make(map[string]TrustedTarget)
-		}
-		bundle.Target.ApprovedAt = time.Now().UTC().Format(time.RFC3339)
-		reg.Targets[bundle.Target.SourceID] = bundle.Target
-		reg.SchemaVersion = TrustSchemaVersion
-		reg.UpdatedAt = bundle.Target.ApprovedAt
-		out, err := json.MarshalIndent(reg, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(trustFilePath(vaultDir)), 0o700); err != nil {
-			return err
-		}
-		return store.WriteAtomic(trustFilePath(vaultDir), append(out, '\n'), 0o600)
-	})
+	return UpsertTrustTarget(vaultDir, bundle.Target)
 }

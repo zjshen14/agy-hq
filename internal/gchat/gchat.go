@@ -863,7 +863,27 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 		return ThreadDetail{}, "", err
 	}
 	convID = resolvedConv
-	if _, alreadyTainted := gmail.IsSessionTainted(vaultDir, convID); !alreadyTainted {
+	if rec, alreadyTainted := taint.Check(vaultDir, convID); alreadyTainted {
+		if strings.HasPrefix(rec.Source, "fail_closed:") || len(rec.ItemKeys) == 0 {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: tainted session has no bound gchat space keys")
+		}
+		if rec.Connector != "" && rec.Connector != "gchat" {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: locked to connector %q (got gchat)", rec.Connector)
+		}
+		if rec.Account != "" && cfg.Alias != "" && rec.Account != cfg.Alias {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: locked to account %q (got %q)", rec.Account, cfg.Alias)
+		}
+		allowed := false
+		for _, k := range rec.ItemKeys {
+			if k == spaceID || k == "gchat:space:"+spaceID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: space %q is outside bound batch keys", spaceID)
+		}
+	} else {
 		if resolvedID, _, rErr := ResolveSpaceTarget(vaultDir, cfg.Alias, spaceID); rErr == nil && resolvedID != "" {
 			spaceID = resolvedID
 		}
@@ -1223,6 +1243,15 @@ func RunPrecheck(vaultDir, accountFilter string) ([]TriageBatch, string, error) 
 	return batches, fmt.Sprintf("GCHAT_NEW (%d new message(s) across %d batch(es))", totalNew, len(batches)), nil
 }
 
+var reValidGChatTriageBatchID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func validateGChatTriageBatchID(batchID string) error {
+	if !reValidGChatTriageBatchID.MatchString(batchID) || strings.Contains(batchID, "..") || strings.ContainsAny(batchID, `/\`) {
+		return fmt.Errorf("invalid triage batch id %q (must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ without '..')", batchID)
+	}
+	return nil
+}
+
 // RecordTriageResults validates and persists structured Google Chat triage results from a Quarantined Reader worker.
 func RecordTriageResults(vaultDir, batchID string, items []TriageItem) error {
 	for _, it := range items {
@@ -1235,23 +1264,26 @@ func RecordTriageResults(vaultDir, batchID string, items []TriageItem) error {
 			return fmt.Errorf("summary for space %s exceeds 500 chars", it.SpaceID)
 		}
 	}
-	dir := filepath.Join(vaultDir, "memory", "gchat", "triage")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+	batchID = strings.TrimSpace(batchID)
 	if batchID == "" {
 		batchID = fmt.Sprintf("gchat-triage-%d", time.Now().Unix())
+	} else if err := validateGChatTriageBatchID(batchID); err != nil {
+		return err
+	}
+	dir := filepath.Join(vaultDir, "memory", "gchat", "triage")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, batchID+".json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, batchID+".json"), data, 0o600); err != nil {
 		return err
 	}
 
 	notesDir := filepath.Join(vaultDir, "notes", "inbox")
-	_ = os.MkdirAll(notesDir, 0o755)
+	_ = os.MkdirAll(notesDir, 0o700)
 	var md strings.Builder
 	fmt.Fprintf(&md, "# Google Chat Triage Digest (%s)\n\n", time.Now().Format("2006-01-02 15:04"))
 	for _, it := range items {
@@ -1268,7 +1300,7 @@ func RecordTriageResults(vaultDir, batchID string, items []TriageItem) error {
 			fmt.Fprintf(&md, "  - Auto-Drafted Reply: `%s` (Proposal: `%s`)\n", it.DraftID, it.ProposalID)
 		}
 	}
-	_ = os.WriteFile(filepath.Join(notesDir, batchID+".md"), []byte(md.String()), 0o644)
+	_ = os.WriteFile(filepath.Join(notesDir, batchID+".md"), []byte(md.String()), 0o600)
 	return nil
 }
 

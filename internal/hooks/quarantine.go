@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/events"
-	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
@@ -168,55 +168,7 @@ func bindSpawnTokenFromTranscript(vaultDir, convID, lastUserInput, transcriptPat
 			continue
 		}
 		boundAny = true
-		needsTaint := false
-		var evIDs []string
-		var itemKeys []string
-		connector := ""
-		account := ""
-		batchID := ""
-		source := "spawn_batch"
-		for _, ev := range bound {
-			evIDs = append(evIDs, ev.ID)
-			if ev.LeaseID != "" && batchID == "" {
-				batchID = ev.LeaseID
-			}
-			if ev.Source != "" && source == "spawn_batch" {
-				source = "spawn_batch:" + ev.Source
-			}
-			if ev.TaintOnSpawn {
-				needsTaint = true
-			}
-			if ev.Metadata != nil {
-				if ik := strings.TrimSpace(ev.Metadata["item_key"]); ik != "" {
-					itemKeys = append(itemKeys, ik)
-				}
-				if tk := strings.TrimSpace(ev.Metadata["thread_key"]); tk != "" {
-					itemKeys = append(itemKeys, tk)
-				}
-				for _, cid := range strings.Split(ev.Metadata["coalesced_item_ids"], ",") {
-					if cid = strings.TrimSpace(cid); cid != "" {
-						itemKeys = append(itemKeys, cid)
-					}
-				}
-				if connector == "" {
-					connector = strings.TrimSpace(ev.Metadata["connector"])
-				}
-				if account == "" {
-					account = strings.TrimSpace(ev.Metadata["account"])
-				}
-			}
-		}
-		if needsTaint {
-			_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{
-				ConvID:    convID,
-				Source:    source,
-				Connector: connector,
-				Account:   account,
-				BatchID:   batchID,
-				EventIDs:  evIDs,
-				ItemKeys:  itemKeys,
-			})
-		}
+		_, _, _ = authz.BindSessionFromEvents(context.Background(), vaultDir, convID, bound)
 	}
 
 	if boundAny || userInputHasSpawn {
@@ -357,131 +309,6 @@ func wrapScrubbedArgvCommand(argv []string) string {
 func wrapScrubbedAutoShellCommand(cmdLine string) string {
 	return "env -u ANTIGRAVITY_CSRF_TOKEN -u ANTIGRAVITY_LS_ADDRESS -u ANTIGRAVITY_AGENTAPI_EXE " +
 		"ANTIGRAVITY_PLUGIN_SHIM_DIR=/nonexistent-hq-sentinel sh -c " + shellQuoteSingle(cmdLine)
-}
-
-// validateTaintedHQArgv enforces the strict Quarantined Worker CLI allowlist (RFC-0017b §3.2):
-// ONLY `watch read|query|ack`, `offer stage`, `outbox add`, `timers set`, `goals mark-replied`,
-// `memory lookup`, `brief format-quarantined`, `status`, and `gmail|gchat read-quarantined|triage-result` are allowed.
-// `propose`, `approve`, `gmail draft`, `gchat draft`, `spawn`, `subagent`, and `exec-sandboxed` are DENIED.
-func validateTaintedHQArgv(argv []string) error {
-	if len(argv) < 2 || !isHQBinaryToken(argv[0]) {
-		return fmt.Errorf("only single canonical `hq` commands are permitted in quarantined sessions")
-	}
-	for _, tok := range argv[1:] {
-		if strings.HasPrefix(tok, "@") {
-			return fmt.Errorf("leading `@` file-inclusion token %q is forbidden in quarantined sessions", tok)
-		}
-		if _, val, ok := strings.Cut(tok, "="); ok && strings.HasPrefix(val, "@") {
-			return fmt.Errorf("leading `@` flag value in %q is forbidden in quarantined sessions", tok)
-		}
-	}
-	top := argv[1]
-	sub := ""
-	if len(argv) >= 3 && !strings.HasPrefix(argv[2], "-") {
-		sub = argv[2]
-	}
-	switch top {
-	case "status":
-		return nil
-	case "watch":
-		if sub == "read" || sub == "query" || sub == "ack" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq watch` allows only read, query, or ack (got %q)", sub)
-	case "offer":
-		if sub == "stage" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq offer` allows only stage (got %q)", sub)
-	case "outbox":
-		if sub == "add" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq outbox` allows only add (got %q)", sub)
-	case "timers":
-		if sub == "set" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq timers` allows only set (got %q)", sub)
-	case "goals":
-		if sub == "mark-replied" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq goals` allows only mark-replied (got %q)", sub)
-	case "memory":
-		if sub == "lookup" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq memory` allows only lookup (got %q)", sub)
-	case "brief":
-		if sub == "format-quarantined" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq brief` allows only format-quarantined (got %q)", sub)
-	case "gmail", "gchat":
-		if sub == "read-quarantined" || sub == "read" || sub == "triage-result" {
-			return nil
-		}
-		return fmt.Errorf("quarantined `hq %s` allows only read-quarantined or triage-result; use `hq offer stage` instead of %q", top, sub)
-	default:
-		return fmt.Errorf("subcommand `hq %s` is forbidden in quarantined sessions; stage actions via `hq offer stage` or `hq outbox add`", top)
-	}
-}
-
-func isAllowedTaintedReadPath(vaultDir string, payload ToolCallPayload, rawPath string) bool {
-	if strings.TrimSpace(rawPath) == "" {
-		return false
-	}
-	absRaw := resolveHookLexicalAbs(vaultDir, rawPath)
-	canonPath := canonicalizeHookPath(vaultDir, rawPath)
-	if absRaw == "" || canonPath == "" || pathHasSymlink(canonPath) {
-		return false
-	}
-	canonSlash := filepath.ToSlash(canonPath)
-	rawSlash := filepath.ToSlash(absRaw)
-	if isSystemGeneratedTranscriptPath(canonSlash) || isSystemGeneratedTranscriptPath(rawSlash) {
-		return false
-	}
-
-	roots := hostpaths.Resolve(vaultDir)
-
-	// 1. Own conversation artifact directory (excluding .system_generated)
-	if isPathInAnyBase(vaultDir, allowedArtifactDirs(payload.CommonPayload, "", roots), rawPath) {
-		return true
-	}
-
-	// Never allow reading any file inside <vault>/ even if a directory inside <vault>/ mimics /.agents/plugins/.../skills/
-	if strings.TrimSpace(vaultDir) != "" {
-		if pathHasPrefix(canonPath, canonicalizeHookPath(vaultDir, vaultDir)) {
-			return false
-		}
-	}
-
-	// 2. Installed, shared HQ, or workspace-root plugin skills/ directories (read-only SKILL.md instructions)
-	if plugRoot := strings.TrimSpace(os.Getenv("PLUGIN_ROOT")); plugRoot != "" {
-		if _, ok := isSafePathUnderBase(vaultDir, filepath.Join(plugRoot, "skills"), rawPath); ok {
-			return true
-		}
-	}
-	var trustedPluginBases []string
-	if roots.PluginsDir != "" {
-		trustedPluginBases = append(trustedPluginBases, roots.PluginsDir)
-	}
-	if roots.AppDataDir != "" {
-		trustedPluginBases = append(trustedPluginBases, filepath.Join(roots.AppDataDir, "hq", "plugins"))
-	}
-	if strings.TrimSpace(vaultDir) != "" {
-		trustedPluginBases = append(trustedPluginBases, filepath.Join(filepath.Dir(filepath.Clean(vaultDir)), ".agents", "plugins"))
-	}
-	for _, plugBase := range trustedPluginBases {
-		if relSlash, ok := isSafePathUnderBase(vaultDir, plugBase, rawPath); ok && relSlash != "." {
-			parts := strings.Split(relSlash, "/")
-			if len(parts) >= 2 && parts[1] == "skills" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func parseCanonicalHQApprove(cmdLine string) (bin, propID, shaPrefix string, err error) {

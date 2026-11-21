@@ -29,6 +29,7 @@ const (
 	RankGoals         Rank = 50 // <vault>/memory/goals.json
 	RankOutbox        Rank = 60 // <vault>/memory/outbox/items.jsonl
 	RankChannels      Rank = 65 // <vault>/memory/channels/<bridge>.json
+	RankDelegates     Rank = 66 // <vault>/memory/delegates_state.json & memory/delegates_queues/*.jsonl
 	RankTaint         Rank = 70 // <vault>/private/taint/*.json
 	RankTasks         Rank = 75 // <vault>/memory/tasks.json & tasks_archive.jsonl
 	RankWorkspaces    Rank = 76 // <vault>/memory/workspaces.json (RFC-0025 ledger; pure leaf callbacks, distinct from RankMemory)

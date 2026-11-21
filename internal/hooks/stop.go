@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
-	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 )
@@ -92,7 +92,16 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 		if userPrompt == "" {
 			userPrompt = transcriptUserPrompt
 		}
-		_, isTainted := taint.Check(vaultDir, payload.ConversationID)
+		if !isFrontDesk {
+			bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
+		}
+		authzPol := authz.Resolve(vaultDir, payload.ConversationID, authz.ResolveHints{IsFrontDesk: isFrontDesk})
+		isTainted := authzPol.Tainted
+		taintedSession := isTainted || tm.TaintedCmdSeen
+		taskSummary := summary
+		if taintedSession {
+			taskSummary = "Tainted worker completed."
+		}
 
 		var existingTasks []kernel.ActiveTask
 		if tasks, err := kernel.ListTasks(vaultDir); err == nil {
@@ -132,7 +141,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				ToolsUsed:            toolsUsed,
 				FilesModified:        filesModified,
 				TerminationReason:    payload.TerminationReason,
-				ResponseSummary:      summary,
+				ResponseSummary:      taskSummary,
 			}
 			if data, err := json.MarshalIndent(entry, "", "  "); err == nil {
 				fileName := fmt.Sprintf("%s-%d.json", payload.ConversationID, execNum)
@@ -148,7 +157,6 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			var matchedTask *kernel.ActiveTask
 			// If this conversation is not the Front Desk, auto-adopt/update it in local/memory/tasks.json
 			if !isFrontDesk {
-				bindSpawnTokenFromTranscript(vaultDir, payload.ConversationID, payload.LastUserInput, payload.TranscriptPath)
 				alreadyTracked := false
 				for i := range existingTasks {
 					if existingTasks[i].ConversationID == payload.ConversationID {
@@ -209,7 +217,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 								CreatedAt:            nowISO,
 								LastUpdatedAt:        nowISO,
 								CompletedAt:          nowISO,
-								LastSummary:          summary,
+								LastSummary:          taskSummary,
 							}
 							if strings.TrimSpace(task.LastSummary) == "" {
 								task.LastSummary = "Task completed."
@@ -218,7 +226,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 							alreadyTracked = true
 							matchedTask = &task
 						} else if hasLSLineage && lsLineage.IsDirectFrontDeskSubagent {
-							task := buildSubagentTaskFromLSLineage(payload.ConversationID, payload.ModelName, "completed", summary, lsLineage)
+							task := buildSubagentTaskFromLSLineage(payload.ConversationID, payload.ModelName, "completed", taskSummary, lsLineage)
 							_ = kernel.RegisterTask(vaultDir, task)
 							alreadyTracked = true
 							matchedTask = &task
@@ -244,7 +252,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 								newStatus = "archived"
 							}
 						}
-						newSummary := summary
+						newSummary := taskSummary
 						if strings.TrimSpace(newSummary) == "" {
 							newSummary = matchedTask.LastSummary
 						}
@@ -348,7 +356,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 								ConversationID: payload.ConversationID,
 								TurnCount:      1,
 								LastUpdatedAt:  time.Now().Format(time.RFC3339),
-								LastSummary:    summary,
+								LastSummary:    taskSummary,
 							})
 						}
 					}
@@ -357,11 +365,11 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 
 			// RFC-0025 §7.3 / §16.8: bind provider workspaces written this turn to the owning task (ledger hits) or
 			// queue daemon probe candidates (root_patterns hits). Ledger/tasks reads only; no provider calls.
-			if !isFrontDesk && !isTainted && !tm.TaintedCmdSeen && !attemptSuperseded {
+			if !isFrontDesk && !taintedSession && !attemptSuperseded {
 				autoBindWorkspacesFromStop(vaultDir, payload.ConversationID, tm.TurnFilesModified)
 			}
 
-			if obsTurn.CurrentContextTokens >= PreCompactionFlushTokens {
+			if !taintedSession && obsTurn.CurrentContextTokens >= PreCompactionFlushTokens {
 				var activeTask kernel.ActiveTask
 				hasActive := false
 				if matchedTask != nil && matchedTask.TaskSlug != "" {

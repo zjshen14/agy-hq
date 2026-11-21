@@ -29,6 +29,7 @@ var lockRankedVaultJSONFiles = []string{
 	"goals.json",
 	"extensions.json",
 	"workspaces.json",
+	"delegates_state.json",
 	"pending_subagents.json",
 	"pending_nested_subagents.json",
 	"nested_conversations.json",

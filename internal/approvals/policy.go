@@ -22,6 +22,20 @@ const (
 	ResolverNone      = ""
 	ResolverGitHubPR  = "github_pr"
 	ResolverGitRemote = "git_remote"
+
+	// InteractivePreset controls approval friction strictly for interactive owner
+	// sessions (top of lattice). Unattended [Auto], subagents, and tainted sessions
+	// always enforce full fail-closed rules regardless of interactive_preset.
+	InteractivePresetStrict      = "strict"
+	InteractivePresetBalanced    = "balanced"
+	InteractivePresetLowFriction = "low_friction"
+
+	// InteractiveGateMode controls how gated commands in interactive owner sessions
+	// are prompted: "propose" stages a cryptographic hq propose item, whereas
+	// "native_force_ask" emits a single native PreToolUse force_ask prompt for
+	// non-Ring-0 rules (rsi_apply always stays on propose).
+	InteractiveGatePropose        = "propose"
+	InteractiveGateNativeForceAsk = "native_force_ask"
 )
 
 var (
@@ -70,11 +84,14 @@ var RegisteredExtensionApprovalRulesProvider func(vaultDir string) []ExtensionPa
 
 // PolicyConfig represents the resolved outbound approval policy for a Vault.
 type PolicyConfig struct {
-	OwnedRepos         []string
-	AskTTL             time.Duration
-	ProposalTTL        time.Duration
-	RejectNoopCommands bool
-	Rules              []Rule
+	OwnedRepos          []string
+	AskTTL              time.Duration
+	ProposalTTL         time.Duration
+	RejectNoopCommands  bool
+	InteractivePreset   string
+	InteractiveGateMode string
+	HostPresetBridge    bool
+	Rules               []Rule
 }
 
 // EvalDecision describes the outcome of evaluating a shell command against PolicyConfig.
@@ -142,7 +159,7 @@ func DefaultRules() []Rule {
 			Description: "Ring-0 self-modification, trust pins, & local console approval API",
 			Mode:        ModeAlways,
 			Commands: []string{
-				`\bhq\s+(?:rsi\s+apply|connector\s+apply-offer|extension\s+apply-trust|channel\s+apply-config)\b`,
+				`\bhq\s+(?:rsi\s+apply|connector\s+apply-offer|extension\s+apply-trust|channel\s+apply-config|delegate\s+(?:apply-policy|apply-reply))\b`,
 				`(?:https?://[^\s"']*|127\.0\.0\.1:\d+|localhost:\d+)/api/(?:approve|reject)\b`,
 			},
 			Source: "builtin",
@@ -195,11 +212,31 @@ func DefaultRules() []Rule {
 // DefaultPolicyConfig returns the compile-time default PolicyConfig.
 func DefaultPolicyConfig() PolicyConfig {
 	return PolicyConfig{
-		OwnedRepos:         nil,
-		AskTTL:             DefaultAskTTL,
-		ProposalTTL:        DefaultProposalTTL,
-		RejectNoopCommands: true,
-		Rules:              DefaultRules(),
+		OwnedRepos:          nil,
+		AskTTL:              DefaultAskTTL,
+		ProposalTTL:         DefaultProposalTTL,
+		RejectNoopCommands:  true,
+		InteractivePreset:   InteractivePresetBalanced,
+		InteractiveGateMode: InteractiveGatePropose,
+		Rules:               DefaultRules(),
+	}
+}
+
+func isValidInteractivePreset(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case InteractivePresetStrict, InteractivePresetBalanced, InteractivePresetLowFriction:
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidInteractiveGateMode(m string) bool {
+	switch strings.ToLower(strings.TrimSpace(m)) {
+	case InteractiveGatePropose, InteractiveGateNativeForceAsk:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -264,14 +301,18 @@ func ValidateRule(r Rule, allowEmptyCommands bool) error {
 }
 
 type parsedVaultApprovals struct {
-	Present               bool
-	HasOwnedRepos         bool
-	OwnedRepos            []string
-	AskTTLRaw             string
-	ProposalTTLRaw        string
-	HasRejectNoopCommands bool
-	RejectNoopCommands    bool
-	Rules                 []Rule
+	Present                bool
+	HasOwnedRepos          bool
+	OwnedRepos             []string
+	AskTTLRaw              string
+	ProposalTTLRaw         string
+	HasRejectNoopCommands  bool
+	RejectNoopCommands     bool
+	InteractivePresetRaw   string
+	InteractiveGateModeRaw string
+	HasHostPresetBridge    bool
+	HostPresetBridge       bool
+	Rules                  []Rule
 }
 
 // stripYAMLCommentQuoteAware strips trailing `# ...` comments outside single/double quotes.
@@ -605,6 +646,22 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 				out.AskTTLRaw = unquoteYAMLScalar(v)
 			case "proposal_ttl":
 				out.ProposalTTLRaw = unquoteYAMLScalar(v)
+			case "interactive_preset":
+				out.InteractivePresetRaw = strings.ToLower(strings.TrimSpace(unquoteYAMLScalar(v)))
+			case "interactive_gate_mode":
+				out.InteractiveGateModeRaw = strings.ToLower(strings.TrimSpace(unquoteYAMLScalar(v)))
+			case "host_preset_bridge":
+				uv := strings.ToLower(unquoteYAMLScalar(v))
+				switch uv {
+				case "true", "yes", "1":
+					out.HasHostPresetBridge = true
+					out.HostPresetBridge = true
+				case "false", "no", "0":
+					out.HasHostPresetBridge = true
+					out.HostPresetBridge = false
+				default:
+					return out, fmt.Errorf("config.yaml:%d: invalid boolean %q for %s", lineIdx+1, v, k)
+				}
 			case "reject_noop_commands", "reject_echo_guard":
 				uv := strings.ToLower(unquoteYAMLScalar(v))
 				switch uv {
@@ -757,6 +814,21 @@ func buildPolicyFromSources(packs []ExtensionPackRules, rawConfigYAML string) (P
 			}
 			if parsed.HasRejectNoopCommands {
 				pol.RejectNoopCommands = parsed.RejectNoopCommands
+			}
+			if parsed.InteractivePresetRaw != "" {
+				if !isValidInteractivePreset(parsed.InteractivePresetRaw) {
+					return pol, warnings, fmt.Errorf("invalid approvals.interactive_preset %q (expected strict, balanced, or low_friction)", parsed.InteractivePresetRaw)
+				}
+				pol.InteractivePreset = parsed.InteractivePresetRaw
+			}
+			if parsed.InteractiveGateModeRaw != "" {
+				if !isValidInteractiveGateMode(parsed.InteractiveGateModeRaw) {
+					return pol, warnings, fmt.Errorf("invalid approvals.interactive_gate_mode %q (expected propose or native_force_ask)", parsed.InteractiveGateModeRaw)
+				}
+				pol.InteractiveGateMode = parsed.InteractiveGateModeRaw
+			}
+			if parsed.HasHostPresetBridge {
+				pol.HostPresetBridge = parsed.HostPresetBridge
 			}
 
 			seenVaultIDs := make(map[string]bool)
@@ -1681,7 +1753,21 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 			continue
 		}
 
-		switch r.Mode {
+		effectiveMode := r.Mode
+		if !isAutoOrTainted {
+			switch pol.InteractivePreset {
+			case InteractivePresetLowFriction:
+				if effectiveMode == ModeAlways && isRelaxedByLowFrictionPreset(r) {
+					effectiveMode = ModeAutoOnly
+				}
+			case InteractivePresetStrict:
+				if effectiveMode == ModeAutoOnly && r.ID != "workspace_auto_guard" {
+					effectiveMode = ModeAlways
+				}
+			}
+		}
+
+		switch effectiveMode {
 		case ModeAlways:
 			return EvalDecision{
 				Gated:  true,
@@ -1735,6 +1821,27 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 	}
 
 	return EvalDecision{Gated: false}
+}
+
+// isRelaxedByLowFrictionPreset returns true if r should relax from ModeAlways
+// to ModeAutoOnly strictly inside owner interactive sessions under
+// approvals.interactive_preset: low_friction (RFC-0026 §3.6).
+// Core irreversible boundaries (messaging, release_publish, pr_merge, rsi_apply)
+// and explicit vault overrides remain gated.
+func isRelaxedByLowFrictionPreset(r *Rule) bool {
+	if r == nil || r.Source == "vault" {
+		return false
+	}
+	if r.ID == "workspace_own" || r.ID == "workspace_remove" {
+		return true
+	}
+	if strings.HasPrefix(r.ID, "wsd-") {
+		return true
+	}
+	if strings.HasPrefix(r.Source, "pack:") && !CoreNonDisableablePackRules[r.ID] {
+		return true
+	}
+	return false
 }
 
 func isNoopBinaryToken(bin string) bool {

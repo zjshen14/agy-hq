@@ -607,6 +607,36 @@ func ReadQuarantinedThread(vaultDir, accountAlias, threadID, convID string) (Thr
 	if err != nil {
 		return ThreadDetail{}, "", err
 	}
+	if rec, alreadyTainted := taint.Check(vaultDir, resolvedConv); alreadyTainted {
+		if strings.HasPrefix(rec.Source, "fail_closed:") || len(rec.ItemKeys) == 0 {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: tainted session has no bound gmail thread keys")
+		}
+		bridgeSpaceKey := "spaces/gmail-chat-" + threadID
+		allowed := false
+		for _, k := range rec.ItemKeys {
+			if rec.Connector == "" || rec.Connector == "gmail" {
+				if k == threadID || k == "gmail:thread:"+threadID {
+					allowed = true
+					break
+				}
+			} else if rec.Connector == "gchat" {
+				// Allow internal gchat gmail-bridge fallback ONLY for the exact authorized spaces/gmail-chat-<threadID>.
+				if k == bridgeSpaceKey || k == "gchat:space:"+bridgeSpaceKey {
+					allowed = true
+					break
+				}
+			}
+		}
+		if rec.Connector != "" && rec.Connector != "gmail" && !allowed {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: locked to connector %q (got gmail)", rec.Connector)
+		}
+		if rec.Connector == "gmail" && rec.Account != "" && cfg.Alias != "" && rec.Account != cfg.Alias {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: locked to account %q (got %q)", rec.Account, cfg.Alias)
+		}
+		if !allowed {
+			return ThreadDetail{}, "", fmt.Errorf("quarantined session scope violation: thread %q is outside bound batch keys", threadID)
+		}
+	}
 	if err := MarkSessionTainted(vaultDir, resolvedConv, "gmail:thread:"+threadID); err != nil {
 		return ThreadDetail{}, "", fmt.Errorf("persist provenance taint before read: %w", err)
 	}
@@ -1105,6 +1135,15 @@ func RunPrecheck(vaultDir, accountFilter string) ([]TriageBatch, string, error) 
 	return batches, fmt.Sprintf("GMAIL_NEW (%d new message(s) across %d batch(es))", totalNew, len(batches)), nil
 }
 
+var reValidTriageBatchID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func validateTriageBatchID(batchID string) error {
+	if !reValidTriageBatchID.MatchString(batchID) || strings.Contains(batchID, "..") || strings.ContainsAny(batchID, `/\`) {
+		return fmt.Errorf("invalid triage batch id %q (must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ without '..')", batchID)
+	}
+	return nil
+}
+
 // RecordTriageResults validates and persists structured triage results from a Quarantined Reader worker.
 func RecordTriageResults(vaultDir, batchID string, items []TriageItem) error {
 	for _, it := range items {
@@ -1117,24 +1156,27 @@ func RecordTriageResults(vaultDir, batchID string, items []TriageItem) error {
 			return fmt.Errorf("summary for thread %s exceeds 500 chars", it.ThreadID)
 		}
 	}
-	dir := filepath.Join(vaultDir, "memory", "gmail", "triage")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+	batchID = strings.TrimSpace(batchID)
 	if batchID == "" {
 		batchID = fmt.Sprintf("triage-%d", time.Now().Unix())
+	} else if err := validateTriageBatchID(batchID); err != nil {
+		return err
+	}
+	dir := filepath.Join(vaultDir, "memory", "gmail", "triage")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, batchID+".json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, batchID+".json"), data, 0o600); err != nil {
 		return err
 	}
 
 	// Also write a human-readable summary note in local/notes/inbox/
 	notesDir := filepath.Join(vaultDir, "notes", "inbox")
-	_ = os.MkdirAll(notesDir, 0o755)
+	_ = os.MkdirAll(notesDir, 0o700)
 	var md strings.Builder
 	fmt.Fprintf(&md, "# Gmail Triage Digest (%s)\n\n", time.Now().Format("2006-01-02 15:04"))
 	for _, it := range items {
@@ -1147,7 +1189,7 @@ func RecordTriageResults(vaultDir, batchID string, items []TriageItem) error {
 			fmt.Fprintf(&md, "  - Auto-Drafted Reply: `%s` (Proposal: `%s`)\n", it.DraftID, it.ProposalID)
 		}
 	}
-	_ = os.WriteFile(filepath.Join(notesDir, batchID+".md"), []byte(md.String()), 0o644)
+	_ = os.WriteFile(filepath.Join(notesDir, batchID+".md"), []byte(md.String()), 0o600)
 	return nil
 }
 

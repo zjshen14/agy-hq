@@ -1082,7 +1082,10 @@ func itemAllowedByLeasedOrTaintedScope(connID, acct, targetKey string, leased []
 			return fmt.Errorf("quarantined session scope violation: %s:%s target %q is outside leased event batch", connID, acct, targetKey)
 		}
 	}
-	if alreadyTainted && len(rec.ItemKeys) > 0 {
+	if alreadyTainted {
+		if strings.HasPrefix(rec.Source, "fail_closed:") || len(rec.ItemKeys) == 0 {
+			return fmt.Errorf("quarantined session scope violation: tainted session has no bound item keys (source=%s)", rec.Source)
+		}
 		if rec.Connector != "" && rec.Connector != connID {
 			return fmt.Errorf("quarantined session scope violation: locked to connector %q (got %q)", rec.Connector, connID)
 		}

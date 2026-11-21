@@ -73,6 +73,12 @@ const (
 	// WorkspaceDestructiveRulePrefix prefixes the synthetic approval rule IDs generated from destructive_commands.
 	// Pack-declared approval_rules may not use it.
 	WorkspaceDestructiveRulePrefix = "wsd-"
+
+	// DelegateTransportProtocolV1 is the frozen JSON-over-stdio protocol for scoped delegate transports (RFC-0026 §5).
+	DelegateTransportProtocolV1     = "hq-delegate-transport/v1"
+	MaxDelegateTransportTimeoutMs   = 30000
+	MinDelegateTransportPollSeconds = 15
+	MaxDelegateTransportBodyRunes   = 32768
 )
 
 var (
@@ -240,6 +246,28 @@ type WorkspaceProviderSpec struct {
 	Skill                string                            `json:"skill,omitempty"`
 }
 
+// DelegateTransportCapabilitiesSpec declares optional capabilities supported by a delegate transport (RFC-0026 §5.1).
+type DelegateTransportCapabilitiesSpec struct {
+	Poll            bool `json:"poll,omitempty"`
+	Reply           bool `json:"reply,omitempty"`
+	PublishSnapshot bool `json:"publish_snapshot,omitempty"`
+	ThreadBinding   bool `json:"thread_binding,omitempty"`
+}
+
+// DelegateTransportSpec declares a dumb poll/reply/snapshot transport in hq-extension.json (RFC-0026 §5.1).
+// Its runtime FQID is "<pack>/<id>"; command[0] is SHA-256 pinned in private/trust.json.
+type DelegateTransportSpec struct {
+	ID                  string                            `json:"id"`
+	Protocol            string                            `json:"protocol"`
+	Description         string                            `json:"description,omitempty"`
+	Command             []string                          `json:"command"`
+	EnvAllow            []string                          `json:"env_allow,omitempty"`
+	TimeoutMs           int                               `json:"timeout_ms,omitempty"`
+	PollIntervalSeconds int                               `json:"poll_interval_seconds,omitempty"`
+	MaxBodyRunes        int                               `json:"max_body_runes,omitempty"`
+	Capabilities        DelegateTransportCapabilitiesSpec `json:"capabilities,omitempty"`
+}
+
 // PackComponents indexes all hq-mediated surfaces inside a companion extension plugin.
 type PackComponents struct {
 	Connectors         []string                     `json:"connectors,omitempty"`
@@ -254,6 +282,7 @@ type PackComponents struct {
 	OwnedRepos         []string                     `json:"owned_repos,omitempty"`
 	ChannelBridges     []ChannelBridgeSpec          `json:"channel_bridges,omitempty"`
 	WorkspaceProviders []WorkspaceProviderSpec      `json:"workspace_providers,omitempty"`
+	DelegateTransports []DelegateTransportSpec      `json:"delegate_transports,omitempty"`
 }
 
 // PackManifest represents <plugin>/hq-extension.json.
@@ -498,6 +527,16 @@ func LintPack(packDir string) ([]string, error) {
 			}
 		}
 	}
+	seenDelegateTransportIDs := make(map[string]bool)
+	for _, dt := range m.Components.DelegateTransports {
+		if err := ValidateDelegateTransportSpec(m.ID, dt); err != nil {
+			return nil, err
+		}
+		if seenDelegateTransportIDs[dt.ID] {
+			return nil, fmt.Errorf("duplicate delegate_transports id %q in hq-extension.json", dt.ID)
+		}
+		seenDelegateTransportIDs[dt.ID] = true
+	}
 
 	return warnings, nil
 }
@@ -577,6 +616,54 @@ func ValidateWorkspaceProviderSpec(packID string, wp WorkspaceProviderSpec) erro
 		return fmt.Errorf("workspace_providers %q skill %q must be a plain skill directory name under skills/", pid, skill)
 	}
 	return nil
+}
+
+// ValidateDelegateTransportSpec validates a single delegate_transports entry (RFC-0026 §5.1).
+func ValidateDelegateTransportSpec(packID string, dt DelegateTransportSpec) error {
+	_ = packID
+	id := dt.ID
+	if id != strings.TrimSpace(id) || !reValidPackID.MatchString(id) {
+		return fmt.Errorf("delegate_transports invalid id %q (expected lowercase kebab-case)", dt.ID)
+	}
+	if err := validateComponentCommandAndEnv("delegate_transports", id, dt.Protocol, DelegateTransportProtocolV1, dt.Command, dt.EnvAllow, dt.TimeoutMs, MaxDelegateTransportTimeoutMs, "a shell, generic interpreter wrapper, or hq itself"); err != nil {
+		return err
+	}
+	if dt.PollIntervalSeconds != 0 && dt.PollIntervalSeconds < MinDelegateTransportPollSeconds {
+		return fmt.Errorf("delegate_transports %q poll_interval_seconds=%d out of range (expected 0 or >= %d)", id, dt.PollIntervalSeconds, MinDelegateTransportPollSeconds)
+	}
+	if dt.MaxBodyRunes < 0 || dt.MaxBodyRunes > MaxDelegateTransportBodyRunes {
+		return fmt.Errorf("delegate_transports %q max_body_runes=%d out of range [0, %d]", id, dt.MaxBodyRunes, MaxDelegateTransportBodyRunes)
+	}
+	return nil
+}
+
+// ActiveDelegateTransport pairs a validated delegate transport spec with its owning trusted pack.
+type ActiveDelegateTransport struct {
+	PackID   string
+	FQID     string
+	PackPath string
+	Spec     DelegateTransportSpec
+}
+
+// ListActiveDelegateTransports returns all enabled, trusted, and re-validated delegate transports.
+func ListActiveDelegateTransports(vaultDir string) []ActiveDelegateTransport {
+	packs := LoadActiveTrustedPacks(vaultDir)
+	var out []ActiveDelegateTransport
+	for _, dp := range packs {
+		for _, dt := range dp.Manifest.Components.DelegateTransports {
+			if ValidateDelegateTransportSpec(dp.ID, dt) != nil {
+				continue
+			}
+			out = append(out, ActiveDelegateTransport{
+				PackID:   dp.ID,
+				FQID:     dp.ID + "/" + dt.ID,
+				PackPath: dp.Path,
+				Spec:     dt,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].FQID < out[j].FQID })
+	return out
 }
 
 // WorkspaceDestructiveRuleID returns the synthetic approval rule ID that gates a workspace provider's

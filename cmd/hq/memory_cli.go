@@ -496,18 +496,16 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 		if posQ == "" {
 			posQ = *qFlag
 		}
-		hits, err := vault.LookupEntities(vaultDir, posQ)
+		var hits []vault.EntityDossier
+		var err error
+		if _, isTainted := checkCallerTaintedEnv(vaultDir); isTainted {
+			hits, err = vault.LookupEntitiesRedacted(vaultDir, posQ)
+		} else {
+			hits, err = vault.LookupEntities(vaultDir, posQ)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq memory lookup failed: %v\n", err)
 			os.Exit(1)
-		}
-		if _, isTainted := checkCallerTaintedEnv(vaultDir); isTainted {
-			for i := range hits {
-				hits[i].Context = ""
-				hits[i].Notes = nil
-				hits[i].Spaces = nil
-				hits[i].Path = ""
-			}
 		}
 		if *asJSON {
 			printJSON(hits)

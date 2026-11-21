@@ -627,9 +627,14 @@ func runReplayArm(label, binPath, vaultDir string, samples []JournalRecord) Repl
 			m.MaxContextBytes = sz
 		}
 
-		isTainted := strings.Contains(ctxText, "Quarantined Triage Worker (TAINTED)")
-		isLean := !isTainted && (strings.Contains(ctxText, "Lean Auto/Skill Context") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(rec.UserPrompt)), "[auto]"))
-		if isTainted {
+		isScopedDelegate := strings.Contains(ctxText, "Scoped Delegate Worker (TAINTED)")
+		isTainted := !isScopedDelegate && strings.Contains(ctxText, "Quarantined Triage Worker (TAINTED)")
+		isLean := !isTainted && !isScopedDelegate && (strings.Contains(ctxText, "Lean Auto/Skill Context") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(rec.UserPrompt)), "[auto]"))
+		if isScopedDelegate {
+			if sz > MaxSessionDelegateBytes {
+				m.LeanAutoOverBudgetCnt++
+			}
+		} else if isTainted {
 			if sz > MaxSessionTaintBytes {
 				m.LeanAutoOverBudgetCnt++
 			}

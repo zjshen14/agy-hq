@@ -351,6 +351,7 @@ func main() {
 		}
 
 	case "status":
+		denyIfCallerTainted(vaultDir, "status")
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		quiet := fs.Bool("quiet", false, "Suppress normal status output")
 		_ = fs.Parse(os.Args[2:])

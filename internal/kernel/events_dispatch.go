@@ -11,11 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/routing"
-	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
@@ -125,26 +126,6 @@ func batchTriggerName(batch events.LeasedBatch) string {
 		}
 	}
 	return fmt.Sprintf("event:%s:%s", head.Source, head.ID)
-}
-
-func batchItemKeys(evs []events.Event) []string {
-	var keys []string
-	for _, ev := range evs {
-		if ev.Metadata != nil {
-			if ik := strings.TrimSpace(ev.Metadata["item_key"]); ik != "" {
-				keys = append(keys, ik)
-			}
-			if tk := strings.TrimSpace(ev.Metadata["thread_key"]); tk != "" {
-				keys = append(keys, tk)
-			}
-			for _, cid := range strings.Split(ev.Metadata["coalesced_item_ids"], ",") {
-				if cid = strings.TrimSpace(cid); cid != "" {
-					keys = append(keys, cid)
-				}
-			}
-		}
-	}
-	return keys
 }
 
 func headMetaVal(ev events.Event, key string) string {
@@ -323,16 +304,10 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 				Status:         "active",
 			})
 			_ = events.BindBatchConversation(vaultDir, ids, cid, now, events.DefaultLeaseTTL)
-			if batch.TaintOnSpawn {
-				_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{
-					ConvID:    cid,
-					Source:    "spawn_batch:" + head.Source,
-					Connector: headMetaVal(head, "connector"),
-					Account:   headMetaVal(head, "account"),
-					BatchID:   batch.LeaseID,
-					EventIDs:  ids,
-					ItemKeys:  batchItemKeys(batch.Events),
-				})
+			_, _, _ = authz.BindSessionFromEvents(context.Background(), vaultDir, cid, batch.Events)
+			if apprPol, _, _ := approvals.LoadPolicy(vaultDir); apprPol.HostPresetBridge || apprPol.InteractiveGateMode == approvals.InteractiveGateNativeForceAsk {
+				sp := authz.Resolve(vaultDir, cid, authz.ResolveHints{IsAutoWorker: true})
+				_ = SyncConversationPermissionPreset(vaultDir, cid, sp.HostPreset)
 			}
 		}
 

@@ -105,6 +105,26 @@ func isBlockedChannelGatewayShell(cmdLine string) bool {
 	if reChannelAPIRoute.MatchString(cmdLine) {
 		return true
 	}
+	return hasBlockedHQSubcommandPair(cmdLine, "channel", map[string]bool{
+		"inbound":      true,
+		"callback":     true,
+		"flush":        true,
+		"apply-config": true,
+	})
+}
+
+// isBlockedDelegateGatewayShell structurally detects direct LLM shell invocations of
+// daemon/approval-only `hq delegate poll|sync-snapshots|apply-policy|apply-reply` commands.
+func isBlockedDelegateGatewayShell(cmdLine string) bool {
+	return hasBlockedHQSubcommandPair(cmdLine, "delegate", map[string]bool{
+		"poll":           true,
+		"sync-snapshots": true,
+		"apply-policy":   true,
+		"apply-reply":    true,
+	})
+}
+
+func hasBlockedHQSubcommandPair(cmdLine, topCmd string, blockedSubs map[string]bool) bool {
 	for _, seg := range splitShellSegmentsUnquoted(cmdLine) {
 		toks, _ := approvals.TokenizeShellWords(seg, false)
 		// Strip leading env assignments (`FOO=bar`), `env [-u X / --unset=X / -i / --]`, `command`, `exec`, `nohup`, `nice`, `timeout <dur>`
@@ -203,11 +223,8 @@ func isBlockedChannelGatewayShell(cmdLine string) bool {
 				break
 			}
 		}
-		if len(pos) >= 2 && pos[0] == "channel" {
-			switch pos[1] {
-			case "inbound", "callback", "flush", "apply-config":
-				return true
-			}
+		if len(pos) >= 2 && pos[0] == topCmd && blockedSubs[pos[1]] {
+			return true
 		}
 	}
 	return false

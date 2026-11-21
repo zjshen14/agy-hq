@@ -836,6 +836,10 @@ func runBriefCLI(vaultDir string, args []string) {
 		if strings.TrimSpace(*jsonIn) != "" {
 			raw = []byte(*jsonIn)
 		} else if strings.TrimSpace(*fileIn) != "" {
+			if _, isTainted := checkCallerTaintedEnv(vaultDir); isTainted {
+				fmt.Fprintln(os.Stderr, "hq brief format-quarantined: --file is forbidden in quarantined sessions; pass --json-input or stdin")
+				os.Exit(1)
+			}
 			raw, err = os.ReadFile(*fileIn)
 		} else {
 			raw, err = io.ReadAll(io.LimitReader(os.Stdin, 256*1024))
