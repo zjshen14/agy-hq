@@ -83,27 +83,29 @@ type TokenRollup struct {
 
 // ConversationMetrics stores full parsed metrics + DAG metadata for a single conversation.
 type ConversationMetrics struct {
-	ConversationID       string              `json:"conversationId"`
-	ParentConversationID string              `json:"parentConversationId,omitempty"`
-	RootConversationID   string              `json:"rootConversationId,omitempty"`
-	TaskSlug             string              `json:"taskSlug,omitempty"`
-	Title                string              `json:"title,omitempty"`
-	Kind                 string              `json:"kind"` // "front_desk" | "task" | "subagent" | "nested_subagent" | "auto"
-	Scope                string              `json:"scope,omitempty"`
-	Tier                 string              `json:"tier"` // "quick" | "standard" | "deep"
-	Model                string              `json:"model,omitempty"`
-	Status               string              `json:"status,omitempty"`
-	TranscriptPath       string              `json:"transcriptPath"`
-	FileSize             int64               `json:"fileSize"`
-	ModTimeNano          int64               `json:"modTimeNano"`
-	StartedAt            string              `json:"startedAt,omitempty"`
-	LastActiveAt         string              `json:"lastActiveAt,omitempty"`
-	CurrentContextTokens int64               `json:"currentContextTokens"`
-	ChildConversationIDs []string            `json:"childConversationIds,omitempty"`
-	SpawnEdges           []SubagentSpawnEdge `json:"spawnEdges,omitempty"`
-	Self                 TokenRollup         `json:"self"`
-	Tree                 TokenRollup         `json:"tree"`
-	Turns                []TurnMetrics       `json:"turns,omitempty"`
+	ConversationID                  string              `json:"conversationId"`
+	ParentConversationID            string              `json:"parentConversationId,omitempty"`
+	RootConversationID              string              `json:"rootConversationId,omitempty"`
+	TaskSlug                        string              `json:"taskSlug,omitempty"`
+	Title                           string              `json:"title,omitempty"`
+	Kind                            string              `json:"kind"` // "front_desk" | "task" | "subagent" | "nested_subagent" | "auto"
+	Scope                           string              `json:"scope,omitempty"`
+	Tier                            string              `json:"tier"` // "quick" | "standard" | "deep"
+	Model                           string              `json:"model,omitempty"`
+	Status                          string              `json:"status,omitempty"`
+	TranscriptPath                  string              `json:"transcriptPath"`
+	FileSize                        int64               `json:"fileSize"`
+	ModTimeNano                     int64               `json:"modTimeNano"`
+	StartedAt                       string              `json:"startedAt,omitempty"`
+	LastActiveAt                    string              `json:"lastActiveAt,omitempty"`
+	CurrentContextTokens            int64               `json:"currentContextTokens"`
+	PlannerResponsesSinceCheckpoint int                 `json:"plannerResponsesSinceCheckpoint"`
+	LastCheckpointStepIdx           int                 `json:"lastCheckpointStepIdx"`
+	ChildConversationIDs            []string            `json:"childConversationIds,omitempty"`
+	SpawnEdges                      []SubagentSpawnEdge `json:"spawnEdges,omitempty"`
+	Self                            TokenRollup         `json:"self"`
+	Tree                            TokenRollup         `json:"tree"`
+	Turns                           []TurnMetrics       `json:"turns,omitempty"`
 }
 
 // ObsIndex is the stat-cached observability index persisted in local/memory/obs/index.json.
@@ -459,7 +461,11 @@ var (
 	obsMemByV  = make(map[string]*obsMemCacheEntry)
 )
 
-const currentObsIndexVersion = 4
+const currentObsIndexVersion = 5
+
+func init() {
+	kernel.RegisterFrontDeskContextInspector(InspectFrontDeskContext)
+}
 
 func shallowCopyObsIndex(src *ObsIndex) *ObsIndex {
 	if src == nil {
@@ -1371,4 +1377,50 @@ func GetFrontDeskContextStatus(vaultDir, transcriptPath string) (currentTokens i
 		)
 	}
 	return currentTokens, budget, nudgeBanner
+}
+
+// InspectFrontDeskContext returns the active Front Desk conversation's current prompt context
+// watermark and uncompacted planner activity for gated pre-run compaction.
+func InspectFrontDeskContext(vaultDir string) (kernel.FrontDeskContextSnapshot, bool) {
+	budget := LoadBudgetConfig(vaultDir)
+	fd, ok := kernel.GetFrontDesk(vaultDir)
+	convID := strings.TrimSpace(fd.ConversationID)
+	if !ok || convID == "" {
+		return kernel.FrontDeskContextSnapshot{}, false
+	}
+	snap := kernel.FrontDeskContextSnapshot{
+		ConversationID:           convID,
+		AutoCompactContextTokens: budget.EffectiveAutoCompactContextTokens(),
+		LastCheckpointStepIdx:    -1,
+	}
+	transcriptPath := ""
+	if fd.ArtifactDir != "" {
+		transcriptPath = resolveTranscriptInDir(fd.ArtifactDir)
+	}
+	if transcriptPath == "" {
+		if brainDir := ResolveBrainDir(vaultDir); brainDir != "" {
+			transcriptPath = resolveTranscriptInDir(filepath.Join(brainDir, convID))
+		}
+	}
+	if transcriptPath != "" {
+		snap.TranscriptPath = transcriptPath
+		if ctxState, okScan := InspectTranscriptContextFile(transcriptPath); okScan {
+			snap.CurrentContextTokens = ctxState.CurrentContextTokens
+			snap.PlannerResponsesSinceCheckpoint = ctxState.PlannerResponsesSinceCheckpoint
+			snap.LastCheckpointStepIdx = ctxState.LastCheckpointStepIdx
+			snap.CompactionCount = ctxState.CompactionCount
+			return snap, true
+		}
+	}
+	if idx, err := LoadOrRefreshIndex(vaultDir); err == nil && idx != nil {
+		if cm, exists := idx.Conversations[strings.ToLower(convID)]; exists {
+			snap.TranscriptPath = cm.TranscriptPath
+			snap.CurrentContextTokens = cm.CurrentContextTokens
+			snap.PlannerResponsesSinceCheckpoint = cm.PlannerResponsesSinceCheckpoint
+			snap.LastCheckpointStepIdx = cm.LastCheckpointStepIdx
+			snap.CompactionCount = cm.Self.CompactionCount
+			return snap, true
+		}
+	}
+	return snap, false
 }

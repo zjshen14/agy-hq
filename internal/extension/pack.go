@@ -109,17 +109,20 @@ type PackPrecheck struct {
 
 // PackSchedule defines a declarative schedule inside hq-extension.json.
 type PackSchedule struct {
-	ID       string        `json:"id"`
-	Cron     string        `json:"cron"`
-	TZ       string        `json:"tz,omitempty"`
-	Tier     string        `json:"tier,omitempty"`
-	Mode     string        `json:"mode,omitempty"`
-	Skill    string        `json:"skill,omitempty"`
-	Prompt   string        `json:"prompt,omitempty"`
-	Delivery string        `json:"delivery,omitempty"`
-	Enabled  *bool         `json:"enabled,omitempty"`
-	CatchUp  string        `json:"catch_up,omitempty"`
-	Precheck *PackPrecheck `json:"precheck,omitempty"`
+	ID                     string        `json:"id"`
+	Cron                   string        `json:"cron"`
+	TZ                     string        `json:"tz,omitempty"`
+	Tier                   string        `json:"tier,omitempty"`
+	Mode                   string        `json:"mode,omitempty"`
+	CompactBeforeRun       bool          `json:"compact_before_run,omitempty"`
+	CompactContextTokens   int64         `json:"compact_context_tokens,omitempty"`
+	CompactMinPlannerSteps int           `json:"compact_min_planner_steps,omitempty"`
+	Skill                  string        `json:"skill,omitempty"`
+	Prompt                 string        `json:"prompt,omitempty"`
+	Delivery               string        `json:"delivery,omitempty"`
+	Enabled                *bool         `json:"enabled,omitempty"`
+	CatchUp                string        `json:"catch_up,omitempty"`
+	Precheck               *PackPrecheck `json:"precheck,omitempty"`
 }
 
 // PackInboxRule defines a file-drop routing rule contributed by a companion pack.

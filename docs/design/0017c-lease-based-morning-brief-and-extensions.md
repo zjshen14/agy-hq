@@ -57,6 +57,16 @@ flowchart TD
 - **Stat-Cached Token Telemetry:** Reads the pre-aggregated stat-cached observability index (`<100ms`) resolved via `internal/hostpaths` ([RFC-0017d §5.2](0017d-enterprise-extensibility-and-portability.md)) rather than cold-scanning raw transcript JSONLs.
 - **Expiring Proposal Alerting:** Proposals with `< 4h` remaining TTL (or expired overnight) carry `ttl_warning: "expires_soon" | "expired_overnight"` so `/morning-brief` highlights them first or offers 1-step re-staging.
 
+### 3.3 Gated Front Desk Pre-Run Compaction & Post-Compaction Priority Reload
+Because `morning-brief` executes as `mode: front_desk_cron` inside long-lived **`[HQ] Front Desk`**, stale multi-day context increases uncached cold-cache prompt tokens across idle overnight gaps while `SessionStart` does not re-run after `/compact`. To keep `CompactThenContinue` safe and free of wasted summaries:
+1. **Explicit Opt-In Metadata (`compact_before_run: true`):** Only `front_desk_cron` schedules that explicitly set `compact_before_run: true` (seeded on `morning-brief` in `templates/triggers.yaml` and added non-destructively to unmodified vaults via `v12` migration) pass opt-in gating metadata (`compact_before_run`, optional `compact_context_tokens`, optional `compact_min_planner_steps`) into `DispatchPendingEvents`. Regular `interrupt` outbox cards, channel inbound messages, follow-up timers, and deferred approvals delivered via `DeliverMessageToSession` never compact.
+2. **Dual-Condition Compaction Gate (`EvaluateFrontDeskCompactionGate`):** `internal/obs` filters `CHECKPOINT` steps to completed compactions (`""`, `"DONE"`, `"CORTEX_STEP_STATUS_DONE"`), tracks `PlannerResponsesSinceCheckpoint`, and exposes `InspectFrontDeskContext` (registered into `internal/kernel` at package init). Compaction triggers **only** when BOTH `CurrentContextTokens >= threshold` (schedule `compact_context_tokens` > `budget.json` `autoCompactContextTokens` > `warnContextTokens` `120,000`) **and** `PlannerResponsesSinceCheckpoint >= minSteps` (default `2`, skipping freshly compacted or near-empty shifts).
+3. **Idle-Safe LS Delivery & Plain Fallbacks (`SendUserCascadeMessage`):**
+   - Calls `LanguageServerService/SendUserCascadeMessage` (`Connect-Protocol-Version: 1`, `x-codeium-csrf-token`) with `blocking: false`, `deliveryStrategy: "MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE"` (preventing preemption of active turns or running subagents), and omits `cascadeConfig` so the Front Desk session's active `planModel` is never overridden.
+   - Prepends `{"item":{"slashCommand":{"info":{"name":"compact","type":"SLASH_COMMAND_TYPE_SYSTEM"}}}}` ahead of `{"text": "<prompt>"}` strictly on the Language Server RPC when the gate passes.
+   - If the Language Server rejects `slashCommand` with an HTTP error, retries `SendUserCascadeMessage` with plain prompt text (`items: [{"text": "<prompt>"}]`) instead; if LS is unavailable and `agentapi send-message` is used as a fallback, it strictly delivers plain prompt text only (never raw `"/compact"`).
+4. **Post-Compaction Priority Reload (`active_priorities`):** `hq brief collect` (`internal/brief`) populates `active_priorities` directly from `<vault>/MEMORY.md` (bounded to `MaxMemoryIndexLines` / `MaxMemoryIndexBytes`) so `/morning-brief` always loads fresh overnight priorities after `/compact` without re-running `SessionStart` or spending Front Desk inline lookup quota.
+
 ---
 
 ## 4. Provenance-Safe Brief Synthesis (`A4` Closed)
@@ -111,7 +121,8 @@ Free-form natural-language brief checklists (e.g., `<vault>/brief.d/morning-acti
 
 ---
 
-## 7. Phase 2 Verification Plan (`CUJ-30b` & `CUJ-32`)
+## 7. Phase 2 Verification Plan (`CUJ-30b`, `CUJ-32`, `CUJ-45`)
 
 - **`TestCUJ30b_LeaseBasedMorningBriefAndStructuredExtensions`:** Verifies Step-0 `hq dispatch resolve` disabled/override handling, idempotent `hq brief collect` peek, `--lease` crash/expiry recovery (`0` lost items), `hq brief commit` post-file-write delivery + `< 4h` TTL warnings, `quarantined: true` default on `mode: "argv"` brief extensions (counts/IDs + tainted reader JSON fence only), unpinned `brief.d` / pack `mode: "prompt"` rejection, and clean execution with consumer connectors disabled.
 - **`TestCUJ32_OutboxQuietHoursAndFencedSystemDelivery`:** Verifies `tz:`/`enabled` parser fix, `07:30` quiet-hours alignment, `DedupKey` + `ThreadKey` burst superseding (both `OutboxItem` and `Proposal`), nonce-fenced system card formatting, and `hq outbox eval` `100%` pass.
+- **`TestCUJ45_MorningBriefGatedFrontDeskCompaction`:** Verifies `v12` migration enabling `compact_before_run` cleanly, dual-condition gating (`CurrentContextTokens` watermark + `PlannerResponsesSinceCheckpoint` after `DONE` `CHECKPOINT` ignoring incomplete `RUNNING` checkpoints), `CompactThenContinue` JSON schema (`Connect-Protocol-Version: 1`, `MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE`, omitted `cascadeConfig`), plain fallback when LS rejects `slashCommand`, plain-text `agentapi` fallback safety, `active_priorities` reload in `hq brief collect`, and zero compaction on regular outbox/timer alerts.

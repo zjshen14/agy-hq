@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
@@ -54,5 +55,37 @@ func TestGitWorktreeProviderWiredToWorktreeAdd(t *testing.T) {
 	}
 	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
 		t.Fatalf("worktree still present after Remove: %v", err)
+	}
+}
+
+// TestFrontDeskContextInspectorWiredFromObs proves importing internal/obs in cmd/hq registers
+// InspectFrontDeskContext with internal/kernel so EvaluateFrontDeskCompactionGate reads live transcripts.
+func TestFrontDeskContextInspectorWiredFromObs(t *testing.T) {
+	vaultDir := t.TempDir()
+	brainDir := filepath.Join(t.TempDir(), "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "99999999-1111-4111-8111-111111111111"
+	artDir := filepath.Join(brainDir, fdID)
+	logDir := filepath.Join(artDir, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logDir: %v", err)
+	}
+	if err := kernel.SetFrontDesk(vaultDir, fdID, artDir); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	transcriptPath := filepath.Join(logDir, "transcript.jsonl")
+	lines := "" +
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-21T07:00:00Z","content":"hi"}` + "\n" +
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-21T07:00:02Z","input_tokens":15000,"cache_read_tokens":120000,"output_tokens":200}` + "\n" +
+		`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-21T07:01:02Z","input_tokens":16000,"cache_read_tokens":121000,"output_tokens":250}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(lines), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	dec := kernel.EvaluateFrontDeskCompactionGate(vaultDir, fdID, 0, 0)
+	if !dec.ShouldCompact || dec.CurrentContextTokens != 137000 || dec.PlannerResponsesSinceCheckpoint != 2 {
+		t.Fatalf("expected wired gate to allow compaction at 137k / 2 steps, got %+v", dec)
 	}
 }

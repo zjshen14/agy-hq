@@ -12,6 +12,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
@@ -289,5 +290,47 @@ func TestCollectIncludesUnifiedActiveWorkspaces(t *testing.T) {
 	}
 	if pkt.ActiveWorkspaces[1].Provider != workspace.CoreGitProviderID || pkt.ActiveWorkspaces[1].Name != "repo-alpha" {
 		t.Fatalf("unexpected second brief workspace summary: %+v", pkt.ActiveWorkspaces[1])
+	}
+}
+
+func TestCollectReloadsBoundedActivePriorities(t *testing.T) {
+	vaultDir := setupBriefTestVault(t)
+
+	var memLines []string
+	memLines = append(memLines, "# Active Priorities", "- Close Q4 tax prep on time")
+	for i := 0; i < vault.MaxMemoryIndexLines+10; i++ {
+		memLines = append(memLines, "- Priority item line that keeps MEMORY.md intentionally above line cap")
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte(strings.Join(memLines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write MEMORY.md: %v", err)
+	}
+
+	pkt, err := Collect(context.Background(), vaultDir, CollectOptions{
+		Lease: false,
+		Now:   time.Date(2026, 11, 21, 7, 30, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if !strings.Contains(pkt.ActivePriorities, "Close Q4 tax prep on time") {
+		t.Fatalf("expected active_priorities to reload MEMORY.md content, got %q", pkt.ActivePriorities)
+	}
+	if len(strings.Split(pkt.ActivePriorities, "\n")) > vault.MaxMemoryIndexLines || len(pkt.ActivePriorities) > vault.MaxMemoryIndexBytes {
+		t.Fatalf("expected active_priorities bounded by (%d lines, %d bytes), got (%d lines, %d bytes)",
+			vault.MaxMemoryIndexLines, vault.MaxMemoryIndexBytes,
+			len(strings.Split(pkt.ActivePriorities, "\n")), len(pkt.ActivePriorities))
+	}
+
+	// Symlinked MEMORY.md must be ignored safely.
+	targetSecret := filepath.Join(t.TempDir(), "secret.txt")
+	_ = os.WriteFile(targetSecret, []byte("DO_NOT_READ_SYMLINK"), 0o600)
+	_ = os.Remove(filepath.Join(vaultDir, "MEMORY.md"))
+	_ = os.Symlink(targetSecret, filepath.Join(vaultDir, "MEMORY.md"))
+	pktSym, err := Collect(context.Background(), vaultDir, CollectOptions{Lease: false})
+	if err != nil {
+		t.Fatalf("Collect with symlink: %v", err)
+	}
+	if pktSym.ActivePriorities != "" {
+		t.Fatalf("expected symlinked MEMORY.md to be ignored, got %q", pktSym.ActivePriorities)
 	}
 }

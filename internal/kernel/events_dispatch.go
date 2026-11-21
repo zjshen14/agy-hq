@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,11 +21,26 @@ import (
 	"github.com/zjshen14/agy-hq/internal/watcher"
 )
 
+// DeliverMessageOptions controls gated pre-run compaction and LS delivery strategy for session wakeups.
+type DeliverMessageOptions struct {
+	CompactBeforeRun       bool
+	CompactContextTokens   int64
+	CompactMinPlannerSteps int
+	DeliveryStrategy       string
+}
+
 // DeliverMessageToSession injects a user/system message into an existing Antigravity conversation
 // (used for resumable follow-up timers, deferred human-approval continuations, and Front Desk alerts).
 // It attempts LanguageServerService/SendUserCascadeMessage first when LS credentials are present,
 // falling back to `agentapi send-message`.
 func DeliverMessageToSession(vaultDir, sessionID, title, text string, dryRun bool) (string, error) {
+	return DeliverMessageToSessionWithOptions(vaultDir, sessionID, title, text, dryRun, DeliverMessageOptions{})
+}
+
+// DeliverMessageToSessionWithOptions delivers a message to sessionID with optional gated
+// Front Desk CompactThenContinue support over LanguageServerService/SendUserCascadeMessage.
+// Non-LS fallbacks (such as `agentapi send-message`) always receive plain prompt text only.
+func DeliverMessageToSessionWithOptions(vaultDir, sessionID, title, text string, dryRun bool, opts DeliverMessageOptions) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return "", fmt.Errorf("sessionID is required")
@@ -32,18 +48,49 @@ func DeliverMessageToSession(vaultDir, sessionID, title, text string, dryRun boo
 	if strings.TrimSpace(title) == "" {
 		title = "[HQ] Automated Continuation"
 	}
+
+	var gate FrontDeskCompactionDecision
+	if opts.CompactBeforeRun {
+		gate = EvaluateFrontDeskCompactionGate(vaultDir, sessionID, opts.CompactContextTokens, opts.CompactMinPlannerSteps)
+	}
+
 	if dryRun {
+		if opts.CompactBeforeRun {
+			if gate.ShouldCompact {
+				return fmt.Sprintf("[dry-run] send-message (compact+when_idle, %s) --title=%q %s", gate.Reason, title, sessionID), nil
+			}
+			return fmt.Sprintf("[dry-run] send-message (skip-compact=%s, when_idle) --title=%q %s", gate.Reason, title, sessionID), nil
+		}
+		if strategy := strings.TrimSpace(opts.DeliveryStrategy); strategy != "" {
+			return fmt.Sprintf("[dry-run] send-message (strategy=%s) --title=%q %s", strategy, title, sessionID), nil
+		}
 		return fmt.Sprintf("[dry-run] send-message --title=%q %s", title, sessionID), nil
 	}
 
 	if creds, ok := discoverLSCredentials(vaultDir); ok {
-		if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, sessionID, text, 3*time.Second); sendErr == nil {
-			return fmt.Sprintf("delivered via LanguageServerService (%s)", sessionID), nil
+		lsOpts := sendCascadeMessageOptions{
+			CompactFirst:     gate.ShouldCompact,
+			DeliveryStrategy: opts.DeliveryStrategy,
+		}
+		if outcome, sendErr := sendUserCascadeMessageWithOptions(creds.BaseURL, creds.CSRFToken, sessionID, text, lsOpts, 3*time.Second); sendErr == nil {
+			switch {
+			case outcome.Compacted:
+				return fmt.Sprintf("delivered via LanguageServerService (compact+when_idle, %s, %s)", gate.Reason, sessionID), nil
+			case outcome.CompactRejectedFallback:
+				return fmt.Sprintf("delivered via LanguageServerService (compact-fallback-plain, %s)", sessionID), nil
+			case opts.CompactBeforeRun:
+				return fmt.Sprintf("delivered via LanguageServerService (skip-compact=%s, %s)", gate.Reason, sessionID), nil
+			case outcome.DeliveryStrategy != "":
+				return fmt.Sprintf("delivered via LanguageServerService (strategy=%s, %s)", outcome.DeliveryStrategy, sessionID), nil
+			default:
+				return fmt.Sprintf("delivered via LanguageServerService (%s)", sessionID), nil
+			}
 		} else if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
 			return "", sendErr
 		}
 	}
 
+	// Never send raw "/compact" text via agentapi fallback; always send plain prompt text only.
 	cmd := exec.Command("agentapi", "send-message", "--title="+title, sessionID, text)
 	configureSpawnCommand(cmd, vaultDir, "deliver-session:"+sessionID)
 	outBytes, err := cmd.CombinedOutput()
@@ -52,7 +99,11 @@ func DeliverMessageToSession(vaultDir, sessionID, title, text string, dryRun boo
 		return outStr, fmt.Errorf("agentapi send-message failed: %w (%s)", err, outStr)
 	}
 	if outStr == "" {
-		outStr = fmt.Sprintf("delivered via agentapi (%s)", sessionID)
+		if opts.CompactBeforeRun {
+			outStr = fmt.Sprintf("delivered via agentapi (plain, %s)", sessionID)
+		} else {
+			outStr = fmt.Sprintf("delivered via agentapi (%s)", sessionID)
+		}
 	}
 	return outStr, nil
 }
@@ -189,7 +240,20 @@ func DispatchPendingEvents(vaultDir string, now time.Time, dryRun bool) ([]strin
 		}
 
 		if batch.SessionID != "" {
-			out, delivErr := DeliverMessageToSession(vaultDir, batch.SessionID, batch.Title, batch.Prompt, dryRun)
+			var delivOpts DeliverMessageOptions
+			if head.Source == "gatekeeper" && headMetaVal(head, "schedule_mode") == "front_desk_cron" {
+				delivOpts.DeliveryStrategy = LSDeliveryStrategyWhenIdle
+				if headMetaVal(head, "compact_before_run") == "1" {
+					delivOpts.CompactBeforeRun = true
+					if v, pErr := strconv.ParseInt(headMetaVal(head, "compact_context_tokens"), 10, 64); pErr == nil && v > 0 {
+						delivOpts.CompactContextTokens = v
+					}
+					if v, pErr := strconv.Atoi(headMetaVal(head, "compact_min_planner_steps")); pErr == nil && v > 0 {
+						delivOpts.CompactMinPlannerSteps = v
+					}
+				}
+			}
+			out, delivErr := DeliverMessageToSessionWithOptions(vaultDir, batch.SessionID, batch.Title, batch.Prompt, dryRun, delivOpts)
 			if delivErr != nil {
 				if headMetaVal(head, "schedule_mode") == "front_desk_cron" && headMetaVal(head, "scheduled_tick") != "1" {
 					// Fall back to an isolated [Auto] spawn only for explicit manual fires when direct Front Desk delivery failed.

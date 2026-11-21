@@ -15,16 +15,29 @@ import (
 
 // BudgetConfig defines daily token budgets and context/turn anomaly thresholds in local/memory/obs/budget.json.
 type BudgetConfig struct {
-	DailyUncachedBudget     int64 `json:"dailyUncachedBudget"`
-	DailyDeepUncachedBudget int64 `json:"dailyDeepUncachedBudget"`
-	TokenCircuitDisabled    bool  `json:"tokenCircuitDisabled,omitempty"`
-	WarnContextTokens       int64 `json:"warnContextTokens"`
-	NudgeContextTokens      int64 `json:"nudgeContextTokens"`
-	CritContextTokens       int64 `json:"critContextTokens"`
-	MaxTurnSteps            int   `json:"maxTurnSteps"`
-	MaxTurnUncachedTokens   int64 `json:"maxTurnUncachedTokens"`
-	MaxTurnOutputTokens     int64 `json:"maxTurnOutputTokens"`
-	MaxDailySpawns          int   `json:"maxDailySpawns,omitempty"`
+	DailyUncachedBudget      int64 `json:"dailyUncachedBudget"`
+	DailyDeepUncachedBudget  int64 `json:"dailyDeepUncachedBudget"`
+	TokenCircuitDisabled     bool  `json:"tokenCircuitDisabled,omitempty"`
+	WarnContextTokens        int64 `json:"warnContextTokens"`
+	NudgeContextTokens       int64 `json:"nudgeContextTokens"`
+	CritContextTokens        int64 `json:"critContextTokens"`
+	AutoCompactContextTokens int64 `json:"autoCompactContextTokens,omitempty"`
+	MaxTurnSteps             int   `json:"maxTurnSteps"`
+	MaxTurnUncachedTokens    int64 `json:"maxTurnUncachedTokens"`
+	MaxTurnOutputTokens      int64 `json:"maxTurnOutputTokens"`
+	MaxDailySpawns           int   `json:"maxDailySpawns,omitempty"`
+}
+
+// EffectiveAutoCompactContextTokens returns the Front Desk context watermark used by opt-in
+// pre-run compaction, defaulting to WarnContextTokens (120,000) when unset.
+func (c BudgetConfig) EffectiveAutoCompactContextTokens() int64 {
+	if c.AutoCompactContextTokens > 0 {
+		return c.AutoCompactContextTokens
+	}
+	if c.WarnContextTokens > 0 {
+		return c.WarnContextTokens
+	}
+	return 120_000
 }
 
 // DefaultBudgetConfig returns the RFC-0012 default budget and context guard configuration.
@@ -71,6 +84,9 @@ func LoadBudgetConfig(vaultDir string) BudgetConfig {
 	}
 	if parsed.CritContextTokens > 0 {
 		cfg.CritContextTokens = parsed.CritContextTokens
+	}
+	if parsed.AutoCompactContextTokens > 0 {
+		cfg.AutoCompactContextTokens = parsed.AutoCompactContextTokens
 	}
 	if parsed.MaxTurnSteps > 0 {
 		cfg.MaxTurnSteps = parsed.MaxTurnSteps

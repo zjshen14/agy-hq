@@ -16,7 +16,7 @@ import (
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
-const CurrentSchemaVersion = 11
+const CurrentSchemaVersion = 12
 
 // SchemaState is persisted at local/memory/schema_version.json.
 type SchemaState struct {
@@ -197,6 +197,12 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 		reconciled, _ := obs.ReconcileSubagentAttribution(vaultDir)
 		removedSlugs, _ := kernel.CleanNestedTasks(vaultDir)
 		recordStep("v11_layer1_taskboard_cleanup", fmt.Sprintf("Reconciled %d subagent/worker attribution(s) and cleaned %d leaked nested/workflow entry(s) from tasks.json", reconciled, len(removedSlugs)))
+	}
+
+	// Migration v11 -> v12: Opt unmodified morning-brief front_desk_cron trigger into gated compact_before_run
+	if prev.Version < 12 {
+		upgradedMorningBrief := upgradeV12MorningBriefCompactTrigger(vaultDir)
+		recordStep("v12_morning_brief_compact_before_run", fmt.Sprintf("Enabled gated compact_before_run on morning-brief trigger=%v", upgradedMorningBrief))
 	}
 
 	// 3. Synchronize unedited installed starter templates (dpkg-style, preserving RSI rule blocks)
@@ -703,6 +709,86 @@ func upgradeV10SleepConsolidateTrigger(vaultDir string) bool {
 			`    precheck_cmd: ["hq", "memory", "dream-plan", "--precheck"]`,
 			"    dedup_mode: exit_zero_nonempty",
 		)
+	}
+
+	var outLines []string
+	outLines = append(outLines, lines[:startIdx]...)
+	outLines = append(outLines, updatedBlock...)
+	outLines = append(outLines, lines[endIdx:]...)
+	updated := strings.Join(outLines, "\n")
+	if updated == s {
+		return false
+	}
+	return store.WriteAtomic(trigPath, []byte(updated), 0o600) == nil
+}
+
+func upgradeV12MorningBriefCompactTrigger(vaultDir string) bool {
+	trigPath := filepath.Join(vaultDir, "triggers.yaml")
+	if !isRegularNonSymlinkFile(trigPath) {
+		return false
+	}
+	b, err := os.ReadFile(trigPath)
+	if err != nil {
+		return false
+	}
+	s := strings.ReplaceAll(string(b), "\r\n", "\n")
+	lines := strings.Split(s, "\n")
+	startIdx := -1
+	endIdx := len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if startIdx == -1 {
+			if trimmed == "- id: morning-brief" {
+				startIdx = i
+			}
+		} else {
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "- id:") || (len(line) > 0 && line[0] != ' ' && line[0] != '\t') {
+				endIdx = i
+				break
+			}
+		}
+	}
+	if startIdx == -1 {
+		return false
+	}
+
+	block := lines[startIdx:endIdx]
+	hasFrontDeskMode := false
+	hasCompactField := false
+	for _, l := range block {
+		t := strings.TrimSpace(l)
+		if t == "mode: front_desk_cron" {
+			hasFrontDeskMode = true
+		}
+		if strings.HasPrefix(t, "compact_before_run:") {
+			hasCompactField = true
+		}
+	}
+	if !hasFrontDeskMode || hasCompactField {
+		return false
+	}
+
+	var updatedBlock []string
+	inserted := false
+	for _, l := range block {
+		updatedBlock = append(updatedBlock, l)
+		t := strings.TrimSpace(l)
+		if !inserted && strings.HasPrefix(t, "tier:") {
+			indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))]
+			updatedBlock = append(updatedBlock, indent+"compact_before_run: true")
+			inserted = true
+		}
+	}
+	if !inserted {
+		for idx, l := range updatedBlock {
+			t := strings.TrimSpace(l)
+			if t == "mode: front_desk_cron" {
+				indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))]
+				tail := append([]string{indent + "compact_before_run: true"}, updatedBlock[idx+1:]...)
+				updatedBlock = append(updatedBlock[:idx+1], tail...)
+				break
+			}
+		}
 	}
 
 	var outLines []string

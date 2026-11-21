@@ -16,6 +16,7 @@ schedules:
     cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"
     mode: front_desk_cron
     tier: routine
+    compact_before_run: true
     delivery: interrupt
     skill: morning-brief
   - id: sleep-consolidate

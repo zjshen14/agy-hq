@@ -21,6 +21,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/taint"
+	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/watcher"
 	"github.com/zjshen14/agy-hq/internal/worktree"
 )
@@ -193,6 +194,7 @@ type Packet struct {
 	OverdueWaiting        []kernel.OverdueWaitingSummary `json:"overdue_waiting"`
 	ActiveWorktrees       []string                       `json:"active_worktrees"`
 	ActiveWorkspaces      []BriefWorkspaceSummary        `json:"active_workspaces"`
+	ActivePriorities      string                         `json:"active_priorities,omitempty"`
 	TokenTelemetry        *TokenDigest                   `json:"token_telemetry,omitempty"`
 	Connectors            []ConnectorBriefSection        `json:"connectors"`
 	Extensions            []ExtensionBriefSection        `json:"extensions"`
@@ -296,6 +298,24 @@ func newProposalAlert(p approvals.Proposal, status, ttlWarn string) ProposalAler
 		Status:      status,
 		TTLWarning:  ttlWarn,
 	}
+}
+
+func loadBoundedActivePriorities(vaultDir string) string {
+	memPath := filepath.Join(vaultDir, "MEMORY.md")
+	info, err := os.Lstat(memPath)
+	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	b, err := os.ReadFile(memPath)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return ""
+	}
+	trimmed, _ := vault.TruncateMemoryIndex(s, vault.MaxMemoryIndexLines, vault.MaxMemoryIndexBytes)
+	return strings.TrimSpace(trimmed)
 }
 
 func collectProposalAlerts(vaultDir string, now time.Time) []ProposalAlert {
@@ -537,6 +557,7 @@ func Collect(parentCtx context.Context, vaultDir string, opts CollectOptions) (P
 			Summary:     ws.Summary,
 		})
 	}
+	pkt.ActivePriorities = loadBoundedActivePriorities(vaultDir)
 	if rep, oErr := obs.BuildSummaryReport(vaultDir, "today", "tier", now); oErr == nil && rep != nil {
 		pkt.TokenTelemetry = &TokenDigest{
 			UpdatedAt:   rep.GeneratedAt,

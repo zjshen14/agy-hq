@@ -23,20 +23,23 @@ import (
 
 // ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml (and optional extension packs).
 type ScheduleTrigger struct {
-	ID                string   `json:"id"`
-	Cron              string   `json:"cron"`
-	Mode              string   `json:"mode,omitempty"` // front_desk_cron | isolated_worker | daemon_gatekeeper
-	Tier              string   `json:"tier,omitempty"` // quick | routine | standard | heavy | deep_routine | deep
-	Model             string   `json:"model"`
-	Skill             string   `json:"skill"`
-	Prompt            string   `json:"prompt,omitempty"`
-	PrecheckCmd       []string `json:"precheckCmd,omitempty"`
-	PrecheckTimeoutMs int      `json:"precheckTimeoutMs,omitempty"`
-	DedupMode         string   `json:"dedupMode,omitempty"` // none | exit_zero_nonempty | stdout_sha256
-	Delivery          string   `json:"delivery,omitempty"`  // interrupt | interrupt_on_breach | brief_rollup | ideas_feed | silent_ledger
-	Enabled           *bool    `json:"enabled,omitempty"`
-	CatchUp           string   `json:"catchUp,omitempty"` // none (default) | last
-	Source            string   `json:"source,omitempty"`  // "core" | "pack:<name>"
+	ID                     string   `json:"id"`
+	Cron                   string   `json:"cron"`
+	Mode                   string   `json:"mode,omitempty"` // front_desk_cron | isolated_worker | daemon_gatekeeper
+	Tier                   string   `json:"tier,omitempty"` // quick | routine | standard | heavy | deep_routine | deep
+	CompactBeforeRun       bool     `json:"compactBeforeRun,omitempty"`
+	CompactContextTokens   int64    `json:"compactContextTokens,omitempty"`
+	CompactMinPlannerSteps int      `json:"compactMinPlannerSteps,omitempty"`
+	Model                  string   `json:"model"`
+	Skill                  string   `json:"skill"`
+	Prompt                 string   `json:"prompt,omitempty"`
+	PrecheckCmd            []string `json:"precheckCmd,omitempty"`
+	PrecheckTimeoutMs      int      `json:"precheckTimeoutMs,omitempty"`
+	DedupMode              string   `json:"dedupMode,omitempty"` // none | exit_zero_nonempty | stdout_sha256
+	Delivery               string   `json:"delivery,omitempty"`  // interrupt | interrupt_on_breach | brief_rollup | ideas_feed | silent_ledger
+	Enabled                *bool    `json:"enabled,omitempty"`
+	CatchUp                string   `json:"catchUp,omitempty"` // none (default) | last
+	Source                 string   `json:"source,omitempty"`  // "core" | "pack:<name>"
 }
 
 // FQID returns the canonical fully qualified schedule ID ("core/<id>" or "<pack>/<id>").
@@ -220,6 +223,21 @@ func parseScheduleField(s *ScheduleTrigger, line string) {
 		s.Delivery = cleanVal(val)
 	case "catch_up":
 		s.CatchUp = cleanVal(val)
+	case "compact_before_run":
+		v := strings.ToLower(cleanVal(val))
+		if v == "true" || v == "1" || v == "yes" {
+			s.CompactBeforeRun = true
+		} else if v == "false" || v == "0" || v == "no" {
+			s.CompactBeforeRun = false
+		}
+	case "compact_context_tokens":
+		if n, err := strconv.ParseInt(cleanVal(val), 10, 64); err == nil && n > 0 {
+			s.CompactContextTokens = n
+		}
+	case "compact_min_planner_steps":
+		if n, err := strconv.Atoi(cleanVal(val)); err == nil && n > 0 {
+			s.CompactMinPlannerSteps = n
+		}
 	case "enabled":
 		v := strings.ToLower(cleanVal(val))
 		if v == "true" || v == "false" {
@@ -380,16 +398,19 @@ func loadPackTriggersDefault(vaultDir string) ([]ScheduleTrigger, []InboxRuleTri
 				cronExpr = "CRON_TZ=" + tz + " " + cronExpr
 			}
 			st := ScheduleTrigger{
-				ID:       id,
-				Cron:     cronExpr,
-				Mode:     strings.TrimSpace(ps.Mode),
-				Tier:     strings.TrimSpace(ps.Tier),
-				Skill:    strings.TrimSpace(ps.Skill),
-				Prompt:   strings.TrimSpace(ps.Prompt),
-				Delivery: strings.TrimSpace(ps.Delivery),
-				Enabled:  ps.Enabled,
-				CatchUp:  strings.TrimSpace(ps.CatchUp),
-				Source:   "pack:" + dp.ID,
+				ID:                     id,
+				Cron:                   cronExpr,
+				Mode:                   strings.TrimSpace(ps.Mode),
+				Tier:                   strings.TrimSpace(ps.Tier),
+				CompactBeforeRun:       ps.CompactBeforeRun,
+				CompactContextTokens:   ps.CompactContextTokens,
+				CompactMinPlannerSteps: ps.CompactMinPlannerSteps,
+				Skill:                  strings.TrimSpace(ps.Skill),
+				Prompt:                 strings.TrimSpace(ps.Prompt),
+				Delivery:               strings.TrimSpace(ps.Delivery),
+				Enabled:                ps.Enabled,
+				CatchUp:                strings.TrimSpace(ps.CatchUp),
+				Source:                 "pack:" + dp.ID,
 			}
 			if ps.Precheck != nil && len(ps.Precheck.Argv) > 0 {
 				st.PrecheckCmd = append([]string(nil), ps.Precheck.Argv...)

@@ -903,6 +903,7 @@ func runObsCLI(vaultDir string, args []string) {
 		disableTokenCircuit := fs.Bool("disable-token-circuit", false, "Disable daily token budget alerts and auto-spawn circuit breaker (telemetry remains active)")
 		enableTokenCircuit := fs.Bool("enable-token-circuit", false, "Re-enable daily token budget alerts and auto-spawn circuit breaker")
 		setWarnCtx := fs.Int64("set-warn-context", 0, "Set Front Desk context warning threshold (default 120000)")
+		setAutoCompactCtx := fs.Int64("set-auto-compact-context", 0, "Set Front Desk pre-run auto-compact token threshold (defaults to warnContextTokens)")
 		setNudgeCtx := fs.Int64("set-nudge-context", 0, "Set Front Desk SessionStart /compact nudge threshold (default 160000)")
 		setCritCtx := fs.Int64("set-crit-context", 0, "Set Front Desk critical context threshold (default 180000)")
 		setMaxDailySpawns := fs.Int("set-max-daily-spawns", 0, "Set daily automated background spawn cap in config.yaml and quota state (e.g. 30)")
@@ -939,6 +940,10 @@ func runObsCLI(vaultDir string, args []string) {
 		}
 		if *setWarnCtx > 0 {
 			cfg.WarnContextTokens = *setWarnCtx
+			updated = true
+		}
+		if *setAutoCompactCtx > 0 {
+			cfg.AutoCompactContextTokens = *setAutoCompactCtx
 			updated = true
 		}
 		if *setNudgeCtx > 0 {
@@ -992,8 +997,9 @@ func runObsCLI(vaultDir string, args []string) {
 		}
 		fmt.Printf("  Daily Auto Spawn Budget:    %d / %d auto spawns today (+%d interactive, circuit=%s)\n",
 			qState.EffectiveAutoSpawns(), qState.MaxDailySpawns, qState.InteractiveSpawnsToday, circuitLabel)
-		fmt.Printf("  Front Desk Context Guards:  WARN=%s | NUDGE=%s | CRITICAL=%s\n",
+		fmt.Printf("  Front Desk Context Guards:  WARN=%s | AUTO-COMPACT=%s | NUDGE=%s | CRITICAL=%s\n",
 			obs.FormatTokensCompact(cfg.WarnContextTokens),
+			obs.FormatTokensCompact(cfg.EffectiveAutoCompactContextTokens()),
 			obs.FormatTokensCompact(cfg.NudgeContextTokens),
 			obs.FormatTokensCompact(cfg.CritContextTokens))
 		fmt.Printf("  Runaway Turn Guards (A3):   MaxSteps=%d | MaxUncached=%s | MaxOutput=%s\n",

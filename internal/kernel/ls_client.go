@@ -576,10 +576,86 @@ func startCascade(lsBaseURL, csrfToken string, reqBody map[string]interface{}) (
 	return startResp.CascadeID, nil
 }
 
+type sendCascadeMessageOptions struct {
+	CompactFirst     bool
+	DeliveryStrategy string
+}
+
+type sendCascadeMessageOutcome struct {
+	Compacted               bool
+	CompactRejectedFallback bool
+	DeliveryStrategy        string
+}
+
 func sendUserCascadeMessage(lsBaseURL, csrfToken, cascadeID, text string, timeout time.Duration) error {
+	_, err := sendUserCascadeMessageWithOptions(lsBaseURL, csrfToken, cascadeID, text, sendCascadeMessageOptions{}, timeout)
+	return err
+}
+
+func sendUserCascadeMessageWithOptions(lsBaseURL, csrfToken, cascadeID, text string, opts sendCascadeMessageOptions, timeout time.Duration) (sendCascadeMessageOutcome, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	var outcome sendCascadeMessageOutcome
+	strategy := strings.TrimSpace(opts.DeliveryStrategy)
+	if opts.CompactFirst && strategy == "" {
+		strategy = LSDeliveryStrategyWhenIdle
+	}
+
+	// Never pass cascadeConfig on SendUserCascadeMessage so active conversation planModel is preserved.
+	if opts.CompactFirst {
+		compactPayload := map[string]interface{}{
+			"cascadeId": cascadeID,
+			"items": []map[string]interface{}{
+				{
+					"item": map[string]interface{}{
+						"slashCommand": map[string]interface{}{
+							"info": map[string]interface{}{
+								"name": "compact",
+								"type": "SLASH_COMMAND_TYPE_SYSTEM",
+							},
+						},
+					},
+				},
+				{"text": text},
+			},
+			"blocking":         false,
+			"deliveryStrategy": strategy,
+		}
+		status, respBody, err := postLSJSON(lsBaseURL, csrfToken, "SendUserCascadeMessage", compactPayload, true, timeout, 0)
+		if err != nil {
+			return outcome, fmt.Errorf("SendUserCascadeMessage failed: %w", err)
+		}
+		if status >= 200 && status < 300 {
+			outcome.Compacted = true
+			outcome.DeliveryStrategy = strategy
+			return outcome, nil
+		}
+		// LS rejected slashCommand/CompactThenContinue (e.g., HTTP 400/404/422/501):
+		// fall back to plain prompt text (never inject literal "/compact" text).
+		_ = respBody
+		outcome.CompactRejectedFallback = true
+	}
+
+	if strategy != "" {
+		whenIdlePayload := map[string]interface{}{
+			"cascadeId": cascadeID,
+			"items": []map[string]interface{}{
+				{"text": text},
+			},
+			"blocking":         false,
+			"deliveryStrategy": strategy,
+		}
+		status, _, err := postLSJSON(lsBaseURL, csrfToken, "SendUserCascadeMessage", whenIdlePayload, true, timeout, 0)
+		if err != nil {
+			return outcome, fmt.Errorf("SendUserCascadeMessage failed: %w", err)
+		}
+		if status >= 200 && status < 300 {
+			outcome.DeliveryStrategy = strategy
+			return outcome, nil
+		}
+	}
+
 	status, respBody, err := postLSJSON(lsBaseURL, csrfToken, "SendUserCascadeMessage", map[string]interface{}{
 		"cascadeId": cascadeID,
 		"items": []map[string]interface{}{
@@ -587,12 +663,12 @@ func sendUserCascadeMessage(lsBaseURL, csrfToken, cascadeID, text string, timeou
 		},
 	}, false, timeout, 0)
 	if err != nil {
-		return fmt.Errorf("SendUserCascadeMessage failed: %w", err)
+		return outcome, fmt.Errorf("SendUserCascadeMessage failed: %w", err)
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("SendUserCascadeMessage HTTP %d: %s", status, strings.TrimSpace(string(respBody)))
+		return outcome, fmt.Errorf("SendUserCascadeMessage HTTP %d: %s", status, strings.TrimSpace(string(respBody)))
 	}
-	return nil
+	return outcome, nil
 }
 
 type lsModelConfig struct {

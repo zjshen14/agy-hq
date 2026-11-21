@@ -484,15 +484,25 @@ func appendExpandedSpawnEdges(cm *ConversationMetrics, recorded map[string]bool,
 	}
 }
 
+func isCompletedCheckpointStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "", "DONE", "CORTEX_STEP_STATUS_DONE":
+		return true
+	default:
+		return false
+	}
+}
+
 // ParseTranscriptFile parses an Antigravity transcript.jsonl file into ConversationMetrics,
 // extracting per-turn token metrics, 3-part latency, context watermarks, compaction checkpoints,
 // and ground-truth invoke_subagent spawn edges.
 func ParseTranscriptFile(convID, transcriptPath, model, tier string) (ConversationMetrics, error) {
 	cm := ConversationMetrics{
-		ConversationID: convID,
-		TranscriptPath: transcriptPath,
-		Model:          model,
-		Tier:           tier,
+		ConversationID:        convID,
+		TranscriptPath:        transcriptPath,
+		Model:                 model,
+		Tier:                  tier,
+		LastCheckpointStepIdx: -1,
 	}
 	info, err := os.Stat(transcriptPath)
 	if err != nil {
@@ -520,6 +530,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 	lastPlannerHadTools := false
 	lastPlannerHadRunCmd := false
 	lastPlannerHadAskQuestion := false
+	plannerSinceCheckpoint := 0
 	var lastStepTime time.Time
 
 	finishTurn := func(endStepIdx int, endAt string) {
@@ -648,8 +659,10 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			}
 		}
 
-		if st.Type == "CHECKPOINT" {
+		if st.Type == "CHECKPOINT" && isCompletedCheckpointStatus(st.Status) {
 			curTurn.CompactionCount++
+			cm.LastCheckpointStepIdx = i
+			plannerSinceCheckpoint = 0
 		}
 
 		if st.Type == "USER_INPUT" {
@@ -666,6 +679,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			pendingAgentAPICalls = nil
 
 			curTurn.PlannerSteps++
+			plannerSinceCheckpoint++
 			// Estimate LLM generation time from previous step timestamp inside the turn
 			accumulateLLMLatency(&curTurn.LLMLatencyMs, stTime, lastStepTime)
 
@@ -830,6 +844,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 	}
 
 	cm.Turns = turns
+	cm.PlannerResponsesSinceCheckpoint = plannerSinceCheckpoint
 	cm.Self = RollupTurns(turns, stepCount, cm.Model, cm.Tier)
 	cm.Tree = cm.Self
 	return cm, nil
@@ -842,12 +857,17 @@ type TurnSliceScanner struct {
 	idx                       int
 	lastStepTime              time.Time
 	lastPlannerHadAskQuestion bool
+	plannerSinceCheckpoint    int
+	lastCheckpointStepIdx     int
 	tm                        TurnMetrics
 }
 
 // NewTurnSliceScanner creates a single-pass TurnMetrics accumulator starting at stepStartIdx.
 func NewTurnSliceScanner(stepStartIdx int) *TurnSliceScanner {
-	return &TurnSliceScanner{stepStartIdx: stepStartIdx}
+	return &TurnSliceScanner{
+		stepStartIdx:          stepStartIdx,
+		lastCheckpointStepIdx: -1,
+	}
 }
 
 // ObserveLine feeds one JSONL line from transcript.jsonl into the accumulator.
@@ -861,8 +881,14 @@ func (s *TurnSliceScanner) ObserveLine(raw []byte) {
 	s.idx++
 
 	ctx := st.InputTokens + st.CacheReadTokens
-	if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
-		s.tm.CurrentContextTokens = ctx
+	if st.Type == "PLANNER_RESPONSE" {
+		if ctx > 0 {
+			s.tm.CurrentContextTokens = ctx
+		}
+		s.plannerSinceCheckpoint++
+	} else if st.Type == "CHECKPOINT" && isCompletedCheckpointStatus(st.Status) {
+		s.lastCheckpointStepIdx = curIdx
+		s.plannerSinceCheckpoint = 0
 	}
 
 	if curIdx < s.stepStartIdx {
@@ -887,7 +913,7 @@ func (s *TurnSliceScanner) ObserveLine(raw []byte) {
 			s.tm.PeakContextTokens = ctx
 		}
 	}
-	if st.Type == "CHECKPOINT" {
+	if st.Type == "CHECKPOINT" && isCompletedCheckpointStatus(st.Status) {
 		s.tm.CompactionCount++
 	}
 	if st.Type == "PLANNER_RESPONSE" {
@@ -944,6 +970,49 @@ func ParseSingleTurnSlice(transcriptPath string, stepStartIdx int) TurnMetrics {
 		acc.ObserveLine(scanner.Bytes())
 	}
 	return acc.Finish()
+}
+
+// TranscriptContextState captures a conversation's latest context window size and uncompacted planner activity.
+type TranscriptContextState struct {
+	CurrentContextTokens            int64
+	PlannerResponsesSinceCheckpoint int
+	LastCheckpointStepIdx           int
+	CompactionCount                 int
+}
+
+// InspectTranscriptContextFile streams transcriptPath once via TurnSliceScanner to extract
+// current prompt context tokens and uncompacted PLANNER_RESPONSE steps after the latest DONE CHECKPOINT.
+func InspectTranscriptContextFile(transcriptPath string) (TranscriptContextState, bool) {
+	if transcriptPath == "" {
+		return TranscriptContextState{LastCheckpointStepIdx: -1}, false
+	}
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return TranscriptContextState{LastCheckpointStepIdx: -1}, false
+	}
+	defer f.Close()
+
+	acc := NewTurnSliceScanner(0)
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		acc.ObserveLine(line)
+	}
+	if scanner.Err() != nil {
+		return TranscriptContextState{LastCheckpointStepIdx: -1}, false
+	}
+	tm := acc.Finish()
+	return TranscriptContextState{
+		CurrentContextTokens:            tm.CurrentContextTokens,
+		PlannerResponsesSinceCheckpoint: acc.plannerSinceCheckpoint,
+		LastCheckpointStepIdx:           acc.lastCheckpointStepIdx,
+		CompactionCount:                 tm.CompactionCount,
+	}, true
 }
 
 func normalizeRawStep(st *rawStep) {

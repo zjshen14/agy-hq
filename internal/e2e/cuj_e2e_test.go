@@ -6881,3 +6881,126 @@ func TestCUJ40_Layer1TaskBoardIsolationCLI(t *testing.T) {
 		}
 	}
 }
+
+// CUJ-45: Gated Front Desk CompactThenContinue for Morning Brief & Post-Compaction Priority Reload
+func TestCUJ45_MorningBriefGatedFrontDeskCompaction(t *testing.T) {
+	runScenario := func(t *testing.T, name string, transcriptLines []string) (requests []map[string]interface{}, headers []string, tickOut string, briefOut string) {
+		t.Helper()
+		env := setupHQEnv(t)
+		if out, err := env.run("", "init"); err != nil {
+			t.Fatalf("[%s] hq init failed: %v (%s)", name, err, out)
+		}
+		trigBytes, err := os.ReadFile(filepath.Join(env.vaultDir, "triggers.yaml"))
+		if err != nil {
+			t.Fatalf("[%s] read seeded triggers.yaml: %v", name, err)
+		}
+		if !strings.Contains(string(trigBytes), "compact_before_run: true") {
+			t.Fatalf("[%s] expected hq init triggers.yaml to include compact_before_run: true on morning-brief, got:\n%s", name, string(trigBytes))
+		}
+		// Match every minute in test so `hq triggers tick` has zero wall-clock boundary flakiness.
+		alwaysDueTrig := strings.Replace(string(trigBytes), `cron: "CRON_TZ=America/Los_Angeles 30 7 * * *"`, `cron: "* * * * *"`, 1)
+		if err := os.WriteFile(filepath.Join(env.vaultDir, "triggers.yaml"), []byte(alwaysDueTrig), 0o600); err != nil {
+			t.Fatalf("[%s] write triggers.yaml: %v", name, err)
+		}
+
+		// Configure budget threshold via CLI and add updated MEMORY.md priorities (post-compaction reload check)
+		if out, err := env.run("", "obs", "budget", "--set-auto-compact-context=120000", "--json"); err != nil || !strings.Contains(out, `"autoCompactContextTokens": 120000`) {
+			t.Fatalf("[%s] hq obs budget failed: err=%v out=%s", name, err, out)
+		}
+		if err := os.WriteFile(filepath.Join(env.vaultDir, "MEMORY.md"), []byte("# Active Priorities\n- Review morning compact rollout\n"), 0o600); err != nil {
+			t.Fatalf("[%s] write MEMORY.md: %v", name, err)
+		}
+
+		var mu sync.Mutex
+		lsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage" {
+				if r.Header.Get("x-codeium-csrf-token") != "cuj45-csrf" {
+					http.Error(w, "bad csrf", http.StatusForbidden)
+					return
+				}
+				var body map[string]interface{}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				requests = append(requests, body)
+				headers = append(headers, r.Header.Get("Connect-Protocol-Version"))
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer lsSrv.Close()
+
+		brainDir := t.TempDir()
+		fdID := "fd450000-1111-4111-8111-111111111111"
+		artDir := filepath.Join(brainDir, fdID)
+		logDir := filepath.Join(artDir, ".system_generated", "logs")
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			t.Fatalf("[%s] mkdir logDir: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte(strings.Join(transcriptLines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatalf("[%s] write transcript: %v", name, err)
+		}
+		if err := kernel.SetFrontDesk(env.vaultDir, fdID, artDir); err != nil {
+			t.Fatalf("[%s] SetFrontDesk: %v", name, err)
+		}
+
+		lsEnv := []string{
+			"HQ_BRAIN_DIR=" + brainDir,
+			"ANTIGRAVITY_LS_ADDRESS=" + strings.TrimPrefix(lsSrv.URL, "http://"),
+			"ANTIGRAVITY_CSRF_TOKEN=cuj45-csrf",
+		}
+		tickOut, err = env.runWithEnv("", lsEnv, "triggers", "tick", "core/morning-brief", "--json")
+		if err != nil {
+			t.Fatalf("[%s] hq triggers tick failed: %v (%s)", name, err, tickOut)
+		}
+		briefOut, err = env.runWithEnv("", lsEnv, "brief", "collect", "--json")
+		if err != nil {
+			t.Fatalf("[%s] hq brief collect failed: %v (%s)", name, err, briefOut)
+		}
+		return requests, headers, tickOut, briefOut
+	}
+
+	// Scenario 1: Freshly compacted (180k context, RUNNING checkpoint ignored, DONE checkpoint at step 3, 0 planner steps after DONE)
+	reqs1, _, tick1, brief1 := runScenario(t, "FreshlyCompactedSkips", []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T07:00:00Z","content":"hi"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T07:00:03Z","input_tokens":20000,"cache_read_tokens":160000,"output_tokens":300}`,
+		`{"step_index":2,"type":"CHECKPOINT","source":"SYSTEM","status":"RUNNING","created_at":"2026-11-21T07:01:00Z"}`,
+		`{"step_index":3,"type":"CHECKPOINT","source":"SYSTEM","status":"CORTEX_STEP_STATUS_DONE","created_at":"2026-11-21T07:01:05Z"}`,
+	})
+	if len(reqs1) != 1 || len(reqs1[0]["items"].([]interface{})) != 1 || !strings.Contains(tick1, "skip-compact=insufficient_planner_activity") {
+		t.Fatalf("expected freshly compacted Front Desk to skip /compact, reqs=%#v tickOut=%s", reqs1, tick1)
+	}
+	if !strings.Contains(brief1, `"active_priorities"`) || !strings.Contains(brief1, "Review morning compact rollout") {
+		t.Fatalf("expected hq brief collect to reload MEMORY.md active_priorities post-compaction, got:\n%s", brief1)
+	}
+
+	// Scenario 2: Threshold exceeded (140k >= 120k) + 2 uncompacted PLANNER_RESPONSE steps after DONE checkpoint -> CompactThenContinue
+	reqs2, hdrs2, tick2, _ := runScenario(t, "GatedCompactThenContinue", []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T06:00:00Z","content":"init"}`,
+		`{"step_index":1,"type":"CHECKPOINT","source":"SYSTEM","status":"DONE","created_at":"2026-11-21T06:05:00Z"}`,
+		`{"step_index":2,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T06:30:00Z","content":"turn A"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T06:30:04Z","input_tokens":10000,"cache_read_tokens":120000,"output_tokens":200}`,
+		`{"step_index":4,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T07:00:00Z","content":"turn B"}`,
+		`{"step_index":5,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T07:00:04Z","input_tokens":12000,"cache_read_tokens":128000,"output_tokens":220}`,
+	})
+	if len(reqs2) != 1 || hdrs2[0] != "1" || !strings.Contains(tick2, "compact+when_idle") {
+		t.Fatalf("expected gated CompactThenContinue LS request, reqs=%#v hdrs=%v tickOut=%s", reqs2, hdrs2, tick2)
+	}
+	req2 := reqs2[0]
+	if req2["blocking"] != false || req2["deliveryStrategy"] != kernel.LSDeliveryStrategyWhenIdle {
+		t.Fatalf("expected blocking=false and WHEN_IDLE strategy, got %#v", req2)
+	}
+	if _, hasCfg := req2["cascadeConfig"]; hasCfg {
+		t.Fatalf("cascadeConfig must not be set on SendUserCascadeMessage")
+	}
+	items2 := req2["items"].([]interface{})
+	if len(items2) != 2 {
+		t.Fatalf("expected 2 items ([compact slashCommand, prompt]), got %#v", items2)
+	}
+	cmdInfo := items2[0].(map[string]interface{})["item"].(map[string]interface{})["slashCommand"].(map[string]interface{})["info"].(map[string]interface{})
+	if cmdInfo["name"] != "compact" || cmdInfo["type"] != "SLASH_COMMAND_TYPE_SYSTEM" {
+		t.Fatalf("unexpected compact slashCommand info: %#v", cmdInfo)
+	}
+}

@@ -725,3 +725,80 @@ func TestSummaryCacheHitExpiryAndBudgetRefresh(t *testing.T) {
 		t.Fatalf("expected date-rollover cache miss")
 	}
 }
+
+func TestCheckpointStatusFilteringAndFrontDeskContextInspection(t *testing.T) {
+	vaultDir := t.TempDir()
+	brainDir := filepath.Join(t.TempDir(), "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "fd111111-2222-4333-8444-555555555555"
+	if err := kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID)); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	// Step 0: USER_INPUT
+	// Step 1: PLANNER_RESPONSE (135k)
+	// Step 2: CHECKPOINT RUNNING (incomplete -> must NOT count or reset uncompacted planner steps)
+	// Step 3: PLANNER_RESPONSE (150k)
+	// Step 4: CHECKPOINT CORTEX_STEP_STATUS_ERROR (failed -> must NOT count or reset)
+	// Step 5: CHECKPOINT DONE (completed -> resets uncompacted planner steps to 0, counts CompactionCount=1)
+	tPath := writeTranscriptFixture(t, brainDir, fdID, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T07:00:00Z","content":"hello"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T07:00:03Z","input_tokens":15000,"cache_read_tokens":120000,"output_tokens":200}`,
+		`{"step_index":2,"type":"CHECKPOINT","source":"SYSTEM","status":"RUNNING","created_at":"2026-11-21T07:01:00Z"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T07:01:05Z","input_tokens":10000,"cache_read_tokens":140000,"output_tokens":250}`,
+		`{"step_index":4,"type":"CHECKPOINT","source":"SYSTEM","status":"CORTEX_STEP_STATUS_ERROR","created_at":"2026-11-21T07:02:00Z"}`,
+		`{"step_index":5,"type":"CHECKPOINT","source":"SYSTEM","status":"DONE","created_at":"2026-11-21T07:02:10Z"}`,
+	})
+
+	cm, err := ParseTranscriptFile(fdID, tPath, "gemini-4-hydrogen-medium", "routine")
+	if err != nil {
+		t.Fatalf("ParseTranscriptFile: %v", err)
+	}
+	if cm.Self.CompactionCount != 1 {
+		t.Fatalf("expected only DONE checkpoint counted (CompactionCount=1), got %d", cm.Self.CompactionCount)
+	}
+	if cm.LastCheckpointStepIdx != 5 || cm.PlannerResponsesSinceCheckpoint != 0 {
+		t.Fatalf("expected LastCheckpointStepIdx=5 and PlannerResponsesSinceCheckpoint=0, got (%d, %d)",
+			cm.LastCheckpointStepIdx, cm.PlannerResponsesSinceCheckpoint)
+	}
+
+	snap, ok := InspectFrontDeskContext(vaultDir)
+	if !ok {
+		t.Fatalf("expected InspectFrontDeskContext to succeed")
+	}
+	if snap.CurrentContextTokens != 150000 || snap.PlannerResponsesSinceCheckpoint != 0 || snap.AutoCompactContextTokens != 120000 {
+		t.Fatalf("unexpected immediate post-checkpoint snapshot: %+v", snap)
+	}
+
+	// Append two post-compaction PLANNER_RESPONSE steps plus custom AutoCompactContextTokens threshold
+	extra := "" +
+		`{"step_index":6,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T07:10:00Z","content":"follow up 1"}` + "\n" +
+		`{"step_index":7,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T07:10:04Z","input_tokens":5000,"cache_read_tokens":125000,"output_tokens":180}` + "\n" +
+		`{"step_index":8,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-21T07:15:00Z","content":"follow up 2"}` + "\n" +
+		`{"step_index":9,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-21T07:15:04Z","input_tokens":6000,"cache_read_tokens":134000,"output_tokens":220}` + "\n"
+	f, oErr := os.OpenFile(tPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if oErr != nil {
+		t.Fatalf("open transcript for append: %v", oErr)
+	}
+	if _, wErr := f.WriteString(extra); wErr != nil {
+		_ = f.Close()
+		t.Fatalf("append transcript: %v", wErr)
+	}
+	_ = f.Close()
+
+	if err := SaveBudgetConfig(vaultDir, BudgetConfig{
+		WarnContextTokens:        120000,
+		AutoCompactContextTokens: 135000,
+	}); err != nil {
+		t.Fatalf("SaveBudgetConfig: %v", err)
+	}
+
+	snap2, ok2 := InspectFrontDeskContext(vaultDir)
+	if !ok2 {
+		t.Fatalf("expected InspectFrontDeskContext after append to succeed")
+	}
+	if snap2.CurrentContextTokens != 140000 || snap2.PlannerResponsesSinceCheckpoint != 2 || snap2.AutoCompactContextTokens != 135000 {
+		t.Fatalf("unexpected post-append snapshot: %+v", snap2)
+	}
+}

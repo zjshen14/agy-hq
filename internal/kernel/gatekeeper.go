@@ -625,6 +625,22 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 			if scheduledMode {
 				schedTickVal = "1"
 			}
+			meta := map[string]string{
+				"trigger":        "gatekeeper:" + s.ID,
+				"action_label":   fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, effSkill),
+				"schedule_id":    s.ID,
+				"schedule_mode":  s.EffectiveMode(),
+				"scheduled_tick": schedTickVal,
+			}
+			if s.EffectiveMode() == "front_desk_cron" && s.CompactBeforeRun {
+				meta["compact_before_run"] = "1"
+				if s.CompactContextTokens > 0 {
+					meta["compact_context_tokens"] = strconv.FormatInt(s.CompactContextTokens, 10)
+				}
+				if s.CompactMinPlannerSteps > 0 {
+					meta["compact_min_planner_steps"] = strconv.Itoa(s.CompactMinPlannerSteps)
+				}
+			}
 			_, _, enqErr := events.Enqueue(vaultDir, events.Event{
 				Source:       "gatekeeper",
 				DedupKey:     dedupKey,
@@ -635,13 +651,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				Title:        title,
 				Prompt:       prompt,
 				TaintOnSpawn: isExternalPrecheck,
-				Metadata: map[string]string{
-					"trigger":        "gatekeeper:" + s.ID,
-					"action_label":   fmt.Sprintf("gatekeeper:%s -> /%s", s.ID, effSkill),
-					"schedule_id":    s.ID,
-					"schedule_mode":  s.EffectiveMode(),
-					"scheduled_tick": schedTickVal,
-				},
+				Metadata:     meta,
 			}, now)
 			if enqErr == nil {
 				mutations = append(mutations, cursorMutation{
