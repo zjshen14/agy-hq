@@ -532,6 +532,9 @@ func main() {
 	case "sidecar":
 		runSidecarCLI(vaultDir, os.Args[2:])
 
+	case "delegate":
+		runDelegateCLI(vaultDir, os.Args[2:])
+
 	default:
 		printUsage()
 		os.Exit(1)
@@ -561,6 +564,7 @@ Commands:
   dispatch resolve <skill>            Resolve active core, Vault skill, or RSI overlay rules
   extension <list|lint|enable|disable|refresh|trust|doctor>  Manage companion extension packs & trust hashes
   channel <list|status|test|pause|resume|audit|configure>  Manage Front Desk channel bridges & SHA-256 audit log
+  delegate <list|show|validate|configure|test|ack-nudge|audit>  Manage declarative scoped peer delegates (RFC-0026)
   connector <list|lint|migrate|doctor|test>  Manage modular JSON-RPC/CLI connectors & fixtures
   watch <precheck|read|query|ack>     Proactive watcher precheck, tainted read/query, and event ack
   offer stage --connector=...         Stage taint-safe outbound offers with participant_lock & /dev/fd/3

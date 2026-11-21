@@ -479,6 +479,27 @@
 {{end}}
 </div>
 
+{{if or .Delegates.PolicyConfigured .Delegates.TransportCount .Delegates.PendingNudges}}
+<h2>
+  <span>Delegated Peers ({{.Delegates.EnabledPolicyCount}}/{{.Delegates.PolicyCount}})</span>
+  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Scoped Peer Policies &amp; Audit · Read-Only</span>
+</h2>
+<div id="delegates-panel">
+  <div class="card">
+    <div class="meta-row">
+      <strong>🛡️ Scoped Delegates</strong>
+      <span class="badge {{if .Delegates.PolicyConfigured}}badge-pass{{else}}badge-warn{{end}}">{{if .Delegates.PolicyConfigured}}active{{else}}unconfigured{{end}}</span>
+    </div>
+    <div class="muted" style="margin:4px 0">
+      Transports: <code>{{.Delegates.TransportCount}}</code> · Replies (1h): <code>{{.Delegates.RepliesLastHour}}/{{.Delegates.GlobalMaxPerHour}}</code> · Queued Nudges: <code>{{.Delegates.PendingNudges}}</code>
+    </div>
+    {{range .Delegates.RecentAudit}}
+    <div class="muted" style="font-size:11px;margin-top:2px"><code>{{.Timestamp}}</code> · <strong>{{.Action}}</strong> {{if .PolicyID}}(<code>{{.PolicyID}}</code>){{end}} → <code>{{.Outcome}}</code>{{if .Detail}} — {{.Detail}}{{end}}</div>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
 <h2>
   <span>Scheduled Automations (<span id="schedules-count">{{len .Schedules}}</span>)</span>
   <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Core OS Daemons &amp; Conversation Crons</span>

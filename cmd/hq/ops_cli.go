@@ -17,6 +17,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/channels"
 	"github.com/zjshen14/agy-hq/internal/ci"
+	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
@@ -153,6 +154,7 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 				now := time.Now()
 				fired, _ := timers.EvaluateDue(vaultDir, now)
 				_ = kernel.EnqueueInboxFiles(vaultDir, now)
+				dlgRep, _ := delegates.PollDue(context.Background(), vaultDir, now, *dryRun)
 				acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
 				if dErr != nil {
 					fmt.Fprintf(os.Stderr, "hq daemon fast-tick dispatch error: %v\n", dErr)
@@ -165,16 +167,17 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 						syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
 					}
 				}
-				if len(fired) > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 {
+				if len(fired) > 0 || dlgRep.ItemsProcessed > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 {
 					_ = webui.SyncMarkdownConsole(vaultDir)
 				}
 			case <-cronTicker.C:
 				now := time.Now()
 				gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
+				snapsPublished, _ := delegates.SyncDueSnapshots(context.Background(), vaultDir, now, *dryRun)
 				acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
 				// RFC-0025: non-blocking single-flight probe drain + cadence-gated status refresh (no-op without a ledger).
 				triggerWorkspaceMaintenance(now)
-				if len(gkActs) > 0 || kernel.HasMaterialDispatchActions(acts) {
+				if len(gkActs) > 0 || snapsPublished > 0 || kernel.HasMaterialDispatchActions(acts) {
 					_ = webui.SyncMarkdownConsole(vaultDir)
 				}
 			case <-hbTicker.C:

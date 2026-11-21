@@ -1,6 +1,6 @@
 # RFC-0026: Unified Session Authorization Lattice & Declarative Scoped Delegates
 
-- **Status:** Proposed (v2.1 — Revised After 4 Independent Adversarial Reviews + Native Host Preset Bridge)
+- **Status:** Implemented (v2.1 — Unified Session Authorization Lattice + Declarative Scoped Delegates; Phase 2A–2D complete)
 - **Created:** 2026-11-20
 - **Companion Research:** [Research 21: Unified Session Authorization Spectrum, Live Quarantine Hardening & Declarative Scoped Delegates Audit](../research/21_declarative_scoped_delegates_audit.md)
 - **Extends / Updates:** [RFC-0003](./0003-approval-bound-execution.md), [RFC-0014](./0014-proactive-engine-and-living-context.md), [RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md), [RFC-0017c](./0017c-lease-based-morning-brief-and-extensions.md), [RFC-0017d](./0017d-enterprise-extensibility-and-portability.md), [RFC-0018](./0018-always-on-agent-runtime-hardening.md), [RFC-0021](./0021-customizable-approval-policy-and-ux.md), [RFC-0023](./0023-front-desk-channel-bridge.md), [RFC-0025](./0025-pluggable-workspace-providers.md)

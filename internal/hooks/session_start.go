@@ -13,6 +13,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/authz"
+	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
@@ -455,6 +456,11 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			zone2Sections = append(zone2Sections, "## Active Task Progress Checkpoint\n"+trimBytesPreservingLines(strings.TrimSpace(rawProg), progCap))
 		}
+		if !leanAuto && !isTaintedStart {
+			if nudgeBanner := delegates.FormatZone2NudgeBanner(vaultDir, matchedTask.TaskSlug); nudgeBanner != "" {
+				zone2Sections = append(zone2Sections, nudgeBanner)
+			}
+		}
 	}
 
 	// Scoped ## Active Playbook (1:1 Playbook-Owner, 0 on Front Desk)
@@ -798,6 +804,8 @@ func sectionTrimPriority(sec string) (tier int, floor int) {
 		strings.HasPrefix(sec, "## Active Vault Facts"),
 		strings.HasPrefix(sec, "### Scoped Playbook:"):
 		return 2, 1600
+	case strings.HasPrefix(sec, "## 📬 Queued Peer Priority Nudges"):
+		return 1, 400
 	case strings.HasPrefix(sec, "## HQ Vault: MEMORY.md"),
 		strings.HasPrefix(sec, "## Active Task Progress Checkpoint"),
 		strings.HasPrefix(sec, "## Active Task Workspaces"),

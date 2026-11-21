@@ -361,6 +361,8 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		b.WriteString("\n---\n\n")
 	}
 
+	appendDelegatesMarkdownSection(&b, state.Delegates)
+
 	b.WriteString("## 🩺 5. System Health (`hq doctor`)\n")
 	b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
 	for _, h := range state.Health {

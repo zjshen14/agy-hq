@@ -1017,19 +1017,21 @@ func runProgressCLI(vaultDir string, args []string) {
 		done := fs.String("done", "", "Completed & verified milestones")
 		next := fs.String("next", "", "Remaining next steps")
 		pointers := fs.String("pointers", "", "Key file/commit/PR pointers")
+		publicStatus := fs.String("public-status", "", "Curated shareable Public Status visible to authorized scoped delegates")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
 		slug := resolveDefaultSlug(*taskSlug)
 		if slug == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq progress save --task=<slug> --goal=\"...\" --done=\"...\" --next=\"...\" [--pointers=\"...\"]")
+			fmt.Fprintln(os.Stderr, "usage: hq progress save --task=<slug> --goal=\"...\" --done=\"...\" --next=\"...\" [--pointers=\"...\"] [--public-status=\"...\"]")
 			os.Exit(1)
 		}
 		cp, err := vault.SaveProgress(vaultDir, vault.ProgressCheckpoint{
-			TaskSlug:  slug,
-			Goal:      *goal,
-			Completed: *done,
-			NextSteps: *next,
-			Pointers:  *pointers,
+			TaskSlug:     slug,
+			Goal:         *goal,
+			Completed:    *done,
+			NextSteps:    *next,
+			Pointers:     *pointers,
+			PublicStatus: *publicStatus,
 		}, time.Now())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq progress save failed: %v\n", err)

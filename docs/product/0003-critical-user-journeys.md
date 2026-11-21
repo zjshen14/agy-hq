@@ -51,6 +51,9 @@
 | **CUJ-39** | Memory v2 Orthogonal Vault, Scoped Playbooks, BM25 Search & Eval | `hq memory add-fact|search|dream-plan|eval|compact` | `TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval` |
 | **CUJ-40** | Layer-1 Task Board Isolation & Nested Child Filtering | `hq hook pre-tool|session-start|stop`, `hq adopt`, `hq tasks clean-nested` | `TestCUJ40_Layer1TaskBoardIsolationCLI` |
 | **CUJ-41** | Pluggable Workspace Providers: Pack Contract, Home-Placement Spawn, Provider-Delegated Archive & Workspace Hygiene | `hq extension lint`, `hq workspace`, `hq spawn --workspace`, `hq archive`, `hq hook pre-tool`, `hq hook session-start` | `TestCUJ41_PluggableWorkspaceProviders` |
+| **CUJ-42** | Unified Session Authorization Lattice, Quarantine Hardening & Asymmetric Interactive Presets | `internal/authz`, `hq hook pre-tool`, `hq status`, `hq brief format-quarantined` | `TestCUJ42_UnifiedAuthzLatticeAndQuarantineHardening` |
+| **CUJ-43** | Scoped Delegate Read-Only Investigation, Curated Public Status & Ring-0 Egress Gateway | `hq delegate poll|read-request|read-task|run|reply|audit`, `hq progress save --public-status`, `CONSOLE.md` | `TestCUJ43_ScopedDelegateReadOnlyCuratedStatusAndEgress` |
+| **CUJ-44** | CaMeL `queue_only` Task Nudge (0-Token Fast Path + Zone-2 Delivery) & Non-Widening Configure | `hq delegate poll|show|configure|ack-nudge`, `hq hook session-start`, `hq approve` | `TestCUJ44_CaMeLQueueOnlyNudgeAndNonWideningConfigure` |
 
 ---
 
@@ -352,3 +355,21 @@
 2. **Home-Placement Spawn & Rollback (`hq spawn --workspace=<provider-fqid>`):** Creates an `owned`, lease-enforced ledger entry in `local/memory/workspaces.json`, pre-registers the task with its primary binding before the conversation exists (and links the conversation before its first prompt on the Language Server path), starts the conversation in the caller's verified Vault project with the `[hq-workspace …]` preamble, and on spawn failure removes the pre-registered task, the binding, and only the workspace it just created.
 3. **Provider-Delegated Archive & Approval-Gated Removal (`hq archive`, `hq workspace remove`, `hq propose --type=workspace_remove`):** Removes a clean, all-landed `owned` workspace; keeps an `owned` workspace with open changes (unbound, `orphaned_open_changes`) and points at an approval-gated `hq workspace remove <key> --force`; only unbinds `attached` workspaces, which `hq` never deletes.
 4. **Workspace Hygiene & Sanitized Surfaces (`hq hook pre-tool`, `hq hook session-start`, `CONSOLE.md`, `hq status`):** W1 lets only the writer task edit a lease-enforced workspace and points other callers at `hq workspace handoff` or `hq tasks`; W3 keeps sessions opened from `root_patterns` directories from auto-claiming a vacant Front Desk; W4 gates provider `destructive_commands` under `wsd-<pack>-<id>`. Injected change titles are scrubbed on `CONSOLE.md` and absent from `SessionStart`, an empty ledger keeps the console byte-identical, and legacy `worktreeDir` tasks round-trip unchanged in `tasks.json`.
+
+---
+
+## CUJ-42: Unified Session Authorization Lattice, Quarantine Hardening & Asymmetric Interactive Presets ([RFC-0026](../design/0026-declarative-scoped-delegates.md))
+1. **Live Quarantine Hardening & Fail-Closed Clamping (`hq hook pre-tool`, `hq status`, `hq brief format-quarantined`):** Denies `hq status` and `--file` on `hq brief format-quarantined` inside tainted sessions, validates `triage-result` batch IDs against traversal, fails closed on empty/corrupt taint scopes, and clamps expired v2 `SessionGrant` markers to `ProfileFailClosed` (denying even `update_focus`).
+2. **Asymmetric Interactive Friction (`approvals.interactive_preset`, `approvals.interactive_gate_mode`):** Relaxes `workspace_own`, `workspace_remove --force`, and non-core pack rules to 0 popups strictly in interactive owner sessions (`low_friction`) while keeping them 100% gated below top-of-lattice (`[Auto]` / subagents), and supports opt-in native `"force_ask"` prompts for live interactive gates.
+
+---
+
+## CUJ-43: Scoped Delegate Read-Only Investigation, Curated Public Status & Ring-0 Egress Gateway ([RFC-0026](../design/0026-declarative-scoped-delegates.md))
+1. **Opaque Ingress & Curated Read Mediation (`hq delegate poll|read-request|read-task|run`):** Polls SHA-256-pinned `hq-delegate-transport/v1` transports, persists raw peer prose strictly in LLM-invisible `local/private/delegates/requests/`, spawns tainted `scoped_delegate` workers with a `<= 2048 B` Grant Banner (zero private Vault memory), serves ONLY explicitly curated `## Public Status` (`hq progress save --public-status`) and projected workspace views, and scrubs + nonce-fences stdout from SHA-256-pinned `Targets["delegates"]` commands under per-request run caps.
+2. **Defense-in-Depth Egress & Audit Surfaces (`hq delegate reply --body-b64`, `hq delegate audit`, `CONSOLE.md`):** Decodes multiline `--line` / `--body-b64` replies without enabling `write_file`, blocks secrets, non-granted task slugs, sensitive terms, and commitment patterns (failing closed to 1-tap FD3 `apply-reply` approval), delivers clean replies bound to `(request_id, origin_thread)`, and surfaces read-only telemetry in `CONSOLE.md` and `:4242`.
+
+---
+
+## CUJ-44: CaMeL `queue_only` Task Nudge & Non-Widening Configure ([RFC-0026](../design/0026-declarative-scoped-delegates.md))
+1. **Zero-Token Regex Fast Path & Zone-2 Delivery (`hq delegate poll`, `hq hook session-start`, `hq delegate ack-nudge`):** Extracts typed parameters via deterministic `match.regex`, enforces pre-preflight cooldowns/rate limits, runs SHA-256-pinned preflight commands (discarding raw output), renders 100% static Go templates with zero raw peer prose into protected `local/memory/delegates_queues/<slug>.jsonl`, surfaces pending nudges in Zone 2 (`<= 800 B`) on the owner's next interactive task turn, and clears them via `hq delegate ack-nudge`.
+2. **Semantic Policy Diff (`hq delegate show`, `hq delegate configure`, `hq approve`):** Applies non-widening policy tightenings immediately with 0 popups in interactive owner chat (with optimistic `--base-sha256` concurrency), while fusing privilege-widening edits + binary pins into a single 1-tap `rsi_apply` approval applied via `/dev/fd/3`.

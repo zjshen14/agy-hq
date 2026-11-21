@@ -19,13 +19,14 @@ var reValidProgressSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9\-_]{0,79}$`)
 // ProgressCheckpoint represents a structured cross-run / pre-compaction task handoff file
 // stored at local/memory/progress/<slug>.md.
 type ProgressCheckpoint struct {
-	TaskSlug  string `json:"taskSlug"`
-	Goal      string `json:"goal"`
-	Completed string `json:"completed"`
-	NextSteps string `json:"nextSteps"`
-	Pointers  string `json:"pointers,omitempty"`
-	UpdatedAt string `json:"updatedAt"`
-	Path      string `json:"path"`
+	TaskSlug     string `json:"taskSlug"`
+	Goal         string `json:"goal"`
+	Completed    string `json:"completed"`
+	NextSteps    string `json:"nextSteps"`
+	Pointers     string `json:"pointers,omitempty"`
+	PublicStatus string `json:"publicStatus,omitempty"`
+	UpdatedAt    string `json:"updatedAt"`
+	Path         string `json:"path"`
 }
 
 func progressDir(vaultDir string) string {
@@ -55,8 +56,23 @@ func SaveProgress(vaultDir string, cp ProgressCheckpoint, now time.Time) (Progre
 	cp.Completed = strings.TrimSpace(cp.Completed)
 	cp.NextSteps = strings.TrimSpace(cp.NextSteps)
 	cp.Pointers = strings.TrimSpace(cp.Pointers)
-	if cp.Goal == "" && cp.Completed == "" && cp.NextSteps == "" {
-		return ProgressCheckpoint{}, fmt.Errorf("progress checkpoint requires at least one of --goal, --done, or --next")
+	cp.PublicStatus = strings.TrimSpace(cp.PublicStatus)
+	if cp.Goal == "" && cp.Completed == "" && cp.NextSteps == "" && cp.PublicStatus == "" {
+		return ProgressCheckpoint{}, fmt.Errorf("progress checkpoint requires at least one of --goal, --done, --next, or --public-status")
+	}
+
+	// Preserve existing curated PublicStatus when auto-checkpoints omit it, and preserve
+	// existing Goal/Completed/NextSteps/Pointers when updating PublicStatus alone.
+	if existing, _, ok, _ := LoadProgress(vaultDir, slug); ok {
+		if cp.PublicStatus == "" && existing.PublicStatus != "" {
+			cp.PublicStatus = existing.PublicStatus
+		}
+		if cp.Goal == "" && cp.Completed == "" && cp.NextSteps == "" && cp.Pointers == "" && cp.PublicStatus != "" {
+			cp.Goal = existing.Goal
+			cp.Completed = existing.Completed
+			cp.NextSteps = existing.NextSteps
+			cp.Pointers = existing.Pointers
+		}
 	}
 	cp.UpdatedAt = now.UTC().Format(time.RFC3339)
 
@@ -70,6 +86,9 @@ func SaveProgress(vaultDir string, cp ProgressCheckpoint, now time.Time) (Progre
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# Task Progress: `%s`\n", slug))
 	sb.WriteString(fmt.Sprintf("- **Updated:** %s\n\n", cp.UpdatedAt))
+	if cp.PublicStatus != "" {
+		sb.WriteString("## Public Status\n" + cp.PublicStatus + "\n\n")
+	}
 	if cp.Goal != "" {
 		sb.WriteString("## Goal\n" + cp.Goal + "\n\n")
 	}
@@ -132,6 +151,8 @@ func parseProgressMarkdown(slug, path, raw string) ProgressCheckpoint {
 		if strings.HasPrefix(trimmed, "## ") {
 			h := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))
 			switch {
+			case strings.HasPrefix(h, "public status"):
+				section = "public_status"
 			case strings.HasPrefix(h, "goal"):
 				section = "goal"
 			case strings.HasPrefix(h, "completed"):
@@ -149,11 +170,25 @@ func parseProgressMarkdown(slug, path, raw string) ProgressCheckpoint {
 			buf[section] = append(buf[section], line)
 		}
 	}
+	cp.PublicStatus = strings.TrimSpace(strings.Join(buf["public_status"], "\n"))
 	cp.Goal = strings.TrimSpace(strings.Join(buf["goal"], "\n"))
 	cp.Completed = strings.TrimSpace(strings.Join(buf["completed"], "\n"))
 	cp.NextSteps = strings.TrimSpace(strings.Join(buf["next"], "\n"))
 	cp.Pointers = strings.TrimSpace(strings.Join(buf["pointers"], "\n"))
 	return cp
+}
+
+// LoadPublicStatus returns ONLY the explicitly curated `## Public Status` section
+// of local/memory/progress/<slug>.md (never exposing Goal, Completed, NextSteps, or Pointers).
+func LoadPublicStatus(vaultDir, rawSlug string) (publicStatus, updatedAt string, ok bool, err error) {
+	cp, _, found, err := LoadProgress(vaultDir, rawSlug)
+	if err != nil || !found {
+		return "", "", false, err
+	}
+	if strings.TrimSpace(cp.PublicStatus) == "" {
+		return "", cp.UpdatedAt, false, nil
+	}
+	return cp.PublicStatus, cp.UpdatedAt, true, nil
 }
 
 // ListProgress returns all active task progress checkpoints sorted by UpdatedAt descending.

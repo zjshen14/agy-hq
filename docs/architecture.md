@@ -247,9 +247,12 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
 │   ├── doctor/                        # Diagnostic checks for sandbox, CLI, and Vault health
 │   ├── e2e/                           # Black-box E2E tests for CUJs 1–24
 │   ├── gchat/                         # Decoupled Google Chat CDP WebSocket & REST transports
+│   ├── authz/                         # Unified 5-axis Session Authorization Lattice & NI-1..NI-4 (RFC-0026)
+│   ├── delegates/                     # Declarative JSONC scoped delegates, CaMeL nudges & egress gateway (RFC-0026)
 │   ├── gmail/                         # Decoupled Gmail Layer 1 primitives & sidecar engine
 │   ├── obs/                           # Token, prefix-cache, latency & context observability engine
 │   ├── outbox/                        # 4-tier attention router, Quiet Hours gate & Ideas feed (RFC-0014)
+│   ├── redact/                        # Shared zero-dep leaf PII, secret, path & Unicode sanitizer (RFC-0026)
 │   ├── rsi/                           # 4-stage recursive self-improvement & proactive noise engine
 │   ├── vault/                         # Memory auditing, 4-layer topics, entities, surgical forget & facts
 │   ├── webui/                         # Interactive Aux Console & Scheduled Spaces (http://127.0.0.1:4242)
@@ -286,8 +289,10 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git
     ├── notes/                         # Open-ended non-repo work (posts, research, theses, plans)
     ├── worktrees/                     # Parallel git worktrees (<repo>-<task>/) across any GitHub repo
     ├── repos/                         # Optional bare git clones for external GitHub repos
-    ├── private/                       # High-PII records (ledger/, taxes/) & isolated credentials (gmail/, gchat/)
+    ├── private/                       # High-PII records (ledger/, taxes/), isolated credentials & delegates/policy.json
     └── memory/                        # 4-layer memory & proactive state store:
+        ├── delegates_state.json       # Lock-ranked (RankDelegates=66) delegate cursors, cooldowns & rate counters
+        ├── delegates_queues/          # Protected per-task CaMeL queue_only peer priority nudges (Zone 2)
         ├── topics/                    # Topic wiki pages (RFC-0006)
         ├── entities/                  # On-demand contact & counterparty dossiers (RFC-0014)
         ├── facts.jsonl                # Bi-temporal atomic facts (RFC-0006)

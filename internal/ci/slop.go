@@ -900,23 +900,30 @@ func checkGateH5ECUJDocParity(rootDir string) (bool, string) {
 	}
 
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, e2ePath, nil, 0)
-	if err != nil {
-		return false, fmt.Sprintf("parse internal/e2e/cuj_e2e_test.go: %v", err)
+	cujFiles, _ := filepath.Glob(filepath.Join(rootDir, "internal", "e2e", "cuj*_test.go"))
+	if len(cujFiles) == 0 {
+		cujFiles = []string{e2ePath}
 	}
+	sort.Strings(cujFiles)
 
 	var testCUJs []string
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Recv != nil {
-			continue
+	for _, cf := range cujFiles {
+		f, err := parser.ParseFile(fset, cf, nil, 0)
+		if err != nil {
+			return false, fmt.Sprintf("parse %s: %v", filepath.Base(cf), err)
 		}
-		if strings.HasPrefix(fd.Name.Name, "TestCUJ") {
-			testCUJs = append(testCUJs, fd.Name.Name)
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil {
+				continue
+			}
+			if strings.HasPrefix(fd.Name.Name, "TestCUJ") {
+				testCUJs = append(testCUJs, fd.Name.Name)
+			}
 		}
 	}
 	if len(testCUJs) == 0 {
-		return false, "no TestCUJ* functions found in internal/e2e/cuj_e2e_test.go"
+		return false, "no TestCUJ* functions found in internal/e2e/cuj*_test.go"
 	}
 
 	docBytes, err := os.ReadFile(docPath)

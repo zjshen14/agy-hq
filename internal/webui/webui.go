@@ -21,6 +21,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/channels"
+	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/doctor"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
@@ -72,6 +73,7 @@ type DashboardState struct {
 	Workspaces     []workspace.SurfaceEntry       `json:"workspaces,omitempty"` // RFC-0025 provider ledger view (read-only)
 	Tasks          []kernel.ActiveTask            `json:"tasks"`
 	ChannelBridges []channels.BridgeSummary       `json:"channelBridges,omitempty"`
+	Delegates      delegates.DashboardSummary     `json:"delegates,omitempty"`
 	TodayTurns     []hooks.JournalEntry           `json:"todayTurns"`
 	Health         []doctor.CheckResult           `json:"health"`
 	FlashResult    string                         `json:"flashResult,omitempty"`
@@ -838,6 +840,7 @@ func loadStateWithObsMaxAge(vaultDir, flashMsg string, obsCacheMaxAge time.Durat
 		Workspaces:     wsEntries,
 		Tasks:          sel.VisibleRows,
 		ChannelBridges: bridgeSummaries,
+		Delegates:      delegates.LoadDashboardSummary(vaultDir),
 		TodayTurns:     turns,
 		Health:         health,
 		FlashResult:    flashMsg,

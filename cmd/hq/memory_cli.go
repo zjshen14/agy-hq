@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/vault"
@@ -380,6 +381,11 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "hq memory compact failed: %v\n", err)
 			os.Exit(1)
 		}
+		activeSet := make(map[string]bool, len(activeSlugs))
+		for _, s := range activeSlugs {
+			activeSet[strings.ToLower(strings.TrimSpace(s))] = true
+		}
+		_ = delegates.SweepOrphanQueues(vaultDir, activeSet)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", memRep.FactsBefore, memRep.FactsAfter)
 		fmt.Printf("Lifecycle archival:    progress=%d, journals=%d, briefs=%d\n",
