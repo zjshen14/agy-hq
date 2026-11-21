@@ -785,6 +785,11 @@ func ListSpaces(vaultDir, accountAlias, query string, maxResults int) ([]SpaceSu
 	return nil, fmt.Errorf("unable to list Google Chat spaces for %q (%s, transport=%s): run `./bin/hq gchat login` or configure Gmail fallback", cfg.Alias, cfg.Email, cfg.Transport)
 }
 
+func isGmailBridgeSpaceID(spaceID string) bool {
+	s := strings.TrimSpace(spaceID)
+	return strings.HasPrefix(s, "spaces/gmail-chat-") || strings.HasPrefix(s, "gmail-chat-")
+}
+
 // SearchMessages returns lightweight message summaries matching query across spaces or within spaceID.
 func SearchMessages(vaultDir, accountAlias, spaceID, query string, maxResults int) ([]MessageSummary, error) {
 	cfg, err := ResolveAccount(vaultDir, accountAlias)
@@ -813,12 +818,23 @@ func SearchMessages(vaultDir, accountAlias, spaceID, query string, maxResults in
 			return msgs, nil
 		}
 	case "cdp":
-		_, _ = EnsureCDPSession(vaultDir, cfg.Alias, false)
-		if msgs, err := searchMessagesViaCDP(cfg, spaceID, query, maxResults); err == nil {
+		if isGmailBridgeSpaceID(spaceID) {
+			return searchMessagesViaGmailBridge(vaultDir, cfg, spaceID, query, maxResults)
+		}
+		_, sessErr := EnsureCDPSession(vaultDir, cfg.Alias, false)
+		msgs, cdpErr := searchMessagesViaCDP(cfg, spaceID, query, maxResults)
+		if cdpErr == nil {
 			return msgs, nil
 		}
-		if msgs, err := searchMessagesViaGmailBridge(vaultDir, cfg, spaceID, query, maxResults); err == nil {
-			return msgs, nil
+		if strings.TrimSpace(spaceID) == "" {
+			if msgs, bErr := searchMessagesViaGmailBridge(vaultDir, cfg, spaceID, query, maxResults); bErr == nil {
+				return msgs, nil
+			}
+		} else {
+			if sessErr != nil {
+				return nil, fmt.Errorf("CDP message search failed for %s (%v): %w", spaceID, sessErr, cdpErr)
+			}
+			return nil, fmt.Errorf("CDP message search failed for %s: %w (ensure Chrome CDP is running and logged in via `./bin/hq gchat login`)", spaceID, cdpErr)
 		}
 	case "gmail-bridge":
 		return searchMessagesViaGmailBridge(vaultDir, cfg, spaceID, query, maxResults)
@@ -866,10 +882,18 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 		case "oauth":
 			td, err = readThreadViaOAuth(cfg, spaceID, threadID, maxMessages)
 		case "cdp":
-			_, _ = EnsureCDPSession(vaultDir, cfg.Alias, false)
-			td, err = readThreadViaCDP(cfg, spaceID, threadID, maxMessages)
-			if err != nil {
+			if isGmailBridgeSpaceID(spaceID) {
 				td, err = readThreadViaGmailBridge(vaultDir, cfg, spaceID, threadID, convID)
+			} else {
+				_, sessErr := EnsureCDPSession(vaultDir, cfg.Alias, false)
+				td, err = readThreadViaCDP(cfg, spaceID, threadID, maxMessages)
+				if err != nil {
+					if sessErr != nil {
+						err = fmt.Errorf("CDP thread read failed for %s (%v): %w", spaceID, sessErr, err)
+					} else {
+						err = fmt.Errorf("CDP thread read failed for %s: %w (ensure Chrome CDP is running and logged in via `./bin/hq gchat login`)", spaceID, err)
+					}
+				}
 			}
 		case "gmail-bridge":
 			td, err = readThreadViaGmailBridge(vaultDir, cfg, spaceID, threadID, convID)
@@ -1731,8 +1755,13 @@ func readThreadViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, threa
 		gmailAlias = "primary"
 	}
 	gmailThreadID := strings.TrimPrefix(strings.TrimSpace(spaceID), "spaces/gmail-chat-")
+	gmailThreadID = strings.TrimPrefix(gmailThreadID, "gmail-chat-")
 	if threadID != "" {
 		gmailThreadID = strings.TrimPrefix(strings.TrimSpace(threadID), "spaces/gmail-chat-")
+		gmailThreadID = strings.TrimPrefix(gmailThreadID, "gmail-chat-")
+	}
+	if strings.HasPrefix(gmailThreadID, "spaces/") {
+		return ThreadDetail{}, fmt.Errorf("gmail-bridge cannot read native Google Chat space %q (use transport=cdp or oauth)", spaceID)
 	}
 	gtd, _, err := gmail.ReadQuarantinedThread(vaultDir, gmailAlias, gmailThreadID, convID)
 	if err != nil {

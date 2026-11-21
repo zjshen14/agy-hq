@@ -1,6 +1,7 @@
 package gchat
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zjshen14/agy-hq/internal/gmail"
@@ -317,5 +319,339 @@ func TestProposalSummary(t *testing.T) {
 	expectedPrefix := fmt.Sprintf(`Send Google Chat to Project Launch Space: "%s..."`, strings.Repeat("A", 120))
 	if sumLong != expectedPrefix {
 		t.Fatalf("expected truncated summary %q, got %q", expectedPrefix, sumLong)
+	}
+}
+
+func writeServerWSFrame(w *bufio.Writer, payload []byte) error {
+	var hdr []byte
+	hdr = append(hdr, 0x81) // FIN + text frame, unmasked server->client
+	n := len(payload)
+	switch {
+	case n < 126:
+		hdr = append(hdr, byte(n))
+	case n <= 65535:
+		hdr = append(hdr, 126, byte(n>>8), byte(n))
+	default:
+		return fmt.Errorf("payload too large for test helper: %d", n)
+	}
+	if _, err := w.Write(hdr); err != nil {
+		return err
+	}
+	if _, err := w.Write(payload); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
+func TestCDPWebSocketNavigationPollingAndLinkExtraction(t *testing.T) {
+	var (
+		mu                 sync.Mutex
+		currentURL         = "https://chat.google.com/u/0/app/home"
+		currentTitle       = "Home - Google Chat"
+		navHistory         []string
+		extractPolls       int
+		sidebarEnabled     bool
+		iframeMessageReads int
+	)
+
+	handleWS := func(w http.ResponseWriter, r *http.Request, onEval func(expr string) interface{}) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("webserver does not support hijacking")
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		defer conn.Close()
+
+		accept := computeWSAccept(r.Header.Get("Sec-WebSocket-Key"))
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n")
+		_ = rw.Flush()
+
+		msgBytes, _, err := readWSFrame(rw.Reader)
+		if err != nil {
+			return
+		}
+		var req struct {
+			ID     int                    `json:"id"`
+			Method string                 `json:"method"`
+			Params map[string]interface{} `json:"params"`
+		}
+		if err := json.Unmarshal(msgBytes, &req); err != nil {
+			return
+		}
+
+		var result interface{} = map[string]interface{}{}
+		if req.Method == "Runtime.evaluate" {
+			expr, _ := req.Params["expression"].(string)
+			if v := onEval(expr); v != nil {
+				result = v
+			}
+		}
+
+		respBytes, _ := json.Marshal(map[string]interface{}{
+			"id":     req.ID,
+			"result": result,
+		})
+		_ = writeServerWSFrame(rw.Writer, respBytes)
+	}
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/json/list":
+			wsBase := "ws" + strings.TrimPrefix(srv.URL, "http")
+			mu.Lock()
+			cur := currentURL
+			title := currentTitle
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]cdpTarget{
+				{
+					ID:                   "iframe-1",
+					Title:                "Roster Subframe",
+					URL:                  "https://chat.google.com/u/0/app/roster",
+					Type:                 "iframe",
+					WebSocketDebuggerURL: wsBase + "/ws/iframe",
+				},
+				{
+					ID:                   "page-1",
+					Title:                title,
+					URL:                  cur,
+					Type:                 "page",
+					WebSocketDebuggerURL: wsBase + "/ws/page",
+				},
+			})
+		case "/ws/iframe":
+			handleWS(w, r, func(expr string) interface{} {
+				if strings.Contains(expr, "bgckF") {
+					mu.Lock()
+					iframeMessageReads++
+					mu.Unlock()
+				}
+				return map[string]interface{}{
+					"result": map[string]interface{}{"type": "object", "value": []interface{}{}},
+				}
+			})
+		case "/ws/page":
+			handleWS(w, r, func(expr string) interface{} {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case expr == "window.location.href":
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": "string", "value": currentURL},
+					}
+				case expr == "document.title":
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": "string", "value": currentTitle},
+					}
+				case strings.HasPrefix(expr, "window.location.href = "):
+					var newURL string
+					_ = json.Unmarshal([]byte(strings.TrimPrefix(expr, "window.location.href = ")), &newURL)
+					currentURL = newURL
+					navHistory = append(navHistory, newURL)
+					extractPolls = 0
+					if strings.Contains(newURL, "TEST_DM_1_AAAAE") {
+						currentTitle = "Alice DM - Google Chat"
+					} else if strings.Contains(newURL, "AAAA_TEAM_SPACE") {
+						currentTitle = "Team Space - Google Chat"
+					}
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": "string", "value": newURL},
+					}
+				case strings.Contains(expr, "[data-group-id="):
+					clicked := false
+					if sidebarEnabled && strings.Contains(expr, "AAAA_TEAM_SPACE") {
+						clicked = true
+						currentURL = "https://chat.google.com/u/0/app/chat/AAAA_TEAM_SPACE"
+						currentTitle = "Team Space - Google Chat"
+						navHistory = append(navHistory, "sidebar:AAAA_TEAM_SPACE")
+						extractPolls = 0
+					}
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": "boolean", "value": clicked},
+					}
+				case strings.Contains(expr, "doc.querySelector("):
+					ready := strings.Contains(currentURL, "AAAA_TEAM_SPACE") || strings.Contains(currentURL, "TEST_DM_1_AAAAE")
+					resultType := "boolean"
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": resultType, "value": ready},
+					}
+				case strings.Contains(expr, "insertText") || strings.Contains(expr, `aria-label="Send message"`):
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": "boolean", "value": true},
+					}
+				case strings.Contains(expr, "bgckF"):
+					var extracted []map[string]interface{}
+					if strings.Contains(currentURL, "TEST_DM_1_AAAAE") {
+						extractPolls++
+						if extractPolls >= 2 {
+							extracted = []map[string]interface{}{{
+								"id":         "dm-msg-1",
+								"sender":     "Alice",
+								"plainText":  "Please review the RFC doc\nhttps://docs.google.com/document/d/example123",
+								"snippet":    "Please review the RFC doc",
+								"createTime": "2026-11-20T12:00:00Z",
+							}}
+						}
+					} else if strings.Contains(currentURL, "AAAA_TEAM_SPACE") {
+						extractPolls++
+						if extractPolls >= 2 {
+							extracted = []map[string]interface{}{{
+								"id":         "space-msg-1",
+								"sender":     "Bob",
+								"plainText":  "Sprint review notes\nhttps://muse.example.com/note/42",
+								"snippet":    "Sprint review notes",
+								"createTime": "2026-11-20T13:00:00Z",
+							}}
+						}
+					}
+					return map[string]interface{}{
+						"result": map[string]interface{}{"type": "object", "value": extracted},
+					}
+				}
+				return nil
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	vaultDir := t.TempDir()
+	if _, err := InitOrAddAccount(vaultDir, "personal", "user@gmail.com", "cdp", srv.URL, "", "primary", "", "", "", true); err != nil {
+		t.Fatalf("InitOrAddAccount: %v", err)
+	}
+
+	// 1. Reading a DM by bare ID ("TEST_DM_1_AAAAE") navigates from app/home to /app/dm/TEST_DM_1_AAAAE,
+	//    polls until messages render, and captures embedded doc links.
+	td, formatted, err := ReadQuarantinedThread(vaultDir, "personal", "TEST_DM_1_AAAAE", "", "conv-ws-dm", 10)
+	if err != nil {
+		t.Fatalf("ReadQuarantinedThread DM failed: %v", err)
+	}
+	if td.SpaceID != "spaces/TEST_DM_1_AAAAE" || td.SpaceName != "Alice DM" {
+		t.Fatalf("expected normalized SpaceID=spaces/TEST_DM_1_AAAAE and SpaceName='Alice DM', got id=%q name=%q", td.SpaceID, td.SpaceName)
+	}
+	if !strings.Contains(formatted, "Please review the RFC doc") || !strings.Contains(formatted, "hxxps://docs.google.com/document/d/example123") {
+		t.Fatalf("expected DM text and defanged doc link in output, got:\n%s", formatted)
+	}
+
+	mu.Lock()
+	if len(navHistory) == 0 || navHistory[0] != "https://chat.google.com/app/dm/TEST_DM_1_AAAAE" {
+		mu.Unlock()
+		t.Fatalf("expected URL navigation to /app/dm/TEST_DM_1_AAAAE, got history=%v", navHistory)
+	}
+	// Reset to app/home and enable sidebar click for the Space test
+	currentURL = "https://chat.google.com/u/0/app/home"
+	currentTitle = "Home - Google Chat"
+	sidebarEnabled = true
+	navHistory = nil
+	mu.Unlock()
+
+	// 2. Searching a specific Space ID switches via sidebar click and waits for messages to render.
+	msgs, err := SearchMessages(vaultDir, "personal", "spaces/AAAA_TEAM_SPACE", "Sprint", 10)
+	if err != nil {
+		t.Fatalf("SearchMessages failed: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].SpaceID != "spaces/AAAA_TEAM_SPACE" || msgs[0].SpaceName != "Team Space" {
+		t.Fatalf("unexpected SearchMessages result: %+v", msgs)
+	}
+	if !strings.Contains(msgs[0].Snippet, "Sprint review notes") {
+		t.Fatalf("expected snippet to contain Sprint review notes, got %q", msgs[0].Snippet)
+	}
+	mu.Lock()
+	if len(navHistory) != 1 || navHistory[0] != "sidebar:AAAA_TEAM_SPACE" {
+		mu.Unlock()
+		t.Fatalf("expected sidebar click navigation for AAAA_TEAM_SPACE, got history=%v", navHistory)
+	}
+	if iframeMessageReads != 0 {
+		mu.Unlock()
+		t.Fatalf("expected page target to be prioritized without reading messages from iframe target, got %d iframe reads", iframeMessageReads)
+	}
+	mu.Unlock()
+
+	// 3. Verify sendDraftViaWebSocket also navigates back to the DM via the shared helper and delivers cleanly.
+	draft, err := CreateOrUpdateDraft(vaultDir, "personal", "", "spaces/TEST_DM_1_AAAAE", "Alice DM", "", "Reviewed the RFC!", "conv-ws-dm")
+	if err != nil {
+		t.Fatalf("CreateOrUpdateDraft: %v", err)
+	}
+	sendOut, err := VerifyAndSendDraft(vaultDir, "personal", draft.DraftID, draft.ContentHash[:12])
+	if err != nil || !strings.Contains(sendOut, "delivered via Chrome CDP WebSocket") {
+		t.Fatalf("expected CDP WebSocket send to succeed, got out=%q err=%v", sendOut, err)
+	}
+
+	// 4. Verify jsExtractMessages embeds link-card <a href="https://..."> extraction and Google /url?q= unwrapping.
+	if !strings.Contains(jsExtractMessages, `el.querySelectorAll('a[href]')`) || !strings.Contains(jsExtractMessages, `u.searchParams.get('q')`) {
+		t.Fatalf("expected jsExtractMessages to extract embedded <a href> links and unwrap /url?q= links")
+	}
+}
+
+func TestReadQuarantinedThread_CDPGuardAndGmailBridge(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	if _, err := gmail.InitOrAddAccountWithOptions(vaultDir, gmail.InitAccountOptions{Alias: "primary", Email: "user@gmail.com", SetDefault: true}); err != nil {
+		t.Fatalf("gmail init: %v", err)
+	}
+	gmailMock := filepath.Join(vaultDir, "memory", "gmail", "mock")
+	_ = os.MkdirAll(gmailMock, 0o755)
+	_ = os.WriteFile(filepath.Join(gmailMock, "messages.json"), []byte(`[
+  {
+    "id": "gm-chat-1",
+    "threadId": "gt-chat-55",
+    "account": "primary",
+    "from": "Bob Lee (via Google Chat) <chat-noreply@google.com>",
+    "to": "user@gmail.com",
+    "subject": "Bob Lee sent you a direct message",
+    "date": "2026-11-08T16:10:00Z",
+    "snippet": "Hey Alex, did you see the tennis schedule?"
+  }
+]`), 0o644)
+	_ = os.WriteFile(filepath.Join(gmailMock, "thread-gt-chat-55.json"), []byte(`{
+  "threadId": "gt-chat-55",
+  "account": "primary",
+  "subject": "Bob Lee sent you a direct message",
+  "messages": [
+    {
+      "id": "gm-chat-1",
+      "threadId": "gt-chat-55",
+      "from": "Bob Lee (via Google Chat) <chat-noreply@google.com>",
+      "to": "user@gmail.com",
+      "subject": "Bob Lee sent you a direct message",
+      "date": "2026-11-08T16:10:00Z",
+      "plainBody": "Hey Alex, did you see the tennis schedule?"
+    }
+  ]
+}`), 0o644)
+
+	// Offline CDP endpoint
+	if _, err := InitOrAddAccount(vaultDir, "personal", "user@gmail.com", "cdp", "http://127.0.0.1:19997", "", "primary", "", "", "", true); err != nil {
+		t.Fatalf("gchat init cdp: %v", err)
+	}
+	if _, err := InitOrAddAccount(vaultDir, "bridge", "user@gmail.com", "gmail-bridge", "", "", "primary", "", "", "", false); err != nil {
+		t.Fatalf("gchat init gmail-bridge: %v", err)
+	}
+
+	// 1. Native space ID on offline CDP must NOT fall back to gmail-bridge (prevents passing "spaces/..." to Gmail API)
+	if _, _, err := ReadQuarantinedThread(vaultDir, "personal", "spaces/TEST_DM_2_AAAAE", "", "conv-guard-1", 10); err == nil || !strings.Contains(err.Error(), "CDP thread read failed for spaces/TEST_DM_2_AAAAE") {
+		t.Fatalf("expected actionable CDP error for native space ID on offline CDP, got: %v", err)
+	}
+	if _, err := SearchMessages(vaultDir, "personal", "spaces/TEST_DM_2_AAAAE", "hello", 10); err == nil || !strings.Contains(err.Error(), "CDP message search failed for spaces/TEST_DM_2_AAAAE") {
+		t.Fatalf("expected actionable CDP error for SearchMessages on native space ID, got: %v", err)
+	}
+
+	// 2. Empty spaceID search and spaces/gmail-chat-* thread read must still fall back to gmail-bridge
+	broadMsgs, err := SearchMessages(vaultDir, "personal", "", "tennis", 10)
+	if err != nil || len(broadMsgs) != 1 || broadMsgs[0].Source != "gmail-bridge" {
+		t.Fatalf("expected broad SearchMessages to fall back to gmail-bridge, got msgs=%+v err=%v", broadMsgs, err)
+	}
+	_, formatted, err := ReadQuarantinedThread(vaultDir, "personal", "spaces/gmail-chat-gt-chat-55", "", "conv-guard-2", 10)
+	if err != nil || !strings.Contains(formatted, "Hey Alex, did you see the tennis schedule?") {
+		t.Fatalf("expected spaces/gmail-chat-gt-chat-55 to succeed via gmail-bridge, got:\n%s (%v)", formatted, err)
+	}
+
+	// 3. Explicit gmail-bridge transport must also reject native "spaces/..." IDs cleanly
+	if _, _, err := ReadQuarantinedThread(vaultDir, "bridge", "spaces/TEST_DM_2_AAAAE", "", "conv-guard-3", 10); err == nil || !strings.Contains(err.Error(), "gmail-bridge cannot read native Google Chat space") {
+		t.Fatalf("expected explicit gmail-bridge to reject native space ID, got: %v", err)
 	}
 }

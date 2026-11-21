@@ -545,6 +545,155 @@ func InteractiveLoginWithOptions(vaultDir, accountAlias string, opts LoginOption
 	return ep, nil
 }
 
+func cleanCDPSpaceID(spaceID string) string {
+	s := strings.TrimSpace(spaceID)
+	s = strings.TrimPrefix(s, "spaces/")
+	s = strings.TrimPrefix(s, "space/")
+	s = strings.TrimPrefix(s, "dm/")
+	s = strings.TrimPrefix(s, "room/")
+	return strings.TrimSpace(s)
+}
+
+func isNavigableCDPSpaceID(cleanSpaceID string) bool {
+	return cleanSpaceID != "" &&
+		!strings.HasPrefix(cleanSpaceID, "gmail-chat-") &&
+		!strings.HasPrefix(cleanSpaceID, "cdp-")
+}
+
+func prioritizeCDPTargets(targets []cdpTarget) []cdpTarget {
+	var pages, others []cdpTarget
+	for _, t := range targets {
+		if t.WebSocketDebuggerURL == "" {
+			continue
+		}
+		if t.Type == "page" {
+			pages = append(pages, t)
+		} else {
+			others = append(others, t)
+		}
+	}
+	return append(pages, others...)
+}
+
+func spaceNavigationURL(curLoc, fallbackURL, cleanSpaceID string) string {
+	isDM := strings.HasSuffix(cleanSpaceID, "AAAAE")
+	if strings.Contains(curLoc, "mail.google.com") || strings.Contains(fallbackURL, "mail.google.com") {
+		if isDM {
+			return fmt.Sprintf("https://mail.google.com/mail/u/0/#chat/dm/%s", cleanSpaceID)
+		}
+		return fmt.Sprintf("https://mail.google.com/mail/u/0/#chat/space/%s", cleanSpaceID)
+	}
+	if isDM {
+		return fmt.Sprintf("https://chat.google.com/app/dm/%s", cleanSpaceID)
+	}
+	return fmt.Sprintf("https://chat.google.com/app/chat/%s", cleanSpaceID)
+}
+
+func jsHasSelector(selector string) string {
+	return fmt.Sprintf(`(() => {
+  const docs = [document];
+  for (const f of document.querySelectorAll('iframe')) {
+    try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+  }
+  for (const doc of docs) {
+    if (doc.querySelector(%q)) return true;
+  }
+  return false;
+})()`, selector)
+}
+
+var (
+	jsCheckComposer = jsHasSelector(`div[role="textbox"][contenteditable="true"]`)
+	jsCheckMessages = jsHasSelector(`div[data-id][data-message-multiplat-item-id], [data-message-id], [data-topic-id]`)
+)
+
+// navigateCDPTargetToSpace applies the CDP network jail to page targets and switches the
+// target tab to cleanSpaceID via sidebar click or direct DM/Space URL fallback.
+func navigateCDPTargetToSpace(t cdpTarget, cleanSpaceID, readyJS string, waitOnNav bool) {
+	wsURL := t.WebSocketDebuggerURL
+	if t.Type == "page" {
+		applyCDPNetworkJail(wsURL)
+	}
+	if !isNavigableCDPSpaceID(cleanSpaceID) {
+		return
+	}
+
+	locBytes, err := cdpEvalJS(wsURL, "window.location.href")
+	curLoc := ""
+	if err == nil {
+		curLoc = strings.Trim(string(locBytes), `"`)
+	}
+	if strings.Contains(curLoc, cleanSpaceID) {
+		return
+	}
+
+	cleanSpaceJSON, _ := json.Marshal(cleanSpaceID)
+	jsClickSidebar := fmt.Sprintf(`(() => {
+  const id = %s;
+  const selectors = [
+    `+"`"+`[data-group-id="space/${id}"]`+"`"+`,
+    `+"`"+`[data-group-id="${id}"]`+"`"+`,
+    `+"`"+`[data-group-id="dm/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/chat/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/room/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/dm/${id}"]`+"`"+`,
+    `+"`"+`a[href*="/spaces/${id}"]`+"`"+`
+  ];
+  const docs = [document];
+  for (const f of document.querySelectorAll('iframe')) {
+    try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+  }
+  for (const doc of docs) {
+    for (const sel of selectors) {
+      const el = doc.querySelector(sel);
+      if (el) { el.click(); return true; }
+    }
+  }
+  return false;
+})()`, string(cleanSpaceJSON))
+
+	clickedSidebar, _ := cdpEvalJS(wsURL, jsClickSidebar)
+	if string(clickedSidebar) == "true" {
+		if !waitOnNav {
+			return
+		}
+		if readyJS != "" {
+			for i := 0; i < 4; i++ {
+				time.Sleep(400 * time.Millisecond)
+				locNow, _ := cdpEvalJS(wsURL, "window.location.href")
+				ready, _ := cdpEvalJS(wsURL, readyJS)
+				if strings.Contains(string(locNow), cleanSpaceID) && string(ready) == "true" {
+					return
+				}
+			}
+		}
+	}
+
+	locBytesAfter, _ := cdpEvalJS(wsURL, "window.location.href")
+	locAfter := strings.Trim(string(locBytesAfter), `"`)
+	if !strings.Contains(locAfter, cleanSpaceID) {
+		targetURL := spaceNavigationURL(curLoc, t.URL, cleanSpaceID)
+		targetURLJSON, _ := json.Marshal(targetURL)
+		_, _ = cdpEvalJS(wsURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
+		if waitOnNav {
+			time.Sleep(800 * time.Millisecond)
+		}
+	}
+}
+
+func waitForCDPReady(wsURL, readyJS string, attempts int, interval time.Duration) bool {
+	for i := 0; i < attempts; i++ {
+		raw, err := cdpEvalJS(wsURL, readyJS)
+		if err == nil && string(raw) == "true" {
+			return true
+		}
+		if i+1 < attempts {
+			time.Sleep(interval)
+		}
+	}
+	return false
+}
+
 // PreWarmSpace ensures the Google Chat CDP session is authenticated (spawning a non-blocking
 // detached guided login window if logged out so `hq gchat propose` returns in < 1s)
 // and navigates the background headless Chrome tab to spaceID so that when the user taps
@@ -565,23 +714,15 @@ func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) error {
 	if err != nil || len(targets) == 0 {
 		return nil
 	}
-	cleanSpaceID := strings.TrimPrefix(strings.TrimSpace(spaceID), "spaces/")
-	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "space/")
-	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "dm/")
-	if cleanSpaceID == "" || strings.HasPrefix(cleanSpaceID, "gmail-chat-") {
+	cleanSpaceID := cleanCDPSpaceID(spaceID)
+	if !isNavigableCDPSpaceID(cleanSpaceID) {
 		return nil
 	}
-	for _, t := range targets {
-		if t.Type != "page" || t.WebSocketDebuggerURL == "" {
+	for _, t := range prioritizeCDPTargets(targets) {
+		if t.Type != "page" {
 			continue
 		}
-		applyCDPNetworkJail(t.WebSocketDebuggerURL)
-		locBytes, _ := cdpEvalJS(t.WebSocketDebuggerURL, "window.location.href")
-		if !strings.Contains(string(locBytes), cleanSpaceID) {
-			targetURL := fmt.Sprintf("https://chat.google.com/app/chat/%s", cleanSpaceID)
-			targetURLJSON, _ := json.Marshal(targetURL)
-			_, _ = cdpEvalJS(t.WebSocketDebuggerURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
-		}
+		navigateCDPTargetToSpace(t, cleanSpaceID, "", false)
 		return nil
 	}
 	return nil
@@ -845,7 +986,27 @@ const jsExtractMessages = `(() => {
       const msgId = el.getAttribute('data-id') || el.getAttribute('data-message-id') || el.getAttribute('data-topic-id') || ('dom-msg-' + (++idx));
       if (seen.has(msgId)) continue;
       const bodyEl = el.querySelector('div[jsname="bgckF"], div.DTp27d.QIJiHb.Zc1Emd');
-      const text = (bodyEl ? bodyEl.innerText : (el.innerText || '')).trim();
+      let text = (bodyEl ? bodyEl.innerText : (el.innerText || '')).trim();
+      const links = [];
+      const seenLinks = new Set();
+      for (const a of el.querySelectorAll('a[href]')) {
+        let href = (a.getAttribute('href') || '').trim();
+        if (!/^https?:\/\//i.test(href)) continue;
+        try {
+          const u = new URL(href);
+          if (u.hostname === 'www.google.com' && u.pathname === '/url') {
+            const q = u.searchParams.get('q');
+            if (q && /^https?:\/\//i.test(q)) href = q;
+          }
+        } catch (e) {}
+        if (!text.includes(href) && !seenLinks.has(href)) {
+          seenLinks.add(href);
+          links.push(href);
+        }
+      }
+      if (links.length > 0) {
+        text = text ? (text + '\n' + links.join('\n')) : links.join('\n');
+      }
       if (!text) continue;
       seen.add(msgId);
       const senderEl = el.querySelector('span.ZTmjQb.Z4BnXb, span[jscontroller="AkvWld"], [data-member-id], [data-name], [role="heading"]');
@@ -861,6 +1022,55 @@ const jsExtractMessages = `(() => {
   }
   return out;
 })()`
+
+type cdpExtractedMessage struct {
+	ID         string `json:"id"`
+	Sender     string `json:"sender"`
+	PlainText  string `json:"plainText"`
+	Snippet    string `json:"snippet"`
+	CreateTime string `json:"createTime"`
+}
+
+func extractCDPMessages(wsURL string, waitForRender bool) ([]cdpExtractedMessage, error) {
+	attempts := 1
+	if waitForRender {
+		attempts = 16 // up to ~3.75s for SPA/page navigation and message DOM hydration
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		raw, err := cdpEvalJS(wsURL, jsExtractMessages)
+		if err != nil {
+			lastErr = err
+		} else if len(raw) > 0 {
+			var msgs []cdpExtractedMessage
+			if uErr := json.Unmarshal(raw, &msgs); uErr != nil {
+				lastErr = uErr
+			} else if len(msgs) > 0 {
+				return msgs, nil
+			}
+		}
+		if i+1 < attempts {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, nil
+}
+
+func readTargetSpaceName(wsURL, fallbackTitle string) string {
+	if raw, err := cdpEvalJS(wsURL, "document.title"); err == nil && len(raw) > 0 {
+		var title string
+		if json.Unmarshal(raw, &title) == nil {
+			title = strings.TrimSpace(strings.TrimSuffix(title, " - Google Chat"))
+			if title != "" {
+				return title
+			}
+		}
+	}
+	return strings.TrimSpace(strings.TrimSuffix(fallbackTitle, " - Google Chat"))
+}
 
 func evalSpacesViaWebSocket(targets []cdpTarget, alias, query string, maxResults int) ([]SpaceSummary, error) {
 	qLower := strings.ToLower(strings.TrimSpace(query))
@@ -905,32 +1115,31 @@ func evalMessagesViaWebSocket(targets []cdpTarget, alias, spaceID, query string,
 	if qLower == "is:unread" {
 		qLower = ""
 	}
+	cleanSpaceID := cleanCDPSpaceID(spaceID)
+	hasTargetSpace := isNavigableCDPSpaceID(cleanSpaceID)
+	sortedTargets := prioritizeCDPTargets(targets)
+	if len(sortedTargets) == 0 {
+		return nil, fmt.Errorf("no active Google Chat WebSocket targets found")
+	}
+
 	var out []MessageSummary
-	for _, t := range targets {
-		if t.WebSocketDebuggerURL == "" {
-			continue
-		}
-		if t.Type == "page" {
+	for _, t := range sortedTargets {
+		if hasTargetSpace {
+			navigateCDPTargetToSpace(t, cleanSpaceID, jsCheckMessages, true)
+		} else if t.Type == "page" {
 			applyCDPNetworkJail(t.WebSocketDebuggerURL)
 		}
-		spID := spaceID
+		spID := strings.TrimSpace(spaceID)
 		if spID == "" {
 			spID = extractSpaceIDFromURL(t.URL, t.ID)
+		} else if hasTargetSpace {
+			spID = normalizeSpaceID(spID)
 		}
-		raw, err := cdpEvalJS(t.WebSocketDebuggerURL, jsExtractMessages)
-		if err != nil || len(raw) == 0 {
+		msgs, err := extractCDPMessages(t.WebSocketDebuggerURL, hasTargetSpace)
+		if err != nil || len(msgs) == 0 {
 			continue
 		}
-		var msgs []struct {
-			ID         string `json:"id"`
-			Sender     string `json:"sender"`
-			PlainText  string `json:"plainText"`
-			Snippet    string `json:"snippet"`
-			CreateTime string `json:"createTime"`
-		}
-		if err := json.Unmarshal(raw, &msgs); err != nil {
-			continue
-		}
+		spaceName := readTargetSpaceName(t.WebSocketDebuggerURL, t.Title)
 		for _, m := range msgs {
 			if qLower != "" && !strings.Contains(strings.ToLower(m.PlainText), qLower) && !strings.Contains(strings.ToLower(m.Sender), qLower) {
 				continue
@@ -938,7 +1147,7 @@ func evalMessagesViaWebSocket(targets []cdpTarget, alias, spaceID, query string,
 			out = append(out, MessageSummary{
 				ID:         m.ID,
 				SpaceID:    spID,
-				SpaceName:  strings.TrimSpace(strings.TrimSuffix(t.Title, " - Google Chat")),
+				SpaceName:  spaceName,
 				ThreadID:   m.ID,
 				Account:    alias,
 				Sender:     m.Sender,
@@ -946,9 +1155,12 @@ func evalMessagesViaWebSocket(targets []cdpTarget, alias, spaceID, query string,
 				Snippet:    m.Snippet,
 				Source:     "cdp",
 			})
-			if len(out) >= maxResults {
+			if maxResults > 0 && len(out) >= maxResults {
 				return out, nil
 			}
+		}
+		if hasTargetSpace {
+			return out, nil
 		}
 	}
 	if len(out) == 0 {
@@ -958,33 +1170,45 @@ func evalMessagesViaWebSocket(targets []cdpTarget, alias, spaceID, query string,
 }
 
 func evalThreadViaWebSocket(targets []cdpTarget, alias, spaceID, threadID string, maxMessages int) (ThreadDetail, error) {
-	for _, t := range targets {
-		if t.WebSocketDebuggerURL == "" {
-			continue
-		}
-		if t.Type == "page" {
+	cleanSpaceID := cleanCDPSpaceID(spaceID)
+	hasTargetSpace := isNavigableCDPSpaceID(cleanSpaceID)
+	sortedTargets := prioritizeCDPTargets(targets)
+	if len(sortedTargets) == 0 {
+		return ThreadDetail{}, fmt.Errorf("no active Google Chat WebSocket targets found")
+	}
+
+	spID := strings.TrimSpace(spaceID)
+	if hasTargetSpace {
+		spID = normalizeSpaceID(spID)
+	}
+
+	for _, t := range sortedTargets {
+		if hasTargetSpace {
+			navigateCDPTargetToSpace(t, cleanSpaceID, jsCheckMessages, true)
+		} else if t.Type == "page" {
 			applyCDPNetworkJail(t.WebSocketDebuggerURL)
 		}
-		raw, err := cdpEvalJS(t.WebSocketDebuggerURL, jsExtractMessages)
-		if err != nil || len(raw) == 0 {
+		extracted, err := extractCDPMessages(t.WebSocketDebuggerURL, hasTargetSpace)
+		if err != nil || len(extracted) == 0 {
 			continue
 		}
-		var msgs []MessageDetail
-		if err := json.Unmarshal(raw, &msgs); err != nil || len(msgs) == 0 {
-			continue
+		msgs := make([]MessageDetail, 0, len(extracted))
+		for _, m := range extracted {
+			msgs = append(msgs, MessageDetail{
+				ID:         m.ID,
+				SpaceID:    spID,
+				ThreadID:   threadID,
+				Sender:     m.Sender,
+				CreateTime: m.CreateTime,
+				PlainText:  m.PlainText,
+			})
 		}
-		for i := range msgs {
-			msgs[i].SpaceID = spaceID
-			if msgs[i].ThreadID == "" {
-				msgs[i].ThreadID = threadID
-			}
-		}
-		if len(msgs) > maxMessages {
+		if maxMessages > 0 && len(msgs) > maxMessages {
 			msgs = msgs[len(msgs)-maxMessages:]
 		}
 		return ThreadDetail{
-			SpaceID:   spaceID,
-			SpaceName: strings.TrimSpace(strings.TrimSuffix(t.Title, " - Google Chat")),
+			SpaceID:   spID,
+			SpaceName: readTargetSpaceName(t.WebSocketDebuggerURL, t.Title),
 			ThreadID:  threadID,
 			Account:   alias,
 			Messages:  msgs,
@@ -995,22 +1219,8 @@ func evalThreadViaWebSocket(targets []cdpTarget, alias, spaceID, threadID string
 }
 
 func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) {
-	cleanSpaceID := strings.TrimPrefix(spec.SpaceID, "spaces/")
-	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "space/")
-	cleanSpaceID = strings.TrimPrefix(cleanSpaceID, "dm/")
-
-	// Prioritize page targets over subframe/iframe targets
-	var sortedTargets []cdpTarget
-	for _, t := range targets {
-		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-			sortedTargets = append(sortedTargets, t)
-		}
-	}
-	for _, t := range targets {
-		if t.Type != "page" && t.WebSocketDebuggerURL != "" {
-			sortedTargets = append(sortedTargets, t)
-		}
-	}
+	cleanSpaceID := cleanCDPSpaceID(spec.SpaceID)
+	sortedTargets := prioritizeCDPTargets(targets)
 	if len(sortedTargets) == 0 {
 		return "", fmt.Errorf("no active Google Chat WebSocket targets found")
 	}
@@ -1048,94 +1258,20 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
   return false;
 })()`
 
-	const jsCheckComposer = `(() => {
-  const docs = [document];
-  for (const f of document.querySelectorAll('iframe')) {
-    try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
-  }
-  for (const doc of docs) {
-    if (doc.querySelector('div[role="textbox"][contenteditable="true"]')) return true;
-  }
-  return false;
-})()`
-
 	var lastErr error
 	for _, t := range sortedTargets {
 		wsURL := t.WebSocketDebuggerURL
-		if t.Type == "page" {
-			applyCDPNetworkJail(wsURL)
-		}
+		navigateCDPTargetToSpace(t, cleanSpaceID, jsCheckComposer, true)
 
-		// 1. Ensure tab is navigated to the target space
-		if cleanSpaceID != "" {
-			locBytes, err := cdpEvalJS(wsURL, "window.location.href")
-			curLoc := ""
-			if err == nil {
-				curLoc = strings.Trim(string(locBytes), `"`)
-			}
-
-			if !strings.Contains(curLoc, cleanSpaceID) {
-				cleanSpaceJSON, _ := json.Marshal(cleanSpaceID)
-				jsClickSidebar := fmt.Sprintf(`(() => {
-  const id = %s;
-  const selectors = [
-    `+"`"+`[data-group-id="space/${id}"]`+"`"+`,
-    `+"`"+`[data-group-id="${id}"]`+"`"+`,
-    `+"`"+`[data-group-id="dm/${id}"]`+"`"+`,
-    `+"`"+`a[href*="/chat/${id}"]`+"`"+`,
-    `+"`"+`a[href*="/room/${id}"]`+"`"+`,
-    `+"`"+`a[href*="/dm/${id}"]`+"`"+`,
-    `+"`"+`a[href*="/spaces/${id}"]`+"`"+`
-  ];
-  for (const sel of selectors) {
-    const el = document.querySelector(sel);
-    if (el) { el.click(); return true; }
-  }
-  return false;
-})()`, string(cleanSpaceJSON))
-
-				clickedSidebar, _ := cdpEvalJS(wsURL, jsClickSidebar)
-				if string(clickedSidebar) == "true" {
-					for i := 0; i < 4; i++ {
-						time.Sleep(400 * time.Millisecond)
-						ready, _ := cdpEvalJS(wsURL, jsCheckComposer)
-						if string(ready) == "true" {
-							break
-						}
-					}
-				}
-
-				locBytesAfter, _ := cdpEvalJS(wsURL, "window.location.href")
-				if !strings.Contains(string(locBytesAfter), cleanSpaceID) {
-					targetURL := fmt.Sprintf("https://chat.google.com/app/chat/%s", cleanSpaceID)
-					if strings.Contains(curLoc, "mail.google.com") || strings.Contains(t.URL, "mail.google.com") {
-						targetURL = fmt.Sprintf("https://mail.google.com/mail/u/0/#chat/space/%s", cleanSpaceID)
-					}
-					targetURLJSON, _ := json.Marshal(targetURL)
-					_, _ = cdpEvalJS(wsURL, fmt.Sprintf("window.location.href = %s", string(targetURLJSON)))
-					time.Sleep(800 * time.Millisecond)
-				}
-			}
-		}
-
-		// 2. Wait up to 10 seconds for the composer element to appear
-		composerReady := false
-		for i := 0; i < 20; i++ {
-			raw, err := cdpEvalJS(wsURL, jsCheckComposer)
-			if err == nil && string(raw) == "true" {
-				composerReady = true
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		if !composerReady {
+		// Wait up to 10 seconds for the composer element to appear
+		if !waitForCDPReady(wsURL, jsCheckComposer, 20, 500*time.Millisecond) {
 			lastErr = fmt.Errorf("timeout waiting for composer in tab %s", t.ID)
 			continue
 		}
 
 		time.Sleep(250 * time.Millisecond)
 
-		// 3. Inject the draft text into the composer
+		// Inject the draft text into the composer
 		raw, err := cdpEvalJS(wsURL, jsFocusAndInsert)
 		if err != nil || string(raw) != "true" {
 			lastErr = fmt.Errorf("failed to focus or insert text into composer in tab %s: %v", t.ID, err)
@@ -1144,7 +1280,7 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 
 		time.Sleep(250 * time.Millisecond)
 
-		// 4. Click Send button or dispatch Enter
+		// Click Send button or dispatch Enter
 		sendRes, err := cdpEvalJS(wsURL, jsClickSendBtn)
 		if err != nil || string(sendRes) != "true" {
 			_, _ = cdpCall(wsURL, "Input.dispatchKeyEvent", map[string]interface{}{
