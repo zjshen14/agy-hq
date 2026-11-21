@@ -204,4 +204,32 @@ func TestPreToolHookConcurrencyAndWatchPruneCLI(t *testing.T) {
 	if len(readResp.Threads) != 2 || strings.Count(readResp.Fenced, "<<<HQ_UNTRUSTED_NONCE_") != 2 {
 		t.Fatalf("expected 2 threads and 2 nonce fences in multi-thread CLI output, got %+v", readResp)
 	}
+
+	// 4. Verify `hq hook pre-tool` on manage_subagents(kill) and manage_task(kill) allows cleanly and quickly.
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "manage_subagents_kill",
+			payload: `{"conversationId":"00000000-0000-0000-0000-000000000111","toolCall":{"name":"manage_subagents","args":{"Action":"kill","ConversationIds":["00000000-0000-0000-0000-000000000333"]}}}`,
+		},
+		{
+			name:    "manage_task_kill",
+			payload: `{"conversationId":"00000000-0000-0000-0000-000000000111","toolCall":{"name":"manage_task","args":{"Action":"kill","TaskId":"00000000-0000-0000-0000-000000000111/task-99"}}}`,
+		},
+	} {
+		tStart := time.Now()
+		killCmd := exec.Command(binPath, "hook", "pre-tool")
+		killCmd.Dir = wsRoot
+		killCmd.Env = append(os.Environ(), "HQ_VAULT_DIR="+vaultDir, "ANTIGRAVITY_CONVERSATION_ID=00000000-0000-0000-0000-000000000111")
+		killCmd.Stdin = strings.NewReader(tc.payload)
+		killOut, kErr := killCmd.CombinedOutput()
+		if kErr != nil || !strings.Contains(string(killOut), `"decision":"allow"`) {
+			t.Fatalf("%s hook pre-tool failed: err=%v out=%s", tc.name, kErr, string(killOut))
+		}
+		if elapsed := time.Since(tStart); elapsed > 5*time.Second {
+			t.Fatalf("%s hook pre-tool exceeded 5s budget: took %s", tc.name, elapsed)
+		}
+	}
 }

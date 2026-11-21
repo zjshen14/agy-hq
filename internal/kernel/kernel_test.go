@@ -1579,3 +1579,31 @@ func TestFetchAllLSLineagePrefersJetboxAndCleanNestedSurvivesGetAllFailure(t *te
 		t.Fatalf("expected only standalone conversation to remain, got %+v", remaining)
 	}
 }
+
+func TestLoadNestedConversationParentsBatchNormalization(t *testing.T) {
+	vaultDir := t.TempDir()
+	if got := LoadNestedConversationParents(vaultDir); len(got) != 0 {
+		t.Fatalf("expected empty map when nested_conversations.json is missing, got %+v", got)
+	}
+
+	parentID := "DDDD0001-0000-0000-0000-000000000001"
+	childA := "DDDD0001-0000-0000-0000-000000000002"
+	childNoParent := "DDDD0001-0000-0000-0000-000000000003"
+	if err := RecordNestedConversation(vaultDir, childA, parentID); err != nil {
+		t.Fatalf("RecordNestedConversation childA: %v", err)
+	}
+	if err := RecordNestedConversation(vaultDir, childNoParent, ""); err != nil {
+		t.Fatalf("RecordNestedConversation childNoParent: %v", err)
+	}
+
+	got := LoadNestedConversationParents(vaultDir)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 normalized entries, got %+v", got)
+	}
+	if p, ok := got[strings.ToLower(childA)]; !ok || p != strings.ToLower(parentID) {
+		t.Fatalf("expected %s -> %s, got ok=%v parent=%q", strings.ToLower(childA), strings.ToLower(parentID), ok, p)
+	}
+	if p, ok := got[strings.ToLower(childNoParent)]; !ok || p != "" {
+		t.Fatalf("expected %s -> empty parent, got ok=%v parent=%q", strings.ToLower(childNoParent), ok, p)
+	}
+}

@@ -26,11 +26,37 @@ func stripConsoleTimestampHeader(s string) string {
 // SyncMarkdownConsole deterministically regenerates `local/CONSOLE.md` and (if present)
 // `<artifactDirectoryPath>/hq_console.md` from live Vault state in 0 LLM tokens.
 func SyncMarkdownConsole(vaultDir string) error {
+	return syncMarkdownConsole(vaultDir, 60*time.Second)
+}
+
+// SyncMarkdownConsoleForHook refreshes CONSOLE.md / hq_console.md on hook hot paths
+// (SessionStart, PreToolUse, Stop) using the fast persisted observability summary cache
+// and bounding total wall time so cosmetic console sync can never push a hook over its
+// SIGKILL timeout budget. Inside Go tests it runs synchronously for deterministic assertions.
+func SyncMarkdownConsoleForHook(vaultDir string, timeout time.Duration) {
+	if timeout <= 0 || store.InGoTest() {
+		_ = syncMarkdownConsole(vaultDir, 5*time.Minute)
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = syncMarkdownConsole(vaultDir, 5*time.Minute)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 	invalidateStateCache(vaultDir)
 	kernel.ReconcileFrontDeskFromTranscript(vaultDir, "")
 	_, _ = approvals.ReconcileAskRejections(vaultDir, "", "", time.Now())
 	_, _ = approvals.ReconcileLocalGitProposals(vaultDir, time.Now())
-	state := loadState(vaultDir, "")
+	state := loadStateWithObsMaxAge(vaultDir, "", obsCacheMaxAge)
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# 🏛️ agy-hq Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))

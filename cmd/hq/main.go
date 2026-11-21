@@ -391,7 +391,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "hq hook session-start: %v\n", err)
 				os.Exit(1)
 			}
-			_ = webui.SyncMarkdownConsole(vaultDir)
+			webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 		case "pre-tool", "pre-tool-use":
 			needsSync, err := hooks.HandlePreToolUseWithSync(os.Stdin, os.Stdout, vaultDir)
 			if err != nil {
@@ -399,14 +399,14 @@ func main() {
 				os.Exit(1)
 			}
 			if needsSync {
-				_ = webui.SyncMarkdownConsole(vaultDir)
+				webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 			}
 		case "stop":
 			if err := hooks.HandleStop(os.Stdin, os.Stdout, vaultDir); err != nil {
 				fmt.Fprintf(os.Stderr, "hq hook stop: %v\n", err)
 				os.Exit(1)
 			}
-			_ = webui.SyncMarkdownConsole(vaultDir)
+			webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown hook subcommand: %s\n", os.Args[2])
 			os.Exit(1)

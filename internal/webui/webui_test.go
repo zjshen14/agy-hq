@@ -497,3 +497,21 @@ func TestWebUIConcurrentStateSingleflightCacheInvalidationAndPollingJS(t *testin
 		t.Fatalf("expected unchanged CONSOLE.md body to skip disk rewrite (mtime1=%d mtime2=%d)", st1.ModTime().UnixNano(), st2.ModTime().UnixNano())
 	}
 }
+
+func TestSyncMarkdownConsoleForHookWritesConsoleAndArtifact(t *testing.T) {
+	vaultDir := t.TempDir()
+	artDir := t.TempDir()
+	if err := kernel.SetFrontDesk(vaultDir, "fd-hook-sync-0001", artDir); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+	SyncMarkdownConsoleForHook(vaultDir, 2*time.Second)
+	for _, p := range []string{
+		filepath.Join(vaultDir, "CONSOLE.md"),
+		filepath.Join(artDir, "hq_console.md"),
+		filepath.Join(artDir, "hq_console.md.metadata.json"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected SyncMarkdownConsoleForHook to write %s: %v", p, err)
+		}
+	}
+}

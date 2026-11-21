@@ -464,6 +464,26 @@ func ListActiveSpawners(vaultDir string, maxAge time.Duration) []ActiveSpawner {
 	return out
 }
 
+// LoadNestedConversationParents reads local/memory/nested_conversations.json once and returns a
+// normalized map of nested conversationID -> parentConversationID (empty string when parent unknown).
+// Callers iterating over many conversations (such as observability DAG builders) should use this
+// batch snapshot rather than calling IsNestedSubagentConversation in a loop.
+func LoadNestedConversationParents(vaultDir string) map[string]string {
+	m, err := loadNestedConversations(vaultDir)
+	if err != nil || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, rec := range m {
+		nk := normalizeUUID(k)
+		if nk == "" {
+			continue
+		}
+		out[nk] = normalizeUUID(rec.ParentConversationID)
+	}
+	return out
+}
+
 // IsNestedSubagentConversation returns true if convID is a known nested descendant subagent.
 func IsNestedSubagentConversation(vaultDir, convID string) bool {
 	convID = normalizeUUID(convID)

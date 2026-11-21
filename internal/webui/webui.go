@@ -757,6 +757,10 @@ func loadStateCached(vaultDir string) DashboardState {
 }
 
 func loadState(vaultDir, flashMsg string) DashboardState {
+	return loadStateWithObsMaxAge(vaultDir, flashMsg, 0)
+}
+
+func loadStateWithObsMaxAge(vaultDir, flashMsg string, obsCacheMaxAge time.Duration) DashboardState {
 	pending, _ := approvals.List(vaultDir)
 	for i := range pending {
 		enrichPendingDraftPayload(vaultDir, &pending[i])
@@ -770,7 +774,12 @@ func loadState(vaultDir, flashMsg string) DashboardState {
 	sel := kernel.SelectConsoleTasks(layer1Tasks, coldCount, now)
 	turns := loadTodayJournals(vaultDir)
 	quota := trimQuotaForDashboard(kernel.LoadQuota(vaultDir))
-	obsSum := obs.BuildDashboardSummary(vaultDir, now)
+	var obsSum obs.DashboardSummary
+	if obsCacheMaxAge > 0 {
+		obsSum = obs.BuildDashboardSummaryCached(vaultDir, now, obsCacheMaxAge)
+	} else {
+		obsSum = obs.BuildDashboardSummary(vaultDir, now)
+	}
 	health := doctor.RunWithObs(vaultDir, &obsSum)
 	allGoals, _ := kernel.ListGoals(vaultDir)
 	var activeGoals []kernel.Goal

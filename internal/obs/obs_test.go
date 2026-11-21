@@ -624,3 +624,104 @@ func TestTokenCircuitDisabledSuppressesBreakerAndA5(t *testing.T) {
 		}
 	}
 }
+
+func TestEnrichAndBuildDAGUsesBatchNestedParents(t *testing.T) {
+	vaultDir := t.TempDir()
+	parentID := "eeee0001-0000-0000-0000-000000000001"
+	childID := "eeee0001-0000-0000-0000-000000000002"
+
+	if err := kernel.RecordNestedConversation(vaultDir, strings.ToUpper(childID), strings.ToUpper(parentID)); err != nil {
+		t.Fatalf("RecordNestedConversation: %v", err)
+	}
+
+	idx := &ObsIndex{
+		Version: currentObsIndexVersion,
+		Conversations: map[string]ConversationMetrics{
+			parentID: {
+				ConversationID: parentID,
+				Kind:           "task",
+				Title:          "[Task:core] Parent",
+				TaskSlug:       "core-parent",
+				Turns: []TurnMetrics{
+					{InputTokens: 1000, OutputTokens: 200, UncachedTokens: 1200, GrossTokens: 1200},
+				},
+			},
+			childID: {
+				ConversationID: childID,
+				Turns: []TurnMetrics{
+					{InputTokens: 500, OutputTokens: 100, UncachedTokens: 600, GrossTokens: 600},
+				},
+			},
+		},
+	}
+
+	enrichAndBuildDAG(vaultDir, idx)
+
+	child := idx.Conversations[childID]
+	if child.Kind != "nested_subagent" {
+		t.Fatalf("expected child Kind=nested_subagent, got %q", child.Kind)
+	}
+	if child.ParentConversationID != parentID {
+		t.Fatalf("expected child ParentConversationID=%s, got %q", parentID, child.ParentConversationID)
+	}
+	parent := idx.Conversations[parentID]
+	if parent.Tree.UncachedTokens != 1800 {
+		t.Fatalf("expected parent Tree.UncachedTokens=1800 (1200+600), got %d", parent.Tree.UncachedTokens)
+	}
+}
+
+func TestSummaryCacheHitExpiryAndBudgetRefresh(t *testing.T) {
+	vaultDir := t.TempDir()
+	brainDir := filepath.Join(t.TempDir(), "brain")
+	now := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+
+	if err := SaveBudgetConfig(vaultDir, BudgetConfig{
+		DailyUncachedBudget:     2_000_000,
+		DailyDeepUncachedBudget: 1_000_000,
+	}); err != nil {
+		t.Fatalf("SaveBudgetConfig: %v", err)
+	}
+
+	seed := DashboardSummary{
+		UpdatedAt:               now.Format("15:04:05"),
+		TodayUncachedTokens:     500_000,
+		TodayDeepUncachedTokens: 250_000,
+		FrontDeskContextStatus:  "OK",
+		TaskBadges: map[string]TaskTokenBadge{
+			"conv-1": {ConversationID: "conv-1", TreeUncachedTokens: 500_000},
+		},
+	}
+	saveSummaryCache(vaultDir, brainDir, now, seed)
+
+	// 1. Fresh hit recomputes budget percentages against current budget config.
+	got, ok := loadSummaryCache(vaultDir, brainDir, now.Add(30*time.Second), time.Minute)
+	if !ok {
+		t.Fatalf("expected fresh summary cache hit")
+	}
+	if got.TodayUncachedTokens != 500_000 || got.DailyBudgetPct != 25.0 || got.DeepBudgetPct != 25.0 {
+		t.Fatalf("unexpected cached summary values: %+v", got)
+	}
+
+	// 2. Updating budget config immediately reflects on next cache hit.
+	if err := SaveBudgetConfig(vaultDir, BudgetConfig{
+		DailyUncachedBudget:     1_000_000,
+		DailyDeepUncachedBudget: 500_000,
+	}); err != nil {
+		t.Fatalf("SaveBudgetConfig update: %v", err)
+	}
+	got2, ok := loadSummaryCache(vaultDir, brainDir, now.Add(45*time.Second), time.Minute)
+	if !ok || got2.DailyBudgetPct != 50.0 || got2.DeepBudgetPct != 50.0 {
+		t.Fatalf("expected updated budget pct (50/50) on cache hit, got ok=%v daily=%v deep=%v", ok, got2.DailyBudgetPct, got2.DeepBudgetPct)
+	}
+
+	// 3. Expired TTL, mismatched brainDir, and date rollover all miss cleanly.
+	if _, ok := loadSummaryCache(vaultDir, brainDir, now.Add(2*time.Minute), time.Minute); ok {
+		t.Fatalf("expected TTL-expired summary cache miss")
+	}
+	if _, ok := loadSummaryCache(vaultDir, brainDir+"-other", now.Add(10*time.Second), time.Minute); ok {
+		t.Fatalf("expected mismatched brainDir cache miss")
+	}
+	if _, ok := loadSummaryCache(vaultDir, brainDir, now.Add(24*time.Hour), 48*time.Hour); ok {
+		t.Fatalf("expected date-rollover cache miss")
+	}
+}

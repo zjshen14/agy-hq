@@ -507,21 +507,28 @@ type transcriptCandidate struct {
 	convID         string
 	transcriptPath string
 	modelHint      string
+	fileSize       int64
+	modTimeNano    int64
 }
 
-func resolveTranscriptInDir(dir string) string {
+func resolveTranscriptInDirWithStat(dir string) (string, int64, int64) {
 	if dir == "" {
-		return ""
+		return "", 0, 0
 	}
 	for _, p := range []string{
 		filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl"),
 		filepath.Join(dir, "transcript.jsonl"),
 	} {
 		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
+			return p, info.Size(), info.ModTime().UnixNano()
 		}
 	}
-	return ""
+	return "", 0, 0
+}
+
+func resolveTranscriptInDir(dir string) string {
+	p, _, _ := resolveTranscriptInDirWithStat(dir)
+	return p
 }
 
 func mergeJournalCandidate(byConv map[string]transcriptCandidate, convID, transcriptPath, modelHint string, preferExistingModel bool) {
@@ -536,6 +543,8 @@ func mergeJournalCandidate(byConv map[string]transcriptCandidate, convID, transc
 	if cand.transcriptPath == "" && transcriptPath != "" {
 		if info, err := os.Stat(transcriptPath); err == nil && !info.IsDir() {
 			cand.transcriptPath = transcriptPath
+			cand.fileSize = info.Size()
+			cand.modTimeNano = info.ModTime().UnixNano()
 		}
 	}
 	if cand.transcriptPath != "" {
@@ -555,8 +564,8 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 					continue
 				}
 				cid := strings.ToLower(strings.TrimSpace(e.Name()))
-				if tp := resolveTranscriptInDir(filepath.Join(brainDir, e.Name())); tp != "" {
-					byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: tp}
+				if tp, sz, mt := resolveTranscriptInDirWithStat(filepath.Join(brainDir, e.Name())); tp != "" {
+					byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: tp, fileSize: sz, modTimeNano: mt}
 				}
 			}
 		}
@@ -566,8 +575,8 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 	if fd, ok := kernel.GetFrontDesk(vaultDir); ok && fd.ConversationID != "" && fd.ArtifactDir != "" {
 		cid := strings.ToLower(strings.TrimSpace(fd.ConversationID))
 		if _, exists := byConv[cid]; !exists {
-			if tp := resolveTranscriptInDir(fd.ArtifactDir); tp != "" {
-				byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: tp}
+			if tp, sz, mt := resolveTranscriptInDirWithStat(fd.ArtifactDir); tp != "" {
+				byConv[cid] = transcriptCandidate{convID: cid, transcriptPath: tp, fileSize: sz, modTimeNano: mt}
 			}
 		}
 	}
@@ -719,12 +728,18 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 	seen := make(map[string]bool, len(candidates))
 	for _, cand := range candidates {
 		seen[cand.convID] = true
-		info, err := os.Stat(cand.transcriptPath)
-		if err != nil {
-			continue
+		fileSize := cand.fileSize
+		modTimeNano := cand.modTimeNano
+		if modTimeNano == 0 {
+			info, err := os.Stat(cand.transcriptPath)
+			if err != nil {
+				continue
+			}
+			fileSize = info.Size()
+			modTimeNano = info.ModTime().UnixNano()
 		}
 		cached, ok := idx.Conversations[cand.convID]
-		if ok && cached.TranscriptPath == cand.transcriptPath && cached.FileSize == info.Size() && cached.ModTimeNano == info.ModTime().UnixNano() {
+		if ok && cached.TranscriptPath == cand.transcriptPath && cached.FileSize == fileSize && cached.ModTimeNano == modTimeNano {
 			if cand.modelHint != "" && cached.Model == "" {
 				cached.Model = cand.modelHint
 				idx.Conversations[cand.convID] = cached
@@ -1323,6 +1338,7 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 	} else {
 		sum.Anomalies = allAnomalies
 	}
+	saveSummaryCache(vaultDir, ResolveBrainDir(vaultDir), now, sum)
 	return sum
 }
 

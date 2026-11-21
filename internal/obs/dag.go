@@ -125,6 +125,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	}
 
 	knownFDs := collectKnownFrontDeskIDs(vaultDir, idx, taskByConv)
+	nestedParents := kernel.LoadNestedConversationParents(vaultDir)
 	parentIDs, edgeByChild := collectWinningSpawnEdges(idx)
 
 	// 2. Enrich each conversation's metadata (Ground-truth SpawnEdge > tasks.json > transcript fallback)
@@ -195,10 +196,10 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 				} else if cm.Kind != "task" || cleanRole != "" {
 					cm.Kind = "subagent"
 				}
-			} else if kernel.IsNestedSubagentConversation(vaultDir, cid) {
+			} else if nestedParent, isNested := nestedParents[cid]; isNested {
 				cm.Kind = "nested_subagent"
-				if cm.ParentConversationID == "" {
-					cm.ParentConversationID = strings.ToLower(strings.TrimSpace(kernel.GetNestedConversationParent(vaultDir, cid)))
+				if cm.ParentConversationID == "" && nestedParent != "" {
+					cm.ParentConversationID = nestedParent
 				}
 			}
 
