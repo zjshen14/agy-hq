@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/authz"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/store"
@@ -36,9 +37,11 @@ type QueuedNudge struct {
 	AckedAt    string            `json:"acked_at,omitempty"`
 }
 
-// NudgeResult reports the outcome of ExecuteNudge (both 0-token fast path and LLM-extracted nudge).
+// NudgeResult reports the outcome of ExecuteNudge (queue_only or spawn_sandboxed_worker).
 type NudgeResult struct {
 	Queued        bool         `json:"queued"`
+	Spawned       bool         `json:"spawned,omitempty"`
+	EventID       string       `json:"event_id,omitempty"`
 	PreflightFail bool         `json:"preflight_fail,omitempty"`
 	Escalated     bool         `json:"escalated,omitempty"`
 	AckSent       bool         `json:"ack_sent,omitempty"`
@@ -168,8 +171,8 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 	if !ok {
 		return NudgeResult{}, fmt.Errorf("nudge %q not found in policy %q", nudgeID, polSpec.ID)
 	}
-	if nudgeSpec.DeliveryMode != "queue_only" {
-		return NudgeResult{}, fmt.Errorf("unsupported delivery_mode %q (v1 supports queue_only exclusively)", nudgeSpec.DeliveryMode)
+	if nudgeSpec.DeliveryMode != "queue_only" && nudgeSpec.DeliveryMode != "spawn_sandboxed_worker" {
+		return NudgeResult{}, fmt.Errorf("unsupported delivery_mode %q (expected queue_only or spawn_sandboxed_worker)", nudgeSpec.DeliveryMode)
 	}
 
 	// Validate typed parameters strictly before touching preflight or queues.
@@ -275,16 +278,6 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 		}
 	}
 
-	// Resolve target task (fail closed to Front Desk escalation if missing/archived/ambiguous).
-	targetSlug, targetErr := resolveNudgeTargetTask(vaultDir, polSpec, nudgeSpec, overrideSlug)
-	if targetErr != nil {
-		_, _ = EscalateRequest(ctx, vaultDir, convID, stored.RequestID, "ambiguous", fmt.Sprintf("Could not resolve target task for nudge %s: %v", nudgeSpec.ID, targetErr), true)
-		return NudgeResult{
-			Escalated: true,
-			Detail:    fmt.Sprintf("Target resolution failed (%v); escalated to Front Desk.", targetErr),
-		}, nil
-	}
-
 	// Render 100% static Go template (ZERO raw peer prose!).
 	rendered, err := RenderSafeTemplate(string(nudgeSpec.Template), TemplateData{
 		CallerID:  stored.CallerID,
@@ -296,43 +289,106 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 		return NudgeResult{}, fmt.Errorf("render nudge template: %w", err)
 	}
 
-	qPath, err := queueFilePath(vaultDir, targetSlug)
-	if err != nil {
-		return NudgeResult{}, err
-	}
-	qn := QueuedNudge{
-		ID:         "nudge-" + randomHexToken(6),
-		PolicyID:   polSpec.ID,
-		NudgeID:    nudgeSpec.ID,
-		CallerID:   stored.CallerID,
-		RequestID:  stored.RequestID,
-		TargetSlug: targetSlug,
-		Params:     validated,
-		Body:       rendered,
-		CreatedAt:  now.Format(time.RFC3339),
-	}
-	lineBytes, err := json.Marshal(qn)
-	if err != nil {
-		return NudgeResult{}, err
+	var targetSlug string
+	var qn *QueuedNudge
+	var spawnedEventID string
+	isSpawnMode := nudgeSpec.DeliveryMode == "spawn_sandboxed_worker"
+
+	if isSpawnMode {
+		workerTier := strings.ToLower(strings.TrimSpace(nudgeSpec.WorkerTier))
+		if workerTier == "" {
+			workerTier = "standard"
+		}
+		workerPrompt := rendered + "\n\n" +
+			"[agy-hq Delegated Sandboxed Worker Guardrails]\n" +
+			"- Execute the requested investigation, review, or drafting work thoroughly in this isolated background session.\n" +
+			"- You run under the unattended_auto sandbox (NI-3 auto_propose_only): never bypass approval gates. Stage any external reply, comment, LGTM, push, or mutation via `hq propose`, and report completed findings/drafts to `[HQ] Front Desk` via `hq outbox add --tier=interrupt`."
+		ev, _, enqErr := events.Enqueue(vaultDir, events.Event{
+			Source:       "delegate_action",
+			DedupKey:     "delegate-action:" + stored.RequestID,
+			ScopeKey:     "delegate-action:" + polSpec.ID + ":" + nudgeSpec.ID + ":" + stored.RequestID,
+			Skill:        strings.TrimSpace(nudgeSpec.WorkerSkill),
+			Title:        fmt.Sprintf("[Auto] Delegate Action: %s/%s (%s)", polSpec.ID, nudgeSpec.ID, stored.RequestID),
+			Prompt:       workerPrompt,
+			TaintOnSpawn: false,
+			Metadata: map[string]string{
+				"tier":          workerTier,
+				"request_id":    stored.RequestID,
+				"policy_id":     polSpec.ID,
+				"nudge_id":      nudgeSpec.ID,
+				"caller_id":     stored.CallerID,
+				"delivery_mode": "spawn_sandboxed_worker",
+				"connector":     stored.SourceFQID,
+				"thread_key":    stored.OriginThread,
+			},
+		}, now)
+		if enqErr != nil {
+			return NudgeResult{}, fmt.Errorf("enqueue sandboxed delegate worker: %w", enqErr)
+		}
+		spawnedEventID = ev.ID
+
+		// If target task is also configured and resolvable, record a static tracking entry for owner visibility.
+		if strings.TrimSpace(overrideSlug) != "" || strings.TrimSpace(nudgeSpec.TargetTaskSlug) != "" || strings.TrimSpace(nudgeSpec.TargetTaskScope) != "" {
+			if resolvedSlug, rErr := resolveNudgeTargetTask(vaultDir, polSpec, nudgeSpec, overrideSlug); rErr == nil && resolvedSlug != "" {
+				targetSlug = resolvedSlug
+			}
+		}
+	} else {
+		// queue_only: resolve target task strictly (fail closed to Front Desk escalation if missing/archived/ambiguous).
+		var targetErr error
+		targetSlug, targetErr = resolveNudgeTargetTask(vaultDir, polSpec, nudgeSpec, overrideSlug)
+		if targetErr != nil {
+			_, _ = EscalateRequest(ctx, vaultDir, convID, stored.RequestID, "ambiguous", fmt.Sprintf("Could not resolve target task for nudge %s: %v", nudgeSpec.ID, targetErr), true)
+			return NudgeResult{
+				Escalated: true,
+				Detail:    fmt.Sprintf("Target resolution failed (%v); escalated to Front Desk.", targetErr),
+			}, nil
+		}
 	}
 
-	// Single leaf lock critical section under store.RankDelegates (66): append queue item.
-	if err := store.With(context.Background(), store.RankDelegates, delegatesLockPath(vaultDir), func(_ context.Context) error {
-		if mkErr := os.MkdirAll(filepath.Dir(qPath), 0o700); mkErr != nil {
-			return mkErr
+	if targetSlug != "" {
+		qPath, qErr := queueFilePath(vaultDir, targetSlug)
+		if qErr != nil {
+			if !isSpawnMode {
+				return NudgeResult{}, qErr
+			}
+		} else {
+			item := QueuedNudge{
+				ID:         "nudge-" + randomHexToken(6),
+				PolicyID:   polSpec.ID,
+				NudgeID:    nudgeSpec.ID,
+				CallerID:   stored.CallerID,
+				RequestID:  stored.RequestID,
+				TargetSlug: targetSlug,
+				Params:     validated,
+				Body:       rendered,
+				CreatedAt:  now.Format(time.RFC3339),
+			}
+			lineBytes, mErr := json.Marshal(item)
+			if mErr == nil {
+				wErr := store.With(context.Background(), store.RankDelegates, delegatesLockPath(vaultDir), func(_ context.Context) error {
+					if mkErr := os.MkdirAll(filepath.Dir(qPath), 0o700); mkErr != nil {
+						return mkErr
+					}
+					f, oErr := os.OpenFile(qPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+					if oErr != nil {
+						return oErr
+					}
+					_, wrErr := f.Write(append(lineBytes, '\n'))
+					cErr := f.Close()
+					if wrErr != nil {
+						return wrErr
+					}
+					return cErr
+				})
+				if wErr != nil && !isSpawnMode {
+					return NudgeResult{}, wErr
+				}
+				if wErr == nil {
+					qn = &item
+				}
+			}
 		}
-		f, oErr := os.OpenFile(qPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if oErr != nil {
-			return oErr
-		}
-		_, wErr := f.Write(append(lineBytes, '\n'))
-		cErr := f.Close()
-		if wErr != nil {
-			return wErr
-		}
-		return cErr
-	}); err != nil {
-		return NudgeResult{}, err
 	}
 
 	// Deliver optional static ack reply via Ring-0 Egress Gateway (which also marks request completed).
@@ -352,38 +408,52 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 		}
 	}
 	if !ackSent {
+		finalStatus := "nudged"
+		if isSpawnMode {
+			finalStatus = "spawned_worker"
+		}
 		_ = withStateMutate(vaultDir, now, func(st *State) error {
-			st.CompletedRequests[stored.RequestID] = "nudged"
+			st.CompletedRequests[stored.RequestID] = finalStatus
 			return nil
 		})
-		stored.Status = "nudged"
+		stored.Status = finalStatus
 		_ = SaveStoredRequest(vaultDir, stored)
 		_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
 			SourceSkill: "scoped-delegate",
 			Scope:       polSpec.ID,
 			Tier:        outbox.TierBriefRollup,
-			Title:       fmt.Sprintf("Queued priority nudge for %s (%s)", targetSlug, stored.CallerID),
-			Summary:     fmt.Sprintf("Queued %s (%s) from verified caller %s for task %s.", qn.ID, nudgeSpec.ID, stored.CallerID, targetSlug),
+			Title:       fmt.Sprintf("Delegated action %s (%s)", nudgeSpec.ID, stored.CallerID),
+			Summary:     fmt.Sprintf("Processed %s (%s) from verified caller %s (mode=%s).", nudgeSpec.ID, stored.RequestID, stored.CallerID, nudgeSpec.DeliveryMode),
 			Tainted:     true,
 			Connector:   stored.SourceFQID,
 			ThreadKey:   stored.OriginThread,
 		}, now)
 	}
 
+	outcome := "queued"
+	detail := fmt.Sprintf("Queued static priority nudge for task %q (delivery_mode=queue_only).", targetSlug)
+	if isSpawnMode {
+		outcome = "spawned_worker"
+		detail = fmt.Sprintf("Spawned sandboxed background worker (event %s, delivery_mode=spawn_sandboxed_worker).", spawnedEventID)
+	} else if qn != nil {
+		detail = fmt.Sprintf("Queued static priority nudge %s for task %q (delivery_mode=queue_only).", qn.ID, targetSlug)
+	}
 	AppendAudit(vaultDir, AuditEntry{
 		Action:    "nudge",
 		PolicyID:  polSpec.ID,
 		RequestID: stored.RequestID,
 		CallerID:  stored.CallerID,
-		Outcome:   "queued",
-		Detail:    fmt.Sprintf("%s -> task %s (fast_path=%v, ack_sent=%v)", qn.ID, targetSlug, isFastPath, ackSent),
+		Outcome:   outcome,
+		Detail:    fmt.Sprintf("%s (event=%s, task=%s, fast_path=%v, ack_sent=%v)", nudgeSpec.ID, spawnedEventID, targetSlug, isFastPath, ackSent),
 	})
 	return NudgeResult{
-		Queued:     true,
+		Queued:     qn != nil,
+		Spawned:    isSpawnMode,
+		EventID:    spawnedEventID,
 		AckSent:    ackSent,
 		TargetSlug: targetSlug,
-		Nudge:      &qn,
-		Detail:     fmt.Sprintf("Queued static priority nudge %s for task %q (delivery_mode=queue_only).", qn.ID, targetSlug),
+		Nudge:      qn,
+		Detail:     detail,
 	}, nil
 }
 

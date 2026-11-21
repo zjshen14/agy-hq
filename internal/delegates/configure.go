@@ -221,11 +221,14 @@ func ClassifyPolicyDiff(oldCfg *Config, hasOld bool, newCfg Config) (bool, []str
 				addReason(fmt.Sprintf("policy %q added nudge %q", np.ID, nn.ID))
 				continue
 			}
-			if nn.PreflightCommand != on.PreflightCommand ||
+			if nn.DeliveryMode != on.DeliveryMode ||
+				nn.WorkerSkill != on.WorkerSkill ||
+				nn.WorkerTier != on.WorkerTier ||
+				nn.PreflightCommand != on.PreflightCommand ||
 				nn.Template != on.Template ||
 				nn.AckReplyTemplate != on.AckReplyTemplate ||
 				!reflect.DeepEqual(nn.Params, on.Params) {
-				addReason(fmt.Sprintf("policy %q modified nudge %q contract/template", np.ID, nn.ID))
+				addReason(fmt.Sprintf("policy %q modified nudge %q contract/delivery/template", np.ID, nn.ID))
 			}
 			if nn.CooldownSeconds < on.CooldownSeconds {
 				addReason(fmt.Sprintf("policy %q lowered nudge %q cooldown_seconds", np.ID, nn.ID))

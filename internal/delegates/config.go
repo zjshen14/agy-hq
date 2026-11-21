@@ -134,12 +134,17 @@ type MatchSpec struct {
 	Keywords        []string `json:"keywords,omitempty"`
 }
 
-// NudgeSpec defines a CaMeL parameterized task priority nudge (queue_only exclusively in v1).
+// NudgeSpec defines a CaMeL parameterized task action:
+//   - "queue_only": appends a static priority item to memory/delegates_queues/<slug>.jsonl (Zone 2 on next interactive turn).
+//   - "spawn_sandboxed_worker": spawns an isolated unattended_auto worker (OS-sandboxed + NI-3 auto_propose_only)
+//     from a 100% static Go template to execute investigative/drafting work autonomously and stage any external action.
 type NudgeSpec struct {
 	ID                         string           `json:"id"`
-	DeliveryMode               string           `json:"delivery_mode"` // "queue_only"
+	DeliveryMode               string           `json:"delivery_mode"` // "queue_only" | "spawn_sandboxed_worker"
 	TargetTaskSlug             string           `json:"target_task_slug,omitempty"`
 	TargetTaskScope            string           `json:"target_task_scope,omitempty"`
+	WorkerSkill                string           `json:"worker_skill,omitempty"`
+	WorkerTier                 string           `json:"worker_tier,omitempty"` // "quick" | "routine" | "standard" | "heavy" | "deep"
 	CooldownSeconds            int              `json:"cooldown_seconds,omitempty"`
 	MaxNudgesPerHour           int              `json:"max_nudges_per_hour,omitempty"`
 	Params                     []CommandArgSpec `json:"params,omitempty"`
@@ -815,11 +820,26 @@ func ValidateConfig(vaultDir string, cfg Config, opts ValidateOptions) ([]string
 				return nil, fmt.Errorf("policy %q duplicate nudge id %q", pol.ID, n.ID)
 			}
 			seenNudges[n.ID] = true
-			if strings.TrimSpace(n.DeliveryMode) != "queue_only" {
-				return nil, fmt.Errorf("policy %q nudge %q delivery_mode=%q unsupported (v1 supports \"queue_only\" exclusively)", pol.ID, n.ID, n.DeliveryMode)
-			}
-			if strings.TrimSpace(n.TargetTaskSlug) == "" && strings.TrimSpace(n.TargetTaskScope) == "" {
-				return nil, fmt.Errorf("policy %q nudge %q requires target_task_slug or target_task_scope", pol.ID, n.ID)
+			dm := strings.TrimSpace(n.DeliveryMode)
+			switch dm {
+			case "queue_only":
+				if strings.TrimSpace(n.TargetTaskSlug) == "" && strings.TrimSpace(n.TargetTaskScope) == "" {
+					return nil, fmt.Errorf("policy %q nudge %q (queue_only) requires target_task_slug or target_task_scope", pol.ID, n.ID)
+				}
+			case "spawn_sandboxed_worker":
+				if ws := strings.TrimSpace(n.WorkerSkill); ws != "" && !reValidSlugID.MatchString(ws) {
+					return nil, fmt.Errorf("policy %q nudge %q invalid worker_skill %q", pol.ID, n.ID, n.WorkerSkill)
+				}
+				switch strings.ToLower(strings.TrimSpace(n.WorkerTier)) {
+				case "", "quick", "routine", "standard", "heavy", "deep":
+				default:
+					return nil, fmt.Errorf("policy %q nudge %q invalid worker_tier %q (expected quick, routine, standard, heavy, or deep)", pol.ID, n.ID, n.WorkerTier)
+				}
+				if strings.TrimSpace(n.PreflightCommand) == "" {
+					warnings = append(warnings, fmt.Sprintf("policy %q nudge %q uses spawn_sandboxed_worker without preflight_command (recommended to verify forwarded objects before spawning background workers)", pol.ID, n.ID))
+				}
+			default:
+				return nil, fmt.Errorf("policy %q nudge %q delivery_mode=%q unsupported (expected \"queue_only\" or \"spawn_sandboxed_worker\")", pol.ID, n.ID, n.DeliveryMode)
 			}
 			paramSet := make(map[string]bool)
 			for _, p := range n.Params {
