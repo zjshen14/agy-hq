@@ -176,7 +176,19 @@ func shannonEntropy(s string) float64 {
 func HasHighEntropyBlob(text string, allowVerbatim []string) (string, bool) {
 	clean := StripInvisibleUnicode(text)
 	for _, m := range reTokenBlob.FindAllString(clean, -1) {
-		if strings.HasPrefix(m, "http") || strings.Contains(m, "://") {
+		if strings.HasPrefix(m, "http") || strings.Contains(m, "://") || strings.HasPrefix(m, "//") {
+			continue
+		}
+		// Require at least one digit or base64 '+/=' char so pure-alphabetic CamelCase code symbols
+		// (e.g. PreCombineKeyMessagesFn/KeyMessagesWithIndexFn) do not false-positive as encoded secrets.
+		hasDigitOrB64 := false
+		for _, r := range m {
+			if (r >= '0' && r <= '9') || r == '+' || r == '=' {
+				hasDigitOrB64 = true
+				break
+			}
+		}
+		if !hasDigitOrB64 {
 			continue
 		}
 		if shannonEntropy(m) < 4.3 {

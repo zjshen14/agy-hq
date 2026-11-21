@@ -57,4 +57,7 @@ func TestHasHighEntropyBlob(t *testing.T) {
 	if _, ok := HasHighEntropyBlob("Normal build status: billing-v2 nightly green across all 12 suites.", nil); ok {
 		t.Fatalf("expected normal English text not to trigger high-entropy detector")
 	}
+	if _, ok := HasHighEntropyBlob("Reviewed PreCombineKeyMessagesFn/KeyMessagesWithIndexFn and //pkg/service/common/proto_utils:delta_processor_test.", nil); ok {
+		t.Fatalf("expected CamelCase code symbols and build target labels not to trigger high-entropy detector")
+	}
 }

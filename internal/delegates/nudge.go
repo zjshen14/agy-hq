@@ -302,7 +302,8 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 		workerPrompt := rendered + "\n\n" +
 			"[agy-hq Delegated Sandboxed Worker Guardrails]\n" +
 			"- Execute the requested investigation, review, or drafting work thoroughly in this isolated background session.\n" +
-			"- You run under the unattended_auto sandbox (NI-3 auto_propose_only): never bypass approval gates. Stage any external reply, comment, LGTM, push, or mutation via `hq propose`, and report completed findings/drafts to `[HQ] Front Desk` via `hq outbox add --tier=interrupt`."
+			fmt.Sprintf("- Deliver your concise, sanitized final reply directly back to the requester via `hq delegate reply --request=%s --body-b64=<base64>` (or repeatable `--line=...`), which passes through the Ring-0 Egress Gateway automatically (zero human intervention when policy egress is `auto_reply`, failing closed if any privacy/redaction guard trips). Never leak private paths, proposal IDs, secrets, or internal codenames.\n", stored.RequestID) +
+			"- You run under the unattended_auto sandbox (NI-3 auto_propose_only): never bypass approval gates for other external mutations (code pushes, CL LGTMs/comments, bug edits, doc mutations). Stage any optional external mutation via `hq propose`. Once `hq delegate reply` succeeds, log a quiet `hq outbox add --tier=brief_rollup` summary (use `--tier=interrupt` only if human escalation or a staged external mutation is needed)."
 		ev, _, enqErr := events.Enqueue(vaultDir, events.Event{
 			Source:       "delegate_action",
 			DedupKey:     "delegate-action:" + stored.RequestID,
@@ -391,7 +392,9 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 		}
 	}
 
-	// Deliver optional static ack reply via Ring-0 Egress Gateway (which also marks request completed).
+	// Deliver optional static ack reply via Ring-0 Egress Gateway.
+	// For spawn_sandboxed_worker, SendWorkerAck keeps CompletedRequests open so the
+	// spawned worker can deliver its single final Ring-0-filtered reply with zero human intervention.
 	ackSent := false
 	if strings.TrimSpace(string(nudgeSpec.AckReplyTemplate)) != "" {
 		ackBody, aErr := RenderSafeTemplate(string(nudgeSpec.AckReplyTemplate), TemplateData{
@@ -401,22 +404,27 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 			Params:    validated,
 		})
 		if aErr == nil && ackBody != "" {
-			res, sErr := SendReply(ctx, vaultDir, convID, stored.RequestID, ackBody, nil, true)
+			var res ReplyResult
+			var sErr error
+			if isSpawnMode {
+				res, sErr = SendWorkerAck(ctx, vaultDir, convID, stored.RequestID, ackBody)
+			} else {
+				res, sErr = SendReply(ctx, vaultDir, convID, stored.RequestID, ackBody, nil, true)
+			}
 			if sErr == nil && res.Sent {
 				ackSent = true
 			}
 		}
 	}
-	if !ackSent {
-		finalStatus := "nudged"
-		if isSpawnMode {
-			finalStatus = "spawned_worker"
-		}
+	if isSpawnMode {
+		stored.Status = "worker_running"
+		_ = SaveStoredRequest(vaultDir, stored)
+	} else if !ackSent {
 		_ = withStateMutate(vaultDir, now, func(st *State) error {
-			st.CompletedRequests[stored.RequestID] = finalStatus
+			st.CompletedRequests[stored.RequestID] = "nudged"
 			return nil
 		})
-		stored.Status = finalStatus
+		stored.Status = "nudged"
 		_ = SaveStoredRequest(vaultDir, stored)
 		_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
 			SourceSkill: "scoped-delegate",

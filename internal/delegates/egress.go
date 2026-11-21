@@ -13,6 +13,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/authz"
+	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
@@ -212,27 +213,75 @@ func findPolicyByID(cfg Config, id string) (PolicySpec, bool) {
 	return PolicySpec{}, false
 }
 
+// resolveBoundWorkerRequest checks whether convID is an active `spawn_sandboxed_worker`
+// unattended_auto session leased to a `delegate_action` event for reqID (or binds reqID
+// when omitted), granting that worker a single Ring-0-filtered reply/escalation strictly
+// for its own originating peer request.
+func resolveBoundWorkerRequest(vaultDir, convID, reqID string) (boundReqID, policyID, callerID string, ok bool) {
+	convID = strings.TrimSpace(convID)
+	if convID == "" {
+		return "", "", "", false
+	}
+	leased, err := events.ListLeasedByConversation(vaultDir, convID)
+	if err != nil || len(leased) == 0 {
+		return "", "", "", false
+	}
+	wantReq := strings.TrimSpace(reqID)
+	for _, ev := range leased {
+		if ev.Source != "delegate_action" || ev.Metadata["delivery_mode"] != "spawn_sandboxed_worker" {
+			continue
+		}
+		evReq := strings.TrimSpace(ev.Metadata["request_id"])
+		evPol := strings.TrimSpace(ev.Metadata["policy_id"])
+		if evReq == "" || evPol == "" {
+			continue
+		}
+		if wantReq != "" && wantReq != evReq {
+			continue
+		}
+		return evReq, evPol, strings.TrimSpace(ev.Metadata["caller_id"]), true
+	}
+	return "", "", "", false
+}
+
+// SendWorkerAck delivers a static initial acknowledgement for a `spawn_sandboxed_worker`
+// request without closing CompletedRequests, keeping the single final Ring-0-filtered reply
+// slot open for the spawned worker conversation.
+func SendWorkerAck(ctx context.Context, vaultDir, convID, reqID, rawBody string) (ReplyResult, error) {
+	return sendReplyInternal(ctx, vaultDir, convID, reqID, rawBody, nil, true, true)
+}
+
 // SendReply enforces single-reply-per-request, sliding-window rate limits, structured_template rendering,
 // and Ring-0 Egress Gateway scanning, then delivers via origin-bound transport.reply or fails closed.
+// Callable by a bound `scoped_delegate` session OR by the exact `unattended_auto` worker spawned for reqID.
 func SendReply(ctx context.Context, vaultDir, convID, reqID, rawBody string, structuredParams map[string]string, isInternalAuto bool) (ReplyResult, error) {
+	return sendReplyInternal(ctx, vaultDir, convID, reqID, rawBody, structuredParams, isInternalAuto, false)
+}
+
+func sendReplyInternal(ctx context.Context, vaultDir, convID, reqID, rawBody string, structuredParams map[string]string, isInternalAuto, isWorkerAck bool) (ReplyResult, error) {
 	now := time.Now().UTC()
 	var callerPolicyID, callerID string
 	if !isInternalAuto {
 		pol, grant, err := resolveCallerGrant(vaultDir, convID)
-		if err != nil {
+		if err == nil {
+			if pol.Profile != authz.ProfileScopedDelegate || !pol.Egress.EgressFilteredReply {
+				return ReplyResult{}, fmt.Errorf("reply not permitted in profile %q (egress=%s)", pol.Profile, grant.EgressMode)
+			}
+			if strings.TrimSpace(reqID) == "" {
+				reqID = grant.RequestID
+			}
+			if reqID != grant.RequestID {
+				return ReplyResult{}, fmt.Errorf("request %q is not bound to this session grant", reqID)
+			}
+			callerPolicyID = grant.PolicyID
+			callerID = grant.CallerID
+		} else if boundReq, boundPol, boundCaller, ok := resolveBoundWorkerRequest(vaultDir, convID, reqID); ok {
+			reqID = boundReq
+			callerPolicyID = boundPol
+			callerID = boundCaller
+		} else {
 			return ReplyResult{}, err
 		}
-		if pol.Profile != authz.ProfileScopedDelegate || !pol.Egress.EgressFilteredReply {
-			return ReplyResult{}, fmt.Errorf("reply not permitted in profile %q (egress=%s)", pol.Profile, grant.EgressMode)
-		}
-		if strings.TrimSpace(reqID) == "" {
-			reqID = grant.RequestID
-		}
-		if reqID != grant.RequestID {
-			return ReplyResult{}, fmt.Errorf("request %q is not bound to this session grant", reqID)
-		}
-		callerPolicyID = grant.PolicyID
-		callerID = grant.CallerID
 	}
 
 	stored, err := LoadStoredRequest(vaultDir, reqID)
@@ -433,12 +482,16 @@ func SendReply(ctx context.Context, vaultDir, convID, reqID, rawBody string, str
 	}
 
 	// PASS -> invoke pinned transport.reply bound to (request_id, origin_thread) with idempotency_key.
+	idemKey := "dlg:" + stored.RequestID
+	if isWorkerAck {
+		idemKey = "dlg-ack:" + stored.RequestID
+	}
 	if _, err := InvokeTransport(ctx, vaultDir, stored.SourceFQID, TransportRequest{
 		Op:             "reply",
 		RequestID:      stored.RequestID,
 		OriginThread:   stored.OriginThread,
 		Body:           scan.CleanedText,
-		IdempotencyKey: "dlg:" + stored.RequestID,
+		IdempotencyKey: idemKey,
 	}); err != nil {
 		AppendAudit(vaultDir, AuditEntry{
 			Action:    "reply",
@@ -455,9 +508,28 @@ func SendReply(ctx context.Context, vaultDir, convID, reqID, rawBody string, str
 	_ = withStateMutate(vaultDir, now, func(st *State) error {
 		st.GlobalReplyTimes = append(pruneTimestampsWithin(st.GlobalReplyTimes, cutoff), tsStr)
 		st.PolicyReplyTimes[polSpec.ID] = append(pruneTimestampsWithin(st.PolicyReplyTimes[polSpec.ID], cutoff), tsStr)
-		st.CompletedRequests[stored.RequestID] = "replied"
+		if !isWorkerAck {
+			st.CompletedRequests[stored.RequestID] = "replied"
+		}
 		return nil
 	})
+	if isWorkerAck {
+		stored.Status = "worker_running"
+		_ = SaveStoredRequest(vaultDir, stored)
+		AppendAudit(vaultDir, AuditEntry{
+			Action:    "ack",
+			PolicyID:  polSpec.ID,
+			RequestID: stored.RequestID,
+			CallerID:  stored.CallerID,
+			Outcome:   "sent",
+			Detail:    fmt.Sprintf("sent worker ack (%d runes) to thread %s", utf8.RuneCountInString(scan.CleanedText), stored.OriginThread),
+		})
+		return ReplyResult{
+			Sent:      true,
+			RequestID: stored.RequestID,
+			Detail:    fmt.Sprintf("Delivered initial worker ack for %s to %s.", stored.RequestID, stored.CallerID),
+		}, nil
+	}
 	stored.Status = "replied"
 	_ = SaveStoredRequest(vaultDir, stored)
 
@@ -563,17 +635,20 @@ func EscalateRequest(ctx context.Context, vaultDir, convID, reqID, category, rea
 	}
 	if !isInternal {
 		pol, grant, err := resolveCallerGrant(vaultDir, convID)
-		if err != nil {
+		if err == nil {
+			if !pol.Writes.DelegateEscalate {
+				return outbox.OutboxItem{}, fmt.Errorf("escalate not permitted in profile %q", pol.Profile)
+			}
+			if strings.TrimSpace(reqID) == "" {
+				reqID = grant.RequestID
+			}
+			if reqID != grant.RequestID {
+				return outbox.OutboxItem{}, fmt.Errorf("request %q is not bound to this session grant", reqID)
+			}
+		} else if boundReq, _, _, ok := resolveBoundWorkerRequest(vaultDir, convID, reqID); ok {
+			reqID = boundReq
+		} else {
 			return outbox.OutboxItem{}, err
-		}
-		if !pol.Writes.DelegateEscalate {
-			return outbox.OutboxItem{}, fmt.Errorf("escalate not permitted in profile %q", pol.Profile)
-		}
-		if strings.TrimSpace(reqID) == "" {
-			reqID = grant.RequestID
-		}
-		if reqID != grant.RequestID {
-			return outbox.OutboxItem{}, fmt.Errorf("request %q is not bound to this session grant", reqID)
 		}
 	}
 	stored, err := LoadStoredRequest(vaultDir, reqID)

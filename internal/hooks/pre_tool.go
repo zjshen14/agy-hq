@@ -470,7 +470,13 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 	if !isFrontDesk {
 		if payload.ToolCall.Name == "run_command" && ctx.isAuto() {
 			cmdLine, _ := payload.ToolCall.Args["CommandLine"].(string)
-			return writePreToolAllowOverwrite(w, map[string]interface{}{"CommandLine": wrapScrubbedAutoShellCommand(cmdLine)})
+			scrubbed := map[string]interface{}{"CommandLine": wrapScrubbedAutoShellCommand(cmdLine)}
+			if isSingleHQCommand(cmdLine) {
+				if apprPol, _, _ := approvals.LoadPolicy(vaultDir); apprPol.HostPresetBridge {
+					return writePreToolAutoApproveOverwrite(w, scrubbed)
+				}
+			}
+			return writePreToolAllowOverwrite(w, scrubbed)
 		}
 		return writeAllowWithOptionalCompactionNudge(w, vaultDir, payload)
 	}

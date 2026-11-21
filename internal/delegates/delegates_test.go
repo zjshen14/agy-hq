@@ -793,4 +793,40 @@ func main() {
 	if !foundActionEv {
 		t.Fatalf("expected enqueued delegate_action event %s in Event Inbox", spawnRes.EventID)
 	}
+
+	// Lease the spawned delegate_action event to a worker conversation and verify zero-touch Ring-0 SendReply!
+	nowLease := time.Now().UTC()
+	batches, _, lErr := events.LeaseNextBatches(vaultDir, nowLease, events.DefaultLeaseTTL)
+	if lErr != nil || len(batches) == 0 {
+		t.Fatalf("LeaseNextBatches: %v (batches=%d)", lErr, len(batches))
+	}
+	workerConv := "conv-spawn-worker-1"
+	boundEvent := false
+	for _, b := range batches {
+		for _, ev := range b.Events {
+			if ev.ID == spawnRes.EventID {
+				if bErr := events.BindBatchConversation(vaultDir, b.EventIDs(), workerConv, nowLease, events.DefaultLeaseTTL); bErr != nil {
+					t.Fatalf("BindBatchConversation: %v", bErr)
+				}
+				boundEvent = true
+			}
+		}
+	}
+	if !boundEvent {
+		t.Fatalf("expected leased batch containing %s", spawnRes.EventID)
+	}
+	// Unrelated conversation must NOT be allowed to reply to req-spawn-1.
+	if _, err := SendReply(context.Background(), vaultDir, "conv-stranger", "req-spawn-1", "spoofed", nil, false); err == nil {
+		t.Fatalf("expected unbound conversation reply to be rejected")
+	}
+	// Bound worker delivers its final Ring-0-scanned report with ZERO human approval (including code symbols & build targets).
+	workerReport := "Reviewed #482910: PreCombineKeyMessagesFn/KeyMessagesWithIndexFn and //pkg/common/proto_utils:delta_processor_test look clean."
+	finalRes, err := SendReply(context.Background(), vaultDir, workerConv, "req-spawn-1", workerReport, nil, false)
+	if err != nil || !finalRes.Sent || finalRes.Staged {
+		t.Fatalf("expected zero-touch worker final reply to pass Ring-0 egress, got %+v (%v)", finalRes, err)
+	}
+	// Single final reply cap: second reply attempt from the same worker MUST fail.
+	if _, err := SendReply(context.Background(), vaultDir, workerConv, "req-spawn-1", "duplicate reply", nil, false); err == nil {
+		t.Fatalf("expected second final reply from worker to be rejected")
+	}
 }
