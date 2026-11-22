@@ -16,10 +16,89 @@ import (
 )
 
 var (
-	reQuarantinedReadCmd = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
-	reBgTaskNoticeLine   = regexp.MustCompile(`(?im)^Tool is running as a background task with task id:\s*([0-9a-zA-Z_-]+/task-\d+)\b`)
-	reBgTaskFinishedLine = regexp.MustCompile(`(?i)(?:Task id\s+"([0-9a-zA-Z_-]+/task-\d+)"\s+(?:finished|was canceled|canceled|failed|completed|exited)|sender=([0-9a-zA-Z_-]+/task-\d+))`)
+	reQuarantinedReadCmd   = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
+	reBgTaskNoticeLine     = regexp.MustCompile(`(?im)^Tool is running as a background task with task id:\s*([0-9a-zA-Z_-]+/task-\d+)\b`)
+	reBgTaskFinishedLine   = regexp.MustCompile(`(?i)(?:Task id\s+"([0-9a-zA-Z_-]+/task-\d+)"\s+(?:finished|was canceled|canceled|failed|completed|exited)|sender=([0-9a-zA-Z_-]+/task-\d+))`)
+	reBgTimerDescLine      = regexp.MustCompile(`(?im)^Task Description:\s*Timer:\s*([^,\n]+)`)
+	reBgMsgSender          = regexp.MustCompile(`(?i)\bsender=([^\s\]]+)`)
+	reBgTaskTerminalStatus = regexp.MustCompile(`(?im)^Task:\s*([0-9a-zA-Z_-]+/task-\d+)\s*\r?\nStatus:\s*(DONE|ERROR|FAILED|CANCELED|CANCELLED|KILLED)\b`)
 )
+
+type scheduleTimerCall struct {
+	condition string
+	duration  time.Duration
+}
+
+type pendingTimerMeta struct {
+	condition string
+	deadline  time.Time
+}
+
+func parseTranscriptStepTime(raw string) time.Time {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return ts
+	}
+	if ts, err := time.Parse(time.RFC3339, s); err == nil {
+		return ts
+	}
+	return time.Time{}
+}
+
+func parseScheduleDurationSeconds(raw interface{}) time.Duration {
+	switch v := raw.(type) {
+	case float64:
+		if v > 0 {
+			return time.Duration(v * float64(time.Second))
+		}
+	case int:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case int64:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case string:
+		s := strings.Trim(strings.TrimSpace(v), "\"")
+		if s == "" {
+			return 0
+		}
+		var secs float64
+		if _, err := fmt.Sscanf(s, "%f", &secs); err == nil && secs > 0 {
+			return time.Duration(secs * float64(time.Second))
+		}
+	}
+	return 0
+}
+
+func parseTimerDescriptionDuration(raw string) time.Duration {
+	compact := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), " ", ""))
+	if compact == "" {
+		return 0
+	}
+	if d, err := time.ParseDuration(compact); err == nil && d > 0 {
+		return d
+	}
+	// Handle optional "<N>d..." prefix (e.g. "1d2h") not accepted by time.ParseDuration.
+	if idx := strings.IndexByte(compact, 'd'); idx > 0 {
+		var days int
+		if _, err := fmt.Sscanf(compact[:idx], "%d", &days); err == nil && days > 0 {
+			total := time.Duration(days) * 24 * time.Hour
+			rest := compact[idx+1:]
+			if rest == "" {
+				return total
+			}
+			if rem, err := time.ParseDuration(rest); err == nil && rem >= 0 {
+				return total + rem
+			}
+		}
+	}
+	return 0
+}
 
 // isReadOnlyFileViewerOutput returns true if the tool output step is a file viewer (`read_file`)
 // or if the preceding planner step only invoked non-command tools (preventing string literals like
@@ -133,6 +212,9 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 	fileSet := make(map[string]bool)
 	turnFileSet := make(map[string]bool)
 	pendingBgTasks := make(map[string]bool)
+	pendingTimers := make(map[string]pendingTimerMeta)
+	var queuedScheduleTimers []scheduleTimerCall
+	var maxStepTime time.Time
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -141,6 +223,9 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 	obsAcc := obs.NewTurnSliceScanner(stepStartIdx)
 	lastPlannerHadTools := false
 	lastPlannerHadRunCommand := false
+	lastPlannerHadSchedule := false
+	lastPlannerHadManageTaskList := false
+	lastPlannerHadManageTaskStatus := false
 
 	for scanner.Scan() {
 		rawLine := scanner.Bytes()
@@ -162,12 +247,12 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 		curIdx := tm.StepCount
 		tm.StepCount++
 		inCurrentTurn := curIdx >= stepStartIdx
-		if inCurrentTurn && tm.CurrentTurnStartedAt.IsZero() && strings.TrimSpace(step.CreatedAt) != "" {
-			if ts, pErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(step.CreatedAt)); pErr == nil {
-				tm.CurrentTurnStartedAt = ts
-			} else if ts2, pErr2 := time.Parse(time.RFC3339, strings.TrimSpace(step.CreatedAt)); pErr2 == nil {
-				tm.CurrentTurnStartedAt = ts2
-			}
+		stepTime := parseTranscriptStepTime(step.CreatedAt)
+		if !stepTime.IsZero() && stepTime.After(maxStepTime) {
+			maxStepTime = stepTime
+		}
+		if inCurrentTurn && tm.CurrentTurnStartedAt.IsZero() && !stepTime.IsZero() {
+			tm.CurrentTurnStartedAt = stepTime
 		}
 
 		if isTranscriptStepErrorWithContext(step.Status, step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) {
@@ -186,15 +271,48 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 			stUpper := strings.ToUpper(strings.TrimSpace(step.Status))
 			isTerminalGeneric := stUpper == "DONE" || stUpper == "CORTEX_STEP_STATUS_DONE" ||
 				stUpper == "ERROR" || stUpper == "CORTEX_STEP_STATUS_ERROR"
+			if isTerminalGeneric {
+				if lastPlannerHadManageTaskList && strings.Contains(step.Content, "No background tasks are currently running") {
+					clear(pendingBgTasks)
+					clear(pendingTimers)
+				}
+				if lastPlannerHadManageTaskStatus {
+					for _, m := range reBgTaskTerminalStatus.FindAllStringSubmatch(step.Content, -1) {
+						if len(m) >= 2 {
+							if tid := strings.TrimSpace(m[1]); tid != "" {
+								delete(pendingBgTasks, tid)
+								delete(pendingTimers, tid)
+							}
+						}
+					}
+				}
+			}
 			if !isTerminalGeneric &&
-				!isReadOnlyFileViewerOutput(step.Content, lastPlannerHadTools, lastPlannerHadRunCommand) &&
+				!isReadOnlyFileViewerOutput(step.Content, lastPlannerHadTools, lastPlannerHadRunCommand || lastPlannerHadSchedule) &&
 				!strings.HasPrefix(step.Content, "Command output:") &&
 				!strings.Contains(step.Content, "\nCommand output:\n") &&
 				!strings.Contains(step.Content, "\nTask Description: Cron:") {
+				timerMatch := reBgTimerDescLine.FindStringSubmatch(step.Content)
 				for _, m := range reBgTaskNoticeLine.FindAllStringSubmatch(step.Content, -1) {
 					if len(m) == 2 {
 						if tid := strings.TrimSpace(m[1]); tid != "" {
 							pendingBgTasks[tid] = true
+							if len(timerMatch) == 2 {
+								var meta pendingTimerMeta
+								var dur time.Duration
+								if len(queuedScheduleTimers) > 0 {
+									meta.condition = queuedScheduleTimers[0].condition
+									dur = queuedScheduleTimers[0].duration
+									queuedScheduleTimers = queuedScheduleTimers[1:]
+								}
+								if dur <= 0 {
+									dur = parseTimerDescriptionDuration(timerMatch[1])
+								}
+								if dur > 0 && !stepTime.IsZero() {
+									meta.deadline = stepTime.Add(dur)
+								}
+								pendingTimers[tid] = meta
+							}
 						}
 					}
 				}
@@ -206,7 +324,25 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 					for _, grp := range m[1:] {
 						if tid := strings.TrimSpace(grp); tid != "" {
 							delete(pendingBgTasks, tid)
+							delete(pendingTimers, tid)
 						}
+					}
+				}
+			}
+			// One-shot schedule timers with TimerCondition ("any" or a specific sender ID) are
+			// cancelled silently by the runtime when a matching [Message] arrives without logging
+			// a separate Task id ".../task-N" canceled SYSTEM_MESSAGE.
+			if len(pendingTimers) > 0 && (strings.Contains(step.Content, "[Message]") || reBgMsgSender.MatchString(step.Content)) {
+				sender := ""
+				if sm := reBgMsgSender.FindStringSubmatch(step.Content); len(sm) == 2 {
+					sender = strings.TrimSpace(sm[1])
+				}
+				for tid, meta := range pendingTimers {
+					cond := strings.TrimSpace(meta.condition)
+					if strings.EqualFold(cond, "any") ||
+						(cond != "" && !strings.EqualFold(cond, "never") && sender != "" && strings.EqualFold(cond, sender)) {
+						delete(pendingBgTasks, tid)
+						delete(pendingTimers, tid)
 					}
 				}
 			}
@@ -241,6 +377,10 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 			}
 			lastPlannerHadTools = len(step.ToolCalls) > 0
 			lastPlannerHadRunCommand = false
+			lastPlannerHadSchedule = false
+			lastPlannerHadManageTaskList = false
+			lastPlannerHadManageTaskStatus = false
+			queuedScheduleTimers = queuedScheduleTimers[:0]
 		}
 		for _, tc := range step.ToolCalls {
 			if tc.Name != "" {
@@ -252,6 +392,24 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 					if reQuarantinedReadCmd.MatchString(cmdStr) {
 						tm.TaintedCmdSeen = true
 					}
+				}
+			}
+			if tc.Name == "schedule" {
+				lastPlannerHadSchedule = true
+				dur := parseScheduleDurationSeconds(tc.Args["DurationSeconds"])
+				cond := ""
+				if rawCond, ok := tc.Args["TimerCondition"].(string); ok {
+					cond = strings.Trim(strings.TrimSpace(rawCond), "\"")
+				}
+				hasCron := false
+				if rawCron, ok := tc.Args["CronExpression"].(string); ok && strings.Trim(strings.TrimSpace(rawCron), "\"") != "" {
+					hasCron = true
+				}
+				if !hasCron && (dur > 0 || cond != "") {
+					queuedScheduleTimers = append(queuedScheduleTimers, scheduleTimerCall{
+						condition: cond,
+						duration:  dur,
+					})
 				}
 			}
 			if tc.Name == "write_file" || tc.Name == "edit_file" {
@@ -266,11 +424,20 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 				}
 			}
 			if tc.Name == "manage_task" {
-				if rawAct, ok := tc.Args["Action"].(string); ok && strings.EqualFold(strings.Trim(strings.TrimSpace(rawAct), "\""), "kill") {
-					if rawTID, ok := tc.Args["TaskId"].(string); ok {
-						if tid := strings.Trim(strings.TrimSpace(rawTID), "\""); tid != "" {
-							delete(pendingBgTasks, tid)
+				if rawAct, ok := tc.Args["Action"].(string); ok {
+					act := strings.Trim(strings.TrimSpace(rawAct), "\"")
+					switch {
+					case strings.EqualFold(act, "kill"):
+						if rawTID, ok := tc.Args["TaskId"].(string); ok {
+							if tid := strings.Trim(strings.TrimSpace(rawTID), "\""); tid != "" {
+								delete(pendingBgTasks, tid)
+								delete(pendingTimers, tid)
+							}
 						}
+					case strings.EqualFold(act, "list"):
+						lastPlannerHadManageTaskList = true
+					case strings.EqualFold(act, "status"):
+						lastPlannerHadManageTaskStatus = true
 					}
 				}
 			}
@@ -286,6 +453,16 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 						}
 					}
 				}
+			}
+		}
+	}
+
+	// One-shot schedule timers whose deadline has already elapsed well before the latest recorded
+	// transcript step cannot still be running (e.g. if cancelled silently without a completion step).
+	if !maxStepTime.IsZero() {
+		for tid, meta := range pendingTimers {
+			if !meta.deadline.IsZero() && maxStepTime.After(meta.deadline.Add(15*time.Second)) {
+				delete(pendingBgTasks, tid)
 			}
 		}
 	}

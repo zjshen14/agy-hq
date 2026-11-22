@@ -420,6 +420,7 @@ func sendReplyInternal(ctx context.Context, vaultDir, convID, reqID, rawBody str
 			})
 			stored.Status = "staged_approval"
 			_ = SaveStoredRequest(vaultDir, stored)
+			_, _ = events.AckDelegateEvents(vaultDir, convID, stored.RequestID, now)
 			_, _, _ = outbox.Add(vaultDir, outbox.OutboxItem{
 				SourceSkill: "scoped-delegate",
 				Scope:       polSpec.ID,
@@ -465,6 +466,7 @@ func sendReplyInternal(ctx context.Context, vaultDir, convID, reqID, rawBody str
 		})
 		stored.Status = "escalated"
 		_ = SaveStoredRequest(vaultDir, stored)
+		_, _ = events.AckDelegateEvents(vaultDir, convID, stored.RequestID, now)
 		AppendAudit(vaultDir, AuditEntry{
 			Action:    "reply_blocked",
 			PolicyID:  polSpec.ID,
@@ -532,6 +534,7 @@ func sendReplyInternal(ctx context.Context, vaultDir, convID, reqID, rawBody str
 	}
 	stored.Status = "replied"
 	_ = SaveStoredRequest(vaultDir, stored)
+	_, _ = events.AckDelegateEvents(vaultDir, convID, stored.RequestID, now)
 
 	auditTier := strings.TrimSpace(cfg.Defaults.AuditTier)
 	if auditTier == "" {
@@ -701,6 +704,7 @@ func EscalateRequest(ctx context.Context, vaultDir, convID, reqID, category, rea
 
 	stored.Status = "escalated"
 	_ = SaveStoredRequest(vaultDir, stored)
+	_, _ = events.AckDelegateEvents(vaultDir, convID, stored.RequestID, now)
 
 	// Optional static escalated_ack_template delivery.
 	if polSpec, ok := findPolicyByID(cfg, stored.PolicyID); ok && strings.TrimSpace(string(polSpec.Egress.EscalatedAckTemplate)) != "" {

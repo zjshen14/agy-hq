@@ -2117,6 +2117,162 @@ func TestAutoInboxTriageBackgroundTaskWaitingMultiTurn(t *testing.T) {
 	}
 }
 
+func TestAutoScheduleTimerEarlyCancelAndExpiryAllowAutoArchive(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	fdConv := "00000000-0000-4000-8000-000000000001"
+	conv1 := "66666666-6666-4666-8666-666666666601"
+	_ = kernel.SetFrontDesk(vaultDir, fdConv, t.TempDir())
+
+	ev, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:   "delegate_action",
+		ScopeKey: "delegate-action:review-worker:req-timer-1",
+		Title:    "[Auto] Delegate Action: review-worker",
+		Prompt:   "Run review",
+	}, now)
+	if err != nil {
+		t.Fatalf("events.Enqueue: %v", err)
+	}
+	batches, _, err := events.LeaseNextBatches(vaultDir, now, events.DefaultLeaseTTL)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("LeaseNextBatches: %+v (%v)", batches, err)
+	}
+	if err := events.BindBatchConversation(vaultDir, []string{ev.ID}, conv1, now, events.DefaultLeaseTTL); err != nil {
+		t.Fatalf("BindBatchConversation: %v", err)
+	}
+	autoSlug := "auto-delegate-timer-cancel"
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       autoSlug,
+		Title:          "[Auto] Delegate Action: review-worker",
+		Kind:           "auto",
+		Scope:          ev.ScopeKey,
+		ConversationID: conv1,
+		EventIDs:       []string{ev.ID},
+		Status:         "active",
+		CreatedAt:      now.Format(time.RFC3339),
+		LastUpdatedAt:  now.Format(time.RFC3339),
+	})
+
+	t0 := now.Format(time.RFC3339)
+	t1 := now.Add(2 * time.Second).Format(time.RFC3339)
+	tPath := filepath.Join(t.TempDir(), "timer-cancel.jsonl")
+	turn1 := strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "USER_INPUT", "status": "DONE", "created_at": t0, "content": "Run review"}),
+		// Standalone schedule AND parallel run_command+schedule timer with TimerCondition="any".
+		mustJSONLine(map[string]interface{}{
+			"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": t0,
+			"tool_calls": []map[string]interface{}{
+				{"name": "run_command", "args": map[string]interface{}{"CommandLine": "echo hi"}},
+				{"name": "schedule", "args": map[string]interface{}{"DurationSeconds": "90", "Prompt": "\"Check subagent\"", "TimerCondition": "\"any\""}},
+			},
+		}),
+		mustJSONLine(map[string]interface{}{"step_index": 2, "type": "GENERIC", "status": "DONE", "created_at": t1, "content": "Command exited with code 0.\n\nCommand output:\nhi"}),
+		mustJSONLine(map[string]interface{}{"step_index": 3, "type": "GENERIC", "status": "RUNNING", "created_at": t1, "content": fmt.Sprintf("Created At: %s\nTool is running as a background task with task id: %s/task-3\nTask Description: Timer: 1m 30s, Prompt: Check subagent", t1, conv1)}),
+		mustJSONLine(map[string]interface{}{"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": t1, "content": "Waiting for subagent."}),
+	}, "\n") + "\n"
+	if err := os.WriteFile(tPath, []byte(turn1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1 Stop: timer is still active (deadline not elapsed, no message arrived) -> MUST remain active!
+	var stopOut bytes.Buffer
+	stopT1, _ := json.Marshal(map[string]interface{}{
+		"conversationId": conv1, "executionNum": 1, "transcriptPath": tPath, "terminationReason": "NO_TOOL_CALL",
+	})
+	if err := HandleStop(bytes.NewReader(stopT1), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop Turn 1: %v", err)
+	}
+	if st := mustFindHotTaskBySlug(t, vaultDir, autoSlug); st.Status != "active" {
+		t.Fatalf("expected active while one-shot timer is genuinely pending, got %+v", st)
+	}
+
+	// Turn 2: subagent sends a [Message] 30s later (silently cancelling task-3 without a Task id canceled step) -> worker finishes.
+	t2 := now.Add(30 * time.Second).Format(time.RFC3339)
+	turn2 := strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 5, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": t2, "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=" + t2 + " sender=subagent-1111 priority=MESSAGE_PRIORITY_HIGH content=CONFIRMED\n</SYSTEM_MESSAGE>"}),
+		mustJSONLine(map[string]interface{}{"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": t2, "content": "Review delivered."}),
+	}, "\n") + "\n"
+	f, err := os.OpenFile(tPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(turn2)
+	_ = f.Close()
+
+	stopOut.Reset()
+	stopT2, _ := json.Marshal(map[string]interface{}{
+		"conversationId": conv1, "executionNum": 2, "transcriptPath": tPath, "terminationReason": "NO_TOOL_CALL",
+	})
+	if err := HandleStop(bytes.NewReader(stopT2), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop Turn 2: %v", err)
+	}
+	if st := mustFindHotTaskBySlug(t, vaultDir, autoSlug); st.Status != "archived" {
+		t.Fatalf("expected auto task archived after TimerCondition=any timer cancelled by subagent message, got %+v", st)
+	}
+	if !kernel.HasQueuedSidebarArchive(vaultDir, conv1) {
+		t.Fatalf("expected sidebar archive queued after Turn 2 completion")
+	}
+	if remaining, _ := events.List(vaultDir, "", false, 0); len(remaining) != 0 {
+		t.Fatalf("expected bound event completed on Turn 2 Stop, got %+v", remaining)
+	}
+
+	// Direct parser checks for: (a) specific sender TimerCondition, (b) elapsed one-shot Timer deadline,
+	// (c) standalone schedule (without run_command), and (d) manage_task(list/status) terminal reconciliation.
+	conv2 := "66666666-6666-4666-8666-666666666602"
+	pSender := filepath.Join(t.TempDir(), "sender-cond.jsonl")
+	_ = os.WriteFile(pSender, []byte(strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": t0, "tool_calls": []map[string]interface{}{{"name": "schedule", "args": map[string]interface{}{"DurationSeconds": 90, "TimerCondition": "sub-target"}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 1, "type": "GENERIC", "status": "RUNNING", "created_at": t0, "content": fmt.Sprintf("Tool is running as a background task with task id: %s/task-1\nTask Description: Timer: 1m 30s, Prompt: Wait", conv2)}),
+		// Unrelated sender must NOT cancel sub-target timer.
+		mustJSONLine(map[string]interface{}{"step_index": 2, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": t1, "content": "[Message] sender=sub-other content=hi"}),
+	}, "\n")+"\n"), 0o600)
+	if tm, _ := parseTranscriptTurnMetrics(pSender, 0); !tm.HasPendingBackgroundTasks {
+		t.Fatalf("expected standalone schedule with unmatched sender condition to stay pending")
+	}
+	// Matching sender cancels it immediately.
+	f2, _ := os.OpenFile(pSender, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = f2.WriteString(mustJSONLine(map[string]interface{}{"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": t2, "content": "[Message] sender=sub-target content=done"}) + "\n")
+	_ = f2.Close()
+	if tm, _ := parseTranscriptTurnMetrics(pSender, 0); tm.HasPendingBackgroundTasks {
+		t.Fatalf("expected matching sender message to cancel TimerCondition timer")
+	}
+
+	// Elapsed one-shot timer (TimerCondition="never") past deadline + grace must not stick forever.
+	pExpired := filepath.Join(t.TempDir(), "expired-timer.jsonl")
+	tLate := now.Add(5 * time.Minute).Format(time.RFC3339)
+	_ = os.WriteFile(pExpired, []byte(strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": t0, "tool_calls": []map[string]interface{}{{"name": "schedule", "args": map[string]interface{}{"DurationSeconds": "60", "TimerCondition": "\"never\""}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 1, "type": "GENERIC", "status": "RUNNING", "created_at": t0, "content": fmt.Sprintf("Tool is running as a background task with task id: %s/task-1\nTask Description: Timer: 1m, Prompt: Check", conv2)}),
+		mustJSONLine(map[string]interface{}{"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": tLate, "content": "Finished later."}),
+	}, "\n")+"\n"), 0o600)
+	if tm, _ := parseTranscriptTurnMetrics(pExpired, 0); tm.HasPendingBackgroundTasks {
+		t.Fatalf("expected long-expired one-shot timer to clear from pendingBgTasks")
+	}
+
+	// manage_task(status) DONE and manage_task(list) empty reconcile background tasks.
+	pManage := filepath.Join(t.TempDir(), "manage-task.jsonl")
+	_ = os.WriteFile(pManage, []byte(strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []map[string]interface{}{{"name": "run_command", "args": map[string]interface{}{"CommandLine": "sleep 20"}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 1, "type": "GENERIC", "status": "RUNNING", "content": fmt.Sprintf("Tool is running as a background task with task id: %s/task-1\nTask Description: sleep 20", conv2)}),
+		mustJSONLine(map[string]interface{}{"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []map[string]interface{}{{"name": "manage_task", "args": map[string]interface{}{"Action": "\"status\"", "TaskId": fmt.Sprintf("\"%s/task-1\"", conv2)}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 3, "type": "GENERIC", "status": "DONE", "content": fmt.Sprintf("Task: %s/task-1\nStatus: DONE\n", conv2)}),
+	}, "\n")+"\n"), 0o600)
+	if tm, _ := parseTranscriptTurnMetrics(pManage, 0); tm.HasPendingBackgroundTasks {
+		t.Fatalf("expected manage_task(status) Status: DONE to clear pendingBgTasks")
+	}
+
+	pListEmpty := filepath.Join(t.TempDir(), "manage-task-list.jsonl")
+	_ = os.WriteFile(pListEmpty, []byte(strings.Join([]string{
+		mustJSONLine(map[string]interface{}{"step_index": 0, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []map[string]interface{}{{"name": "run_command", "args": map[string]interface{}{"CommandLine": "sleep 20"}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 1, "type": "GENERIC", "status": "RUNNING", "content": fmt.Sprintf("Tool is running as a background task with task id: %s/task-1\nTask Description: sleep 20", conv2)}),
+		mustJSONLine(map[string]interface{}{"step_index": 2, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []map[string]interface{}{{"name": "manage_task", "args": map[string]interface{}{"Action": "\"list\""}}}}),
+		mustJSONLine(map[string]interface{}{"step_index": 3, "type": "GENERIC", "status": "DONE", "content": "No background tasks are currently running."}),
+	}, "\n")+"\n"), 0o600)
+	if tm, _ := parseTranscriptTurnMetrics(pListEmpty, 0); tm.HasPendingBackgroundTasks {
+		t.Fatalf("expected manage_task(list) empty output to clear pendingBgTasks")
+	}
+}
+
 func TestSupersededAutoRetryLateTurn2StopDoesNotAutoAdoptOrPurgeSidebarSync(t *testing.T) {
 	vaultDir := t.TempDir()
 	now := time.Now().UTC()

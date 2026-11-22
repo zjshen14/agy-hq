@@ -829,4 +829,17 @@ func main() {
 	if _, err := SendReply(context.Background(), vaultDir, workerConv, "req-spawn-1", "duplicate reply", nil, false); err == nil {
 		t.Fatalf("expected second final reply from worker to be rejected")
 	}
+	// Bound delegate_action event MUST be stamped acked="1" so lease expiry finalizes StatusDone instead of spawning a duplicate worker.
+	evAfterReply, iErr := events.Inspect(vaultDir, spawnRes.EventID)
+	if iErr != nil || evAfterReply.Metadata["acked"] != "1" {
+		t.Fatalf("expected delegate_action event %s to be acked after final reply, got %+v (%v)", spawnRes.EventID, evAfterReply, iErr)
+	}
+	requeuedBatches, droppedAfterExpiry, l2Err := events.LeaseNextBatches(vaultDir, nowLease.Add(events.DefaultLeaseTTL+time.Minute), events.DefaultLeaseTTL)
+	if l2Err != nil || len(requeuedBatches) != 0 || len(droppedAfterExpiry) != 0 {
+		t.Fatalf("expected acked delegate_action event to finalize cleanly on lease expiry without retry, got batches=%d dropped=%d err=%v", len(requeuedBatches), len(droppedAfterExpiry), l2Err)
+	}
+	evFinal, i2Err := events.Inspect(vaultDir, spawnRes.EventID)
+	if i2Err != nil || evFinal.Status != events.StatusDone {
+		t.Fatalf("expected finalized delegate_action event %s to reach StatusDone, got %+v (%v)", spawnRes.EventID, evFinal, i2Err)
+	}
 }

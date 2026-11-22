@@ -1059,6 +1059,54 @@ func AckWatcherEvents(vaultDir, convID string, itemKeys []string, now time.Time)
 	return acked, err
 }
 
+// AckDelegateEvents marks Metadata["acked"]="1" on leased delegate_action events matching requestID
+// (and convID when provided) so finalized delegate requests are never re-dispatched as duplicate workers
+// on lease expiry and can be safely reconciled even if the Stop hook is missed.
+func AckDelegateEvents(vaultDir, convID, requestID string, now time.Time) (int, error) {
+	convID = strings.TrimSpace(convID)
+	requestID = strings.TrimSpace(requestID)
+	if convID == "" && requestID == "" {
+		return 0, fmt.Errorf("convID or requestID is required")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	acked := 0
+	err := withEventsLock(vaultDir, func() error {
+		active, lErr := loadActiveUnlocked(vaultDir)
+		if lErr != nil {
+			return lErr
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		changed := false
+		for i := range active {
+			if active[i].Status != StatusLeased || active[i].Source != "delegate_action" {
+				continue
+			}
+			if convID != "" && active[i].LeaseConvID != convID {
+				continue
+			}
+			if requestID != "" {
+				if active[i].Metadata == nil || strings.TrimSpace(active[i].Metadata["request_id"]) != requestID {
+					continue
+				}
+			}
+			if active[i].Metadata == nil {
+				active[i].Metadata = make(map[string]string)
+			}
+			active[i].Metadata["acked"] = "1"
+			active[i].UpdatedAt = nowStr
+			acked++
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		return saveActiveUnlocked(vaultDir, active)
+	})
+	return acked, err
+}
+
 // TryRenewLeaseByConversation performs a non-blocking lease renewal (LOCK_NB) suitable for hot PreToolUse hooks
 // so active tool calls never stall waiting behind background batch dispatchers.
 func TryRenewLeaseByConversation(vaultDir, convID string, now time.Time, leaseTTL time.Duration) (bool, error) {
