@@ -59,16 +59,24 @@ type WaitingOnOptions struct {
 
 // Goal represents a stateful multi-day objective tracked in local/memory/goals.json (Active Focus).
 type Goal struct {
-	Slug        string      `json:"slug"`
-	Title       string      `json:"title"`
-	Scope       string      `json:"scope"`
-	Status      string      `json:"status"`               // active | paused | completed
-	TargetDate  string      `json:"targetDate,omitempty"` // YYYY-MM-DD
-	Milestones  []Milestone `json:"milestones,omitempty"`
-	WaitingOn   []WaitingOn `json:"waitingOn,omitempty"`
-	CreatedAt   string      `json:"createdAt"`
-	UpdatedAt   string      `json:"updatedAt"`
-	CompletedAt string      `json:"completedAt,omitempty"`
+	Slug                string          `json:"slug"`
+	Title               string          `json:"title"`
+	Scope               string          `json:"scope"`
+	Status              string          `json:"status"`                        // active | paused | completed
+	TargetDate          string          `json:"targetDate,omitempty"`          // YYYY-MM-DD
+	WindowStartAt       string          `json:"windowStartAt,omitempty"`       // RFC3339 or YYYY-MM-DD
+	WindowEndAt         string          `json:"windowEndAt,omitempty"`         // RFC3339 or YYYY-MM-DD
+	Timezone            string          `json:"timezone,omitempty"`            // IANA timezone
+	BlocksAvailability  bool            `json:"blocksAvailability,omitempty"`  // unavailable/freeze window
+	RequiredCoverageTag string          `json:"requiredCoverageTag,omitempty"` // daily coverage tag invariant
+	ParkedUntil         string          `json:"parkedUntil,omitempty"`         // YYYY-MM-DD, RFC3339, or "after:<goal-slug>"
+	SpaceSlug           string          `json:"spaceSlug,omitempty"`           // linked Living Space slug
+	Milestones          []Milestone     `json:"milestones,omitempty"`
+	Checklist           []ChecklistItem `json:"checklist,omitempty"`
+	WaitingOn           []WaitingOn     `json:"waitingOn,omitempty"`
+	CreatedAt           string          `json:"createdAt"`
+	UpdatedAt           string          `json:"updatedAt"`
+	CompletedAt         string          `json:"completedAt,omitempty"`
 }
 
 func goalsFilePath(vaultDir string) string {
@@ -487,7 +495,7 @@ func SweepWaitingOnObligations(vaultDir string, now time.Time) ([]string, error)
 	}
 	var jobs []inspectJob
 	for _, g := range snapshot {
-		if g.Status != "active" {
+		if g.Status != "active" || g.IsParked(snapshot, now) {
 			continue
 		}
 		for _, w := range g.WaitingOn {
@@ -560,7 +568,7 @@ func SweepWaitingOnObligations(vaultDir string, now time.Time) ([]string, error)
 		}
 		changed := false
 		for i := range goals {
-			if goals[i].Status != "active" {
+			if goals[i].Status != "active" || goals[i].IsParked(goals, now) {
 				continue
 			}
 			urgentGoal := false

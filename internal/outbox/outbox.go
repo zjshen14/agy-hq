@@ -32,12 +32,13 @@ const (
 
 // Supported outbox lifecycle states.
 const (
-	StatusPending     = "pending"
-	StatusDispatching = "dispatching"
-	StatusDelivered   = "delivered"
-	StatusPromoted    = "promoted"
-	StatusSnoozed     = "snoozed"
-	StatusDismissed   = "dismissed"
+	StatusPending      = "pending"
+	StatusDispatching  = "dispatching"
+	StatusDelivered    = "delivered"
+	StatusPromoted     = "promoted"
+	StatusSnoozed      = "snoozed"
+	StatusDismissed    = "dismissed"
+	StatusActedHandled = "acted_handled"
 )
 
 const (
@@ -45,38 +46,54 @@ const (
 	DispatchingClaimTTL = 2 * time.Minute
 )
 
+// CoalescedBullet captures a secondary alert merged into a pending burst OutboxItem.
+type CoalescedBullet struct {
+	Title     string `json:"title"`
+	Summary   string `json:"summary,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
 // OutboxItem represents a proactive insight, rollup item, or actionable idea persisted
 // in local/memory/outbox/items.jsonl.
 type OutboxItem struct {
-	ID                  string   `json:"id"`
-	CreatedAt           string   `json:"createdAt"`
-	SourceSkill         string   `json:"sourceSkill"`
-	SourceConvID        string   `json:"sourceConvId,omitempty"`
-	Scope               string   `json:"scope,omitempty"`
-	Tier                string   `json:"tier"` // interrupt | brief_rollup | ideas_feed | silent_ledger
-	Title               string   `json:"title"`
-	Summary             string   `json:"summary"`
-	ProposalIDs         []string `json:"proposalIds,omitempty"`
-	SuggestedSlug       string   `json:"suggestedSlug,omitempty"`
-	Critical            bool     `json:"critical,omitempty"`
-	Force               bool     `json:"force,omitempty"`
-	Tainted             bool     `json:"tainted,omitempty"`
-	Connector           string   `json:"connector,omitempty"`
-	Account             string   `json:"account,omitempty"`
-	ThreadKey           string   `json:"threadKey,omitempty"`
-	BriefLeaseID        string   `json:"briefLeaseId,omitempty"`
-	BriefLeaseExpiresAt string   `json:"briefLeaseExpiresAt,omitempty"`
-	BriefLeaseConvID    string   `json:"briefLeaseConvId,omitempty"`
-	DispatchClaimUntil  string   `json:"dispatchClaimUntil,omitempty"`
-	Status              string   `json:"status"` // pending | dispatching | delivered | promoted | snoozed | dismissed
-	DismissReason       string   `json:"dismissReason,omitempty"`
-	SnoozeUntil         string   `json:"snoozeUntil,omitempty"`
-	DowngradedBy        string   `json:"downgradedBy,omitempty"`
-	CoalescedCount      int      `json:"coalescedCount,omitempty"`
-	DeliveryAttempts    int      `json:"deliveryAttempts,omitempty"`
-	NextAttemptAt       string   `json:"nextAttemptAt,omitempty"`
-	LastDeliveryError   string   `json:"lastDeliveryError,omitempty"`
-	UpdatedAt           string   `json:"updatedAt"`
+	ID                     string            `json:"id"`
+	CreatedAt              string            `json:"createdAt"`
+	SourceSkill            string            `json:"sourceSkill"`
+	SourceConvID           string            `json:"sourceConvId,omitempty"`
+	Scope                  string            `json:"scope,omitempty"`
+	Tier                   string            `json:"tier"` // interrupt | brief_rollup | ideas_feed | silent_ledger
+	Title                  string            `json:"title"`
+	Summary                string            `json:"summary"`
+	IncidentKey            string            `json:"incidentKey,omitempty"`
+	AvailableForDispatchAt string            `json:"availableForDispatchAt,omitempty"`
+	CorrelatedFromID       string            `json:"correlatedFromId,omitempty"`
+	CorrelatedCount        int               `json:"correlatedCount,omitempty"`
+	CoalescedItems         []CoalescedBullet `json:"coalescedItems,omitempty"`
+	Decisions              []DecisionOption  `json:"decisions,omitempty"`
+	ProposalIDs            []string          `json:"proposalIds,omitempty"`
+	SuggestedSlug          string            `json:"suggestedSlug,omitempty"`
+	Critical               bool              `json:"critical,omitempty"`
+	Force                  bool              `json:"force,omitempty"`
+	Tainted                bool              `json:"tainted,omitempty"`
+	Connector              string            `json:"connector,omitempty"`
+	Account                string            `json:"account,omitempty"`
+	ThreadKey              string            `json:"threadKey,omitempty"`
+	BriefLeaseID           string            `json:"briefLeaseId,omitempty"`
+	BriefLeaseExpiresAt    string            `json:"briefLeaseExpiresAt,omitempty"`
+	BriefLeaseConvID       string            `json:"briefLeaseConvId,omitempty"`
+	DispatchClaimUntil     string            `json:"dispatchClaimUntil,omitempty"`
+	Status                 string            `json:"status"` // pending | dispatching | delivered | promoted | snoozed | dismissed | acted_handled
+	DismissReason          string            `json:"dismissReason,omitempty"`
+	ActionResult           string            `json:"actionResult,omitempty"`
+	ActedAt                string            `json:"actedAt,omitempty"`
+	SnoozeUntil            string            `json:"snoozeUntil,omitempty"`
+	ParkHorizon            string            `json:"parkHorizon,omitempty"`
+	DowngradedBy           string            `json:"downgradedBy,omitempty"`
+	CoalescedCount         int               `json:"coalescedCount,omitempty"`
+	DeliveryAttempts       int               `json:"deliveryAttempts,omitempty"`
+	NextAttemptAt          string            `json:"nextAttemptAt,omitempty"`
+	LastDeliveryError      string            `json:"lastDeliveryError,omitempty"`
+	UpdatedAt              string            `json:"updatedAt"`
 }
 
 // QuietHoursConfig configures DND quiet hours for proactive interrupts.
@@ -88,27 +105,45 @@ type QuietHoursConfig struct {
 	AllowCriticalBreach bool   `json:"allowCriticalBreach"`
 }
 
-// AttentionConfig governs the 4-tier attention budget, quiet hours, dedup cooldown, and batch coalescing.
-type AttentionConfig struct {
-	Mode              string           `json:"mode"` // focused | balanced | proactive
-	QuietHours        QuietHoursConfig `json:"quietHours"`
-	CooldownPerTopic  time.Duration    `json:"cooldownPerTopic"`
-	CoalesceWindow    time.Duration    `json:"coalesceWindow"`
-	CooldownRaw       string           `json:"cooldownRaw,omitempty"`
-	CoalesceWindowRaw string           `json:"coalesceWindowRaw,omitempty"`
+// ScopeAttentionRule downgrades non-critical interrupts for matching scopes during a schedule window.
+type ScopeAttentionRule struct {
+	Scopes                 []string `json:"scopes"`
+	Schedule               string   `json:"schedule"`                        // e.g. "weekdays 09:00-17:30 America/Los_Angeles"
+	DowngradeNonCriticalTo string   `json:"downgradeNonCriticalInterruptTo"` // brief_rollup | ideas_feed | silent_ledger
 }
 
-// SkillDismissalStat summarizes user feedback on proactive ideas and outbound proposals emitted by a skill.
+// AttentionConfig governs the 4-tier attention budget, quiet hours, dedup cooldown, burst coalescing, and scope rules.
+type AttentionConfig struct {
+	Mode                      string               `json:"mode"` // focused | balanced | proactive
+	QuietHours                QuietHoursConfig     `json:"quietHours"`
+	CooldownPerTopic          time.Duration        `json:"cooldownPerTopic"`
+	CoalesceWindow            time.Duration        `json:"coalesceWindow"`
+	IncidentCorrelationWindow time.Duration        `json:"incidentCorrelationWindow"`
+	CooldownRaw               string               `json:"cooldownRaw,omitempty"`
+	CoalesceWindowRaw         string               `json:"coalesceWindowRaw,omitempty"`
+	CorrelationWindowRaw      string               `json:"correlationWindowRaw,omitempty"`
+	ScopeRules                []ScopeAttentionRule `json:"scopeRules,omitempty"`
+}
+
+// SkillDismissalStat summarizes user feedback on proactive ideas, interrupts, and outbound proposals emitted by a skill.
 type SkillDismissalStat struct {
-	Skill          string  `json:"skill"`
-	TotalResolved  int     `json:"totalResolved"`
-	PromotedCount  int     `json:"promotedCount"`
-	DismissedCount int     `json:"dismissedCount"`
-	ApprovedCount  int     `json:"approvedCount,omitempty"`
-	RejectedCount  int     `json:"rejectedCount,omitempty"`
-	DismissRate    float64 `json:"dismissRate"`
-	SampleReasons  string  `json:"sampleReasons,omitempty"`
-	LastSeenAt     string  `json:"lastSeenAt,omitempty"`
+	Skill                  string  `json:"skill"`
+	TotalResolved          int     `json:"totalResolved"`
+	PromotedCount          int     `json:"promotedCount"`
+	DismissedCount         int     `json:"dismissedCount"`
+	ApprovedCount          int     `json:"approvedCount,omitempty"`
+	RejectedCount          int     `json:"rejectedCount,omitempty"`
+	DismissRate            float64 `json:"dismissRate"`
+	InterruptActedCount    int     `json:"interruptActedCount,omitempty"`
+	InterruptParkedCount   int     `json:"interruptParkedCount,omitempty"`
+	InterruptNoisyCount    int     `json:"interruptNoisyCount,omitempty"`
+	InterruptResolvedCount int     `json:"interruptResolvedCount,omitempty"`
+	InterruptNoisyRate     float64 `json:"interruptNoisyRate,omitempty"`
+	ProposalExpiredCount   int     `json:"proposalExpiredCount,omitempty"`
+	ProposalTotalCount     int     `json:"proposalTotalCount,omitempty"`
+	ProposalExpiredRate    float64 `json:"proposalExpiredRate,omitempty"`
+	SampleReasons          string  `json:"sampleReasons,omitempty"`
+	LastSeenAt             string  `json:"lastSeenAt,omitempty"`
 }
 
 // DefaultAttentionConfig returns safe defaults when local/config.yaml has no attention: block.
@@ -122,9 +157,11 @@ func DefaultAttentionConfig() AttentionConfig {
 			Timezone:            "America/Los_Angeles",
 			AllowCriticalBreach: true,
 		},
-		CooldownPerTopic: 4 * time.Hour,
-		CoalesceWindow:   0,
-		CooldownRaw:      "4h",
+		CooldownPerTopic:          4 * time.Hour,
+		CoalesceWindow:            0,
+		IncidentCorrelationWindow: 30 * time.Minute,
+		CooldownRaw:               "4h",
+		CorrelationWindowRaw:      "30m",
 	}
 }
 
@@ -144,6 +181,22 @@ func ParseAttentionConfig(content string) AttentionConfig {
 	cfg := DefaultAttentionConfig()
 	inAttention := false
 	inQuietHours := false
+	inScopeRules := false
+	curRuleIdx := -1
+
+	parseYAMLList := func(raw string) []string {
+		s := strings.TrimSpace(raw)
+		s = strings.TrimPrefix(s, "[")
+		s = strings.TrimSuffix(s, "]")
+		var out []string
+		for _, part := range strings.Split(s, ",") {
+			v := cleanYAMLVal(part)
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
 
 	for _, rawLine := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(rawLine)
@@ -154,6 +207,8 @@ func ParseAttentionConfig(content string) AttentionConfig {
 		if indent == 0 {
 			inAttention = strings.HasPrefix(trimmed, "attention:")
 			inQuietHours = false
+			inScopeRules = false
+			curRuleIdx = -1
 			continue
 		}
 		if !inAttention {
@@ -161,6 +216,8 @@ func ParseAttentionConfig(content string) AttentionConfig {
 		}
 		if indent == 2 {
 			inQuietHours = false
+			inScopeRules = false
+			curRuleIdx = -1
 			idx := strings.Index(trimmed, ":")
 			if idx < 0 {
 				continue
@@ -177,6 +234,8 @@ func ParseAttentionConfig(content string) AttentionConfig {
 				inQuietHours = true
 				// Presence of an explicit `quiet_hours:` block enables quiet hours by default unless `enabled: false` is set.
 				cfg.QuietHours.Enabled = true
+			case "scope_rules":
+				inScopeRules = true
 			case "cooldown_per_topic":
 				if d, err := time.ParseDuration(val); err == nil && d >= 0 {
 					cfg.CooldownPerTopic = d
@@ -186,6 +245,11 @@ func ParseAttentionConfig(content string) AttentionConfig {
 				if d, err := time.ParseDuration(val); err == nil && d >= 0 {
 					cfg.CoalesceWindow = d
 					cfg.CoalesceWindowRaw = val
+				}
+			case "incident_correlation_window":
+				if d, err := time.ParseDuration(val); err == nil && d >= 0 {
+					cfg.IncidentCorrelationWindow = d
+					cfg.CorrelationWindowRaw = val
 				}
 			}
 			continue
@@ -214,6 +278,34 @@ func ParseAttentionConfig(content string) AttentionConfig {
 				}
 			case "allow_critical_breach":
 				cfg.QuietHours.AllowCriticalBreach = strings.EqualFold(val, "true") || val == "1" || strings.EqualFold(val, "yes")
+			}
+			continue
+		}
+		if inScopeRules && indent >= 4 {
+			line := trimmed
+			if strings.HasPrefix(line, "- ") {
+				cfg.ScopeRules = append(cfg.ScopeRules, ScopeAttentionRule{DowngradeNonCriticalTo: TierBriefRollup})
+				curRuleIdx = len(cfg.ScopeRules) - 1
+				line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+			}
+			if curRuleIdx < 0 {
+				continue
+			}
+			idx := strings.Index(line, ":")
+			if idx < 0 {
+				continue
+			}
+			key := strings.TrimSpace(line[:idx])
+			val := cleanYAMLVal(line[idx+1:])
+			switch key {
+			case "scopes":
+				cfg.ScopeRules[curRuleIdx].Scopes = parseYAMLList(line[idx+1:])
+			case "schedule":
+				cfg.ScopeRules[curRuleIdx].Schedule = val
+			case "downgrade_non_critical_interrupt_to", "downgrade_to":
+				if val != "" {
+					cfg.ScopeRules[curRuleIdx].DowngradeNonCriticalTo = normalizeTier(val)
+				}
 			}
 		}
 	}
@@ -466,8 +558,92 @@ func isNearDuplicateTitle(a, b OutboxItem) bool {
 	return float64(inter)/float64(len(union)) >= 0.75
 }
 
-// EvaluateDelivery applies attention mode, quiet-hours hold, exact topic cooldown, and 12h semantic Jaccard dedup
-// deterministically in Go before persisting or dispatching an OutboxItem.
+// MatchesScopeSchedule evaluates a schedule expression like "weekdays 09:00-17:30 America/Los_Angeles"
+// or "daily 08:00-18:00 UTC" or "weekends 10:00-20:00 America/New_York".
+func MatchesScopeSchedule(schedule string, now time.Time) bool {
+	fields := strings.Fields(strings.TrimSpace(schedule))
+	if len(fields) < 2 {
+		return false
+	}
+	daySpec := strings.ToLower(fields[0])
+	timeRange := fields[1]
+	loc := now.Location()
+	if len(fields) >= 3 {
+		if l, err := time.LoadLocation(fields[2]); err == nil {
+			loc = l
+		}
+	}
+	localNow := now.In(loc)
+	wd := localNow.Weekday()
+	dayMatch := false
+	switch daySpec {
+	case "daily", "everyday", "*":
+		dayMatch = true
+	case "weekdays", "mon-fri":
+		dayMatch = wd >= time.Monday && wd <= time.Friday
+	case "weekends", "sat-sun":
+		dayMatch = wd == time.Saturday || wd == time.Sunday
+	default:
+		dayMap := map[string]time.Weekday{
+			"sun": time.Sunday, "mon": time.Monday, "tue": time.Tuesday,
+			"wed": time.Wednesday, "thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday,
+		}
+		for _, tok := range strings.Split(daySpec, ",") {
+			if target, ok := dayMap[strings.TrimSpace(tok)]; ok && target == wd {
+				dayMatch = true
+				break
+			}
+		}
+	}
+	if !dayMatch {
+		return false
+	}
+	parts := strings.SplitN(timeRange, "-", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	startMin, ok1 := parseHHMM(parts[0])
+	endMin, ok2 := parseHHMM(parts[1])
+	if !ok1 || !ok2 || startMin == endMin {
+		return false
+	}
+	curMin := localNow.Hour()*60 + localNow.Minute()
+	if startMin < endMin {
+		return curMin >= startMin && curMin < endMin
+	}
+	return curMin >= startMin || curMin < endMin
+}
+
+func matchScopeRule(cfg AttentionConfig, scope string, now time.Time) (string, bool) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" || len(cfg.ScopeRules) == 0 {
+		return "", false
+	}
+	for _, rule := range cfg.ScopeRules {
+		matchedScope := false
+		for _, s := range rule.Scopes {
+			pat := strings.ToLower(strings.TrimSpace(s))
+			if pat == "*" || pat == scope || (strings.HasSuffix(pat, "*") && strings.HasPrefix(scope, strings.TrimSuffix(pat, "*"))) {
+				matchedScope = true
+				break
+			}
+		}
+		if !matchedScope {
+			continue
+		}
+		if MatchesScopeSchedule(rule.Schedule, now) {
+			target := normalizeTier(rule.DowngradeNonCriticalTo)
+			if target == TierInterrupt {
+				target = TierBriefRollup
+			}
+			return target, true
+		}
+	}
+	return "", false
+}
+
+// EvaluateDelivery applies attention mode, quiet-hours hold, scope rules, exact topic cooldown,
+// 12h semantic Jaccard dedup, burst coalescing hold, and incident correlation deterministically in Go.
 func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time, item OutboxItem) (OutboxItem, bool) {
 	if now.IsZero() {
 		now = time.Now()
@@ -495,7 +671,7 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 		}
 		for i := len(existing) - 1; i >= 0; i-- {
 			prev := existing[i]
-			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" || prev.DowngradedBy == "thread_cooldown" {
+			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" || prev.DowngradedBy == "thread_cooldown" || prev.DowngradedBy == "burst_coalesced" {
 				continue
 			}
 			ts, err := time.Parse(time.RFC3339, prev.CreatedAt)
@@ -543,6 +719,72 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 		}
 	}
 
+	// 4. Scope-specific quiet/focus rules (e.g. quiet personal alerts during weekday coding blocks)
+	if item.Tier == TierInterrupt && !item.Critical {
+		if targetTier, matched := matchScopeRule(cfg, item.Scope, now); matched {
+			item.Tier = targetTier
+			if item.DowngradedBy == "" {
+				item.DowngradedBy = "scope_rule"
+			}
+		}
+	}
+
+	// 5. Burst coalescing hold & 30m incident correlation for interrupts sharing IncidentKey
+	if item.Tier == TierInterrupt {
+		incKey := strings.TrimSpace(item.IncidentKey)
+		if incKey != "" {
+			// 5a. If an undispatched pending interrupt with the same IncidentKey is still in its CoalesceWindow, merge into it.
+			if cfg.CoalesceWindow > 0 && !item.Critical && !item.Force {
+				for i := len(existing) - 1; i >= 0; i-- {
+					prev := existing[i]
+					if prev.Tier != TierInterrupt || prev.Status != StatusPending {
+						continue
+					}
+					if !strings.EqualFold(strings.TrimSpace(prev.IncidentKey), incKey) {
+						continue
+					}
+					if ts, err := time.Parse(time.RFC3339, prev.CreatedAt); err == nil && now.Sub(ts) >= 0 && now.Sub(ts) <= cfg.CoalesceWindow {
+						item.DowngradedBy = "burst_coalesced"
+						item.CorrelatedFromID = prev.ID
+						item.Tier = TierSilentLedger
+						item.Status = StatusDelivered
+						return item, true
+					}
+				}
+			}
+			// 5b. If a prior interrupt with the same IncidentKey was already delivered within IncidentCorrelationWindow, link it.
+			corrWin := cfg.IncidentCorrelationWindow
+			if corrWin <= 0 {
+				corrWin = 30 * time.Minute
+			}
+			corrCount := 0
+			var lastID string
+			for i := len(existing) - 1; i >= 0; i-- {
+				prev := existing[i]
+				if prev.Tier != TierInterrupt || prev.DowngradedBy == "burst_coalesced" {
+					continue
+				}
+				if !strings.EqualFold(strings.TrimSpace(prev.IncidentKey), incKey) {
+					continue
+				}
+				if ts, err := time.Parse(time.RFC3339, prev.CreatedAt); err == nil && now.Sub(ts) >= 0 && now.Sub(ts) <= corrWin {
+					corrCount++
+					if lastID == "" {
+						lastID = prev.ID
+					}
+				}
+			}
+			if corrCount > 0 {
+				item.CorrelatedFromID = lastID
+				item.CorrelatedCount = corrCount + 1
+			}
+		}
+		// 5c. Apply burst-coalescing hold for non-critical, non-force interrupts when CoalesceWindow > 0.
+		if cfg.CoalesceWindow > 0 && !item.Critical && !item.Force && strings.TrimSpace(item.AvailableForDispatchAt) == "" {
+			item.AvailableForDispatchAt = now.Add(cfg.CoalesceWindow).UTC().Format(time.RFC3339)
+		}
+	}
+
 	return item, false
 }
 
@@ -563,6 +805,9 @@ func Add(vaultDir string, item OutboxItem, now time.Time) (OutboxItem, bool, err
 	if strings.TrimSpace(item.SourceSkill) == "" {
 		item.SourceSkill = "general"
 	}
+	if err := ValidateDecisionOptions(&item); err != nil {
+		return OutboxItem{}, false, err
+	}
 
 	cfg := LoadAttentionConfig(vaultDir)
 	nowStr := now.UTC().Format(time.RFC3339)
@@ -580,6 +825,24 @@ func Add(vaultDir string, item OutboxItem, now time.Time) (OutboxItem, bool, err
 			return lErr
 		}
 		evaluated, cooled = EvaluateDelivery(existing, cfg, now, item)
+		if cooled && evaluated.DowngradedBy == "burst_coalesced" && evaluated.CorrelatedFromID != "" {
+			for i := len(existing) - 1; i >= 0; i-- {
+				if existing[i].ID == evaluated.CorrelatedFromID {
+					existing[i].CoalescedCount++
+					existing[i].CoalescedItems = append(existing[i].CoalescedItems, CoalescedBullet{
+						Title:     SanitizeAntiCue(item.Title, 160),
+						Summary:   SanitizeAntiCue(item.Summary, 400),
+						CreatedAt: nowStr,
+					})
+					for _, pid := range item.ProposalIDs {
+						existing[i].ProposalIDs = appendUniqueStr(existing[i].ProposalIDs, pid)
+					}
+					existing[i].UpdatedAt = nowStr
+					evaluated = existing[i]
+					return SaveCanonicalUnlocked(vaultDir, existing)
+				}
+			}
+		}
 		if cooled && evaluated.DowngradedBy == "semantic_dedup" {
 			for i := len(existing) - 1; i >= 0; i-- {
 				if isNearDuplicateTitle(existing[i], item) {
@@ -596,6 +859,19 @@ func Add(vaultDir string, item OutboxItem, now time.Time) (OutboxItem, bool, err
 		return OutboxItem{}, false, err
 	}
 	return evaluated, cooled, nil
+}
+
+func appendUniqueStr(slice []string, val string) []string {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return slice
+	}
+	for _, s := range slice {
+		if s == val {
+			return slice
+		}
+	}
+	return append(slice, val)
 }
 
 // List returns OutboxItems filtered by tier and status, automatically waking expired snoozes.
@@ -906,6 +1182,36 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 	}
 
 	for _, it := range items {
+		if it.Tier == TierInterrupt {
+			switch it.Status {
+			case StatusActedHandled, StatusPromoted:
+				entry := ensureSkill(it.SourceSkill)
+				entry.stat.InterruptActedCount++
+				entry.stat.InterruptResolvedCount++
+				if it.UpdatedAt > entry.stat.LastSeenAt {
+					entry.stat.LastSeenAt = it.UpdatedAt
+				}
+			case StatusSnoozed:
+				if strings.TrimSpace(it.ParkHorizon) != "" || strings.TrimSpace(it.SnoozeUntil) != "" {
+					entry := ensureSkill(it.SourceSkill)
+					entry.stat.InterruptParkedCount++
+					entry.stat.InterruptResolvedCount++
+					if it.UpdatedAt > entry.stat.LastSeenAt {
+						entry.stat.LastSeenAt = it.UpdatedAt
+					}
+				}
+			case StatusDismissed:
+				entry := ensureSkill(it.SourceSkill)
+				entry.stat.InterruptNoisyCount++
+				entry.stat.InterruptResolvedCount++
+				if r := strings.TrimSpace(it.DismissReason); r != "" && len(entry.reasons) < 3 {
+					entry.reasons = append(entry.reasons, r)
+				}
+				if it.UpdatedAt > entry.stat.LastSeenAt {
+					entry.stat.LastSeenAt = it.UpdatedAt
+				}
+			}
+		}
 		if it.Status != StatusPromoted && it.Status != StatusDismissed {
 			continue
 		}
@@ -924,10 +1230,10 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 		}
 	}
 
-	// Join rejected/approved proposals carrying explicit OriginSkill attribution from interventions.jsonl
+	// Join approved/rejected/expired proposals carrying explicit OriginSkill attribution from interventions.jsonl
 	if interventions, iErr := approvals.LoadInterventions(vaultDir); iErr == nil {
 		for _, rec := range interventions {
-			if rec.Decision != "approved" && rec.Decision != "rejected" {
+			if rec.Decision != "approved" && rec.Decision != "rejected" && rec.Decision != "expired" {
 				continue
 			}
 			origin := strings.TrimSpace(rec.Proposal.OriginSkill)
@@ -938,15 +1244,20 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 				continue
 			}
 			entry := ensureSkill(origin)
-			entry.stat.TotalResolved++
-			if rec.Decision == "approved" {
+			entry.stat.ProposalTotalCount++
+			switch rec.Decision {
+			case "approved":
+				entry.stat.TotalResolved++
 				entry.stat.ApprovedCount++
-			} else {
+			case "rejected":
+				entry.stat.TotalResolved++
 				entry.stat.RejectedCount++
 				entry.stat.DismissedCount++
 				if r := strings.TrimSpace(rec.Output); r != "" && len(entry.reasons) < 3 {
 					entry.reasons = append(entry.reasons, r)
 				}
+			case "expired":
+				entry.stat.ProposalExpiredCount++
 			}
 			if rec.Timestamp > entry.stat.LastSeenAt {
 				entry.stat.LastSeenAt = rec.Timestamp
@@ -960,6 +1271,12 @@ func ComputeSkillDismissalStats(vaultDir string) ([]SkillDismissalStat, error) {
 		entry := bySkill[sk]
 		if entry.stat.TotalResolved > 0 {
 			entry.stat.DismissRate = float64(entry.stat.DismissedCount) / float64(entry.stat.TotalResolved)
+		}
+		if entry.stat.InterruptResolvedCount > 0 {
+			entry.stat.InterruptNoisyRate = float64(entry.stat.InterruptNoisyCount) / float64(entry.stat.InterruptResolvedCount)
+		}
+		if entry.stat.ProposalTotalCount > 0 {
+			entry.stat.ProposalExpiredRate = float64(entry.stat.ProposalExpiredCount) / float64(entry.stat.ProposalTotalCount)
 		}
 		if len(entry.reasons) > 0 {
 			entry.stat.SampleReasons = strings.Join(entry.reasons, "; ")

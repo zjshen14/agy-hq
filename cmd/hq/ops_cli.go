@@ -22,6 +22,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
+	"github.com/zjshen14/agy-hq/internal/pulse"
 	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
@@ -134,9 +135,11 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 		_, _, lastFDSize, lastFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
 		fastTicker := time.NewTicker(15 * time.Second)
 		cronTicker := time.NewTicker(30 * time.Second)
+		pulseTicker := time.NewTicker(15 * time.Minute)
 		hbTicker := time.NewTicker(30 * time.Minute)
 		defer fastTicker.Stop()
 		defer cronTicker.Stop()
+		defer pulseTicker.Stop()
 		defer hbTicker.Stop()
 		for {
 			select {
@@ -184,6 +187,13 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 				// RFC-0025: non-blocking single-flight probe drain + cadence-gated status refresh (no-op without a ledger).
 				triggerWorkspaceMaintenance(now)
 				if len(gkActs) > 0 || snapsPublished > 0 || kernel.HasMaterialDispatchActions(acts) {
+					_ = webui.SyncMarkdownConsole(vaultDir)
+				}
+			case <-pulseTicker.C:
+				now := time.Now()
+				if pRep, pErr := pulse.RunPrecheck(context.Background(), vaultDir, pulse.PrecheckOptions{Now: now, DryRun: *dryRun}); pErr == nil && pRep.EmittedCount > 0 {
+					_, _ = kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+					_, _ = channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
 					_ = webui.SyncMarkdownConsole(vaultDir)
 				}
 			case <-hbTicker.C:

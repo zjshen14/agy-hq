@@ -344,6 +344,63 @@
 {{end}}
 </div>
 
+{{if .ProactiveV3.ExpiredProposals}}
+<h2>Timed-Out Approvals Unsent ({{len .ProactiveV3.ExpiredProposals}})</h2>
+<div id="expired-proposals-list">
+  {{range .ProactiveV3.ExpiredProposals}}
+  <div class="card">
+    <div class="meta-row">
+      <strong>⏰ {{.Proposal.Summary}}</strong>
+      <span class="badge badge-warn">expired</span>
+    </div>
+    <div class="muted" style="margin:4px 0">ID: <code>{{.Proposal.ID}}</code> · Expired: <code>{{.Timestamp}}</code></div>
+    <div class="actions">
+      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="restage-proposal" data-id="{{.Proposal.ID}}">↻ Re-open 24h Card</button>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{if .ProactiveV3.DecisionCards}}
+<h2>Quick Decisions ({{len .ProactiveV3.DecisionCards}})</h2>
+<div id="decision-cards-list">
+  {{range .ProactiveV3.DecisionCards}}
+  {{$itemID := .ID}}
+  <div class="card" id="decision-{{.ID}}">
+    <div class="meta-row">
+      <strong>⚡ {{.Title}}</strong>
+      <span class="badge badge-info">{{.SourceSkill}}</span>
+    </div>
+    {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
+    <div class="actions">
+      {{range .Decisions}}
+      <button type="button" class="btn {{if .Recommended}}btn-approve{{else}}btn-secondary{{end}}" style="font-size:11px;padding:4px 8px" data-hq-action="outbox-act" data-id="{{$itemID}}" data-opt="{{.ID}}">{{.Label}}</button>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{if .ProactiveV3.LivingSpaces}}
+<h2>Living Spaces ({{len .ProactiveV3.LivingSpaces}})</h2>
+<div id="living-spaces-list">
+  {{range .ProactiveV3.LivingSpaces}}
+  <div class="card">
+    <div class="meta-row">
+      <strong><a href="/living-spaces/{{.Slug}}" target="_blank">🧩 {{.Title}}</a></strong>
+      <span class="badge badge-info">{{.Slug}}</span>
+    </div>
+    <div class="muted" style="margin:4px 0">Updated {{.UpdatedAt}}{{if .GoalSlug}} · Goal: <code>{{.GoalSlug}}</code>{{end}}</div>
+    <div class="actions">
+      <a class="btn btn-secondary" style="font-size:11px;padding:4px 8px" href="/living-spaces/{{.Slug}}" target="_blank">Open Sandboxed Space ↗</a>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
 <h2>Proactive Gatekeeper & Daily Quota</h2>
 <div class="card" id="quota-card">
   <div class="meta-row">
@@ -754,6 +811,19 @@ document.addEventListener('click', function(ev) {
       headers: postHeaders(),
       body: JSON.stringify({ id: id, action: op, csrf_token: CSRF_TOKEN })
     }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated schedule ' + id), !d.ok); refreshState(); });
+  } else if (act === 'outbox-act' && id) {
+    const opt = btn.getAttribute('data-opt') || '';
+    fetch('/api/outbox/act', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, option: opt, csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash((d.result && d.result.summary) || d.error || 'Updated decision', !d.ok); window.location.reload(); });
+  } else if (act === 'restage-proposal' && id) {
+    fetch('/api/approvals/restage', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash(d.ok ? ('Restaged as ' + (d.proposal && d.proposal.id)) : (d.error || 'Restage failed'), !d.ok); window.location.reload(); });
   }
 });
 

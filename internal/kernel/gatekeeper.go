@@ -106,6 +106,13 @@ func resolveScheduleDispatch(vaultDir string, s ScheduleTrigger, precheckDigest 
 	return modelID, effectiveSkill, prompt
 }
 
+// RegisteredPulsePrecheck allows cmd/hq to wire internal/pulse.RunPrecheck in-process without import cycles.
+var RegisteredPulsePrecheck func(ctx context.Context, vaultDir string, now time.Time, dryRun bool) ([]byte, error)
+
+func isSelfPulsePrecheckArgs(args []string) bool {
+	return len(args) >= 2 && args[0] == "pulse" && args[1] == "precheck"
+}
+
 func parseSelfWatchPrecheckArgs(args []string) (watcher.PrecheckOptions, bool) {
 	if len(args) < 2 || args[0] != "watch" || args[1] != "precheck" {
 		return watcher.PrecheckOptions{}, false
@@ -490,6 +497,10 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				return true
 			}() {
 				// handled in-process via watcher.RunPrecheck
+			} else if isSelfHQ && RegisteredPulsePrecheck != nil && isSelfPulsePrecheckArgs(s.PrecheckCmd[1:]) {
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				outBytes, cmdErr = RegisteredPulsePrecheck(ctx, vaultDir, now, dryRun)
+				cancel()
 			} else {
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				cmd := exec.CommandContext(ctx, bin0, s.PrecheckCmd[1:]...)
@@ -534,6 +545,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				// while distinguishing paused/errored connector polls from genuine 0-token idle skips.
 				var preSum struct {
 					EnqueuedTotal int `json:"enqueued_total"`
+					EmittedCount  int `json:"emittedCount"`
 					Results       []struct {
 						Connector string `json:"connector"`
 						Account   string `json:"account"`
@@ -552,8 +564,9 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 						nonOKStatus = fmt.Sprintf("%s:%s %s", r.Connector, r.Account, r.Status)
 					}
 				}
-				if preSum.EnqueuedTotal > 0 {
-					actions = append(actions, fmt.Sprintf("precheck_enqueued:%s=%d", s.ID, preSum.EnqueuedTotal))
+				totalTriggered := preSum.EnqueuedTotal + preSum.EmittedCount
+				if totalTriggered > 0 {
+					actions = append(actions, fmt.Sprintf("precheck_enqueued:%s=%d", s.ID, totalTriggered))
 					mutations = append(mutations, cursorMutation{
 						id:            s.ID,
 						slotKey:       slotKey,

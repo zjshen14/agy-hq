@@ -47,7 +47,7 @@ description: >-
 
 ### Stage 4: Verified RSI (`hq rsi`), Lifecycle Compaction & Vault Commit
 1. **Run the Two-Tier 4-Stage RSI Pipeline (RFC-0010, RFC-0014, & RFC-0019 — Never Unilaterally Edit `SKILL.md`, Overlay Rules, or Kernel Code):**
-   - Mine ground-truth friction events and update canary records:
+   - Mine ground-truth friction events (including `dismiss_noisy` interrupt rates $\ge 40\%$ and high expired-proposal rates targeting Vault-local rules in `local/memory/rsi/rules/`) and update canary records:
      ```sh
      hq rsi mine --since=24h
      ```

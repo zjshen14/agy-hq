@@ -535,6 +535,9 @@ func main() {
 	case "delegate":
 		runDelegateCLI(vaultDir, os.Args[2:])
 
+	case "pulse", "space", "cancel", "approvals":
+		runProactiveV3CLI(vaultDir, os.Args[1], os.Args[2:])
+
 	default:
 		printUsage()
 		os.Exit(1)

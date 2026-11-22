@@ -92,12 +92,35 @@ func FormatInterruptCard(it OutboxItem) string {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("### %s (`%s`)\n", badge, scope))
+	if it.CorrelatedFromID != "" && it.CorrelatedCount >= 2 {
+		sb.WriteString(fmt.Sprintf("> ↪ Correlated Update (#%d — follows `%s`)\n\n", it.CorrelatedCount, SanitizeAntiCue(it.CorrelatedFromID, 64)))
+	}
 	sb.WriteString(fmt.Sprintf("**%s**", title))
 	if summary != "" {
 		sb.WriteString("\n\n" + summary)
 	}
+	if len(it.CoalescedItems) > 0 {
+		sb.WriteString(fmt.Sprintf("\n\n**Grouped Updates (+%d within burst window):**", len(it.CoalescedItems)))
+		for _, ci := range it.CoalescedItems {
+			line := SanitizeAntiCue(ci.Title, 140)
+			if s := SanitizeAntiCue(ci.Summary, 240); s != "" && s != line {
+				line += " — " + s
+			}
+			sb.WriteString("\n- " + line)
+		}
+	}
 	if len(it.ProposalIDs) > 0 {
 		sb.WriteString(fmt.Sprintf("\n\n- **Pending Approval ID(s):** `%s`", strings.Join(it.ProposalIDs, "`, `")))
+	}
+	if len(it.Decisions) > 0 {
+		sb.WriteString("\n\n**Quick Decisions (`hq outbox act " + SanitizeAntiCue(it.ID, 64) + " --option=<id>`):**")
+		for _, d := range it.Decisions {
+			rec := ""
+			if d.Recommended {
+				rec = " *(Recommended)*"
+			}
+			sb.WriteString(fmt.Sprintf("\n- `[%s]` %s%s", SanitizeAntiCue(d.ID, 32), SanitizeAntiCue(d.Label, 80), rec))
+		}
 	}
 	return sb.String()
 }
@@ -147,6 +170,11 @@ func DispatchPendingInterrupts(vaultDir string, now time.Time, deliverFn Interru
 			}
 			if inQuiet && !(it.Critical && !it.Tainted && cfg.QuietHours.AllowCriticalBreach) {
 				continue
+			}
+			if strings.TrimSpace(it.AvailableForDispatchAt) != "" && !(it.Critical && !it.Tainted) && !it.Force {
+				if availAt, pErr := time.Parse(time.RFC3339, it.AvailableForDispatchAt); pErr == nil && now.Before(availAt) {
+					continue
+				}
 			}
 			if it.NextAttemptAt != "" {
 				if nextAt, pErr := time.Parse(time.RFC3339, it.NextAttemptAt); pErr == nil && now.Before(nextAt) {

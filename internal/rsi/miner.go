@@ -548,31 +548,66 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 		}
 	}
 
-	// 3c. Scan outbox ideas_feed dismissal rates (>70% across >=5 resolved ideas) as FrictionProactiveNoise (RFC-0014)
+	// 3c. Scan outbox ideas_feed dismissal rates (>70% across >=5 resolved ideas), full-funnel interrupt
+	// noisy dismissals (>=40% across >=5 resolved interrupts), and high proposal expiry rates (>=50% across >=4 proposals)
+	// as FrictionProactiveNoise targeting Tier-1 Vault RSI overlays (RFC-0014 & RFC-0027).
 	if stats, err := outbox.ComputeSkillDismissalStats(vaultDir); err == nil {
 		for _, st := range stats {
-			if st.TotalResolved < 5 || st.DismissRate <= 0.70 {
-				continue
-			}
 			reasonsSuffix := ""
 			if st.SampleReasons != "" {
 				reasonsSuffix = fmt.Sprintf(" (user reasons: %s)", st.SampleReasons)
 			}
-			upsert(
-				FrictionProactiveNoise,
-				FaultWorkerACIOrSkill,
-				st.Skill,
-				"hq_outbox",
-				"ideas_feed:"+st.Skill,
-				fmt.Sprintf("Skill %s has %.0f%% proactive idea dismissal rate (%d/%d dismissed)%s", st.Skill, st.DismissRate*100.0, st.DismissedCount, st.TotalResolved, reasonsSuffix),
-				fmt.Sprintf("Tighten proactive idea generation threshold in %s/SKILL.md so low-signal suggestions are suppressed", st.Skill),
-				st.DismissedCount,
-				"outbox-"+st.Skill,
-				"",
-				"",
-				st.LastSeenAt,
-				false,
-			)
+			if st.TotalResolved >= 5 && st.DismissRate > 0.70 {
+				upsert(
+					FrictionProactiveNoise,
+					FaultWorkerACIOrSkill,
+					st.Skill,
+					"hq_outbox",
+					"ideas_feed:"+st.Skill,
+					fmt.Sprintf("Skill %s has %.0f%% proactive idea dismissal rate (%d/%d dismissed)%s", st.Skill, st.DismissRate*100.0, st.DismissedCount, st.TotalResolved, reasonsSuffix),
+					fmt.Sprintf("Tighten proactive idea generation threshold in Vault overlay local/memory/rsi/rules/%s.md so low-signal suggestions are suppressed", st.Skill),
+					st.DismissedCount,
+					"outbox-"+st.Skill,
+					"",
+					"",
+					st.LastSeenAt,
+					false,
+				)
+			}
+			if st.InterruptResolvedCount >= 5 && st.InterruptNoisyRate >= 0.40 {
+				upsert(
+					FrictionProactiveNoise,
+					FaultWorkerACIOrSkill,
+					st.Skill,
+					"hq_outbox",
+					"interrupt_noisy:"+st.Skill,
+					fmt.Sprintf("Skill %s has %.0f%% noisy interrupt dismissal rate (%d/%d marked noisy; %d handled, %d parked)%s", st.Skill, st.InterruptNoisyRate*100.0, st.InterruptNoisyCount, st.InterruptResolvedCount, st.InterruptActedCount, st.InterruptParkedCount, reasonsSuffix),
+					fmt.Sprintf("Add a Vault-local rule in local/memory/rsi/rules/%s.md downgrading routine %s alerts from --tier=interrupt to --tier=brief_rollup or --tier=ideas_feed", st.Skill, st.Skill),
+					st.InterruptNoisyCount,
+					"outbox-interrupt-"+st.Skill,
+					"",
+					"",
+					st.LastSeenAt,
+					false,
+				)
+			}
+			if st.ProposalTotalCount >= 4 && st.ProposalExpiredRate >= 0.50 {
+				upsert(
+					FrictionProactiveNoise,
+					FaultWorkerACIOrSkill,
+					st.Skill,
+					"hq_approvals",
+					"proposal_expired:"+st.Skill,
+					fmt.Sprintf("Skill %s has %.0f%% staged proposal expiration rate (%d/%d expired unsent)", st.Skill, st.ProposalExpiredRate*100.0, st.ProposalExpiredCount, st.ProposalTotalCount),
+					fmt.Sprintf("Stage outbound proposals for %s only when high-confidence or bundle into Morning Brief via local/memory/rsi/rules/%s.md", st.Skill, st.Skill),
+					st.ProposalExpiredCount,
+					"approvals-expired-"+st.Skill,
+					"",
+					"",
+					st.LastSeenAt,
+					false,
+				)
+			}
 		}
 	}
 

@@ -24,6 +24,7 @@ const (
 	RankExtensions    Rank = 10 // <vault>/extensions.json & <vault>/private/trust.json
 	RankTriggerCur    Rank = 20 // <vault>/memory/trigger_cursors.json
 	RankWatcher       Rank = 30 // <vault>/memory/watchers/<id>/<acct>.json
+	RankPulse         Rank = 32 // <vault>/memory/pulse/state.json (RFC-0027 look-ahead engine)
 	RankTimers        Rank = 35 // <vault>/memory/timers.json (EvaluateDue -> events.Enqueue)
 	RankEvents        Rank = 40 // <vault>/memory/events.json
 	RankGoals         Rank = 50 // <vault>/memory/goals.json
@@ -33,6 +34,7 @@ const (
 	RankTaint         Rank = 70 // <vault>/private/taint/*.json
 	RankTasks         Rank = 75 // <vault>/memory/tasks.json & tasks_archive.jsonl
 	RankWorkspaces    Rank = 76 // <vault>/memory/workspaces.json (RFC-0025 ledger; pure leaf callbacks, distinct from RankMemory)
+	RankLivingSpaces  Rank = 77 // <vault>/living_spaces/<slug>/space.json (RFC-0027 leaf store)
 	RankMemory        Rank = 78 // <vault>/memory/{facts.jsonl,entities,progress,topics} (leaf writes only)
 	RankSubagentQueue Rank = 80 // <vault>/memory/pending_*_subagents.json & nested_conversations.json
 	RankQuota         Rank = 85 // <vault>/memory/quota*.json (leaf store)

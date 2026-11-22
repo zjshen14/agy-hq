@@ -316,20 +316,17 @@ func collectProposalAlerts(vaultDir string, now time.Time) []ProposalAlert {
 			seen[p.ID] = true
 		}
 	}
-	if recs, err := approvals.LoadInterventions(vaultDir); err == nil {
-		for _, rec := range recs {
-			if rec.Decision != "expired" || seen[rec.Proposal.ID] {
+	if expiredRecs, err := approvals.ListExpiredProposals(vaultDir, 7*24*time.Hour, now); err == nil {
+		for _, rec := range expiredRecs {
+			if seen[rec.Proposal.ID] {
 				continue
 			}
-			ts, pErr := time.Parse(time.RFC3339, rec.Timestamp)
-			if pErr != nil {
-				continue
+			warn := "expired_unrestaged"
+			if ts, pErr := time.Parse(time.RFC3339, rec.Timestamp); pErr == nil && now.Sub(ts) <= 12*time.Hour {
+				warn = "expired_overnight"
 			}
-			age := now.Sub(ts)
-			if age >= 0 && age <= 12*time.Hour {
-				alerts = append(alerts, newProposalAlert(rec.Proposal, "expired", "expired_overnight"))
-				seen[rec.Proposal.ID] = true
-			}
+			alerts = append(alerts, newProposalAlert(rec.Proposal, "expired", warn))
+			seen[rec.Proposal.ID] = true
 		}
 	}
 	if alerts == nil {

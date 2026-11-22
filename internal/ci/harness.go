@@ -311,7 +311,8 @@ var (
 		"spaces": true, "skill": true, "skills": true, "obs": true, "rsi": true, "ci": true,
 		"watch": true, "offer": true, "brief": true, "dispatch": true,
 		"extension": true, "connector": true, "triggers": true, "sidecar": true,
-		"connector-driver": true, "channel": true,
+		"connector-driver": true, "channel": true, "delegate": true,
+		"pulse": true, "space": true, "cancel": true, "approvals": true,
 		// Prose words that can follow `hq` in descriptive sentences
 		"daemon_gatekeeper": true, "binary": true, "cli": true, "microkernel": true,
 	}

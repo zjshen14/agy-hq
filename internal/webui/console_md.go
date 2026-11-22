@@ -96,85 +96,69 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		}
 		b.WriteString("\n---\n\n")
 	} else {
-		b.WriteString("> [!NOTE]\n> **Pending Approvals (`0` items):** All staged actions have been resolved.\n\n---\n\n")
+		b.WriteString("> [!NOTE]\n> **Pending Approvals (`0` items):** All staged actions have been resolved.\n\n")
 	}
 
-	b.WriteString("## 📊 1. Front Desk Lease & Daily Quota\n")
-	if state.hasFrontDesk {
-		fd := state.frontDesk
-		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
-		pinStatus := "⚠️ Pending Turn-1 `write_file` pin"
-		if fd.ConsolePinned {
-			pinStatus = "✅ Pinned in UI"
+	if len(state.ProactiveV3.ExpiredProposals) > 0 {
+		fmt.Fprintf(&b, "> [!WARNING]\n> **Timed-Out Approvals Unsent (`%d` item(s)):**\n", len(state.ProactiveV3.ExpiredProposals))
+		for _, rec := range state.ProactiveV3.ExpiredProposals {
+			fmt.Fprintf(&b, "> - **`%s`** (`%s` · expired `%s`): %s — run `./bin/hq approvals restage %s`\n",
+				rec.Proposal.ID, rec.Proposal.ActionType, rec.Timestamp, rec.Proposal.Summary, rec.Proposal.ID)
 		}
-		fmt.Fprintf(&b, "- **Console Artifact Pin:** `%s`\n", pinStatus)
-		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
-		totalTriggers := len(armed) + len(unarmed)
-		if totalTriggers > 0 {
-			if kernel.IsDaemonActiveFast(vaultDir) {
-				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d active in hq daemon`\n", len(armed), totalTriggers)
-			} else {
-				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d armed in Front Desk`\n", len(armed), totalTriggers)
+		b.WriteString("\n")
+	}
+
+	if len(state.ProactiveV3.DecisionCards) > 0 {
+		fmt.Fprintf(&b, "## ⚡ Active Decision Cards (`%d`)\n", len(state.ProactiveV3.DecisionCards))
+		for _, dc := range state.ProactiveV3.DecisionCards {
+			var opts []string
+			for _, d := range dc.Decisions {
+				opts = append(opts, fmt.Sprintf("`%s`: %s", d.ID, d.Label))
 			}
+			fmt.Fprintf(&b, "- **`%s`** (`%s`): **%s** — %s\n  - Options: %s *(run `./bin/hq outbox act %s --option=<id>`)*\n",
+				dc.ID, dc.SourceSkill, dc.Title, truncateRunes(dc.Summary, 160), strings.Join(opts, " · "), dc.ID)
 		}
-		if len(fd.AdHocCrons) > 0 {
-			fmt.Fprintf(&b, "- **Ad-Hoc Conversation Crons (Front Desk):** `%d active`\n", len(fd.AdHocCrons))
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.ProactiveV3.LivingSpaces) > 0 {
+		fmt.Fprintf(&b, "## 🧩 Living Spaces (`%d` Local Micro-Apps)\n", len(state.ProactiveV3.LivingSpaces))
+		for _, ls := range state.ProactiveV3.LivingSpaces {
+			goalNote := ""
+			if ls.GoalSlug != "" {
+				goalNote = fmt.Sprintf(" · goal `%s`", ls.GoalSlug)
+			}
+			fmt.Fprintf(&b, "- **[%s](http://127.0.0.1:4242/living-spaces/%s)** (`%s`%s · updated `%s`)\n",
+				ls.Title, ls.Slug, ls.Slug, goalNote, ls.UpdatedAt)
 		}
-	} else {
-		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")
+		b.WriteString("\n---\n\n")
 	}
-	circuitBadge := "BUDGET OK"
-	if state.Quota.CircuitOpen {
-		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
+
+	if len(state.Goals) > 0 || len(state.OverdueWaits) > 0 {
+		fmt.Fprintf(&b, "## 🎯 Active Goals & Readiness (`%d` Goal(s) · `%d` Overdue Wait(s))\n", len(state.Goals), len(state.OverdueWaits))
+		for _, g := range state.Goals {
+			prog := g.Readiness()
+			dueTag := ""
+			if g.WindowStartAt != "" {
+				dueTag = fmt.Sprintf(" · window `%s`", g.WindowStartAt)
+			} else if g.TargetDate != "" {
+				dueTag = fmt.Sprintf(" · target `%s`", g.TargetDate)
+			}
+			parkTag := ""
+			if g.ParkedUntil != "" {
+				parkTag = fmt.Sprintf(" · ⏸️ parked until `%s`", g.ParkedUntil)
+			}
+			skipTag := ""
+			if prog.Skipped > 0 {
+				skipTag = fmt.Sprintf(", %d skipped", prog.Skipped)
+			}
+			fmt.Fprintf(&b, "- **`%s`** — %s (`%d/%d` ready%s%s%s)\n", g.Slug, g.Title, prog.Confirmed, prog.Active, skipTag, dueTag, parkTag)
+		}
+		for _, ow := range state.OverdueWaits {
+			fmt.Fprintf(&b, "- ⚠️ **Overdue SLA (`%s`):** Waiting on **%s** for *%s* (`%s` · deadline `%s`)\n", ow.GoalSlug, ow.Waiting.Counterparty, ow.Waiting.Summary, ow.Waiting.Channel, ow.Waiting.FollowUpAfter)
+		}
+		b.WriteString("\n---\n\n")
 	}
-	gatekeeperNote := ""
-	if state.Quota.GatekeeperSavesToday > 0 {
-		gatekeeperNote = fmt.Sprintf(" · 0-Token Gatekeeper Skips: `%d`", state.Quota.GatekeeperSavesToday)
-	}
-	interNote := ""
-	if state.Quota.InteractiveSpawnsToday > 0 {
-		interNote = fmt.Sprintf(" · Interactive: `+%d`", state.Quota.InteractiveSpawnsToday)
-	}
-	fmt.Fprintf(&b, "- **Background Auto Spawns Today:** `%d / %d` (`%s`%s%s)\n", state.Quota.EffectiveAutoSpawns(), state.Quota.MaxDailySpawns, circuitBadge, interNote, gatekeeperNote)
-	if state.Observability.Budget.TokenCircuitDisabled {
-		fmt.Fprintf(&b, "- **Token Burn Today (Uncached):** `%s` (`budget guard disabled` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s`)\n",
-			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
-			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
-			state.Observability.TodayCacheHitRatio*100.0,
-			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
-		)
-	} else {
-		fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
-			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
-			obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
-			state.Observability.DailyBudgetPct,
-			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
-			state.Observability.TodayCacheHitRatio*100.0,
-			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
-			obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
-		)
-	}
-	fdCtxDisplay := obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens) + " / 256k"
-	if state.Observability.FrontDeskCompactedPending {
-		fdCtxDisplay = "compacted (pending next turn) / 256k"
-	}
-	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
-		fdCtxDisplay,
-		state.Observability.FrontDeskContextStatus,
-		state.Observability.FrontDeskCompactions,
-		state.Observability.FrontDeskCacheHitRatio*100.0,
-	)
-	lastHB := state.Quota.LastStatus
-	if lastHB == "" {
-		lastHB = "Not run yet today"
-	}
-	evStats := events.GetSummaryStats(vaultDir, time.Now())
-	armedTimers, _ := timers.List(vaultDir, false)
-	if evStats.PendingCount > 0 || evStats.LeasedCount > 0 || evStats.Dropped24h > 0 || len(armedTimers) > 0 {
-		fmt.Fprintf(&b, "- **Durable Event Inbox & Timers:** `pending=%d` · `leased=%d` · `dropped24h=%d` · `armedTimers=%d`\n",
-			evStats.PendingCount, evStats.LeasedCount, evStats.Dropped24h, len(armedTimers))
-	}
-	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
 
 	now := time.Now()
 	sel := state.TaskSelection
@@ -260,27 +244,6 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		b.WriteString("\n---\n\n")
 	}
 
-	if len(state.Goals) > 0 || len(state.OverdueWaits) > 0 {
-		fmt.Fprintf(&b, "## 🎯 Active Goals & Counterparty SLAs (`%d` Goal(s) · `%d` Overdue Wait(s))\n", len(state.Goals), len(state.OverdueWaits))
-		for _, g := range state.Goals {
-			done := 0
-			for _, m := range g.Milestones {
-				if m.Done {
-					done++
-				}
-			}
-			dueTag := ""
-			if g.TargetDate != "" {
-				dueTag = fmt.Sprintf(" · target `%s`", g.TargetDate)
-			}
-			fmt.Fprintf(&b, "- **`%s`** — %s (`%d/%d` milestones%s)\n", g.Slug, g.Title, done, len(g.Milestones), dueTag)
-		}
-		for _, ow := range state.OverdueWaits {
-			fmt.Fprintf(&b, "- ⚠️ **Overdue SLA (`%s`):** Waiting on **%s** for *%s* (`%s` · deadline `%s`)\n", ow.GoalSlug, ow.Waiting.Counterparty, ow.Waiting.Summary, ow.Waiting.Channel, ow.Waiting.FollowUpAfter)
-		}
-		b.WriteString("\n---\n\n")
-	}
-
 	if len(state.Ideas) > 0 {
 		fmt.Fprintf(&b, "## 💡 Proactive Ideas Feed (`%d` Pending)\n", len(state.Ideas))
 		for _, it := range state.Ideas {
@@ -289,9 +252,87 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		b.WriteString("\n---\n\n")
 	}
 
+	b.WriteString("## 🔧 Ops & Diagnostics Inspector\n\n")
+	b.WriteString("## 📊 1. Front Desk Lease & Daily Quota\n")
+	if state.hasFrontDesk {
+		fd := state.frontDesk
+		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
+		pinStatus := "⚠️ Pending Turn-1 `write_file` pin"
+		if fd.ConsolePinned {
+			pinStatus = "✅ Pinned in UI"
+		}
+		fmt.Fprintf(&b, "- **Console Artifact Pin:** `%s`\n", pinStatus)
+		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
+		totalTriggers := len(armed) + len(unarmed)
+		if totalTriggers > 0 {
+			if kernel.IsDaemonActiveFast(vaultDir) {
+				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d active in hq daemon`\n", len(armed), totalTriggers)
+			} else {
+				fmt.Fprintf(&b, "- **Proactive Schedules (`triggers.yaml`):** `%d / %d armed in Front Desk`\n", len(armed), totalTriggers)
+			}
+		}
+		if len(fd.AdHocCrons) > 0 {
+			fmt.Fprintf(&b, "- **Ad-Hoc Conversation Crons (Front Desk):** `%d active`\n", len(fd.AdHocCrons))
+		}
+	} else {
+		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")
+	}
+	circuitBadge := "BUDGET OK"
+	if state.Quota.CircuitOpen {
+		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason
+	}
+	gatekeeperNote := ""
+	if state.Quota.GatekeeperSavesToday > 0 {
+		gatekeeperNote = fmt.Sprintf(" · 0-Token Gatekeeper Skips: `%d`", state.Quota.GatekeeperSavesToday)
+	}
+	interNote := ""
+	if state.Quota.InteractiveSpawnsToday > 0 {
+		interNote = fmt.Sprintf(" · Interactive: `+%d`", state.Quota.InteractiveSpawnsToday)
+	}
+	fmt.Fprintf(&b, "- **Background Auto Spawns Today:** `%d / %d` (`%s`%s%s)\n", state.Quota.EffectiveAutoSpawns(), state.Quota.MaxDailySpawns, circuitBadge, interNote, gatekeeperNote)
+	if state.Observability.Budget.TokenCircuitDisabled {
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached):** `%s` (`budget guard disabled` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s`)\n",
+			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+			state.Observability.TodayCacheHitRatio*100.0,
+			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+		)
+	} else {
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
+			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
+			state.Observability.DailyBudgetPct,
+			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
+			state.Observability.TodayCacheHitRatio*100.0,
+			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
+			obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
+		)
+	}
+	fdCtxDisplay := obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens) + " / 256k"
+	if state.Observability.FrontDeskCompactedPending {
+		fdCtxDisplay = "compacted (pending next turn) / 256k"
+	}
+	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
+		fdCtxDisplay,
+		state.Observability.FrontDeskContextStatus,
+		state.Observability.FrontDeskCompactions,
+		state.Observability.FrontDeskCacheHitRatio*100.0,
+	)
+	lastHB := state.Quota.LastStatus
+	if lastHB == "" {
+		lastHB = "Not run yet today"
+	}
+	evStats := events.GetSummaryStats(vaultDir, time.Now())
+	armedTimers, _ := timers.List(vaultDir, false)
+	if evStats.PendingCount > 0 || evStats.LeasedCount > 0 || evStats.Dropped24h > 0 || len(armedTimers) > 0 {
+		fmt.Fprintf(&b, "- **Durable Event Inbox & Timers:** `pending=%d` · `leased=%d` · `dropped24h=%d` · `armedTimers=%d`\n",
+			evStats.PendingCount, evStats.LeasedCount, evStats.Dropped24h, len(armedTimers))
+	}
+	fmt.Fprintf(&b, "- **Last Heartbeat:** `%s`\n\n---\n\n", lastHB)
+
 	if len(state.Schedules) > 0 {
 		fmt.Fprintf(&b, "## ⏰ Scheduled Automations (`%d` Configured)\n", len(state.Schedules))
-		b.WriteString("| Schedule | Runner | Cron | Latest Activity |\n| :--- | :--- | :--- | :--- |\n")
+		b.WriteString("| Schedule | Runner | Next Run / Cron | Latest Activity |\n| :--- | :--- | :--- | :--- |\n")
 		for _, sc := range state.Schedules {
 			stateIcon := "🟢"
 			if !sc.Enabled {
@@ -336,8 +377,13 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 				actCell = strings.Join(actParts, " · ")
 			}
 			cronClean := strings.ReplaceAll(sc.Cron, "|", "\\|")
+			if sc.NextRunHuman != "" {
+				cronClean = sc.NextRunHuman + " · `" + cronClean + "`"
+			} else {
+				cronClean = "`" + cronClean + "`"
+			}
 			runnerClean := strings.ReplaceAll(sc.Runner, "|", "\\|")
-			fmt.Fprintf(&b, "| %s | `%s` | `%s` | %s |\n", nameCell, runnerClean, cronClean, actCell)
+			fmt.Fprintf(&b, "| %s | `%s` | %s | %s |\n", nameCell, runnerClean, cronClean, actCell)
 		}
 		b.WriteString("\n---\n\n")
 	}
@@ -361,6 +407,14 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 				shortConv = shortConv[:8]
 			}
 			fmt.Fprintf(&b, "- `%s` · [`%s`](conversation://%s) (`%s`): %s\n", j.Timestamp, shortConv, j.ConversationID, j.ModelName, prompt)
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	if len(state.ProactiveV3.RecentActivity) > 0 {
+		b.WriteString("## ↩️ Recent User Reversals (`hq cancel`)\n")
+		for _, a := range state.ProactiveV3.RecentActivity {
+			fmt.Fprintf(&b, "- `%s` (`%s`): %s\n", a.Timestamp, a.Kind, a.Summary)
 		}
 		b.WriteString("\n---\n\n")
 	}

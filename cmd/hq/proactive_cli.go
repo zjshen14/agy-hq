@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/pulse"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
 	"github.com/zjshen14/agy-hq/internal/timers"
@@ -39,12 +41,30 @@ func runOutboxCLI(vaultDir string, args []string) {
 		connectorFlag := fs.String("connector", "", "Optional originating connector ID")
 		accountFlag := fs.String("account", "", "Optional originating account alias")
 		threadFlag := fs.String("thread", "", "Optional originating thread/item key for per-thread interrupt cooldown")
+		incidentKey := fs.String("incident-key", "", "Optional incident correlation / burst coalescing key")
+		decisionsJSON := fs.String("decisions-json", "", "Optional JSON array of DecisionOption buttons (max 4)")
+		proposalIDsRaw := fs.String("proposal-ids", "", "Optional comma-separated proposal IDs linked to this outbox item")
 		critical := fs.Bool("critical", false, "Critical breach override (bypasses quiet-hours hold)")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
 		if strings.TrimSpace(*title) == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq outbox add --title=\"...\" [--tier=brief_rollup|ideas_feed|interrupt|silent_ledger] [--scope=...] [--skill=...] [--summary=\"...\"] [--critical]")
+			fmt.Fprintln(os.Stderr, "usage: hq outbox add --title=\"...\" [--tier=brief_rollup|ideas_feed|interrupt|silent_ledger] [--scope=...] [--skill=...] [--summary=\"...\"] [--incident-key=...] [--decisions-json='[...]'] [--critical]")
 			os.Exit(1)
+		}
+		var decisions []outbox.DecisionOption
+		if strings.TrimSpace(*decisionsJSON) != "" {
+			if err := json.Unmarshal([]byte(*decisionsJSON), &decisions); err != nil {
+				fmt.Fprintf(os.Stderr, "hq outbox add: invalid --decisions-json: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		var propIDs []string
+		if strings.TrimSpace(*proposalIDsRaw) != "" {
+			for _, part := range strings.Split(*proposalIDsRaw, ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					propIDs = append(propIDs, p)
+				}
+			}
 		}
 		taintRec, isTainted := checkCallerTaintedEnv(vaultDir)
 		obItem := outbox.OutboxItem{
@@ -53,6 +73,9 @@ func runOutboxCLI(vaultDir string, args []string) {
 			Tier:          *tier,
 			Title:         *title,
 			Summary:       *summary,
+			IncidentKey:   strings.TrimSpace(*incidentKey),
+			Decisions:     decisions,
+			ProposalIDs:   propIDs,
 			SuggestedSlug: *slug,
 			Connector:     strings.TrimSpace(*connectorFlag),
 			Account:       strings.TrimSpace(*accountFlag),
@@ -165,8 +188,30 @@ func runOutboxCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 
+	case "act":
+		itemID, flagArgs := splitFirstPositionalAndFlags(rest)
+		fs := flag.NewFlagSet("outbox act", flag.ExitOnError)
+		optID := fs.String("option", "", "DecisionOption ID to execute in 0 LLM tokens")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if strings.TrimSpace(itemID) == "" || strings.TrimSpace(*optID) == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq outbox act <item-id> --option=<opt-id> [--json]")
+			os.Exit(1)
+		}
+		res, err := pulse.ExecuteDecision(vaultDir, itemID, *optID, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq outbox act failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			printJSON(res)
+			return
+		}
+		fmt.Printf("Executed decision %s/%s (%s): %s\n", res.ItemID, res.OptionID, res.Kind, res.Summary)
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown outbox subcommand: %s (expected add, list, drain, or eval)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown outbox subcommand: %s (expected add, list, act, drain, or eval)\n", sub)
 		os.Exit(1)
 	}
 }
@@ -357,9 +402,28 @@ func runGoalsCLI(vaultDir string, args []string) {
 		title := fs.String("title", "", "Goal title")
 		scope := fs.String("scope", "", "Goal scope (e.g. engineering, investing, admin)")
 		target := fs.String("target", "", "Target completion date (YYYY-MM-DD)")
+		winStart := fs.String("window-start", "", "Optional event/window start (YYYY-MM-DD or RFC3339)")
+		winEnd := fs.String("window-end", "", "Optional event/window end (YYYY-MM-DD or RFC3339)")
+		tz := fs.String("tz", "", "Optional IANA timezone")
+		blocksAvail := fs.Bool("blocks-availability", false, "Mark this window as unavailable (travel, offsite, release freeze)")
+		covTag := fs.String("coverage-tag", "", "Optional required daily coverage tag (e.g. oncall, lodging)")
+		parkedUntil := fs.String("parked-until", "", "Optional park horizon (YYYY-MM-DD, RFC3339, or after:<goal-slug>)")
+		spaceSlug := fs.String("space", "", "Optional linked Living Space slug")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
-		g, err := kernel.AddGoal(vaultDir, *slug, *title, *scope, *target, now)
+		g, err := kernel.AddGoalWithOptions(vaultDir, kernel.AddGoalOptions{
+			Slug:                *slug,
+			Title:               *title,
+			Scope:               *scope,
+			TargetDate:          *target,
+			WindowStartAt:       *winStart,
+			WindowEndAt:         *winEnd,
+			Timezone:            *tz,
+			BlocksAvailability:  *blocksAvail,
+			RequiredCoverageTag: *covTag,
+			ParkedUntil:         *parkedUntil,
+			SpaceSlug:           *spaceSlug,
+		}, now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq goals add failed: %v\n", err)
 			os.Exit(1)
@@ -550,8 +614,145 @@ func runGoalsCLI(vaultDir string, args []string) {
 		}
 		fmt.Printf("Completed goal %s (%s)\n", g.Slug, g.Title)
 
+	case "checklist":
+		cSub, cRest := splitSubcommand(rest, "list")
+		switch cSub {
+		case "add":
+			fs := flag.NewFlagSet("goals checklist add", flag.ExitOnError)
+			goalSlug := fs.String("goal", "", "Goal slug")
+			itemID := fs.String("id", "", "Optional checklist item ID")
+			title := fs.String("title", "", "Checklist item title")
+			tag := fs.String("tag", "", "Optional category/coverage tag")
+			status := fs.String("status", kernel.ChecklistOpen, "Initial status (open|confirmed|skipped)")
+			winStart := fs.String("window-start", "", "Optional window start")
+			winEnd := fs.String("window-end", "", "Optional window end")
+			cutoff := fs.String("cutoff", "", "Optional cutoff timestamp")
+			mustBefore := fs.Bool("must-complete-before-window", false, "Flag before unavailable window")
+			group := fs.String("group", "", "Optional filter group")
+			extRef := fs.String("ref", "", "Optional external reference (PR#, confirmation code)")
+			note := fs.String("note", "", "Optional status note")
+			urlFlag := fs.String("url", "", "Optional action URL")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(cRest)
+			g, ci, err := kernel.AddChecklistItem(vaultDir, *goalSlug, kernel.ChecklistItemOptions{
+				ID: *itemID, Title: *title, Tag: *tag, Status: *status,
+				WindowStartAt: *winStart, WindowEndAt: *winEnd, CutoffAt: *cutoff,
+				MustCompleteBeforeWindow: *mustBefore, Group: *group, ExternalRef: *extRef,
+				StatusNote: *note, ActionURL: *urlFlag,
+			}, now)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq goals checklist add failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			if *asJSON {
+				printJSON(map[string]interface{}{"goal": g, "item": ci})
+				return
+			}
+			fmt.Printf("Saved checklist item %s/%s [%s]: %s\n", g.Slug, ci.ID, ci.Status, ci.Title)
+		case "confirm":
+			fs := flag.NewFlagSet("goals checklist confirm", flag.ExitOnError)
+			goalSlug := fs.String("goal", "", "Goal slug")
+			itemID := fs.String("id", "", "Checklist item ID or title")
+			extRef := fs.String("ref", "", "Optional external reference")
+			note := fs.String("note", "", "Optional confirmation note")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(cRest)
+			g, ci, err := kernel.ConfirmChecklistItem(vaultDir, *goalSlug, *itemID, *extRef, *note, now)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq goals checklist confirm failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			if *asJSON {
+				printJSON(map[string]interface{}{"goal": g, "item": ci})
+				return
+			}
+			prog := g.Readiness()
+			fmt.Printf("Confirmed %s/%s (%d/%d ready, %d skipped)\n", g.Slug, ci.ID, prog.Confirmed, prog.Active, prog.Skipped)
+		case "skip":
+			fs := flag.NewFlagSet("goals checklist skip", flag.ExitOnError)
+			goalSlug := fs.String("goal", "", "Goal slug")
+			itemID := fs.String("id", "", "Checklist item ID or title")
+			reason := fs.String("reason", "", "Reason for skipping (persisted tombstone)")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(cRest)
+			g, ci, err := kernel.SkipChecklistItem(vaultDir, *goalSlug, *itemID, *reason, now)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq goals checklist skip failed: %v\n", err)
+				os.Exit(1)
+			}
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			if *asJSON {
+				printJSON(map[string]interface{}{"goal": g, "item": ci})
+				return
+			}
+			fmt.Printf("Skipped %s/%s (won't re-suggest): %s\n", g.Slug, ci.ID, ci.SkipReason)
+		default:
+			goalSlug, flagArgs := splitFirstPositionalAndFlags(cRest)
+			fs := flag.NewFlagSet("goals checklist list", flag.ExitOnError)
+			gFlag := fs.String("goal", "", "Goal slug")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(flagArgs)
+			if goalSlug == "" {
+				goalSlug = *gFlag
+			}
+			goals, _ := kernel.ListGoals(vaultDir)
+			for _, g := range goals {
+				if g.Slug == goalSlug {
+					if *asJSON {
+						printJSON(g.Checklist)
+						return
+					}
+					prog := g.Readiness()
+					fmt.Printf("Checklist %s (%d/%d ready, %d skipped):\n", g.Slug, prog.Confirmed, prog.Active, prog.Skipped)
+					for _, ci := range g.Checklist {
+						fmt.Printf("  - [%s] %s: %s\n", ci.Status, ci.ID, ci.Title)
+					}
+					return
+				}
+			}
+			fmt.Fprintf(os.Stderr, "goal %q not found\n", goalSlug)
+			os.Exit(1)
+		}
+
+	case "park":
+		goalSlug, flagArgs := splitFirstPositionalAndFlags(rest)
+		fs := flag.NewFlagSet("goals park", flag.ExitOnError)
+		until := fs.String("until", "", "Park horizon (YYYY-MM-DD, RFC3339, or after:<goal-slug>)")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		g, err := kernel.ParkGoal(vaultDir, goalSlug, *until, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq goals park failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			printJSON(g)
+			return
+		}
+		fmt.Printf("Parked goal %s until %s\n", g.Slug, g.ParkedUntil)
+
+	case "unpark":
+		goalSlug, flagArgs := splitFirstPositionalAndFlags(rest)
+		fs := flag.NewFlagSet("goals unpark", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		g, err := kernel.UnparkGoal(vaultDir, goalSlug, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hq goals unpark failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			printJSON(g)
+			return
+		}
+		fmt.Printf("Unparked goal %s\n", g.Slug)
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown goals subcommand: %s (expected list, add, milestone, check-off, wait-on, mark-replied, due, or complete)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown goals subcommand: %s (expected list, add, milestone, check-off, checklist, park, unpark, wait-on, mark-replied, due, or complete)\n", sub)
 		os.Exit(1)
 	}
 }

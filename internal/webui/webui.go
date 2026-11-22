@@ -55,6 +55,7 @@ type ScheduleSummaryRow struct {
 	SkipsCount      int    `json:"skipsCount,omitempty"`
 	LastError       string `json:"lastError,omitempty"`
 	LatestConvID    string `json:"latestConvId,omitempty"`
+	NextRunHuman    string `json:"nextRunHuman,omitempty"`
 }
 
 // DashboardState aggregates live Vault, approval, worktree, provider workspace, task, schedule, journal, quota, observability, spaces, goals, ideas, and doctor state.
@@ -76,6 +77,7 @@ type DashboardState struct {
 	Delegates      delegates.DashboardSummary     `json:"delegates,omitempty"`
 	TodayTurns     []hooks.JournalEntry           `json:"todayTurns"`
 	Health         []doctor.CheckResult           `json:"health"`
+	ProactiveV3    ProactiveV3State               `json:"proactiveV3,omitempty"`
 	FlashResult    string                         `json:"flashResult,omitempty"`
 	CSRFToken      string                         `json:"-"`
 	TaskSelection  kernel.ConsoleTaskSelection    `json:"-"`
@@ -546,6 +548,7 @@ func NewHandler(vaultDir string) http.Handler {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		_, _ = w.Write([]byte(faviconSVG))
 	})
+	registerProactiveV3Routes(mux, vaultDir, csrfToken)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		state := loadStateCached(vaultDir)
@@ -827,7 +830,7 @@ func loadStateWithObsMaxAge(vaultDir, flashMsg string, obsCacheMaxAge time.Durat
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	schedules := buildScheduleSummaries(vaultDir, tasks, fd, hasFD)
 	bridgeSummaries, _ := channels.ListBridgeSummaries(vaultDir)
-	return DashboardState{
+	st := DashboardState{
 		VaultDir:       vaultDir,
 		UpdatedAt:      now.Format("15:04:05"),
 		Quota:          quota,
@@ -852,6 +855,8 @@ func loadStateWithObsMaxAge(vaultDir, flashMsg string, obsCacheMaxAge time.Durat
 		frontDesk:      fd,
 		hasFrontDesk:   hasFD,
 	}
+	enrichProactiveV3State(vaultDir, &st, now)
+	return st
 }
 
 func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask, fd kernel.FrontDeskLease, hasFD bool) []ScheduleSummaryRow {

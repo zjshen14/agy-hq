@@ -11,12 +11,14 @@ import (
 
 // EvalFixture defines a single synthetic proactive event routing test case for `hq outbox eval`.
 type EvalFixture struct {
-	Name         string     `json:"name"`
-	Timestamp    string     `json:"timestamp"`
-	Mode         string     `json:"mode,omitempty"` // optional override (balanced default)
-	Item         OutboxItem `json:"item"`
-	ExpectTier   string     `json:"expectTier"`
-	ExpectCooled bool       `json:"expectCooled"`
+	Name           string               `json:"name"`
+	Timestamp      string               `json:"timestamp"`
+	Mode           string               `json:"mode,omitempty"`           // optional override (balanced default)
+	CoalesceWindow string               `json:"coalesceWindow,omitempty"` // optional burst hold override (e.g. "3m")
+	ScopeRules     []ScopeAttentionRule `json:"scopeRules,omitempty"`     // optional scope attention rules
+	Item           OutboxItem           `json:"item"`
+	ExpectTier     string               `json:"expectTier"`
+	ExpectCooled   bool                 `json:"expectCooled"`
 }
 
 // EvalCaseResult captures the pass/fail outcome of a single EvalFixture.
@@ -108,6 +110,75 @@ func DefaultEvalFixtures() []EvalFixture {
 			Item:       OutboxItem{ID: "ev-10", SourceSkill: "sleep-consolidate", Tier: TierSilentLedger, Title: "Nightly consolidation complete", Summary: "3 facts verified."},
 			ExpectTier: TierSilentLedger,
 		},
+		{
+			Name:           "burst-coalesce-first-alert",
+			Timestamp:      "2026-11-13T16:00:00Z",
+			CoalesceWindow: "3m",
+			Item:           OutboxItem{ID: "ev-11", SourceSkill: "inbox-triage", Scope: "travel", IncidentKey: "sender:airline@example.com", Tier: TierInterrupt, Title: "Account security login code", Summary: "Verification email 1."},
+			ExpectTier:     TierInterrupt,
+		},
+		{
+			Name:           "burst-coalesce-second-within-3m",
+			Timestamp:      "2026-11-13T16:01:30Z",
+			CoalesceWindow: "3m",
+			Item:           OutboxItem{ID: "ev-12", SourceSkill: "inbox-triage", Scope: "travel", IncidentKey: "sender:airline@example.com", Tier: TierInterrupt, Title: "New browser sign-in detected", Summary: "Verification email 2."},
+			ExpectTier:     TierSilentLedger,
+			ExpectCooled:   true,
+		},
+		{
+			Name:           "correlated-incident-after-burst-within-30m",
+			Timestamp:      "2026-11-13T16:15:00Z",
+			CoalesceWindow: "3m",
+			Item:           OutboxItem{ID: "ev-13", SourceSkill: "inbox-triage", Scope: "travel", IncidentKey: "sender:airline@example.com", Tier: TierInterrupt, Title: "Password reset requested", Summary: "Follow-up email 15m later."},
+			ExpectTier:     TierInterrupt,
+		},
+		{
+			Name:       "scope-rule-weekday-personal-downgraded",
+			Timestamp:  "2026-11-13T15:00:00Z", // Friday 15:00 UTC
+			ScopeRules: []ScopeAttentionRule{{Scopes: []string{"personal"}, Schedule: "weekdays 09:00-17:30 UTC", DowngradeNonCriticalTo: TierBriefRollup}},
+			Item:       OutboxItem{ID: "ev-14", SourceSkill: "pulse", Scope: "personal", Tier: TierInterrupt, Title: "Non-urgent personal reminder", Summary: "Can wait until brief."},
+			ExpectTier: TierBriefRollup,
+		},
+		{
+			Name:       "scope-rule-weekday-work-preserved",
+			Timestamp:  "2026-11-13T15:05:00Z", // Friday 15:05 UTC
+			ScopeRules: []ScopeAttentionRule{{Scopes: []string{"personal"}, Schedule: "weekdays 09:00-17:30 UTC", DowngradeNonCriticalTo: TierBriefRollup}},
+			Item:       OutboxItem{ID: "ev-15", SourceSkill: "pulse", Scope: "engineering", Tier: TierInterrupt, Title: "Pre-1:1 Prep: Alice", Summary: "1:1 starts in 25m with 1 PR needing review."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "scope-rule-critical-personal-preserved",
+			Timestamp:  "2026-11-13T15:10:00Z",
+			ScopeRules: []ScopeAttentionRule{{Scopes: []string{"personal"}, Schedule: "weekdays 09:00-17:30 UTC", DowngradeNonCriticalTo: TierBriefRollup}},
+			Item:       OutboxItem{ID: "ev-16", SourceSkill: "pulse", Scope: "personal", Tier: TierInterrupt, Critical: true, Title: "Flight gate departure changed", Summary: "Urgent safety/travel alert."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "scope-rule-weekend-personal-allowed",
+			Timestamp:  "2026-11-14T15:00:00Z", // Saturday 15:00 UTC
+			ScopeRules: []ScopeAttentionRule{{Scopes: []string{"personal"}, Schedule: "weekdays 09:00-17:30 UTC", DowngradeNonCriticalTo: TierBriefRollup}},
+			Item:       OutboxItem{ID: "ev-17", SourceSkill: "pulse", Scope: "personal", Tier: TierInterrupt, Title: "Weekend booking cutoff in 5h", Summary: "Cancellation window closing."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "tainted-cannot-force-quiet-hours-breach",
+			Timestamp:  "2026-11-14T23:10:00Z",
+			Item:       OutboxItem{ID: "ev-18", SourceSkill: "inbox-triage", Scope: "mail", Tier: TierInterrupt, Critical: true, Force: true, Tainted: true, Title: "Untrusted Urgent Claim", Summary: "External email claiming critical."},
+			ExpectTier: TierBriefRollup,
+		},
+		{
+			Name:       "tainted-thread-first-alert-allowed",
+			Timestamp:  "2026-11-15T12:00:00Z",
+			Item:       OutboxItem{ID: "ev-19", SourceSkill: "inbox-triage", Scope: "mail", Connector: "gmail", Account: "personal", ThreadKey: "thr-99", Tainted: true, Tier: TierInterrupt, Title: "Invoice question from vendor", Summary: "Needs owner confirmation."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:         "tainted-thread-duplicate-within-cooldown",
+			Timestamp:    "2026-11-15T12:20:00Z",
+			Item:         OutboxItem{ID: "ev-20", SourceSkill: "inbox-triage", Scope: "mail", Connector: "gmail", Account: "personal", ThreadKey: "thr-99", Tainted: true, Tier: TierInterrupt, Title: "Re: Completely different subject line", Summary: "Same thread within cooldown."},
+			ExpectTier:   TierSilentLedger,
+			ExpectCooled: true,
+		},
 	}
 }
 
@@ -164,6 +235,14 @@ func RunEvalSuite(fixtures []EvalFixture) EvalReport {
 		cfg := baseCfg
 		if strings.TrimSpace(fx.Mode) != "" {
 			cfg.Mode = strings.TrimSpace(fx.Mode)
+		}
+		if strings.TrimSpace(fx.CoalesceWindow) != "" {
+			if d, err := time.ParseDuration(strings.TrimSpace(fx.CoalesceWindow)); err == nil && d >= 0 {
+				cfg.CoalesceWindow = d
+			}
+		}
+		if len(fx.ScopeRules) > 0 {
+			cfg.ScopeRules = fx.ScopeRules
 		}
 		now, err := time.Parse(time.RFC3339, fx.Timestamp)
 		if err != nil {

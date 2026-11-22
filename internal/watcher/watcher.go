@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/outbox"
@@ -845,6 +846,10 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 			if item.HasSecurityOverride {
 				signalFlags = append(signalFlags, "security_alert=true")
 			}
+			expiredOffer := approvals.FindUnrestagedExpiredOfferForThread(vaultDir, connID, acct, threadKey, 30*24*time.Hour, now)
+			if expiredOffer != nil {
+				signalFlags = append(signalFlags, "prior_staged_reply_expired_unsent=true")
+			}
 			if len(signalFlags) > 0 {
 				itemTier = "routine"
 			}
@@ -854,6 +859,15 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 			signalHint := ""
 			if len(signalFlags) > 0 {
 				signalHint = fmt.Sprintf(" [Precheck Urgency Signals: %s — use `--tier=interrupt` if actionable or time-sensitive.]", strings.Join(signalFlags, ", "))
+			}
+			expiredPropID := ""
+			if expiredOffer != nil {
+				expDate := expiredOffer.Timestamp
+				if len(expDate) >= 10 {
+					expDate = expDate[:10]
+				}
+				expiredPropID = expiredOffer.Proposal.ID
+				signalHint += fmt.Sprintf(" [Prior Staged Reply Expired Unsent: %s on %s — verify whether a fresh reply is still needed.]", expiredPropID, expDate)
 			}
 
 			// Opaque IDs ONLY in Title & Prompt — zero Sender/Subject/Body text
@@ -883,15 +897,16 @@ func RunPrecheck(ctx context.Context, vaultDir string, opts PrecheckOptions) (Pr
 				Prompt:               prompt,
 				TaintOnSpawn:         true,
 				Metadata: map[string]string{
-					"requires_ack": "1",
-					"connector":    connID,
-					"account":      acct,
-					"item_id":      itemID,
-					"item_key":     itemID,
-					"thread_key":   threadKey,
-					"tier":         itemTier,
-					"trigger":      fmt.Sprintf("watch:%s:%s", connID, acct),
-					"action_label": fmt.Sprintf("%s:%s/%s -> /inbox-triage", connID, acct, itemID),
+					"requires_ack":           "1",
+					"connector":              connID,
+					"account":                acct,
+					"item_id":                itemID,
+					"item_key":               itemID,
+					"thread_key":             threadKey,
+					"tier":                   itemTier,
+					"trigger":                fmt.Sprintf("watch:%s:%s", connID, acct),
+					"action_label":           fmt.Sprintf("%s:%s/%s -> /inbox-triage", connID, acct, itemID),
+					"expired_prior_proposal": expiredPropID,
 				},
 			})
 			enqIDs = append(enqIDs, itemID)

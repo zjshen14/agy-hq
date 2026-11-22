@@ -48,7 +48,26 @@ attention:
     tz: "America/Los_Angeles"
     allow_critical_breach: true
   cooldown_per_topic: "4h"
-  coalesce_window: "0s"
+  coalesce_window: "3m"
+  incident_correlation_window: "30m"
+  # Optional scope attention rules (e.g. quiet personal alerts during weekday coding blocks):
+  # scope_rules:
+  #   - scopes: ["personal"]
+  #     schedule: "weekdays 09:00-17:30 America/Los_Angeles"
+  #     downgrade_non_critical_interrupt_to: "brief_rollup"
+
+pulse:
+  enabled: true
+  pre_meeting_lead: "30m"
+  countdown_horizons: ["168h", "72h", "24h"]
+  cutoff_lead: "6h"
+  min_slot_buffer: "45m"
+  stale_draft_age: "4h"
+
+living_spaces:
+  # Locale-neutral framework default. Override in your private <vault>/config.yaml (e.g. ["en", "zh"]).
+  default_locales: ["en"]
+  default_surfaces: ["webui", "artifact"]
 
 spaces:
   - id: morning-ops

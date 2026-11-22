@@ -1,6 +1,6 @@
 # RFC-0027: Smarter Proactive Actions — Looking Ahead, 1-Tap Decisions & Interactive Spaces
 
-- **Status:** Proposed (Phase 1 — Awaiting User Review)
+- **Status:** Implemented (Phases 2A–2D complete; verified via `CUJ-45`–`CUJ-47`)
 - **Created:** 2026-11-21 · **Updated:** 2026-11-22
 - **Supersedes:** [RFC-0020 (Ambient Synthesis & Mobile Push)](./0020-proactive-ambient-synthesis-and-mobile-push.md)
 - **Builds On:** [RFC-0014 (Proactive Engine v2)](./0014-proactive-engine-and-living-context.md), [RFC-0023 (Channel Bridges)](./0023-front-desk-channel-bridge.md), [RFC-0025 (Workspaces)](./0025-pluggable-workspace-providers.md), [RFC-0026 (Scoped Delegates)](./0026-declarative-scoped-delegates.md)
@@ -137,7 +137,7 @@ living_spaces:
 
 ---
 
-## 6. Phased Implementation Plan (Paused Until Approved)
+## 6. Phased Implementation Plan (Implemented)
 
 | Phase | Scope | Key Verification |
 | :--- | :--- | :--- |
@@ -146,4 +146,4 @@ living_spaces:
 | **Phase 2C (`P1`)** | `internal/living` (`space.json` $\rightarrow$ HTML compiler, 5 block types, `hq-i18n`, `perspectives`, 0-token `data_sources`, `:4242` sandbox & `generative_ui`). | **`CUJ-47`:** Single- vs. multi-locale build, 0-token workspace/Goal sync, & strict iframe CSP isolation. |
 | **Phase 2D (`P1/P2`)** | Re-ordered human-first Console + collapsible Ops Inspector (`NextRunAt`), `hq cancel`, and `dismiss_noisy` RSI mining. | Unit + E2E tests for `parkedUntil`, `NextRunAt`, `hq cancel`, and Vault-local RSI noise tuning. |
 
-> **Current Status:** `RFC-0027` is **Proposed (Awaiting Review)**; [RFC-0020](./0020-proactive-ambient-synthesis-and-mobile-push.md) is marked `Superseded by RFC-0027`. No implementation code will be written until you approve.
+> **Implementation Status:** Phases 2A–2D are implemented and verified across unit tests (`internal/pulse`, `internal/living`, `internal/outbox`, `internal/approvals`, `internal/kernel`, `internal/webui`, `internal/rsi`) and black-box E2E journeys `CUJ-45`–`CUJ-47`.

@@ -54,6 +54,9 @@
 | **CUJ-42** | Unified Session Authorization Lattice, Quarantine Hardening & Asymmetric Interactive Presets | `internal/authz`, `hq hook pre-tool`, `hq status`, `hq brief format-quarantined` | `TestCUJ42_UnifiedAuthzLatticeAndQuarantineHardening` |
 | **CUJ-43** | Scoped Delegate Read-Only Investigation, Curated Public Status & Ring-0 Egress Gateway | `hq delegate poll|read-request|read-task|run|reply|audit`, `hq progress save --public-status`, `CONSOLE.md` | `TestCUJ43_ScopedDelegateReadOnlyCuratedStatusAndEgress` |
 | **CUJ-44** | CaMeL `queue_only` Task Nudge (0-Token Fast Path + Zone-2 Delivery) & Non-Widening Configure | `hq delegate poll|show|configure|ack-nudge`, `hq hook session-start`, `hq approve` | `TestCUJ44_CaMeLQueueOnlyNudgeAndNonWideningConfigure` |
+| **CUJ-45** | 0-Token Pulse Look-Ahead (`D1`–`D10`), 3-State Goal Readiness & 3m Outbox Burst Coalescing | `hq goals checklist|park`, `hq pulse precheck`, `hq outbox add|eval` | `TestCUJ45_PulseAnticipationReadinessAndBurstCoalescing` |
+| **CUJ-46** | 1-Tap `DecisionOption` Cards, Ring-0 Taint Safety, Proposal Restage, `hq cancel` & Noisy-Interrupt RSI | `hq outbox act`, `hq approvals expired|restage`, `hq cancel`, `hq rsi mine` | `TestCUJ46_DecisionOptionCardsTaintSafetyAndProposalRestage` |
+| **CUJ-47** | Composable Living Spaces, Locale-Neutral vs. Vault i18n, 0-Token `dataSources` & CSP Sandbox | `hq space create|refresh|sync-goal|export-artifact`, `:4242/living-spaces/<slug>` | `TestCUJ47_ComposableLivingSpacesI18nDataSourcesAndCSPSandbox` |
 
 ---
 
@@ -373,3 +376,21 @@
 ## CUJ-44: CaMeL Parameterized Task Actions (`queue_only` & `spawn_sandboxed_worker`) & Non-Widening Configure ([RFC-0026](../design/0026-declarative-scoped-delegates.md))
 1. **Zero-Token Regex Fast Path, Zone-2 Queue & Sandboxed Background Worker (`hq delegate poll`, `hq hook session-start`, `hq delegate ack-nudge`):** Extracts typed parameters via deterministic `match.regex`, enforces pre-preflight cooldowns/rate limits, runs SHA-256-pinned preflight commands (discarding raw output), and renders 100% static Go templates (zero raw peer prose) either into protected `local/memory/delegates_queues/<slug>.jsonl` (`delivery_mode: "queue_only"`, surfaced in Zone 2 `<= 800 B` and cleared via `hq delegate ack-nudge`) or into an isolated `unattended_auto` worker event (`delivery_mode: "spawn_sandboxed_worker"`, constrained by `NI-3` `auto_propose_only` + OS sandbox so it can execute investigative/drafting work autonomously without touching `⊤` threads or bypassing approvals).
 2. **Semantic Policy Diff (`hq delegate show`, `hq delegate configure`, `hq approve`):** Applies non-widening policy tightenings immediately with 0 popups in interactive owner chat (with optimistic `--base-sha256` concurrency), while fusing privilege-widening edits + binary pins (including `queue_only` → `spawn_sandboxed_worker`) into a single 1-tap `rsi_apply` approval applied via `/dev/fd/3`.
+
+---
+
+## CUJ-45: 0-Token Pulse Look-Ahead (`D1`–`D10`), 3-State Goal Readiness & 3m Outbox Burst Coalescing ([RFC-0027](../design/0027-muse-proactive-actions.md))
+1. **3-State Goal Readiness & Unavailable-Window Ripple (`hq goals add|checklist|park`, `hq pulse precheck`):** Tracks `confirmed` / `open` / `skipped` (tombstone) checklists, detects pre-meeting prep (`D1`), horizon/cutoff countdowns (`D2`), deadlines colliding with `blocksAvailability` windows (`D3`), schedule buffer/coverage conflicts (`D5`), and workspace `NeedsOwner` transitions (`D9`) in `0` LLM tokens with idempotent repeat ticks.
+2. **Burst Coalescing, Incident Correlation & Scope Rules (`hq outbox add`, `hq outbox eval`):** Merges non-critical interrupts sharing `--incident-key` within `coalesce_window` (`3m`), links follow-ups within `30m`, applies `attention.scope_rules`, and passes all 20 golden fixtures in `hq outbox eval`.
+
+---
+
+## CUJ-46: 1-Tap `DecisionOption` Cards, Ring-0 Taint Safety, Proposal Restage, `hq cancel` & Noisy-Interrupt RSI ([RFC-0027](../design/0027-muse-proactive-actions.md))
+1. **Closed-Enum Decision Execution & Timeout Recovery (`hq outbox act`, `hq approvals expired|restage`):** Rejects tainted cross-proposal `DecisionOption` references, catches expired proposals regardless of `> 12h` age via `D6` and `hq approvals expired`, and re-stages fresh `24h` proposals in `0` LLM tokens.
+2. **Instant Reversal & Full-Funnel SNR Mining (`hq cancel`, `hq rsi mine`):** Cancels matching events, armed timers, and pending proposals in one command (logging `reverted_by_user` to `activity.jsonl`), and mines `>= 40%` `dismiss_noisy` interrupt rates into `FrictionProactiveNoise` observations targeting Vault-local RSI overlays.
+
+---
+
+## CUJ-47: Composable Living Spaces, Locale-Neutral vs. Vault i18n, 0-Token `dataSources` & CSP Sandbox ([RFC-0027](../design/0027-muse-proactive-actions.md))
+1. **Composable Compilation, Goal Sync & Live Data Refresh (`hq space create|refresh|sync-goal|export-artifact`):** Hides the language toggle under the neutral `["en"]` framework default while enabling instant `<script id="hq-i18n">` switching under Vault `["en", "zh"]`, syncs 3-state Goal checklists and `hq_builtin` `workspaces` in `0` LLM tokens, and exports remote-accessible `generative_ui` HTML artifacts (`space_<slug>.html` + `.metadata.json`).
+2. **Strict Loopback Isolation (`:4242/living-spaces/<slug>`):** Renders compiled Spaces inside `<iframe sandbox="allow-scripts">` (omitting `allow-same-origin`) with strict `Content-Security-Policy: default-src 'none'` on `/raw`.
