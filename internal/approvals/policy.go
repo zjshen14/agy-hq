@@ -1049,7 +1049,7 @@ func gitRemoteOwnerRepo(workDir, remoteName string) string {
 	if dir == "" {
 		return ""
 	}
-	out, err := runApprovalGitCmd(dir, 50*time.Millisecond, "remote", "get-url", remoteName)
+	out, err := runApprovalGitCmd(dir, 500*time.Millisecond, "remote", "get-url", remoteName)
 	if err != nil {
 		return ""
 	}

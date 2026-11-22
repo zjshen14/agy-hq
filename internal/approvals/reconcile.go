@@ -149,7 +149,7 @@ func localGitRemotePath(dir, remote string) string {
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(remote) == "" {
 		return ""
 	}
-	u, err := runApprovalGitCmd(dir, 20*time.Millisecond, "remote", "get-url", remote)
+	u, err := runApprovalGitCmd(dir, 500*time.Millisecond, "remote", "get-url", remote)
 	if err != nil || u == "" || strings.Contains(u, "://") || strings.Contains(u, "@") {
 		return ""
 	}
@@ -166,7 +166,7 @@ func localBareRepoRefSHA(bareOrWorkDir, ref string) string {
 	if strings.TrimSpace(bareOrWorkDir) == "" || strings.TrimSpace(ref) == "" {
 		return ""
 	}
-	out, err := runApprovalGitCmd(bareOrWorkDir, 20*time.Millisecond, "rev-parse", "--verify", "--quiet", ref)
+	out, err := runApprovalGitCmd(bareOrWorkDir, 500*time.Millisecond, "rev-parse", "--verify", "--quiet", ref)
 	if err != nil {
 		return ""
 	}

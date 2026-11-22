@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -76,13 +77,13 @@ func RemoveUnboundTaskBySlug(vaultDir, slug string) {
 	})
 }
 
+var reQuotaDeferral = regexp.MustCompile(`(?i)\b(?:quota|daily\s+spawn\s+budget|token\s+budget|budget\s+(?:exhausted|reached|exceeded)|circuit\s+breaker|too\s+many\s+requests|rate[\s_-]+limit(?:ed|s)?)\b`)
+
 func isQuotaDeferralMessage(msg string) bool {
-	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "quota") ||
-		strings.Contains(msg, "budget") ||
-		strings.Contains(msg, "circuit breaker") ||
-		strings.Contains(msg, "429") ||
-		strings.Contains(msg, "resource_exhausted")
+	if isQuotaExhaustedError(msg) {
+		return true
+	}
+	return reQuotaDeferral.MatchString(scrubWorkspaceErrPaths(msg))
 }
 
 func isQuotaDeferralError(err error) bool {

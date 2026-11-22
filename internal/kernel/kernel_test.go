@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/events"
 )
 
 func TestClassifyInboxAndHeartbeatAndCircuitBreaker(t *testing.T) {
@@ -1605,5 +1607,92 @@ func TestLoadNestedConversationParentsBatchNormalization(t *testing.T) {
 	}
 	if p, ok := got[strings.ToLower(childNoParent)]; !ok || p != "" {
 		t.Fatalf("expected %s -> empty parent, got ok=%v parent=%q", strings.ToLower(childNoParent), ok, p)
+	}
+}
+
+func TestQuotaErrorDetectionIgnoresWorkspacePath429AndBudget(t *testing.T) {
+	falsePositives := []string{
+		"spawnTaskViaLS: Language Server credentials unavailable and no verified projectId for workspace /var/folders/lr/429xyz/T/TestCUJ30_1429873210/001 (refusing unverified agentapi fallback)",
+		"spawnTaskViaLS: Language Server credentials unavailable and no verified projectId for workspace /tmp/my-budget-quota-app/001 (refusing unverified agentapi fallback)",
+		"spawnTaskViaLS: dial tcp 127.0.0.1:4290: connection refused",
+		"dial tcp 127.0.0.1:14290: i/o timeout",
+	}
+	for _, msg := range falsePositives {
+		if isQuotaExhaustedError(msg) {
+			t.Fatalf("isQuotaExhaustedError falsely matched non-quota error: %q", msg)
+		}
+		if isQuotaDeferralMessage(msg) {
+			t.Fatalf("isQuotaDeferralMessage falsely matched non-quota error: %q", msg)
+		}
+	}
+
+	exhaustedTrue := []string{
+		"HTTP 429 Too Many Requests",
+		"agentapi error: exit status 1 (status=429)",
+		"rpc error: code = RESOURCE_EXHAUSTED desc = rate limit",
+		"429 Too Many Requests",
+		"error: (429)",
+	}
+	for _, msg := range exhaustedTrue {
+		if !isQuotaExhaustedError(msg) {
+			t.Fatalf("expected isQuotaExhaustedError(%q)=true", msg)
+		}
+		if !isQuotaDeferralMessage(msg) {
+			t.Fatalf("expected isQuotaDeferralMessage(%q)=true", msg)
+		}
+	}
+
+	deferralTrue := []string{
+		"quota circuit breaker is OPEN: test",
+		"daily spawn budget exhausted (15/15)",
+		"insufficient quota remaining",
+		"rate_limited by upstream",
+	}
+	for _, msg := range deferralTrue {
+		if !isQuotaDeferralMessage(msg) {
+			t.Fatalf("expected isQuotaDeferralMessage(%q)=true", msg)
+		}
+	}
+
+	// End-to-end DispatchPendingEvents regression: a temp vault under a path containing "429" and "budget"
+	// without agentapi in PATH must increment AttemptCount (not falsely treat the path as 429 quota) and
+	// must NOT trip QuotaState.CircuitOpen.
+	rootDir := filepath.Join(t.TempDir(), "TestCUJ30_1429000123-budget-dir")
+	vaultDir := filepath.Join(rootDir, "local")
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir vault memory: %v", err)
+	}
+	emptyBin := filepath.Join(t.TempDir(), "empty-bin")
+	_ = os.MkdirAll(emptyBin, 0o755)
+	t.Setenv("PATH", emptyBin)
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
+	t.Setenv("ANTIGRAVITY_AGENTAPI_EXE", "")
+
+	now := time.Now()
+	if _, _, err := events.Enqueue(vaultDir, events.Event{
+		Source:   "connector:corp-review",
+		DedupKey: "watch:corp-review:default:rev-429-path",
+		ScopeKey: "watch:corp-review:default",
+		Skill:    "inbox-triage",
+		Title:    "[Auto] Channel Triage",
+		Prompt:   "Process item",
+		Metadata: map[string]string{"requires_ack": "1"},
+	}, now); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	if _, err := DispatchPendingEvents(vaultDir, now.Add(time.Second), false); err != nil {
+		t.Fatalf("DispatchPendingEvents: %v", err)
+	}
+	pending, err := events.List(vaultDir, string(events.StatusPending), false, 0)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("expected 1 pending event after failed non-quota spawn, got %d (%v)", len(pending), err)
+	}
+	if pending[0].AttemptCount != 1 {
+		t.Fatalf("expected AttemptCount=1 after spawn error under path containing 429/budget, got %d (lastError=%q)", pending[0].AttemptCount, pending[0].LastError)
+	}
+	if qs := LoadQuota(vaultDir); qs.CircuitOpen {
+		t.Fatalf("expected QuotaState.CircuitOpen=false for non-quota error containing 429/budget in workspace path, got %+v", qs)
 	}
 }

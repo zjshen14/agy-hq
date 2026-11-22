@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -145,8 +146,19 @@ func configureSpawnCommandWithTarget(cmd *exec.Cmd, vaultDir, trigger, workDir, 
 	cmd.Env = cleanEnv
 }
 
+var (
+	reResourceExhausted = regexp.MustCompile(`(?i)\bresource_exhausted\b`)
+	reHTTP429Token      = regexp.MustCompile(`(?i)(?:^|[\s(:=\[])429(?:$|[\s),.:;\]]|\btoo\s+many\s+requests)`)
+	reWorkspaceErrPath  = regexp.MustCompile(`for workspace [^\s(]+`)
+)
+
+func scrubWorkspaceErrPaths(msg string) string {
+	return reWorkspaceErrPath.ReplaceAllString(msg, "for workspace <dir>")
+}
+
 func isQuotaExhaustedError(msg string) bool {
-	return strings.Contains(msg, "RESOURCE_EXHAUSTED") || strings.Contains(msg, "429")
+	cleaned := scrubWorkspaceErrPaths(msg)
+	return reResourceExhausted.MatchString(cleaned) || reHTTP429Token.MatchString(cleaned)
 }
 
 func resolveRoutineFallbackModel(vaultDir string) string {
