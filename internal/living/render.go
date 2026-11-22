@@ -77,6 +77,12 @@ func safeHref(raw string) string {
 	if strings.HasPrefix(low, "https://") || strings.HasPrefix(low, "http://") {
 		return html.EscapeString(u)
 	}
+	if strings.HasPrefix(low, "conversation://") {
+		rest := u[len("conversation://"):]
+		if rest != "" && !strings.ContainsAny(rest, " \t\n\r\"'<>") {
+			return html.EscapeString(u)
+		}
+	}
 	return ""
 }
 
@@ -169,9 +175,10 @@ func RenderHTML(doc SpaceDoc, opts RenderOptions) ([]byte, error) {
 		html.EscapeString(doc.Slug), html.EscapeString(doc.UpdatedAt)))
 
 	i18nJSON := safeJSONForScript(map[string]interface{}{
-		"locales": locales,
-		"default": primary,
-		"dicts":   col.dicts,
+		"locales":            locales,
+		"default":            primary,
+		"defaultPerspective": strings.ToLower(strings.TrimSpace(doc.DefaultPerspective)),
+		"dicts":              col.dicts,
 	})
 
 	surfaceClass := "surface-webui"
@@ -305,6 +312,14 @@ func renderChecklistLedger(sb *strings.Builder, blk BlockSpec, col *i18nCollecto
 			if it.CutoffAt != "" {
 				sb.WriteString(`<div class="chk-meta">Cutoff: ` + html.EscapeString(it.CutoffAt) + `</div>`)
 			}
+			if strings.TrimSpace(it.CopyText) != "" {
+				lbl := it.CopyLabel
+				if lbl.IsEmpty() {
+					lbl = Text("Copy Action")
+				}
+				sb.WriteString(fmt.Sprintf(`<div class="act-row"><button type="button" class="copy-btn" data-copy="%s">📋 %s</button></div>`,
+					html.EscapeString(it.CopyText), col.span(lbl)))
+			}
 			sb.WriteString(`</div></li>`)
 		}
 		sb.WriteString(`</ul></div>`)
@@ -325,8 +340,37 @@ func renderCalloutNotes(sb *strings.Builder, blk BlockSpec, col *i18nCollector) 
 		if tone == "" {
 			tone = "info"
 		}
-		sb.WriteString(fmt.Sprintf(`<article class="note tone-%s" data-group="%s" data-perspectives="%s"><h3>%s</h3><p>%s</p></article>`,
+		sb.WriteString(fmt.Sprintf(`<article class="note tone-%s" data-group="%s" data-perspectives="%s"><h3>%s</h3><p>%s</p>`,
 			html.EscapeString(tone), html.EscapeString(strings.ToLower(n.Group)), html.EscapeString(attrList(n.Perspectives)), col.span(n.Title), col.span(n.Body)))
+		hasActions := strings.TrimSpace(n.CopyText) != "" || strings.TrimSpace(n.CopyAltText) != "" || safeHref(n.LinkURL) != ""
+		if hasActions {
+			sb.WriteString(`<div class="act-row">`)
+			if href := safeHref(n.LinkURL); href != "" {
+				lbl := n.LinkLabel
+				if lbl.IsEmpty() {
+					lbl = Text("Open ↗")
+				}
+				sb.WriteString(fmt.Sprintf(`<a class="copy-btn link-btn" href="%s">%s</a>`, href, col.span(lbl)))
+			}
+			if strings.TrimSpace(n.CopyText) != "" {
+				lbl := n.CopyLabel
+				if lbl.IsEmpty() {
+					lbl = Text("Copy")
+				}
+				sb.WriteString(fmt.Sprintf(`<button type="button" class="copy-btn primary-btn" data-copy="%s">📋 %s</button>`,
+					html.EscapeString(n.CopyText), col.span(lbl)))
+			}
+			if strings.TrimSpace(n.CopyAltText) != "" {
+				lbl := n.CopyAltLabel
+				if lbl.IsEmpty() {
+					lbl = Text("Copy Alt")
+				}
+				sb.WriteString(fmt.Sprintf(`<button type="button" class="copy-btn" data-copy="%s">📋 %s</button>`,
+					html.EscapeString(n.CopyAltText), col.span(lbl)))
+			}
+			sb.WriteString(`</div>`)
+		}
+		sb.WriteString(`</article>`)
 	}
 	sb.WriteString(`</div>`)
 }
@@ -366,7 +410,11 @@ h1{margin:0;font-size:22px;line-height:1.25}h2{margin:0 0 10px;font-size:16px}h3
 .skipped-sec{margin-top:8px;font-size:13px;color:var(--muted)}.skipped-sec summary{cursor:pointer}
 .notes-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
 .note{border:1px solid var(--bdr);border-left:4px solid var(--acc);border-radius:8px;padding:10px 12px;background:var(--bg)}
-.note.tone-warn{border-left-color:var(--warn)}.note.tone-ok{border-left-color:var(--ok)}.note p{margin:4px 0 0;font-size:13px}
+.note.tone-warn{border-left-color:var(--warn)}.note.tone-ok{border-left-color:var(--ok)}.note p{margin:4px 0 0;font-size:13px;white-space:pre-line}
+.act-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.copy-btn{border:1px solid var(--bdr);background:var(--card-bg);color:var(--fg);padding:5px 10px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px;min-height:30px}
+.copy-btn.primary-btn{background:var(--acc);color:#fff;border-color:var(--acc)}
+.copy-btn.copied{background:var(--ok);color:#fff;border-color:var(--ok)}
 .ftr{text-align:center;color:var(--muted);font-size:12px;margin-top:20px}
 .hidden{display:none!important}
 `
@@ -396,7 +444,7 @@ const livingSpaceJS = `
     if(p&&i18n.dicts&&i18n.dicts[p])setLang(p);
   }catch(e){}
 
-  var activePersp='all',activeGrp='all';
+  var activePersp=(i18n.defaultPerspective||'all'),activeGrp='all';
   function applyFilters(){
     document.querySelectorAll('[data-perspectives],[data-group]').forEach(function(el){
       var ps=(el.getAttribute('data-perspectives')||'').split(',').filter(Boolean);
@@ -407,11 +455,34 @@ const livingSpaceJS = `
     });
   }
   document.querySelectorAll('.persp-btn').forEach(function(b){
+    b.classList.toggle('active',b.getAttribute('data-persp')===activePersp);
     b.addEventListener('click',function(){
       activePersp=b.getAttribute('data-persp');
       document.querySelectorAll('.persp-btn').forEach(function(x){x.classList.toggle('active',x===b);});
       applyFilters();
     });
+  });
+  applyFilters();
+
+  function copyToClipboard(txt,btn){
+    var done=function(){
+      var orig=btn.textContent;
+      btn.classList.add('copied');
+      btn.textContent='✓ Copied — paste in chat';
+      setTimeout(function(){btn.classList.remove('copied');btn.textContent=orig;},1800);
+    };
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(txt).then(done).catch(function(){
+        var ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
+        document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done();}catch(e){}document.body.removeChild(ta);
+      });
+    }else{
+      var ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
+      document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done();}catch(e){}document.body.removeChild(ta);
+    }
+  }
+  document.querySelectorAll('.copy-btn[data-copy]').forEach(function(b){
+    b.addEventListener('click',function(){copyToClipboard(b.getAttribute('data-copy')||'',b);});
   });
   document.querySelectorAll('.grp-btn').forEach(function(b){
     b.addEventListener('click',function(){

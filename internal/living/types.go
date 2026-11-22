@@ -150,6 +150,8 @@ type ChecklistRow struct {
 	SkipReason  LocalizedText `json:"skipReason,omitempty"`
 	CutoffAt    string        `json:"cutoffAt,omitempty"`
 	ActionURL   string        `json:"actionUrl,omitempty"`
+	CopyText    string        `json:"copyText,omitempty"`
+	CopyLabel   LocalizedText `json:"copyLabel,omitempty"`
 }
 
 // CalloutNote is a compact callout card in a `callout_notes` block.
@@ -159,6 +161,12 @@ type CalloutNote struct {
 	Body         LocalizedText `json:"body"`
 	Group        string        `json:"group,omitempty"`
 	Perspectives []string      `json:"perspectives,omitempty"`
+	LinkURL      string        `json:"linkUrl,omitempty"`
+	LinkLabel    LocalizedText `json:"linkLabel,omitempty"`
+	CopyText     string        `json:"copyText,omitempty"`
+	CopyLabel    LocalizedText `json:"copyLabel,omitempty"`
+	CopyAltText  string        `json:"copyAltText,omitempty"`
+	CopyAltLabel LocalizedText `json:"copyAltLabel,omitempty"`
 }
 
 // BlockSpec is one composable section in a Living Space.
@@ -189,20 +197,21 @@ type BlockSpec struct {
 
 // SpaceDoc is the canonical JSON source stored at <vault>/living_spaces/<slug>/space.json.
 type SpaceDoc struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	Slug          string            `json:"slug"`
-	Title         LocalizedText     `json:"title"`
-	Subtitle      LocalizedText     `json:"subtitle,omitempty"`
-	GoalSlug      string            `json:"goalSlug,omitempty"`
-	Timezone      string            `json:"timezone,omitempty"`
-	Locales       []string          `json:"locales,omitempty"`
-	LocaleLabels  map[string]string `json:"localeLabels,omitempty"`
-	Perspectives  []PerspectiveSpec `json:"perspectives,omitempty"`
-	Groups        []string          `json:"groups,omitempty"`
-	DataSources   []DataSourceSpec  `json:"dataSources,omitempty"`
-	Blocks        []BlockSpec       `json:"blocks,omitempty"`
-	CreatedAt     string            `json:"createdAt"`
-	UpdatedAt     string            `json:"updatedAt"`
+	SchemaVersion      int               `json:"schemaVersion"`
+	Slug               string            `json:"slug"`
+	Title              LocalizedText     `json:"title"`
+	Subtitle           LocalizedText     `json:"subtitle,omitempty"`
+	GoalSlug           string            `json:"goalSlug,omitempty"`
+	Timezone           string            `json:"timezone,omitempty"`
+	Locales            []string          `json:"locales,omitempty"`
+	LocaleLabels       map[string]string `json:"localeLabels,omitempty"`
+	Perspectives       []PerspectiveSpec `json:"perspectives,omitempty"`
+	DefaultPerspective string            `json:"defaultPerspective,omitempty"`
+	Groups             []string          `json:"groups,omitempty"`
+	DataSources        []DataSourceSpec  `json:"dataSources,omitempty"`
+	Blocks             []BlockSpec       `json:"blocks,omitempty"`
+	CreatedAt          string            `json:"createdAt"`
+	UpdatedAt          string            `json:"updatedAt"`
 }
 
 // SpaceSummary is a lightweight directory listing entry for Console & `hq space list`.

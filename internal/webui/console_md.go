@@ -11,6 +11,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/living"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/timers"
@@ -60,7 +61,12 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# 🏛️ agy-hq Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
-	b.WriteString("[🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n")
+	if state.hasFrontDesk && strings.TrimSpace(state.frontDesk.ArtifactDir) != "" {
+		livePath := filepath.ToSlash(filepath.Join(strings.TrimSpace(state.frontDesk.ArtifactDir), "hq_console_live.html"))
+		fmt.Fprintf(&b, "[📱 Interactive Mobile Console](file://%s) · [🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n", livePath)
+	} else {
+		b.WriteString("[🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n")
+	}
 
 	if len(state.Pending) > 0 {
 		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **Pending Approvals (`%d` item(s) waiting):**\n", len(state.Pending))
@@ -121,9 +127,15 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		b.WriteString("\n---\n\n")
 	}
 
-	if len(state.ProactiveV3.LivingSpaces) > 0 {
-		fmt.Fprintf(&b, "## 🧩 Living Spaces (`%d` Local Micro-Apps)\n", len(state.ProactiveV3.LivingSpaces))
-		for _, ls := range state.ProactiveV3.LivingSpaces {
+	var userSpaces []living.SpaceSummary
+	for _, ls := range state.ProactiveV3.LivingSpaces {
+		if ls.Slug != ConsoleLivingSpaceSlug {
+			userSpaces = append(userSpaces, ls)
+		}
+	}
+	if len(userSpaces) > 0 {
+		fmt.Fprintf(&b, "## 🧩 Living Spaces (`%d` Local Micro-Apps)\n", len(userSpaces))
+		for _, ls := range userSpaces {
 			goalNote := ""
 			if ls.GoalSlug != "" {
 				goalNote = fmt.Sprintf(" · goal `%s`", ls.GoalSlug)
@@ -465,5 +477,6 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			_ = store.WriteAtomic(artMeta, metaBytes, 0o644)
 		}
 	}
+	_ = SyncConsoleLivingSpace(vaultDir, state, unchangedBody)
 	return nil
 }
