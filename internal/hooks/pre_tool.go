@@ -16,6 +16,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 var (
@@ -114,6 +115,49 @@ func (c *preToolSessionCtx) authzPolicy() authz.SessionPolicy {
 func (c *preToolSessionCtx) tainted() (string, bool) {
 	pol := c.authzPolicy()
 	return pol.TaintReason, pol.Tainted
+}
+
+func hasAutoOrTaintedAncestor(vaultDir, convID string) bool {
+	cur := strings.ToLower(strings.TrimSpace(convID))
+	if cur == "" {
+		return false
+	}
+	nestedParents := kernel.LoadNestedConversationParents(vaultDir)
+	seen := map[string]bool{cur: true}
+	for depth := 0; depth < 16; depth++ {
+		var parent string
+		inNested := false
+		if nestedParents != nil {
+			if p, ok := nestedParents[cur]; ok {
+				inNested = true
+				parent = strings.ToLower(strings.TrimSpace(p))
+			}
+		}
+		if parent == "" {
+			if task, _, ok := kernel.FindTaskAnywhere(vaultDir, cur); ok {
+				parent = strings.ToLower(strings.TrimSpace(task.ParentConversationID))
+			} else if attemptTask, _, _, ok := kernel.FindTaskAttemptAnywhere(vaultDir, cur); ok {
+				parent = strings.ToLower(strings.TrimSpace(attemptTask.ParentConversationID))
+			}
+		}
+		if parent == "" {
+			// A nested descendant with an unknown parent fails closed.
+			return inNested
+		}
+		if seen[parent] {
+			return false
+		}
+		seen[parent] = true
+		if isAutoConversation(vaultDir, parent) {
+			return true
+		}
+		if _, tainted := taint.Check(vaultDir, parent); tainted {
+			return true
+		}
+		cur = parent
+	}
+	// Fail closed if ancestry chain exceeds bounded depth.
+	return true
 }
 
 func protectedCredentialTargets(canonVault string, extra []string, includeLedgers bool) []string {
@@ -561,13 +605,17 @@ func handlePreToolRunCommand(w io.Writer, vaultDir string, payload ToolCallPaylo
 	if len(payload.WorkspacePaths) > 0 {
 		workDir = payload.WorkspacePaths[0]
 	}
-	isRestricted := isAuto || ctx.isSubagent()
-	if _, isTaintedCaller := ctx.tainted(); isTaintedCaller {
-		isRestricted = true
-	}
-	if eval := approvals.EvaluateCommand(pol, checkLine, isRestricted, workDir); eval.Gated {
+	_, isTaintedCaller := ctx.tainted()
+	isUntaintedInteractiveSubagent := !isAuto && ctx.isSubagent() && !isTaintedCaller && !hasAutoOrTaintedAncestor(vaultDir, payload.ConversationID)
+	isRestricted := isAuto || ctx.isSubagent() || isTaintedCaller
+	if eval := approvals.EvaluateCommandForSession(pol, checkLine, isRestricted, isUntaintedInteractiveSubagent, workDir); eval.Gated {
 		var reason string
-		if isRestricted {
+		if isUntaintedInteractiveSubagent && eval.RuleID == "forge_git" {
+			reason = fmt.Sprintf(
+				"Blocked by agy-hq subagent approval policy (%s): interactive subagents may only push or manage issues/PRs on repositories listed in `approvals.owned_repos` in `config.yaml`. Stage %q via `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` for human review.",
+				eval.RuleID, cmdLine, eval.RuleID, cmdLine,
+			)
+		} else if isRestricted {
 			reason = fmt.Sprintf(
 				"Blocked by agy-hq Unattended [Auto] policy (%s): autonomous background runs may not execute external mutating command %q directly. Stage it via `./bin/hq propose --type=%s --summary=\"...\" --cmd=%q` for human review.",
 				eval.RuleID, cmdLine, eval.RuleID, cmdLine,

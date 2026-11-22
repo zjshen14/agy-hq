@@ -2530,6 +2530,116 @@ func TestLateStopOnColdAutoSpawnTokenOrVacantDeskNeverAdopts(t *testing.T) {
 	}
 }
 
+func TestPreToolSubagentOwnedRepoForgeGitAndLineageGuard(t *testing.T) {
+	vaultDir := t.TempDir()
+	ownedRepo := t.TempDir()
+	otherRepo := t.TempDir()
+
+	initRepo := func(dir, remoteURL string) {
+		t.Helper()
+		for _, args := range [][]string{{"init", "-b", "main"}, {"remote", "add", "origin", remoteURL}} {
+			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v failed: %v (%s)", args, err, string(out))
+			}
+		}
+	}
+	initRepo(ownedRepo, "https://github.com/alice/my-repo.git")
+	initRepo(otherRepo, "https://github.com/alice/other-repo.git")
+
+	cfgYAML := "vault_version: 1\napprovals:\n  owned_repos:\n    - \"alice/my-repo\"\n"
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	fdConv := "10000000-0000-4000-8000-000000000001"
+	taskConv := "10000000-0000-4000-8000-000000000002"
+	fdSubConv := "10000000-0000-4000-8000-000000000003"
+	taskNestedSubConv := "10000000-0000-4000-8000-000000000004"
+	autoParentConv := "10000000-0000-4000-8000-000000000005"
+	autoChildSubConv := "10000000-0000-4000-8000-000000000006"
+	autoGrandchildSubConv := "10000000-0000-4000-8000-000000000007"
+	taintedSubConv := "10000000-0000-4000-8000-000000000008"
+	taintedParentConv := "10000000-0000-4000-8000-000000000009"
+	taintedParentChildSubConv := "10000000-0000-4000-8000-000000000010"
+	unknownParentNestedConv := "10000000-0000-4000-8000-000000000011"
+
+	_ = kernel.SetFrontDesk(vaultDir, fdConv, t.TempDir())
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "interactive-task", Title: "[Task:core] Interactive", Kind: "task", ConversationID: taskConv, Status: "active",
+	})
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "subagent-core-fixer", Title: "[Subagent:core] Fixer [standard]", Kind: "subagent", ParentConversationID: fdConv, ConversationID: fdSubConv, Status: "active",
+	})
+	_ = kernel.RecordNestedConversation(vaultDir, taskNestedSubConv, taskConv)
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "auto-worker", Title: "[Auto] Worker", Kind: "auto", ConversationID: autoParentConv, Status: "active",
+	})
+	_ = kernel.RecordNestedConversation(vaultDir, autoChildSubConv, autoParentConv)
+	_ = kernel.RecordNestedConversation(vaultDir, autoGrandchildSubConv, autoChildSubConv)
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug: "subagent-tainted-fixer", Title: "[Subagent:core] Tainted [standard]", Kind: "subagent", ParentConversationID: fdConv, ConversationID: taintedSubConv, Status: "active",
+	})
+	_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{ConvID: taintedSubConv, Source: "test:tainted_sub"})
+	_, _ = taint.Mark(context.Background(), vaultDir, taint.Record{ConvID: taintedParentConv, Source: "test:tainted_parent"})
+	_ = kernel.RecordNestedConversation(vaultDir, taintedParentChildSubConv, taintedParentConv)
+	_ = kernel.RecordNestedConversation(vaultDir, unknownParentNestedConv, "")
+
+	runPre := func(convID, cmdLine, workDir string) string {
+		t.Helper()
+		var out bytes.Buffer
+		req, _ := json.Marshal(map[string]interface{}{
+			"conversationId": convID,
+			"workspacePaths": []string{workDir},
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]interface{}{"CommandLine": cmdLine},
+			},
+		})
+		if err := HandlePreToolUse(bytes.NewReader(req), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse(%s, %q): %v", convID, cmdLine, err)
+		}
+		return out.String()
+	}
+
+	// Untainted Front Desk and interactive-task subagents can push to the explicitly owned repo.
+	if out := runPre(fdSubConv, "git -C "+ownedRepo+" push -u origin hq/fix", otherRepo); !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected Front Desk subagent git -C push on owned repo to allow, got: %s", out)
+	}
+	if out := runPre(fdSubConv, "cd "+ownedRepo+" && git push -u origin hq/fix", otherRepo); !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected Front Desk subagent cd && git push on owned repo to allow, got: %s", out)
+	}
+	if out := runPre(taskNestedSubConv, "git -C "+ownedRepo+" push -u origin hq/fix", otherRepo); !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("expected interactive-task nested subagent push on owned repo to allow, got: %s", out)
+	}
+
+	// Front Desk subagent targeting non-owned repo or chaining pr_merge MUST be denied.
+	if out := runPre(fdSubConv, "git -C "+otherRepo+" push -u origin hq/fix", ownedRepo); !strings.Contains(out, `"decision":"deny"`) || !strings.Contains(out, "approvals.owned_repos") {
+		t.Fatalf("expected Front Desk subagent push to non-owned repo to deny with owned_repos hint, got: %s", out)
+	}
+	if out := runPre(fdSubConv, "git -C "+ownedRepo+" push -u origin hq/fix && gh pr merge 1 -R alice/my-repo", ownedRepo); !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("expected Front Desk subagent chained gh pr merge to deny, got: %s", out)
+	}
+
+	// [Auto] worker, its child/grandchild subagents, tainted subagents, tainted-parent children,
+	// and unknown-parent nested subagents MUST all be denied even on the owned repo.
+	for _, tc := range []struct {
+		name string
+		conv string
+	}{
+		{"auto-parent", autoParentConv},
+		{"auto-child-subagent", autoChildSubConv},
+		{"auto-grandchild-subagent", autoGrandchildSubConv},
+		{"tainted-subagent", taintedSubConv},
+		{"tainted-parent-child-subagent", taintedParentChildSubConv},
+		{"unknown-parent-nested-subagent", unknownParentNestedConv},
+	} {
+		if out := runPre(tc.conv, "git -C "+ownedRepo+" push -u origin hq/fix", ownedRepo); !strings.Contains(out, `"decision":"deny"`) {
+			t.Fatalf("SECURITY REGRESSION (%s): expected push on owned repo to be denied, got: %s", tc.name, out)
+		}
+	}
+}
+
 func mustFindHotTaskBySlug(t *testing.T, vaultDir, slug string) kernel.ActiveTask {
 	t.Helper()
 	tasks, err := kernel.ListTasks(vaultDir)

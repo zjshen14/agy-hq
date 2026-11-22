@@ -39,13 +39,16 @@ const (
 )
 
 var (
-	reValidRuleID     = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
-	reGitHubURLRepo   = regexp.MustCompile(`(?i)https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git|/|$|\s|["'])`)
-	reGHRepoFlag      = regexp.MustCompile(`(?:^|\s)(?:-R|--repo)(?:=|\s+)["']?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+){1,2})["']?(?:\s|$)`)
-	reCurlMutFlagPol  = regexp.MustCompile(`(?i)(?:^|\s)(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b|(?:-d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form|--json|--upload-file|-T)(?:=|\s|$))`)
-	reWgetMutFlagPol  = regexp.MustCompile(`(?i)(?:^|\s)(?:--post-data|--post-file|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)`)
-	reLoopbackOnlyPol = regexp.MustCompile(`(?i)https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/|\s|"|'|$)`)
-	reExtURLHostPol   = regexp.MustCompile(`(?i)https?://([^\s/"':]+)`)
+	reValidRuleID        = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+	reGitHubURLRepo      = regexp.MustCompile(`(?i)https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git|/|$|\s|["'])`)
+	reGHRepoFlag         = regexp.MustCompile(`(?:^|\s)(?:-R|--repo)(?:=|\s+)["']?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+){1,2})["']?(?:\s|$)`)
+	reGitPushCmd         = regexp.MustCompile(`(?i)\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]+"|'[^']+'|\S+)|--(?:git-dir|work-tree|namespace|super-prefix|config-env)\s+(?:"[^"]+"|'[^']+'|\S+)|-(?:[Cc]\S+|\w)|--[^\s]+))*\s+push\b`)
+	reGitDashC           = regexp.MustCompile(`(?:^|\s)-C(?:\s+(?:"([^"]+)"|'([^']+)'|(\S+))|(\S+))`)
+	reUnsafeGitEnvAssign = regexp.MustCompile(`(?i)^(?:GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GH_REPO|GH_HOST|GITHUB_HOST)=`)
+	reCurlMutFlagPol     = regexp.MustCompile(`(?i)(?:^|\s)(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--request(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b|(?:-d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form|--json|--upload-file|-T)(?:=|\s|$))`)
+	reWgetMutFlagPol     = regexp.MustCompile(`(?i)(?:^|\s)(?:--post-data|--post-file|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)`)
+	reLoopbackOnlyPol    = regexp.MustCompile(`(?i)https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/|\s|"|'|$)`)
+	reExtURLHostPol      = regexp.MustCompile(`(?i)https?://([^\s/"':]+)`)
 )
 
 // CoreNonDisableablePackRules lists core security rule IDs that companion extension packs
@@ -147,7 +150,7 @@ func DefaultRules() []Rule {
 			Mode:           ModeAutoOnly,
 			TargetResolver: ResolverGitRemote,
 			Commands: []string{
-				`\bgit\s+push\b`,
+				`\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]+"|'[^']+'|\S+)|--(?:git-dir|work-tree|namespace|super-prefix|config-env)\s+(?:"[^"]+"|'[^']+'|\S+)|-(?:[Cc]\S+|\w)|--[^\s]+))*\s+push\b`,
 				`\bgh\s+(?:(?:pr|issue)\s+(?:create|close|reopen|comment|edit|ready|review)|repo\s+(?:delete|rename)|api\b[^\n]*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE)|(?:\s|^)-[fF]\s|--field\b|--raw-field\b))`,
 				`\b(?:terraform\s+(?:apply|destroy)|kubectl\s+(?:apply|delete|patch))\b`,
 			},
@@ -1056,6 +1059,18 @@ func gitRemoteOwnerRepo(workDir, remoteName string) string {
 	return ParseOwnerRepoFromRemoteURL(out)
 }
 
+func expandLeadingTilde(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if p == "~" {
+				return home
+			}
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
 func extractLeadingCDDir(cmdLine, fallbackDir string) string {
 	s := strings.TrimSpace(cmdLine)
 	if !strings.HasPrefix(s, "cd ") {
@@ -1064,7 +1079,7 @@ func extractLeadingCDDir(cmdLine, fallbackDir string) string {
 	for _, sep := range []string{"&&", ";"} {
 		if idx := strings.Index(s, sep); idx > 3 {
 			rawDir := strings.TrimSpace(strings.TrimPrefix(s[:idx], "cd "))
-			rawDir = strings.Trim(rawDir, `"'`)
+			rawDir = expandLeadingTilde(strings.Trim(rawDir, `"'`))
 			if rawDir != "" {
 				if filepath.IsAbs(rawDir) {
 					return rawDir
@@ -1077,6 +1092,47 @@ func extractLeadingCDDir(cmdLine, fallbackDir string) string {
 		}
 	}
 	return fallbackDir
+}
+
+func applyGitDashCDirs(gitPrefix, baseDir string) string {
+	dir := strings.TrimSpace(baseDir)
+	for _, m := range reGitDashC.FindAllStringSubmatch(gitPrefix, -1) {
+		raw := ""
+		for k := 1; k < len(m); k++ {
+			if m[k] != "" {
+				raw = m[k]
+				break
+			}
+		}
+		raw = expandLeadingTilde(strings.TrimSpace(raw))
+		if raw == "" {
+			continue
+		}
+		if filepath.IsAbs(raw) {
+			dir = raw
+		} else if dir != "" {
+			dir = filepath.Join(dir, raw)
+		} else {
+			dir = raw
+		}
+	}
+	return dir
+}
+
+func gitPushFlagTakesSeparateArg(tok string) bool {
+	if strings.Contains(tok, "=") {
+		return false
+	}
+	switch tok {
+	case "-o", "--push-option", "--receive-pack", "--exec":
+		return true
+	default:
+		return false
+	}
+}
+
+func isShellRedirToken(tok string) bool {
+	return strings.Contains(tok, ">") || strings.Contains(tok, "<")
 }
 
 // ResolveRepoTarget extracts `owner/repo` from a command line and/or local git remote without network calls.
@@ -1096,26 +1152,44 @@ func ResolveRepoTarget(resolver, cmdLine, workDir string) string {
 		return strings.TrimSuffix(m[1], ".git")
 	}
 
-	// 3. `git push <remote-or-url>` positional inspection when using git_remote
+	// 3. `git [flags] push <remote-or-url>` positional inspection when using git_remote
 	if resolver == ResolverGitRemote {
-		idx := strings.Index(strings.ToLower(cmdLine), "git push")
-		if idx >= 0 {
-			rest := strings.TrimSpace(cmdLine[idx+len("git push"):])
+		if loc := reGitPushCmd.FindStringIndex(cmdLine); loc != nil {
+			effDir = applyGitDashCDirs(cmdLine[loc[0]:loc[1]], effDir)
+			rest := strings.TrimSpace(cmdLine[loc[1]:])
 			fields := strings.Fields(rest)
 			remoteTok := ""
+			afterDoubleDash := false
 			for i := 0; i < len(fields); i++ {
 				tok := strings.Trim(fields[i], `"'`)
-				if tok == "" || tok == "&&" || tok == ";" || tok == "|" {
+				if tok == "" || tok == "&&" || tok == ";" || tok == "|" || tok == "||" {
 					break
 				}
-				if strings.HasPrefix(tok, "-") {
-					if tok == "-u" || tok == "--set-upstream" || tok == "-f" || tok == "--force" || tok == "--force-with-lease" || tok == "--tags" || tok == "--delete" || tok == "-d" {
-						continue
-					}
-					if !strings.Contains(tok, "=") && i+1 < len(fields) {
+				if isShellRedirToken(tok) {
+					if (strings.HasSuffix(tok, ">") || strings.HasSuffix(tok, "<")) && i+1 < len(fields) {
 						i++
 					}
 					continue
+				}
+				if !afterDoubleDash {
+					if tok == "--" {
+						afterDoubleDash = true
+						continue
+					}
+					if strings.HasPrefix(tok, "--repo=") {
+						remoteTok = strings.Trim(strings.TrimPrefix(tok, "--repo="), `"'`)
+						break
+					}
+					if tok == "--repo" && i+1 < len(fields) {
+						remoteTok = strings.Trim(fields[i+1], `"'`)
+						break
+					}
+					if strings.HasPrefix(tok, "-") {
+						if gitPushFlagTakesSeparateArg(tok) && i+1 < len(fields) {
+							i++
+						}
+						continue
+					}
 				}
 				remoteTok = tok
 				break
@@ -1125,10 +1199,9 @@ func ResolveRepoTarget(resolver, cmdLine, workDir string) string {
 					return parsed
 				}
 				if !strings.Contains(remoteTok, ":") && !strings.Contains(remoteTok, "/") {
-					if r := gitRemoteOwnerRepo(effDir, remoteTok); r != "" {
-						return r
-					}
+					return gitRemoteOwnerRepo(effDir, remoteTok)
 				}
+				return ""
 			}
 		}
 	}
@@ -1393,32 +1466,29 @@ var pipelineExecOrShellBinaries = map[string]bool{
 	"sed": true, "gsed": true, "lua": true, "php": true, "tclsh": true,
 }
 
-// filterReadOnlySearchSegments removes strictly read-only text-search pipeline stages
-// (grep/egrep/fgrep/rg/ag/ack and `git grep`) so searching for a gated command string does not
-// false-trigger approval rules. It fails closed (returns cmdLine, false) on any shell expansion,
-// quoting trick, subshell, output redirection, exec flag (`rg --pre`), or pipe to a shell/interpreter.
-func filterReadOnlySearchSegments(cmdLine string) (string, bool) {
+// splitStrictTopLevelStatements splits cmdLine on unquoted top-level ';', '\n', '&&', and '||'.
+// It fails closed (returns nil, false) on command/process substitutions, ANSI-C/locale quoting,
+// line continuations, subshells/braces, unclosed quotes/escapes, or background '&'.
+func splitStrictTopLevelStatements(cmdLine string) ([]string, bool) {
 	if strings.TrimSpace(cmdLine) == "" {
-		return cmdLine, false
+		return nil, false
 	}
-	// Fail closed immediately on command/process substitution, ANSI-C/locale quoting, or line continuations.
 	for i := 0; i < len(cmdLine); i++ {
 		ch := cmdLine[i]
 		if ch == '`' || ch == '\r' {
-			return cmdLine, false
+			return nil, false
 		}
 		if ch == '\\' && i+1 < len(cmdLine) && (cmdLine[i+1] == '\n' || cmdLine[i+1] == '\r') {
-			return cmdLine, false
+			return nil, false
 		}
 		if ch == '$' && i+1 < len(cmdLine) && (cmdLine[i+1] == '(' || cmdLine[i+1] == '\'' || cmdLine[i+1] == '"') {
-			return cmdLine, false
+			return nil, false
 		}
 		if (ch == '<' || ch == '>') && i+1 < len(cmdLine) && cmdLine[i+1] == '(' {
-			return cmdLine, false
+			return nil, false
 		}
 	}
 
-	// Split top-level statements on unquoted ';', '&&', '||', '\n'; reject unclosed quotes or subshells.
 	var stmts []string
 	var cur strings.Builder
 	inSingle, inDouble, escaped := false, false, false
@@ -1459,7 +1529,7 @@ func filterReadOnlySearchSegments(cmdLine string) (string, bool) {
 			inDouble = true
 			cur.WriteByte(ch)
 		case '(', ')', '{', '}':
-			return cmdLine, false
+			return nil, false
 		case ';', '\n':
 			if s := strings.TrimSpace(cur.String()); s != "" {
 				stmts = append(stmts, s)
@@ -1479,7 +1549,7 @@ func filterReadOnlySearchSegments(cmdLine string) (string, bool) {
 				cur.WriteByte(ch)
 				continue
 			}
-			return cmdLine, false
+			return nil, false
 		case '|':
 			if i+1 < len(cmdLine) && cmdLine[i+1] == '|' {
 				if s := strings.TrimSpace(cur.String()); s != "" {
@@ -1495,12 +1565,24 @@ func filterReadOnlySearchSegments(cmdLine string) (string, bool) {
 		}
 	}
 	if inSingle || inDouble || escaped {
-		return cmdLine, false
+		return nil, false
 	}
 	if s := strings.TrimSpace(cur.String()); s != "" {
 		stmts = append(stmts, s)
 	}
 	if len(stmts) == 0 {
+		return nil, false
+	}
+	return stmts, true
+}
+
+// filterReadOnlySearchSegments removes strictly read-only text-search pipeline stages
+// (grep/egrep/fgrep/rg/ag/ack and `git grep`) so searching for a gated command string does not
+// false-trigger approval rules. It fails closed (returns cmdLine, false) on any shell expansion,
+// quoting trick, subshell, output redirection, exec flag (`rg --pre`), or pipe to a shell/interpreter.
+func filterReadOnlySearchSegments(cmdLine string) (string, bool) {
+	stmts, ok := splitStrictTopLevelStatements(cmdLine)
+	if !ok {
 		return cmdLine, false
 	}
 
@@ -1727,8 +1809,294 @@ func isPureReadOnlySearchCommand(words []string) bool {
 	}
 }
 
+func isSafeOwnedGitConfigOverride(kv string) bool {
+	if strings.ContainsAny(kv, "$`") {
+		return false
+	}
+	low := strings.ToLower(strings.TrimSpace(kv))
+	for _, banned := range []string{
+		"remote.", "insteadof", "pushinsteadof", "sshcommand",
+		"core.hookspath", "core.fsmonitor", "credential.", "include.", "includeif.",
+	} {
+		if strings.Contains(low, banned) {
+			return false
+		}
+	}
+	return true
+}
+
+func extractOwnerRepoFromFlagVal(raw string) string {
+	cleaned := strings.Trim(strings.TrimSuffix(strings.TrimSpace(raw), ".git"), "/")
+	parts := strings.Split(cleaned, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+}
+
+func ruleMatchesText(r *Rule, text string) bool {
+	if r == nil {
+		return false
+	}
+	norm := normalizeCommandForRuleMatch(text)
+	for _, re := range r.compiled {
+		if re.MatchString(text) || (norm != "" && re.MatchString(norm)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSafeOwnedRepoForgeStage(pol PolicyConfig, stage string, curDir string) bool {
+	words, ok := tokenizeSimpleShellWords(stage)
+	if !ok || len(words) == 0 {
+		return false
+	}
+	for _, tok := range words {
+		if !isEnvAssignToken(tok) {
+			break
+		}
+		if reUnsafeGitEnvAssign.MatchString(tok) {
+			return false
+		}
+	}
+	rest := StripLeadingEnv(words, false)
+	if len(rest) < 2 {
+		return false
+	}
+	bin := rest[0]
+	if strings.ContainsAny(bin, "$*?") {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(bin))
+
+	// Every explicit forge URL in the stage must resolve to an owned repo.
+	for _, m := range reGitHubURLRepo.FindAllStringSubmatch(stage, -1) {
+		if len(m) >= 2 && !MatchesOwnedRepos(pol.OwnedRepos, strings.TrimSuffix(m[1], ".git")) {
+			return false
+		}
+	}
+
+	switch base {
+	case "git":
+		stageDir := strings.TrimSpace(curDir)
+		j := 1
+		for j < len(rest) {
+			a := rest[j]
+			if !strings.HasPrefix(a, "-") {
+				break
+			}
+			switch {
+			case a == "-C":
+				if j+1 >= len(rest) {
+					return false
+				}
+				d := rest[j+1]
+				if strings.ContainsAny(d, "$*?") {
+					return false
+				}
+				d = expandLeadingTilde(strings.TrimSpace(d))
+				if filepath.IsAbs(d) {
+					stageDir = d
+				} else if stageDir != "" {
+					stageDir = filepath.Join(stageDir, d)
+				} else {
+					stageDir = d
+				}
+				j += 2
+			case strings.HasPrefix(a, "-C") && len(a) > 2:
+				d := a[2:]
+				if strings.ContainsAny(d, "$*?") {
+					return false
+				}
+				d = expandLeadingTilde(strings.TrimSpace(d))
+				if filepath.IsAbs(d) {
+					stageDir = d
+				} else if stageDir != "" {
+					stageDir = filepath.Join(stageDir, d)
+				} else {
+					stageDir = d
+				}
+				j++
+			case a == "-c":
+				if j+1 >= len(rest) || !isSafeOwnedGitConfigOverride(rest[j+1]) {
+					return false
+				}
+				j += 2
+			case strings.HasPrefix(a, "-c") && len(a) > 2:
+				if !isSafeOwnedGitConfigOverride(a[2:]) {
+					return false
+				}
+				j++
+			case a == "--no-pager":
+				j++
+			default:
+				return false
+			}
+		}
+		if j >= len(rest) {
+			return false
+		}
+		sub := strings.ToLower(rest[j])
+		if sub == "commit" {
+			return MatchesOwnedRepos(pol.OwnedRepos, gitRemoteOwnerRepo(stageDir, "origin"))
+		}
+		if sub != "push" {
+			return false
+		}
+		pushArgs := rest[j+1:]
+		afterDoubleDash := false
+		for k := 0; k < len(pushArgs); k++ {
+			arg := pushArgs[k]
+			if isShellRedirToken(arg) {
+				if (strings.HasSuffix(arg, ">") || strings.HasSuffix(arg, "<")) && k+1 < len(pushArgs) {
+					k++
+				}
+				continue
+			}
+			if !afterDoubleDash {
+				if arg == "--" {
+					afterDoubleDash = true
+					continue
+				}
+				if strings.HasPrefix(arg, "--repo=") {
+					if strings.Contains(arg, "$") {
+						return false
+					}
+					continue
+				}
+				if arg == "--repo" {
+					if k+1 >= len(pushArgs) || strings.Contains(pushArgs[k+1], "$") {
+						return false
+					}
+					k++
+					continue
+				}
+				if strings.HasPrefix(arg, "-") {
+					if gitPushFlagTakesSeparateArg(arg) {
+						k++
+					}
+					continue
+				}
+			}
+			if strings.Contains(arg, "$") {
+				return false
+			}
+			break
+		}
+		target := ResolveRepoTarget(ResolverGitRemote, stage, curDir)
+		return MatchesOwnedRepos(pol.OwnedRepos, target)
+
+	case "gh":
+		if len(rest) < 3 {
+			return false
+		}
+		sub1 := strings.ToLower(rest[1])
+		sub2 := strings.ToLower(rest[2])
+		if sub1 != "pr" && sub1 != "issue" {
+			return false
+		}
+		switch sub2 {
+		case "create", "close", "reopen", "comment", "edit", "ready", "review":
+		default:
+			return false
+		}
+		for k := 3; k < len(rest); k++ {
+			arg := rest[k]
+			switch {
+			case arg == "-R" || arg == "--repo":
+				if k+1 >= len(rest) || strings.Contains(rest[k+1], "$") {
+					return false
+				}
+				if !MatchesOwnedRepos(pol.OwnedRepos, extractOwnerRepoFromFlagVal(rest[k+1])) {
+					return false
+				}
+				k++
+			case strings.HasPrefix(arg, "--repo="):
+				val := strings.TrimPrefix(arg, "--repo=")
+				if strings.Contains(val, "$") || !MatchesOwnedRepos(pol.OwnedRepos, extractOwnerRepoFromFlagVal(val)) {
+					return false
+				}
+			case strings.HasPrefix(arg, "-R") && len(arg) > 2:
+				val := strings.TrimPrefix(arg[2:], "=")
+				if strings.Contains(val, "$") || !MatchesOwnedRepos(pol.OwnedRepos, extractOwnerRepoFromFlagVal(val)) {
+					return false
+				}
+			}
+		}
+		target := ResolveRepoTarget(ResolverGitRemote, stage, curDir)
+		return MatchesOwnedRepos(pol.OwnedRepos, target)
+
+	default:
+		return false
+	}
+}
+
+// isSafeOwnedRepoGitForgeSubcommand returns true iff every forge_git-matching stage in evalLine
+// is a direct `git push` (or local `git commit` mentioning `git push`) or safe `gh pr|issue`
+// management command targeting a repository explicitly matched by pol.OwnedRepos.
+// It fails closed when pol.OwnedRepos is empty, on any shell substitution/subshell/wrapper,
+// on terraform/kubectl/gh repo delete|rename/gh api, or when any target resolves outside owned_repos.
+func isSafeOwnedRepoGitForgeSubcommand(pol PolicyConfig, forgeRule *Rule, evalLine string, workDir string) bool {
+	if len(pol.OwnedRepos) == 0 || forgeRule == nil {
+		return false
+	}
+	stmts, ok := splitStrictTopLevelStatements(evalLine)
+	if !ok {
+		return false
+	}
+	curDir := strings.TrimSpace(workDir)
+	matchedAnyForge := false
+	for _, stmt := range stmts {
+		stages, _ := splitPipelineStagesStrict(stmt)
+		if len(stages) == 0 {
+			return false
+		}
+		if len(stages) == 1 {
+			if words, wok := tokenizeSimpleShellWords(stages[0]); wok && len(words) > 0 {
+				cmdWord := strings.ToLower(firstNonAssignCommandWord(words))
+				if cmdWord == "pushd" || cmdWord == "popd" {
+					return false
+				}
+				if cmdWord == "cd" {
+					rest := StripLeadingEnv(words, false)
+					if len(rest) != 2 || rest[1] == "-" || strings.ContainsAny(rest[1], "$*?") {
+						return false
+					}
+					d := expandLeadingTilde(strings.TrimSpace(rest[1]))
+					if filepath.IsAbs(d) {
+						curDir = d
+					} else if curDir != "" {
+						curDir = filepath.Join(curDir, d)
+					} else {
+						curDir = d
+					}
+					continue
+				}
+			}
+		}
+		for _, stage := range stages {
+			if !ruleMatchesText(forgeRule, stage) {
+				continue
+			}
+			if !isSafeOwnedRepoForgeStage(pol, stage, curDir) {
+				return false
+			}
+			matchedAnyForge = true
+		}
+	}
+	return matchedAnyForge
+}
+
 // EvaluateCommand checks checkLine against the resolved PolicyConfig and session autonomy context.
 func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, workDir string) EvalDecision {
+	return EvaluateCommandForSession(pol, checkLine, isAutoOrTainted, false, workDir)
+}
+
+// EvaluateCommandForSession checks checkLine against the resolved PolicyConfig and session autonomy
+// context, optionally allowing untainted interactive subagents to run safe owned-repo `forge_git`
+// commands (`git push`, `gh pr|issue`) when `approvals.owned_repos` matches every resolved target.
+func EvaluateCommandForSession(pol PolicyConfig, checkLine string, isAutoOrTainted bool, isUntaintedInteractiveSubagent bool, workDir string) EvalDecision {
 	evalLine, stripped := filterReadOnlySearchSegments(checkLine)
 	if stripped && strings.TrimSpace(evalLine) == "" {
 		return EvalDecision{Gated: false}
@@ -1777,6 +2145,12 @@ func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, w
 			}
 		case ModeAutoOnly:
 			if isAutoOrTainted {
+				if isUntaintedInteractiveSubagent &&
+					r.ID == "forge_git" &&
+					pol.InteractivePreset != InteractivePresetStrict &&
+					isSafeOwnedRepoGitForgeSubcommand(pol, r, evalLine, workDir) {
+					continue
+				}
 				return EvalDecision{
 					Gated:  true,
 					RuleID: r.ID,

@@ -614,3 +614,110 @@ func TestInteractivePresetsAndGateModes(t *testing.T) {
 		t.Fatalf("expected invalid interactive_gate_mode to error")
 	}
 }
+
+func TestUntaintedInteractiveSubagentOwnedRepoForgeGit(t *testing.T) {
+	ownedRepo := t.TempDir()
+	runGitCmd(t, ownedRepo, "init", "-b", "main")
+	runGitCmd(t, ownedRepo, "remote", "add", "origin", "https://github.com/alice/my-repo.git")
+	runGitCmd(t, ownedRepo, "remote", "add", "upstream", "https://github.com/bob/upstream-repo.git")
+
+	otherRepo := t.TempDir()
+	runGitCmd(t, otherRepo, "init", "-b", "main")
+	runGitCmd(t, otherRepo, "remote", "add", "origin", "https://github.com/alice/other-repo.git")
+
+	// ResolveRepoTarget handles git -C, boolean flags (--no-verify), redirections (2>&1), and explicit URLs.
+	if got := approvals.ResolveRepoTarget(approvals.ResolverGitRemote, "git -C "+ownedRepo+" push -u origin hq/fix", otherRepo); got != "alice/my-repo" {
+		t.Fatalf("ResolveRepoTarget git -C = %q, want alice/my-repo", got)
+	}
+	if got := approvals.ResolveRepoTarget(approvals.ResolverGitRemote, "git -C "+ownedRepo+" -c user.name=bot push --no-verify upstream main", otherRepo); got != "bob/upstream-repo" {
+		t.Fatalf("ResolveRepoTarget git -C --no-verify upstream = %q, want bob/upstream-repo", got)
+	}
+	if got := approvals.ResolveRepoTarget(approvals.ResolverGitRemote, "git -C "+ownedRepo+" push 2>&1", otherRepo); got != "alice/my-repo" {
+		t.Fatalf("ResolveRepoTarget git -C push 2>&1 = %q, want alice/my-repo", got)
+	}
+	if got := approvals.ResolveRepoTarget(approvals.ResolverGitRemote, "git push git@example.com:bob/upstream-repo.git HEAD:main", ownedRepo); got != "bob/upstream-repo" {
+		t.Fatalf("ResolveRepoTarget SSH URL = %q, want bob/upstream-repo", got)
+	}
+
+	vaultDir := t.TempDir()
+	cfg := "vault_version: 1\napprovals:\n  owned_repos:\n    - \"alice/my-repo\"\n"
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	pol, _, err := approvals.LoadPolicy(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+
+	// Allowed for untainted interactive subagents targeting the explicitly owned repo.
+	allowedCases := []struct {
+		cmd     string
+		workDir string
+	}{
+		{"git push -u origin hq/fix-ci", ownedRepo},
+		{"git -C " + ownedRepo + " push -u origin hq/fix-ci", otherRepo},
+		{"cd " + ownedRepo + " && git add -A && git commit -m \"fix: allow git push\" && git push -u origin hq/fix-ci", otherRepo},
+		{"HQ_SKIP_AGY_PLUGIN_VALIDATE=1 git push origin main 2>&1 | tail -n 5", ownedRepo},
+		{"gh pr create --title \"fix\" --body \"done\"", ownedRepo},
+		{"gh issue comment 12 -R alice/my-repo --body \"ping\"", otherRepo},
+	}
+	for _, tc := range allowedCases {
+		if dec := approvals.EvaluateCommandForSession(pol, tc.cmd, true, true, tc.workDir); dec.Gated {
+			t.Fatalf("expected untainted interactive subagent to be allowed for %q (wd=%s), got %+v", tc.cmd, tc.workDir, dec)
+		}
+	}
+
+	// Empty owned_repos fails closed even for untainted interactive subagents.
+	emptyPol := approvals.DefaultPolicyConfig()
+	if dec := approvals.EvaluateCommandForSession(emptyPol, "git push origin main", true, true, ownedRepo); !dec.Gated || dec.RuleID != "forge_git" {
+		t.Fatalf("expected empty owned_repos to gate subagent git push fail-closed, got %+v", dec)
+	}
+
+	// Denied cases for untainted interactive subagents (third-party targets, non-git-forge, chains, wrappers).
+	deniedCases := []struct {
+		cmd      string
+		workDir  string
+		wantRule string
+	}{
+		{"git push origin main", otherRepo, "forge_git"},
+		{"git push --no-verify upstream main", ownedRepo, "forge_git"},
+		{"git push https://github.com/bob/upstream-repo.git HEAD:main", ownedRepo, "forge_git"},
+		{"git push git@example.com:bob/upstream-repo.git HEAD:main", ownedRepo, "forge_git"},
+		{"git push origin main && git push upstream main", ownedRepo, "forge_git"},
+		{"cd " + ownedRepo + " && git push origin main && cd " + otherRepo + " && git push origin main", ownedRepo, "forge_git"},
+		{"git push origin main && hq rsi apply hyp-1", ownedRepo, "rsi_apply"},
+		{"git push origin main && gh pr merge 7 -R alice/my-repo", ownedRepo, "pr_merge"},
+		{"git push origin main && gh release create v1.0.0", ownedRepo, "release_publish"},
+		{"git push origin main && curl -X POST https://example.com/hook -d hi", ownedRepo, "mutating_external_http"},
+		{"terraform apply -auto-approve", ownedRepo, "forge_git"},
+		{"kubectl apply -f deploy.yaml", ownedRepo, "forge_git"},
+		{"gh repo delete alice/my-repo --yes", ownedRepo, "forge_git"},
+		{"gh api -X DELETE repos/alice/my-repo/issues/1", ownedRepo, "forge_git"},
+		{"bash -c \"git push origin main\"", ownedRepo, "forge_git"},
+		{"git push $(echo upstream) main", ownedRepo, "forge_git"},
+		{"git push $REMOTE main", ownedRepo, "forge_git"},
+		{"git -c url.https://github.com/bob/upstream-repo.insteadOf=https://github.com/alice/my-repo push origin main", ownedRepo, "forge_git"},
+		{"GIT_DIR=/tmp/evil git push origin main", ownedRepo, "forge_git"},
+		{"gh pr create -R bob/upstream-repo --title x --body y", ownedRepo, "forge_git"},
+		{"gh pr create -Rbob/upstream-repo --title x --body y", ownedRepo, "forge_git"},
+		{"gh pr create -R alice/my-repo --title x --body y && gh pr create -R bob/upstream-repo --title z --body w", ownedRepo, "forge_git"},
+	}
+	for _, tc := range deniedCases {
+		dec := approvals.EvaluateCommandForSession(pol, tc.cmd, true, true, tc.workDir)
+		if !dec.Gated || dec.RuleID != tc.wantRule {
+			t.Fatalf("SECURITY REGRESSION: expected %q to be gated by %q, got %+v", tc.cmd, tc.wantRule, dec)
+		}
+	}
+
+	// interactive_preset: strict gates subagents too.
+	strictPol := pol
+	strictPol.InteractivePreset = approvals.InteractivePresetStrict
+	if dec := approvals.EvaluateCommandForSession(strictPol, "git push origin main", true, true, ownedRepo); !dec.Gated || dec.RuleID != "forge_git" {
+		t.Fatalf("expected strict preset to gate subagent git push, got %+v", dec)
+	}
+
+	// Unattended [Auto] (isUntaintedInteractiveSubagent=false) MUST remain gated even with git -C on ownedRepo.
+	if dec := approvals.EvaluateCommandForSession(pol, "git -C "+ownedRepo+" push origin main", true, false, otherRepo); !dec.Gated || dec.RuleID != "forge_git" {
+		t.Fatalf("expected [Auto] git -C push on owned repo to stay gated by forge_git, got %+v", dec)
+	}
+}
