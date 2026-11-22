@@ -319,3 +319,36 @@ func TestSanitizedApprovalEnvPreservesPluginShimAndTimesOutHungCmd(t *testing.T)
 		t.Fatalf("expected hung command to be killed promptly, took %s", elapsed)
 	}
 }
+
+func TestSanitizedApprovalEnvPrefersTargetVaultAndStripsOuterExecCaps(t *testing.T) {
+	outerVault := t.TempDir()
+	targetVault := t.TempDir()
+	t.Setenv("HQ_VAULT_DIR", outerVault)
+	t.Setenv("HQ_APPROVAL_EXEC_ID", "exec-outer-stale")
+	t.Setenv("HQ_APPROVAL_EXEC_TOKEN", "stale-outer-token")
+
+	env := SanitizedApprovalEnv(targetVault)
+	envJoined := strings.Join(env, "\n")
+	if !strings.Contains(envJoined, "HQ_VAULT_DIR="+targetVault) || strings.Contains(envJoined, "HQ_VAULT_DIR="+outerVault) {
+		t.Fatalf("expected SanitizedApprovalEnv to bind HQ_VAULT_DIR to targetVault %q instead of outerVault %q:\n%s", targetVault, outerVault, envJoined)
+	}
+	if strings.Contains(envJoined, "HQ_APPROVAL_EXEC_ID=") || strings.Contains(envJoined, "HQ_APPROVAL_EXEC_TOKEN=") {
+		t.Fatalf("expected SanitizedApprovalEnv to strip inherited HQ_APPROVAL_EXEC_*:\n%s", envJoined)
+	}
+
+	prop, err := CreateWithOptions(targetVault, CreateOptions{
+		ActionType: "external_action",
+		Summary:    "Verify approved child sees targetVault without outer exec caps",
+		Command:    `printf "%s|%s|%s" "$HQ_VAULT_DIR" "$HQ_APPROVAL_EXEC_ID" "$HQ_APPROVAL_EXEC_TOKEN"`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWithOptions: %v", err)
+	}
+	out, err := ApproveProposal(targetVault, prop.ID, prop.SHA256[:12])
+	if err != nil {
+		t.Fatalf("ApproveProposal: %v (out=%s)", err, out)
+	}
+	if want := targetVault + "||"; out != want {
+		t.Fatalf("expected approved child env %q, got %q", want, out)
+	}
+}

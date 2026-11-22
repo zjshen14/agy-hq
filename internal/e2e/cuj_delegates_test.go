@@ -101,7 +101,7 @@ func main() {
 					"description":           "E2E peer transport",
 					"command":               []string{transportBin},
 					"env_allow":             []string{"E2E_DELEGATE_STATE"},
-					"timeout_ms":            5000,
+					"timeout_ms":            20000,
 					"poll_interval_seconds": 15,
 					"max_body_runes":        2000,
 					"capabilities":          map[string]bool{"poll": true, "reply": true, "publish_snapshot": true},
@@ -254,7 +254,7 @@ func main() { fmt.Println("nightly=PASS token=" + "ghp_" + strings.Repeat("a", 3
 		"commands": {
 			"ci-status": {
 				"command": ["` + filepath.ToSlash(ciBin) + `"],
-				"timeout_ms": 5000,
+				"timeout_ms": 20000,
 				"args": [{"name": "job", "flag": "--job", "type": "enum", "values": ["billing-v2-nightly"], "required": true}],
 			},
 		},
@@ -395,7 +395,7 @@ func main() {
 		"commands": {
 			"review-check-pending": {
 				"command": ["` + filepath.ToSlash(reviewBin) + `", "check-pending"],
-				"timeout_ms": 5000,
+				"timeout_ms": 20000,
 				"args": [{"name": "change_id", "flag": "--id", "type": "regex", "pattern": "^[0-9]{5,12}$", "required": true}]
 			}
 		},

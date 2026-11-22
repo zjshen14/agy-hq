@@ -244,7 +244,18 @@ func RunPrePush(rootDir string, skipTests bool) error {
 	fmt.Println("==> [pre-push 3/3] Running `go vet ./...` and full test suite (`go test ./...`)...")
 	var baseEnv []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "GIT_") {
+		if strings.HasPrefix(kv, "GIT_") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_") ||
+			strings.HasPrefix(kv, "HQ_VAULT_DIR=") ||
+			strings.HasPrefix(kv, "HQ_ROOT_DIR=") ||
+			strings.HasPrefix(kv, "HQ_HOME_DIR=") ||
+			strings.HasPrefix(kv, "HQ_GEMINI_DIR=") ||
+			strings.HasPrefix(kv, "HQ_CONFIG_DIR=") ||
+			strings.HasPrefix(kv, "HQ_APP_DATA_DIR=") ||
+			strings.HasPrefix(kv, "HQ_BRAIN_DIR=") ||
+			strings.HasPrefix(kv, "HQ_APPROVAL_EXEC_ID=") ||
+			strings.HasPrefix(kv, "HQ_APPROVAL_EXEC_TOKEN=") ||
+			strings.HasPrefix(kv, "HQ_FORCE_CAP_CHECK=") {
 			continue
 		}
 		baseEnv = append(baseEnv, kv)

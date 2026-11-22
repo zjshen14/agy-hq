@@ -652,10 +652,10 @@ func SanitizedApprovalEnv(vaultDir string) []string {
 		env = append(env, "PATH="+strings.Join(pathParts, string(os.PathListSeparator)))
 	}
 
-	if v := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); v != "" {
-		env = append(env, "HQ_VAULT_DIR="+v)
-	} else if strings.TrimSpace(vaultDir) != "" {
+	if strings.TrimSpace(vaultDir) != "" {
 		env = append(env, "HQ_VAULT_DIR="+vaultDir)
+	} else if v := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); v != "" {
+		env = append(env, "HQ_VAULT_DIR="+v)
 	}
 	return env
 }
