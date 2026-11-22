@@ -385,8 +385,8 @@
     </div>
     <div class="kpi-tile">
       <div class="kpi-label">Front Desk Context (256k Cap)</div>
-      <div class="kpi-val" id="obs-fd-ctx">{{fmtTokens .Observability.FrontDeskContextTokens}} / 256k</div>
-      <div class="kpi-sub">Status: {{.Observability.FrontDeskContextStatus}} · Compactions: {{.Observability.FrontDeskCompactions}}</div>
+      <div class="kpi-val" id="obs-fd-ctx">{{if .Observability.FrontDeskCompactedPending}}Compacted{{else}}{{fmtTokens .Observability.FrontDeskContextTokens}} / 256k{{end}}</div>
+      <div class="kpi-sub">Status: {{.Observability.FrontDeskContextStatus}}{{if .Observability.FrontDeskCompactedPending}} (pending next turn){{end}} · Compactions: {{.Observability.FrontDeskCompactions}}</div>
     </div>
     <div class="kpi-tile">
       <div class="kpi-label">Deep Tier Burn Today</div>
@@ -399,7 +399,7 @@
     </div>
   </div>
   <div class="meta-row" style="margin-top:4px">
-    <span class="muted">Front Desk Context Fill ({{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens)}}% of ~256k auto-compaction ceiling)</span>
+    <span class="muted">Front Desk Context Fill ({{if .Observability.FrontDeskCompactedPending}}compacted · pending next turn{{else}}{{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens)}}% of ~256k auto-compaction ceiling{{end}})</span>
     <span class="badge {{if eq .Observability.FrontDeskContextStatus "OK"}}badge-pass{{else if eq .Observability.FrontDeskContextStatus "WARN"}}badge-warn{{else}}badge-danger{{end}}">{{.Observability.FrontDeskContextStatus}}</span>
   </div>
   <div class="progress-bar">

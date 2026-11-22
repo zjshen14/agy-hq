@@ -143,7 +143,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 		cm := idx.Conversations[cid]
 
 		// A1: Front Desk Context Bloat
-		if fdID != "" && cid == fdID && cm.CurrentContextTokens >= cfg.WarnContextTokens {
+		if fdID != "" && cid == fdID && !cm.CompactedPendingNextTurn && cm.CurrentContextTokens >= cfg.WarnContextTokens {
 			sev := "WARN"
 			thresh := cfg.WarnContextTokens
 			if cm.CurrentContextTokens >= cfg.CritContextTokens {

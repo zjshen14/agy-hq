@@ -34,32 +34,33 @@ type SubagentSpawnEdge struct {
 
 // TurnMetrics captures token burn, prefix cache efficiency, context watermarks, and 3-part latency for a single turn.
 type TurnMetrics struct {
-	TurnIndex            int      `json:"turnIndex"`
-	StepStartIdx         int      `json:"stepStartIdx"`
-	StepEndIdx           int      `json:"stepEndIdx"`
-	StepCount            int      `json:"stepCount"`
-	PlannerSteps         int      `json:"plannerSteps"`
-	StartedAt            string   `json:"startedAt"`
-	EndedAt              string   `json:"endedAt"`
-	TriggerKind          string   `json:"triggerKind"` // "user" | "schedule" | "subagent_callback" | "system_wakeup"
-	PromptPreview        string   `json:"promptPreview,omitempty"`
-	InputTokens          int64    `json:"inputTokens"`
-	CacheReadTokens      int64    `json:"cacheReadTokens"`
-	OutputTokens         int64    `json:"outputTokens"`
-	UncachedTokens       int64    `json:"uncachedTokens"`
-	GrossTokens          int64    `json:"grossTokens"`
-	CacheHitRatio        float64  `json:"cacheHitRatio"`
-	PeakContextTokens    int64    `json:"peakContextTokens"`
-	CurrentContextTokens int64    `json:"currentContextTokens"`
-	CompactionCount      int      `json:"compactionCount"`
-	LLMLatencyMs         int64    `json:"llmLatencyMs"`
-	ToolLatencyMs        int64    `json:"toolLatencyMs"`
-	HumanWaitMs          int64    `json:"humanWaitMs"`
-	ActiveLatencyMs      int64    `json:"activeLatencyMs"`
-	ToolsUsed            []string `json:"toolsUsed,omitempty"`
-	ToolErrorCount       int      `json:"toolErrorCount,omitempty"`
-	QuotaUnits           float64  `json:"quotaUnits"`
-	EstCostUSD           float64  `json:"estCostUsd"`
+	TurnIndex                int      `json:"turnIndex"`
+	StepStartIdx             int      `json:"stepStartIdx"`
+	StepEndIdx               int      `json:"stepEndIdx"`
+	StepCount                int      `json:"stepCount"`
+	PlannerSteps             int      `json:"plannerSteps"`
+	StartedAt                string   `json:"startedAt"`
+	EndedAt                  string   `json:"endedAt"`
+	TriggerKind              string   `json:"triggerKind"` // "user" | "schedule" | "subagent_callback" | "system_wakeup"
+	PromptPreview            string   `json:"promptPreview,omitempty"`
+	InputTokens              int64    `json:"inputTokens"`
+	CacheReadTokens          int64    `json:"cacheReadTokens"`
+	OutputTokens             int64    `json:"outputTokens"`
+	UncachedTokens           int64    `json:"uncachedTokens"`
+	GrossTokens              int64    `json:"grossTokens"`
+	CacheHitRatio            float64  `json:"cacheHitRatio"`
+	PeakContextTokens        int64    `json:"peakContextTokens"`
+	CurrentContextTokens     int64    `json:"currentContextTokens"`
+	CompactedPendingNextTurn bool     `json:"compactedPendingNextTurn,omitempty"`
+	CompactionCount          int      `json:"compactionCount"`
+	LLMLatencyMs             int64    `json:"llmLatencyMs"`
+	ToolLatencyMs            int64    `json:"toolLatencyMs"`
+	HumanWaitMs              int64    `json:"humanWaitMs"`
+	ActiveLatencyMs          int64    `json:"activeLatencyMs"`
+	ToolsUsed                []string `json:"toolsUsed,omitempty"`
+	ToolErrorCount           int      `json:"toolErrorCount,omitempty"`
+	QuotaUnits               float64  `json:"quotaUnits"`
+	EstCostUSD               float64  `json:"estCostUsd"`
 }
 
 // TokenRollup aggregates token, context, compaction, latency, and quota metrics across turns or DAG subtrees.
@@ -83,27 +84,28 @@ type TokenRollup struct {
 
 // ConversationMetrics stores full parsed metrics + DAG metadata for a single conversation.
 type ConversationMetrics struct {
-	ConversationID       string              `json:"conversationId"`
-	ParentConversationID string              `json:"parentConversationId,omitempty"`
-	RootConversationID   string              `json:"rootConversationId,omitempty"`
-	TaskSlug             string              `json:"taskSlug,omitempty"`
-	Title                string              `json:"title,omitempty"`
-	Kind                 string              `json:"kind"` // "front_desk" | "task" | "subagent" | "nested_subagent" | "auto"
-	Scope                string              `json:"scope,omitempty"`
-	Tier                 string              `json:"tier"` // "quick" | "standard" | "deep"
-	Model                string              `json:"model,omitempty"`
-	Status               string              `json:"status,omitempty"`
-	TranscriptPath       string              `json:"transcriptPath"`
-	FileSize             int64               `json:"fileSize"`
-	ModTimeNano          int64               `json:"modTimeNano"`
-	StartedAt            string              `json:"startedAt,omitempty"`
-	LastActiveAt         string              `json:"lastActiveAt,omitempty"`
-	CurrentContextTokens int64               `json:"currentContextTokens"`
-	ChildConversationIDs []string            `json:"childConversationIds,omitempty"`
-	SpawnEdges           []SubagentSpawnEdge `json:"spawnEdges,omitempty"`
-	Self                 TokenRollup         `json:"self"`
-	Tree                 TokenRollup         `json:"tree"`
-	Turns                []TurnMetrics       `json:"turns,omitempty"`
+	ConversationID           string              `json:"conversationId"`
+	ParentConversationID     string              `json:"parentConversationId,omitempty"`
+	RootConversationID       string              `json:"rootConversationId,omitempty"`
+	TaskSlug                 string              `json:"taskSlug,omitempty"`
+	Title                    string              `json:"title,omitempty"`
+	Kind                     string              `json:"kind"` // "front_desk" | "task" | "subagent" | "nested_subagent" | "auto"
+	Scope                    string              `json:"scope,omitempty"`
+	Tier                     string              `json:"tier"` // "quick" | "standard" | "deep"
+	Model                    string              `json:"model,omitempty"`
+	Status                   string              `json:"status,omitempty"`
+	TranscriptPath           string              `json:"transcriptPath"`
+	FileSize                 int64               `json:"fileSize"`
+	ModTimeNano              int64               `json:"modTimeNano"`
+	StartedAt                string              `json:"startedAt,omitempty"`
+	LastActiveAt             string              `json:"lastActiveAt,omitempty"`
+	CurrentContextTokens     int64               `json:"currentContextTokens"`
+	CompactedPendingNextTurn bool                `json:"compactedPendingNextTurn,omitempty"`
+	ChildConversationIDs     []string            `json:"childConversationIds,omitempty"`
+	SpawnEdges               []SubagentSpawnEdge `json:"spawnEdges,omitempty"`
+	Self                     TokenRollup         `json:"self"`
+	Tree                     TokenRollup         `json:"tree"`
+	Turns                    []TurnMetrics       `json:"turns,omitempty"`
 }
 
 // ObsIndex is the stat-cached observability index persisted in local/memory/obs/index.json.
@@ -124,21 +126,22 @@ type BucketMetrics struct {
 
 // ObsSummaryReport is returned by `hq obs [tokens]`.
 type ObsSummaryReport struct {
-	GeneratedAt       string          `json:"generatedAt"`
-	Since             string          `json:"since"`
-	GroupBy           string          `json:"groupBy"`
-	ConversationCount int             `json:"conversationCount"`
-	Totals            TokenRollup     `json:"totals"`
-	FrontDesk         *TokenRollup    `json:"frontDesk,omitempty"`
-	FrontDeskContext  int64           `json:"frontDeskContextTokens"`
-	FrontDeskConvID   string          `json:"frontDeskConvId,omitempty"`
-	Buckets           []BucketMetrics `json:"buckets"`
-	ByTier            []BucketMetrics `json:"byTier"`
-	ByKind            []BucketMetrics `json:"byKind"`
-	Budget            BudgetConfig    `json:"budget"`
-	TodayUncached     int64           `json:"todayUncachedTokens"`
-	TodayDeepUncached int64           `json:"todayDeepUncachedTokens"`
-	Anomalies         []TokenAnomaly  `json:"anomalies,omitempty"`
+	GeneratedAt               string          `json:"generatedAt"`
+	Since                     string          `json:"since"`
+	GroupBy                   string          `json:"groupBy"`
+	ConversationCount         int             `json:"conversationCount"`
+	Totals                    TokenRollup     `json:"totals"`
+	FrontDesk                 *TokenRollup    `json:"frontDesk,omitempty"`
+	FrontDeskContext          int64           `json:"frontDeskContextTokens"`
+	FrontDeskCompactedPending bool            `json:"frontDeskCompactedPending,omitempty"`
+	FrontDeskConvID           string          `json:"frontDeskConvId,omitempty"`
+	Buckets                   []BucketMetrics `json:"buckets"`
+	ByTier                    []BucketMetrics `json:"byTier"`
+	ByKind                    []BucketMetrics `json:"byKind"`
+	Budget                    BudgetConfig    `json:"budget"`
+	TodayUncached             int64           `json:"todayUncachedTokens"`
+	TodayDeepUncached         int64           `json:"todayDeepUncachedTokens"`
+	Anomalies                 []TokenAnomaly  `json:"anomalies,omitempty"`
 }
 
 // TopItem represents a ranked conversation/task row in `hq obs top`.
@@ -227,30 +230,31 @@ type TaskTokenBadge struct {
 
 // DashboardSummary is embedded into Web UI `/api/state`, `/api/obs`, and `SyncMarkdownConsole`.
 type DashboardSummary struct {
-	UpdatedAt               string                    `json:"updatedAt"`
-	TodayUncachedTokens     int64                     `json:"todayUncachedTokens"`
-	TodayGrossTokens        int64                     `json:"todayGrossTokens"`
-	TodayCacheHitRatio      float64                   `json:"todayCacheHitRatio"`
-	TodayDeepUncachedTokens int64                     `json:"todayDeepUncachedTokens"`
-	TodayQuotaUnits         float64                   `json:"todayQuotaUnits"`
-	TodayTurnCount          int                       `json:"todayTurnCount"`
-	AllTimeUncachedTokens   int64                     `json:"allTimeUncachedTokens"`
-	AllTimeGrossTokens      int64                     `json:"allTimeGrossTokens"`
-	AllTimeCacheHitRatio    float64                   `json:"allTimeCacheHitRatio"`
-	FrontDeskConvID         string                    `json:"frontDeskConvId,omitempty"`
-	FrontDeskContextTokens  int64                     `json:"frontDeskContextTokens"`
-	FrontDeskPeakTokens     int64                     `json:"frontDeskPeakTokens"`
-	FrontDeskCompactions    int                       `json:"frontDeskCompactions"`
-	FrontDeskCacheHitRatio  float64                   `json:"frontDeskCacheHitRatio"`
-	FrontDeskContextStatus  string                    `json:"frontDeskContextStatus"` // "OK" | "WARN" | "CRITICAL"
-	Budget                  BudgetConfig              `json:"budget"`
-	DailyBudgetPct          float64                   `json:"dailyBudgetPct"`
-	DeepBudgetPct           float64                   `json:"deepBudgetPct"`
-	DailyTrend              []DailyBurnPoint          `json:"dailyTrend"`
-	TierBreakdown           []TierBurnPoint           `json:"tierBreakdown"`
-	TotalAnomalies          int                       `json:"totalAnomalies,omitempty"`
-	Anomalies               []TokenAnomaly            `json:"anomalies,omitempty"`
-	TaskBadges              map[string]TaskTokenBadge `json:"taskBadges,omitempty"`
+	UpdatedAt                 string                    `json:"updatedAt"`
+	TodayUncachedTokens       int64                     `json:"todayUncachedTokens"`
+	TodayGrossTokens          int64                     `json:"todayGrossTokens"`
+	TodayCacheHitRatio        float64                   `json:"todayCacheHitRatio"`
+	TodayDeepUncachedTokens   int64                     `json:"todayDeepUncachedTokens"`
+	TodayQuotaUnits           float64                   `json:"todayQuotaUnits"`
+	TodayTurnCount            int                       `json:"todayTurnCount"`
+	AllTimeUncachedTokens     int64                     `json:"allTimeUncachedTokens"`
+	AllTimeGrossTokens        int64                     `json:"allTimeGrossTokens"`
+	AllTimeCacheHitRatio      float64                   `json:"allTimeCacheHitRatio"`
+	FrontDeskConvID           string                    `json:"frontDeskConvId,omitempty"`
+	FrontDeskContextTokens    int64                     `json:"frontDeskContextTokens"`
+	FrontDeskPeakTokens       int64                     `json:"frontDeskPeakTokens"`
+	FrontDeskCompactions      int                       `json:"frontDeskCompactions"`
+	FrontDeskCacheHitRatio    float64                   `json:"frontDeskCacheHitRatio"`
+	FrontDeskContextStatus    string                    `json:"frontDeskContextStatus"` // "OK" | "WARN" | "CRITICAL"
+	FrontDeskCompactedPending bool                      `json:"frontDeskCompactedPending,omitempty"`
+	Budget                    BudgetConfig              `json:"budget"`
+	DailyBudgetPct            float64                   `json:"dailyBudgetPct"`
+	DeepBudgetPct             float64                   `json:"deepBudgetPct"`
+	DailyTrend                []DailyBurnPoint          `json:"dailyTrend"`
+	TierBreakdown             []TierBurnPoint           `json:"tierBreakdown"`
+	TotalAnomalies            int                       `json:"totalAnomalies,omitempty"`
+	Anomalies                 []TokenAnomaly            `json:"anomalies,omitempty"`
+	TaskBadges                map[string]TaskTokenBadge `json:"taskBadges,omitempty"`
 }
 
 // NormalizeTier infers "quick", "standard", or "deep" from tier and model strings.
@@ -424,19 +428,22 @@ func statFileStamp(path string) fileStatStamp {
 }
 
 type obsMetaStamps struct {
-	tasks   fileStatStamp
-	archive fileStatStamp
-	nested  fileStatStamp
-	fd      fileStatStamp
+	tasks        fileStatStamp
+	archive      fileStatStamp
+	nested       fileStatStamp
+	fd           fileStatStamp
+	fdTranscript fileStatStamp
 }
 
-func currentObsMetaStamps(vaultDir string) obsMetaStamps {
+func currentObsMetaStamps(vaultDir, brainDir string) obsMetaStamps {
 	memDir := filepath.Join(vaultDir, "memory")
+	_, _, fdSize, fdMod := currentFrontDeskTranscriptStamp(vaultDir, brainDir)
 	return obsMetaStamps{
-		tasks:   statFileStamp(filepath.Join(memDir, "tasks.json")),
-		archive: statFileStamp(filepath.Join(memDir, "tasks_archive.jsonl")),
-		nested:  statFileStamp(filepath.Join(memDir, "nested_conversations.json")),
-		fd:      statFileStamp(filepath.Join(memDir, "front_desk.json")),
+		tasks:        statFileStamp(filepath.Join(memDir, "tasks.json")),
+		archive:      statFileStamp(filepath.Join(memDir, "tasks_archive.jsonl")),
+		nested:       statFileStamp(filepath.Join(memDir, "nested_conversations.json")),
+		fd:           statFileStamp(filepath.Join(memDir, "front_desk.json")),
+		fdTranscript: fileStatStamp{size: fdSize, modNano: fdMod},
 	}
 }
 
@@ -459,7 +466,7 @@ var (
 	obsMemByV  = make(map[string]*obsMemCacheEntry)
 )
 
-const currentObsIndexVersion = 4
+const currentObsIndexVersion = 5
 
 func shallowCopyObsIndex(src *ObsIndex) *ObsIndex {
 	if src == nil {
@@ -699,8 +706,8 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 	now := time.Now()
 	idxPath := obsIndexFilePath(vaultDir)
 	diskStamp := statFileStamp(idxPath)
-	metaStamps := currentObsMetaStamps(vaultDir)
 	curBrainDir := ResolveBrainDir(vaultDir)
+	metaStamps := currentObsMetaStamps(vaultDir, curBrainDir)
 
 	mem, hasMem := obsMemByV[cleanVault]
 	if !hasMem || mem.idx == nil || mem.brainDir != curBrainDir || mem.indexStamp != diskStamp {
@@ -871,6 +878,7 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 			cp := fdCM.Self
 			rep.FrontDesk = &cp
 			rep.FrontDeskContext = fdCM.CurrentContextTokens
+			rep.FrontDeskCompactedPending = fdCM.CompactedPendingNextTurn
 		}
 	}
 
@@ -1311,7 +1319,10 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 			sum.FrontDeskPeakTokens = fdCM.Self.PeakContextTokens
 			sum.FrontDeskCompactions = fdCM.Self.CompactionCount
 			sum.FrontDeskCacheHitRatio = fdCM.Self.CacheHitRatio
+			sum.FrontDeskCompactedPending = fdCM.CompactedPendingNextTurn
 			switch {
+			case fdCM.CompactedPendingNextTurn:
+				sum.FrontDeskContextStatus = "OK"
 			case fdCM.CurrentContextTokens >= budget.CritContextTokens:
 				sum.FrontDeskContextStatus = "CRITICAL"
 			case fdCM.CurrentContextTokens >= budget.WarnContextTokens:
@@ -1353,15 +1364,18 @@ func GetFrontDeskContextStatus(vaultDir, transcriptPath string) (currentTokens i
 	if transcriptPath == "" && fd.ArtifactDir != "" {
 		transcriptPath = resolveTranscriptInDir(fd.ArtifactDir)
 	}
+	compactedPending := false
 	if transcriptPath != "" {
 		tm := ParseSingleTurnSlice(transcriptPath, 0)
 		currentTokens = tm.CurrentContextTokens
+		compactedPending = tm.CompactedPendingNextTurn
 	} else if idx, err := LoadOrRefreshIndex(vaultDir); err == nil {
 		if cm, exists := idx.Conversations[strings.ToLower(fd.ConversationID)]; exists {
 			currentTokens = cm.CurrentContextTokens
+			compactedPending = cm.CompactedPendingNextTurn
 		}
 	}
-	if budget.NudgeContextTokens > 0 && currentTokens >= budget.NudgeContextTokens {
+	if !compactedPending && budget.NudgeContextTokens > 0 && currentTokens >= budget.NudgeContextTokens {
 		nudgeBanner = fmt.Sprintf(
 			"## 💡 Front Desk Context Health (`%s` / `256k` tokens)\n"+
 				"- Active `[HQ] Front Desk` context is at **%s tokens** (threshold: `%s`). To prevent cold-cache wakeup token spikes between idle turns, consider running `/compact` or starting a fresh Front Desk shift (`./bin/hq release-desk`).",

@@ -642,14 +642,20 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			if ctx > curTurn.PeakContextTokens {
 				curTurn.PeakContextTokens = ctx
 			}
-			if st.Type == "PLANNER_RESPONSE" {
+			if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
 				curTurn.CurrentContextTokens = ctx
+				curTurn.CompactedPendingNextTurn = false
 				cm.CurrentContextTokens = ctx
+				cm.CompactedPendingNextTurn = false
 			}
 		}
 
 		if st.Type == "CHECKPOINT" {
 			curTurn.CompactionCount++
+			curTurn.CurrentContextTokens = 0
+			curTurn.CompactedPendingNextTurn = true
+			cm.CurrentContextTokens = 0
+			cm.CompactedPendingNextTurn = true
 		}
 
 		if st.Type == "USER_INPUT" {
@@ -861,8 +867,12 @@ func (s *TurnSliceScanner) ObserveLine(raw []byte) {
 	s.idx++
 
 	ctx := st.InputTokens + st.CacheReadTokens
-	if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
+	if st.Type == "CHECKPOINT" {
+		s.tm.CurrentContextTokens = 0
+		s.tm.CompactedPendingNextTurn = true
+	} else if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
 		s.tm.CurrentContextTokens = ctx
+		s.tm.CompactedPendingNextTurn = false
 	}
 
 	if curIdx < s.stepStartIdx {

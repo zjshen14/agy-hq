@@ -369,7 +369,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 				autoBindWorkspacesFromStop(vaultDir, payload.ConversationID, tm.TurnFilesModified)
 			}
 
-			if !taintedSession && obsTurn.CurrentContextTokens >= PreCompactionFlushTokens {
+			if !taintedSession && !obsTurn.CompactedPendingNextTurn && obsTurn.CurrentContextTokens >= PreCompactionFlushTokens {
 				var activeTask kernel.ActiveTask
 				hasActive := false
 				if matchedTask != nil && matchedTask.TaskSlug != "" {
@@ -401,6 +401,7 @@ func HandleStop(r io.Reader, w io.Writer, vaultDir string) error {
 			}
 			if obsTurn.CompactionCount > 0 {
 				_ = os.Remove(compactionNudgeMarkerPath(vaultDir, payload.ConversationID))
+				obs.InvalidateSummaryCache(vaultDir)
 			}
 			if !awaitingBackgroundTurn && !attemptSuperseded {
 				_, _ = kernel.CompleteConversationEvents(vaultDir, payload.ConversationID, time.Now())

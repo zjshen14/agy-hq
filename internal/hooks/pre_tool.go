@@ -269,7 +269,7 @@ func writeAllowWithOptionalCompactionNudge(w io.Writer, vaultDir string, payload
 		}
 		if !alreadyNudged {
 			tm := obs.ParseSingleTurnSlice(payload.TranscriptPath, 0)
-			if tm.CurrentContextTokens >= PreCompactionFlushTokens {
+			if !tm.CompactedPendingNextTurn && tm.CurrentContextTokens >= PreCompactionFlushTokens {
 				_ = os.MkdirAll(filepath.Dir(marker), 0o700)
 				_ = os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)), 0o600)
 				slug := "current-task"

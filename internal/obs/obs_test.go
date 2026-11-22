@@ -725,3 +725,152 @@ func TestSummaryCacheHitExpiryAndBudgetRefresh(t *testing.T) {
 		t.Fatalf("expected date-rollover cache miss")
 	}
 }
+
+func TestPostCheckpointWatermarkAndRecovery(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "dddd0001-0000-0000-0000-000000000001"
+	fdArtDir := filepath.Join(brainDir, fdID)
+	if err := kernel.SetFrontDesk(vaultDir, fdID, fdArtDir); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+
+	// 1. Pre-compaction Front Desk at 205k tokens -> CRITICAL + A1 anomaly + /compact nudge.
+	preLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-22T09:50:00Z","content":"Status?"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-22T09:50:03Z","input_tokens":20000,"cache_read_tokens":185000,"output_tokens":400,"content":"All green."}`,
+	}
+	fdPath := writeTranscriptFixture(t, brainDir, fdID, preLines)
+
+	sum1 := BuildDashboardSummary(vaultDir, now)
+	if sum1.FrontDeskContextTokens != 205000 || sum1.FrontDeskContextStatus != "CRITICAL" || sum1.FrontDeskCompactedPending {
+		t.Fatalf("pre-compaction summary = (tokens=%d status=%s compacted=%v), want (205000 CRITICAL false)",
+			sum1.FrontDeskContextTokens, sum1.FrontDeskContextStatus, sum1.FrontDeskCompactedPending)
+	}
+	hasA1 := false
+	for _, a := range sum1.Anomalies {
+		if a.Code == "A1" {
+			hasA1 = true
+		}
+	}
+	if !hasA1 {
+		t.Fatalf("expected A1 FrontDeskContextBloat anomaly pre-compaction, got %+v", sum1.Anomalies)
+	}
+	if curTok, _, nudge := GetFrontDeskContextStatus(vaultDir, fdPath); curTok != 205000 || nudge == "" {
+		t.Fatalf("expected pre-compaction nudge at 205k, got curTok=%d nudge=%q", curTok, nudge)
+	}
+
+	// 2. Append /compact CHECKPOINT with no subsequent PLANNER_RESPONSE yet.
+	postCompactLines := append(append([]string{}, preLines...),
+		`{"step_index":2,"type":"CHECKPOINT","source":"SYSTEM","created_at":"2026-11-22T09:55:00Z","input_tokens":10000,"cache_read_tokens":200000,"output_tokens":1800}`,
+	)
+	writeTranscriptFixture(t, brainDir, fdID, postCompactLines)
+
+	cm, err := ParseTranscriptFile(fdID, fdPath, "gemini-4-hydrogen-medium", "standard")
+	if err != nil {
+		t.Fatalf("ParseTranscriptFile post-compact: %v", err)
+	}
+	if cm.CurrentContextTokens != 0 || !cm.CompactedPendingNextTurn {
+		t.Fatalf("post-checkpoint cm = (cur=%d compacted=%v), want (0 true)", cm.CurrentContextTokens, cm.CompactedPendingNextTurn)
+	}
+	if cm.Self.PeakContextTokens != 210000 || cm.Self.CompactionCount != 1 {
+		t.Fatalf("post-checkpoint peak/compactions = (%d, %d), want (210000, 1)", cm.Self.PeakContextTokens, cm.Self.CompactionCount)
+	}
+	if len(cm.Turns) != 1 || !cm.Turns[0].CompactedPendingNextTurn || cm.Turns[0].CurrentContextTokens != 0 || cm.Turns[0].PeakContextTokens != 210000 {
+		t.Fatalf("unexpected post-checkpoint turn metrics: %+v", cm.Turns)
+	}
+
+	sliceTM := ParseSingleTurnSlice(fdPath, 0)
+	if sliceTM.CurrentContextTokens != 0 || !sliceTM.CompactedPendingNextTurn || sliceTM.PeakContextTokens != 210000 || sliceTM.CompactionCount != 1 {
+		t.Fatalf("unexpected ParseSingleTurnSlice post-checkpoint: %+v", sliceTM)
+	}
+
+	sum2 := BuildDashboardSummary(vaultDir, now)
+	if sum2.FrontDeskContextTokens != 0 || !sum2.FrontDeskCompactedPending || sum2.FrontDeskContextStatus != "OK" {
+		t.Fatalf("post-compaction summary = (tokens=%d compacted=%v status=%s), want (0 true OK)",
+			sum2.FrontDeskContextTokens, sum2.FrontDeskCompactedPending, sum2.FrontDeskContextStatus)
+	}
+	if sum2.FrontDeskPeakTokens != 210000 || sum2.FrontDeskCompactions != 1 {
+		t.Fatalf("post-compaction peak/compactions = (%d, %d), want (210000, 1)", sum2.FrontDeskPeakTokens, sum2.FrontDeskCompactions)
+	}
+	for _, a := range sum2.Anomalies {
+		if a.Code == "A1" {
+			t.Fatalf("expected no A1 anomaly right after CHECKPOINT, got %+v", a)
+		}
+	}
+	if curTok, _, nudge := GetFrontDeskContextStatus(vaultDir, fdPath); curTok != 0 || nudge != "" {
+		t.Fatalf("expected no /compact nudge right after CHECKPOINT, got curTok=%d nudge=%q", curTok, nudge)
+	}
+
+	// 3. Recovery on next user turn's PLANNER_RESPONSE (42k context).
+	recoveredLines := append(append([]string{}, postCompactLines...),
+		`{"step_index":3,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-22T09:58:00Z","content":"Next task"}`,
+		`{"step_index":4,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-22T09:58:02Z","input_tokens":12000,"cache_read_tokens":30000,"output_tokens":300,"content":"Ready."}`,
+	)
+	writeTranscriptFixture(t, brainDir, fdID, recoveredLines)
+
+	sum3 := BuildDashboardSummary(vaultDir, now)
+	if sum3.FrontDeskContextTokens != 42000 || sum3.FrontDeskCompactedPending || sum3.FrontDeskContextStatus != "OK" {
+		t.Fatalf("recovered summary = (tokens=%d compacted=%v status=%s), want (42000 false OK)",
+			sum3.FrontDeskContextTokens, sum3.FrontDeskCompactedPending, sum3.FrontDeskContextStatus)
+	}
+	if sum3.FrontDeskPeakTokens != 210000 || sum3.FrontDeskCompactions != 1 {
+		t.Fatalf("recovered peak/compactions = (%d, %d), want (210000, 1)", sum3.FrontDeskPeakTokens, sum3.FrontDeskCompactions)
+	}
+}
+
+func TestSummaryCacheInvalidatesOnFrontDeskTranscriptChange(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "dddd0002-0000-0000-0000-000000000002"
+	if err := kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID)); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+
+	preLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-22T09:50:00Z","content":"Hi"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-22T09:50:02Z","input_tokens":25000,"cache_read_tokens":180000,"output_tokens":200,"content":"Hello"}`,
+	}
+	writeTranscriptFixture(t, brainDir, fdID, preLines)
+
+	sum1 := BuildDashboardSummary(vaultDir, now)
+	if sum1.FrontDeskContextStatus != "CRITICAL" {
+		t.Fatalf("expected CRITICAL pre-compact, got %s", sum1.FrontDeskContextStatus)
+	}
+	if got, ok := loadSummaryCache(vaultDir, brainDir, now.Add(10*time.Second), 5*time.Minute); !ok || got.FrontDeskContextStatus != "CRITICAL" {
+		t.Fatalf("expected fresh summary cache hit before transcript change, got ok=%v status=%s", ok, got.FrontDeskContextStatus)
+	}
+
+	// Append CHECKPOINT to Front Desk transcript -> cache MUST miss immediately even 15s later (inside 5m TTL).
+	postLines := append(append([]string{}, preLines...),
+		`{"step_index":2,"type":"CHECKPOINT","source":"SYSTEM","created_at":"2026-11-22T09:55:00Z","input_tokens":5000,"cache_read_tokens":200000,"output_tokens":1500}`,
+	)
+	writeTranscriptFixture(t, brainDir, fdID, postLines)
+
+	if _, ok := loadSummaryCache(vaultDir, brainDir, now.Add(15*time.Second), 5*time.Minute); ok {
+		t.Fatalf("expected summary cache miss immediately after Front Desk transcript CHECKPOINT change")
+	}
+
+	// Rebuilding summary updates cache stamp; subsequent load hits with OK + compacted state.
+	sum2 := BuildDashboardSummary(vaultDir, now.Add(15*time.Second))
+	if !sum2.FrontDeskCompactedPending || sum2.FrontDeskContextStatus != "OK" {
+		t.Fatalf("expected OK compacted summary after rebuild, got %+v", sum2)
+	}
+	if got2, ok := loadSummaryCache(vaultDir, brainDir, now.Add(20*time.Second), 5*time.Minute); !ok || !got2.FrontDeskCompactedPending || got2.FrontDeskContextStatus != "OK" {
+		t.Fatalf("expected fresh cache hit with compacted state, got ok=%v compacted=%v status=%s", ok, got2.FrontDeskCompactedPending, got2.FrontDeskContextStatus)
+	}
+
+	// Explicit InvalidateSummaryCache forces miss immediately.
+	InvalidateSummaryCache(vaultDir)
+	if _, ok := loadSummaryCache(vaultDir, brainDir, now.Add(21*time.Second), 5*time.Minute); ok {
+		t.Fatalf("expected cache miss after InvalidateSummaryCache")
+	}
+}

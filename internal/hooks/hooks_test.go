@@ -2659,3 +2659,62 @@ func mustJSONLine(v interface{}) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+func TestPostCheckpointSuppressesCompactionNudgeAndInvalidatesSummaryCache(t *testing.T) {
+	vaultDir := t.TempDir()
+	brainDir := filepath.Join(t.TempDir(), "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	convID := "cccc0001-0000-0000-0000-000000000001"
+	logDir := filepath.Join(brainDir, convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logDir: %v", err)
+	}
+	transcriptPath := filepath.Join(logDir, "transcript.jsonl")
+	lines := []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-22T09:50:00Z","content":"Run check"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-22T09:50:02Z","input_tokens":20000,"cache_read_tokens":150000,"output_tokens":300,"content":"Done"}`,
+		`{"step_index":2,"type":"CHECKPOINT","source":"SYSTEM","created_at":"2026-11-22T09:55:00Z","input_tokens":5000,"cache_read_tokens":170000,"output_tokens":1200}`,
+	}
+	if err := os.WriteFile(transcriptPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	// 1. PreToolUse right after CHECKPOINT must NOT emit Pre-Compaction Checkpoint Nudge.
+	var preOut bytes.Buffer
+	preReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId": convID,
+		"transcriptPath": transcriptPath,
+		"toolCall": map[string]interface{}{
+			"name": "read_file",
+			"args": map[string]interface{}{"Path": "/tmp/example.txt"},
+		},
+	})
+	if err := HandlePreToolUse(bytes.NewReader(preReq), &preOut, vaultDir); err != nil {
+		t.Fatalf("HandlePreToolUse: %v", err)
+	}
+	if strings.Contains(preOut.String(), "Pre-Compaction Checkpoint Nudge") {
+		t.Fatalf("expected no compaction nudge right after CHECKPOINT, got: %s", preOut.String())
+	}
+
+	// 2. Seed a dummy summary_cache.json; HandleStop on a turn with CompactionCount > 0 must invalidate it.
+	cachePath := filepath.Join(vaultDir, "memory", "obs", "summary_cache.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir obs dir: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatalf("write stale cache: %v", err)
+	}
+	var stopOut bytes.Buffer
+	stopReq, _ := json.Marshal(map[string]interface{}{
+		"conversationId":  convID,
+		"transcriptPath":  transcriptPath,
+		"executionNumber": 1,
+	})
+	if err := HandleStop(bytes.NewReader(stopReq), &stopOut, vaultDir); err != nil {
+		t.Fatalf("HandleStop: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("expected HandleStop with CompactionCount > 0 to invalidate summary_cache.json, stat err=%v", err)
+	}
+}

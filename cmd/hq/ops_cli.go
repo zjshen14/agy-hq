@@ -131,6 +131,7 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 		triggerWorkspaceMaintenance(time.Now())
 		_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), *dryRun)
 		_ = webui.SyncMarkdownConsole(vaultDir)
+		_, _, lastFDSize, lastFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
 		fastTicker := time.NewTicker(15 * time.Second)
 		cronTicker := time.NewTicker(30 * time.Second)
 		hbTicker := time.NewTicker(30 * time.Minute)
@@ -167,7 +168,12 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 						syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
 					}
 				}
-				if len(fired) > 0 || dlgRep.ItemsProcessed > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 {
+				_, _, curFDSize, curFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
+				fdTranscriptChanged := curFDSize != lastFDSize || curFDMod != lastFDMod
+				if fdTranscriptChanged {
+					lastFDSize, lastFDMod = curFDSize, curFDMod
+				}
+				if len(fired) > 0 || dlgRep.ItemsProcessed > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 || fdTranscriptChanged {
 					_ = webui.SyncMarkdownConsole(vaultDir)
 				}
 			case <-cronTicker.C:
@@ -666,9 +672,13 @@ func runObsCLI(vaultDir string, args []string) {
 			if len(fdID) > 8 {
 				fdID = fdID[:8]
 			}
+			fdCtxStr := obs.FormatTokensCompact(rep.FrontDeskContext)
+			if rep.FrontDeskCompactedPending {
+				fdCtxStr = "compacted (pending next turn)"
+			}
 			fmt.Printf("  [HQ] Front Desk (%s): Context %s / 256k (Peak: %s | Compactions: %d | CHR: %.1f%%)\n",
 				fdID,
-				obs.FormatTokensCompact(rep.FrontDeskContext),
+				fdCtxStr,
 				obs.FormatTokensCompact(rep.FrontDesk.PeakContextTokens),
 				rep.FrontDesk.CompactionCount,
 				rep.FrontDesk.CacheHitRatio*100.0)
@@ -804,8 +814,12 @@ func runObsCLI(vaultDir string, args []string) {
 		if cm.ParentConversationID != "" {
 			fmt.Printf("  Parent Conversation: %s\n", cm.ParentConversationID)
 		}
+		curCtxStr := obs.FormatTokensCompact(cm.CurrentContextTokens)
+		if cm.CompactedPendingNextTurn {
+			curCtxStr = "compacted (pending next turn)"
+		}
 		fmt.Printf("  Current Context: %s | Peak Context: %s | Compactions: %d\n",
-			obs.FormatTokensCompact(cm.CurrentContextTokens),
+			curCtxStr,
 			obs.FormatTokensCompact(cm.Self.PeakContextTokens),
 			cm.Self.CompactionCount)
 		fmt.Printf("  Self Burn: Uncached %s (In: %s, Out: %s) | Gross %s | CHR %.1f%% | QBU %.0f | Latency %s\n",

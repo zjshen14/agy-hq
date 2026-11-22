@@ -154,8 +154,12 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
 		)
 	}
-	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s / 256k` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
-		obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens),
+	fdCtxDisplay := obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens) + " / 256k"
+	if state.Observability.FrontDeskCompactedPending {
+		fdCtxDisplay = "compacted (pending next turn) / 256k"
+	}
+	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
+		fdCtxDisplay,
 		state.Observability.FrontDeskContextStatus,
 		state.Observability.FrontDeskCompactions,
 		state.Observability.FrontDeskCacheHitRatio*100.0,

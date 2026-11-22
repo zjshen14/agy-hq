@@ -515,3 +515,87 @@ func TestSyncMarkdownConsoleForHookWritesConsoleAndArtifact(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncMarkdownConsolePostCheckpointWatermark(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	fdID := "fd-compact-watermark-0001"
+	fdArtDir := filepath.Join(brainDir, fdID)
+	logDir := filepath.Join(fdArtDir, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logDir: %v", err)
+	}
+	if err := kernel.SetFrontDesk(vaultDir, fdID, fdArtDir); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+	transcriptPath := filepath.Join(logDir, "transcript.jsonl")
+
+	writeLines := func(lines []string) {
+		t.Helper()
+		if err := os.WriteFile(transcriptPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("write transcript: %v", err)
+		}
+	}
+
+	// 1. Pre-compaction at 205k -> CRITICAL in CONSOLE.md and hq_console.md
+	preLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-22T09:50:00Z","content":"Status?"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-22T09:50:02Z","input_tokens":20000,"cache_read_tokens":185000,"output_tokens":300,"content":"All green."}`,
+	}
+	writeLines(preLines)
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole pre-compact: %v", err)
+	}
+	raw1, err := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	if err != nil {
+		t.Fatalf("read CONSOLE.md pre-compact: %v", err)
+	}
+	if !strings.Contains(string(raw1), "- **Front Desk Context Watermark:** `205k / 256k` (`CRITICAL`") {
+		t.Fatalf("expected CRITICAL 205k watermark pre-compact, got:\n%s", string(raw1))
+	}
+
+	// 2. Append CHECKPOINT -> CONSOLE.md and hq_console.md immediately show OK compacted state (not CRITICAL)
+	postLines := append(append([]string{}, preLines...),
+		`{"step_index":2,"type":"CHECKPOINT","source":"SYSTEM","created_at":"2026-11-22T09:55:00Z","input_tokens":10000,"cache_read_tokens":200000,"output_tokens":1600}`,
+	)
+	writeLines(postLines)
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole post-compact: %v", err)
+	}
+	for _, p := range []string{filepath.Join(vaultDir, "CONSOLE.md"), filepath.Join(fdArtDir, "hq_console.md")} {
+		raw2, rErr := os.ReadFile(p)
+		if rErr != nil {
+			t.Fatalf("read %s post-compact: %v", p, rErr)
+		}
+		text2 := string(raw2)
+		if !strings.Contains(text2, "- **Front Desk Context Watermark:** `compacted (pending next turn) / 256k` (`OK` · Compactions: `1`") {
+			t.Fatalf("expected compacted OK watermark in %s, got:\n%s", p, text2)
+		}
+		if strings.Contains(text2, "Front Desk context 205k / 256k (CRITICAL)") {
+			t.Fatalf("expected doctor health row not to report stale CRITICAL in %s, got:\n%s", p, text2)
+		}
+		if !strings.Contains(text2, "Front Desk context compacted (pending next turn) / 256k (OK)") {
+			t.Fatalf("expected doctor health row to report compacted OK in %s, got:\n%s", p, text2)
+		}
+	}
+
+	// 3. Recovery on next turn PLANNER_RESPONSE at 42k -> normal OK numeric watermark
+	recLines := append(append([]string{}, postLines...),
+		`{"step_index":3,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-22T09:58:00Z","content":"Next"}`,
+		`{"step_index":4,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-22T09:58:02Z","input_tokens":12000,"cache_read_tokens":30000,"output_tokens":250,"content":"Done."}`,
+	)
+	writeLines(recLines)
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole post-recovery: %v", err)
+	}
+	raw3, err := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	if err != nil {
+		t.Fatalf("read CONSOLE.md post-recovery: %v", err)
+	}
+	if !strings.Contains(string(raw3), "- **Front Desk Context Watermark:** `42k / 256k` (`OK` · Compactions: `1`") {
+		t.Fatalf("expected 42k OK watermark after recovery, got:\n%s", string(raw3))
+	}
+}

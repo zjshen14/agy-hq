@@ -357,6 +357,9 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 	todayUncachedStr := obs.FormatTokensCompact(obsSum.TodayUncachedTokens)
 	dailyBudgetStr := obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget)
 	fdCtxStr := obs.FormatTokensCompact(obsSum.FrontDeskContextTokens)
+	if obsSum.FrontDeskCompactedPending {
+		fdCtxStr = "compacted (pending next turn)"
+	}
 	chrPct := obsSum.TodayCacheHitRatio * 100.0
 	var tokStatus, tokDetail string
 	switch {

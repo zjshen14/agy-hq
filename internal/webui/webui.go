@@ -658,7 +658,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	}
 }
 
-type vaultStateFingerprint [15]int64
+type vaultStateFingerprint [16]int64
 
 func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	var fp vaultStateFingerprint
@@ -687,6 +687,8 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	statAt(12, filepath.Join(mem, "channels"))
 	statAt(13, filepath.Join(vaultDir, "private", "channels"))
 	statAt(14, filepath.Join(mem, "workspaces.json"))
+	_, _, fdSize, fdMod := obs.FrontDeskTranscriptStamp(vaultDir)
+	fp[15] = fdMod ^ (fdSize << 13)
 	return fp
 }
 
