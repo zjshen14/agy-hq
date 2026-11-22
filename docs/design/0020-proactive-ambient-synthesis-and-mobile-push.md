@@ -1,10 +1,14 @@
 # RFC-0020: Cross-Source Ambient Synthesis Loop, Pre-Meeting / Deadline Nudges & Optional Zero-Body Mobile Push
 
-- **Status:** Proposed (Phase 1 — Awaiting User Review)
+- **Status:** Superseded by [RFC-0027](./0027-muse-proactive-actions.md) *(marked superseded 2026-11-22; `RFC-0027` remains Proposed — Awaiting User Review)*
 - **Author:** `[Task:headquarter] Proactive Always-On Synthesis` (`gemini-4-carbon-high`)
 - **Created:** 2026-11-16
+- **Superseded By:** [RFC-0027 (Muse-Informed Proactive Actions)](./0027-muse-proactive-actions.md) & [RFC-0023 (Vendor-Neutral Front Desk Channel Bridge)](./0023-front-desk-channel-bridge.md)
 - **Companion Research:** [10 — Meta Muse (`muse.ai`) Deep Dive](../research/10_muse_ai_proactive_and_context_study.md), [13 — General Watcher Mechanism & Quarantine Provenance Audit](../research/13_proactive_channel_watcher_audit.md), [14 — Anthropic Always-On Agents Architecture & Forensic Gap Audit](../research/14_anthropic_always_on_agents_gap_audit.md)
 - **Extends / Integrates With:** [RFC-0014 (Proactive Engine v2)](./0014-proactive-engine-and-living-context.md), [RFC-0017a (Connector Protocol & Watcher Engine)](./0017a-connector-protocol-and-watcher-engine.md), [RFC-0017b (Provenance Taint & Offer Gateway)](./0017b-provenance-taint-and-offer-gateway.md), [RFC-0018 (Always-On Runtime Hardening)](./0018-always-on-agent-runtime-hardening.md)
+
+> [!NOTE]
+> **Supersession Notice:** All five detectors (`P1`–`P5`) originally proposed here have been subsumed and expanded into `D1`–`D10` of [RFC-0027: Muse-Informed Proactive Actions](./0027-muse-proactive-actions.md) (which adds 3-state readiness ledgers, `BlocksAvailability` ripples, work-native workspace/PR/delegate synthesis, `3m` burst coalescing, 1-tap `DecisionOption` cards, and composable Living Spaces), while mobile interrupt delivery and 1-tap callbacks are handled via the [RFC-0023](./0023-front-desk-channel-bridge.md) `hq-channel-bridge/v1` seam. This document is preserved for historical context.
 
 ---
 
