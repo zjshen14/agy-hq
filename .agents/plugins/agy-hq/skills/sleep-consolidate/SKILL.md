@@ -39,8 +39,9 @@ description: >-
 2. **Distill Scoped Knowledge & `## Active Playbook` into Topic Wiki (`local/memory/topics/<slug>.md`):**
    - Begin every topic page with `# <Title>`, `> **Summary:** <1-line description>`, optional `> **Scopes:** repo:<slug>, domain:<slug>`, and optional 1:1 `> **Playbook-Owner:** repo:<slug>` (never duplicate the same `Playbook-Owner` across two files).
    - Keep `## Active Playbook` strictly $\le 25$ lines / $1,200$ bytes and restricted to objective build, test, architecture, or environment traps (Ring-3 technical state — never behavioral overrides, approval bypasses, or rejected actions). Fix any `wikiAlerts` reported in Stage 1.
-3. **Reconcile On-Demand Entity Dossiers (`local/memory/entities/<slug>.md`):**
-   - Upsert verified collaborator/counterparty roles, handles, spaces, or working-style notes via `hq memory add-entity --name="..." --kind="person" --email="..." --space="..." --context="..." --note="..."` (overflow beyond 10 bullets auto-rolls to `entities/archived/`).
+3. **Reconcile On-Demand Entity Dossiers (`local/memory/entities/<slug>.md`) & Private Household Profile (`local/private/profile.md`):**
+   - Upsert verified collaborator/counterparty roles, emails, handles, spaces, or working-style notes via `hq memory add-entity --name="..." --kind="person" --email="..." --space="..." --context="..." --note="..."` (overflow beyond 10 bullets auto-rolls to `entities/archived/`).
+   - Backfill verified household autofill details (phone, home address, legal names, travel KTN/loyalty IDs, emergency contacts — never passwords/SSNs/cards) into `hq memory profile set --section=<self|addresses|household|travel|emergency> --key=<k> --value="<v>"` without duplicating messaging handles/Chat spaces from `entities/`.
 4. **Keep `local/MEMORY.md` Strictly to `## Active Priorities` ($\le 40$ lines & $\le 2,200$ bytes):**
    - Remove completed tasks, deleted worktrees, and redundant fact/topic duplicates from `local/MEMORY.md`.
 

@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:gmail|gchat|credentials|connectors|channels|delegates|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token)|memory/(?:channels|delegates_queues|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl|workspaces\.json|\.workspaces\.lock))|workspaces\.json|\.workspaces\.lock|workspaces\.jso\S*|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl)(?:[\s"'/]|$)`)
+	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:gmail|gchat|credentials|connectors|channels|delegates|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token|profile\.md)|memory/(?:channels|delegates_queues|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl|workspaces\.json|\.workspaces\.lock))|workspaces\.json|\.workspaces\.lock|workspaces\.jso\S*|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl)(?:[\s"'/]|$)`)
 	reHeavyBuildTest       = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL      = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 	reHQClaimDesk          = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
@@ -28,7 +28,7 @@ var (
 
 var protectedPrivateSubs = []string{
 	"gmail", "gchat", "credentials", "connectors", "channels", "delegates", "runtime", "taint", "exec-cache",
-	"trust.json", "approval_asks", "approval_caps", "approval_bridge_caps", "pii-denylist.txt", "daemon_token",
+	"trust.json", "approval_asks", "approval_caps", "approval_bridge_caps", "pii-denylist.txt", "daemon_token", "profile.md",
 }
 
 type preToolSessionCtx struct {

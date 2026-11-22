@@ -6749,6 +6749,43 @@ func TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval(t *testing.T) {
 	if err != nil || !strings.Contains(compactOut, "Lifecycle archival:") {
 		t.Fatalf("expected unified `hq memory compact` output, got err=%v out=%s", err, compactOut)
 	}
+
+	// 7. Verify `hq memory profile` (Tier-2 private household autofill PII):
+	//    - set/get/unset work at 0600, rejected for Tier-3 secrets (SSN/password/card),
+	//    - excluded from `memory search`, denied under taint & unattended [Auto],
+	//    - raw PreToolUse read_file on local/private/profile.md is blocked, and `forget` cascades cleanly.
+	if out, err := env.run("", "memory", "profile", "set", "--section=addresses", "--key=home", "--value=742 Evergreen Terrace, Springfield"); err != nil || !strings.Contains(out, "addresses.home") {
+		t.Fatalf("hq memory profile set failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "memory", "profile", "get", "--section=addresses"); err != nil || !strings.Contains(out, "742 Evergreen Terrace") {
+		t.Fatalf("hq memory profile get failed: %v (%s)", err, out)
+	}
+	if out, err := env.run("", "memory", "profile", "set", "--section=self", "--key=ssn", "--value=123-45-6789"); err == nil {
+		t.Fatalf("expected Tier-3 secret guard to reject SSN in `hq memory profile set`, got: %s", out)
+	}
+	profSearchOut, err := env.run("", "memory", "search", "742 Evergreen Terrace", "--json")
+	if err != nil || strings.Contains(profSearchOut, "742 Evergreen Terrace") {
+		t.Fatalf("expected private/profile.md to be excluded from `hq memory search`, got err=%v out=%s", err, profSearchOut)
+	}
+	if out, err := env.runWithEnv("", []string{"ANTIGRAVITY_CONVERSATION_ID=" + taintedCID}, "memory", "profile", "get"); err == nil {
+		t.Fatalf("expected tainted caller to be denied `hq memory profile get`, got: %s", out)
+	}
+	if out, err := env.runWithEnv("", []string{"ANTIGRAVITY_CONVERSATION_ID=" + autoCID}, "memory", "profile", "get"); err == nil {
+		t.Fatalf("expected unattended [Auto] worker to be denied `hq memory profile get`, got: %s", out)
+	}
+	rawReadProbe, _ := json.Marshal(map[string]interface{}{
+		"conversationId": "conv-normal-probe",
+		"toolCall": map[string]interface{}{
+			"name": "read_file",
+			"args": map[string]interface{}{"Path": filepath.Join(env.vaultDir, "private", "profile.md")},
+		},
+	})
+	if preOut, pErr := env.run(string(rawReadProbe), "hook", "pre-tool"); pErr != nil || !strings.Contains(preOut, `"decision":"deny"`) {
+		t.Fatalf("expected PreToolUse to deny raw read_file on private/profile.md, got err=%v out=%s", pErr, preOut)
+	}
+	if out, err := env.run("", "memory", "forget", "742 Evergreen Terrace"); err != nil || !strings.Contains(out, "scrubbedFiles=1") {
+		t.Fatalf("expected `hq memory forget` to scrub private/profile.md, got err=%v out=%s", err, out)
+	}
 }
 
 // CUJ-40: Real CLI E2E verification of Layer-1 Task Board boundary across hooks, adopt, and clean-nested

@@ -691,6 +691,29 @@ func forgetMemoryInner(vaultDir, query, topicSlug, entitySlug string, blockPII, 
 				}
 			}
 		}
+
+		// 7b. Scrub matching lines from local/private/profile.md (Tier-2 household profile)
+		profPath := ProfilePath(vaultDir)
+		if isRegularNonSymlinkFile(profPath) {
+			if raw, err := os.ReadFile(profPath); err == nil {
+				lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+				var kept []string
+				changed := false
+				for _, line := range lines {
+					if strings.Contains(strings.ToLower(line), qLower) {
+						changed = true
+						continue
+					}
+					kept = append(kept, line)
+				}
+				if changed {
+					recordScrubbed(profPath)
+					if !dryRun {
+						_ = store.WriteAtomic(profPath, []byte(strings.Join(kept, "\n")), 0o600)
+					}
+				}
+			}
+		}
 	}
 
 	// 8. Optionally append query to local/private/pii-denylist.txt (--block-pii)

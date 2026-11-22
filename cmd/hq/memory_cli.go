@@ -529,6 +529,121 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			}
 		}
 
+	case "profile":
+		action := "get"
+		pArgs := rest
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			action = strings.ToLower(strings.TrimSpace(rest[0]))
+			pArgs = rest[1:]
+		}
+		// Block unattended [Auto] workers from accessing private/profile.md
+		// (only nightly sleep-consolidate may invoke `set` for verified backfill).
+		if callerConv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")); callerConv != "" {
+			if t, ok := kernel.FindTaskByConversationID(vaultDir, callerConv); ok && t.EffectiveKind() == "auto" {
+				lowerMeta := strings.ToLower(t.TaskSlug + " " + t.Title)
+				isDream := strings.Contains(lowerMeta, "sleep-consolidate") || strings.Contains(lowerMeta, "sleep_consolidate")
+				if !(isDream && action == "set") {
+					fmt.Fprintf(os.Stderr, "hq memory profile %s denied: unattended [Auto] workers cannot access private/profile.md\n", action)
+					os.Exit(1)
+				}
+			}
+		}
+		switch action {
+		case "get", "list", "show":
+			fs := flag.NewFlagSet("memory profile get", flag.ExitOnError)
+			secFlag := fs.String("section", "", "Optional section filter (self, addresses, household, travel, emergency)")
+			keyFlag := fs.String("key", "", "Optional key filter (or section.key)")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(pArgs)
+			prof, err := vault.LoadProfile(vaultDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory profile get failed: %v\n", err)
+				os.Exit(1)
+			}
+			secFilter := strings.TrimSpace(*secFlag)
+			keyFilter := strings.TrimSpace(*keyFlag)
+			if keyFilter != "" || secFilter != "" {
+				var normSec, normKey string
+				if keyFilter != "" && (secFilter != "" || strings.Contains(keyFilter, ".")) {
+					normSec, normKey = vault.ParseProfileSectionAndKey(secFilter, keyFilter)
+				} else if secFilter != "" {
+					normSec, _ = vault.ParseProfileSectionAndKey(secFilter, "x")
+					normKey = ""
+				} else {
+					_, normKey = vault.ParseProfileSectionAndKey("self", keyFilter)
+				}
+				filtered := make(map[string]map[string]string)
+				for sec, fields := range prof.Sections {
+					if normSec != "" && sec != normSec {
+						continue
+					}
+					for k, v := range fields {
+						if normKey != "" && k != normKey {
+							continue
+						}
+						if filtered[sec] == nil {
+							filtered[sec] = make(map[string]string)
+						}
+						filtered[sec][k] = v
+					}
+				}
+				prof.Sections = filtered
+			}
+			if *asJSON {
+				printJSON(prof)
+				return
+			}
+			if len(prof.Sections) == 0 {
+				fmt.Println("No private household profile entries stored yet.")
+				return
+			}
+			fmt.Print(vault.FormatProfileMarkdown(prof))
+
+		case "set":
+			fs := flag.NewFlagSet("memory profile set", flag.ExitOnError)
+			secFlag := fs.String("section", "", "Profile section (self, addresses, household, travel, emergency; defaults to self)")
+			keyFlag := fs.String("key", "", "Field key (e.g., phone, home, spouse_name, or shorthand addresses.home)")
+			valFlag := fs.String("value", "", "Field value (Tier-2 autofill PII only; passwords/SSNs/cards are rejected)")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(pArgs)
+			prof, err := vault.SetProfileField(vaultDir, *secFlag, *keyFlag, *valFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory profile set failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *asJSON {
+				printJSON(prof)
+				return
+			}
+			sec, k := vault.ParseProfileSectionAndKey(*secFlag, *keyFlag)
+			fmt.Printf("Saved private profile field %s.%s (0600)\n", sec, k)
+
+		case "unset", "delete", "rm":
+			fs := flag.NewFlagSet("memory profile unset", flag.ExitOnError)
+			secFlag := fs.String("section", "", "Optional section (self, addresses, household, travel, emergency)")
+			keyFlag := fs.String("key", "", "Field key to remove (or section.key)")
+			asJSON := fs.Bool("json", false, "Output JSON")
+			_ = fs.Parse(pArgs)
+			prof, removed, err := vault.UnsetProfileField(vaultDir, *secFlag, *keyFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq memory profile unset failed: %v\n", err)
+				os.Exit(1)
+			}
+			if *asJSON {
+				printJSON(map[string]interface{}{"removed": removed, "profile": prof})
+				return
+			}
+			if removed {
+				fmt.Printf("Removed private profile field %q\n", *keyFlag)
+			} else {
+				fmt.Printf("Private profile field %q not found\n", *keyFlag)
+			}
+
+		default:
+			fmt.Fprintf(os.Stderr, "usage: hq memory profile <get|set|unset> [--section=self|addresses|household|travel|emergency] [--key=...] [--value=...] [--json]\n")
+			os.Exit(1)
+		}
+
 	case "commit":
 		fs := flag.NewFlagSet("memory commit", flag.ExitOnError)
 		msg := fs.String("message", "", "Optional commit message for the private Vault git repository")
@@ -565,7 +680,7 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 		}
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, search, dream-plan, eval, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup, commit)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s (expected status, topics, search, dream-plan, eval, add-fact, prune-fact, compact, verify-transcript, forget, entities, add-entity, lookup, profile, commit)\n", sub)
 		os.Exit(1)
 	}
 }
