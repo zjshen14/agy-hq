@@ -1,12 +1,18 @@
 package kernel
 
 import (
+	"bufio"
 	"encoding/xml"
+	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestParseTriggersFile(t *testing.T) {
@@ -266,5 +272,119 @@ func TestParseSystemdSupervisorProps(t *testing.T) {
 	})
 	if !strings.Contains(formatted, "DEGRADED") || !strings.Contains(formatted, "WARNING:") || !strings.Contains(formatted, "NRestarts=4589") {
 		t.Fatalf("expected FormatDaemonStatus to surface DEGRADED and NRestarts, got:\n%s", formatted)
+	}
+}
+
+func TestUninstallDaemonHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_UNINSTALL_DAEMON_HELPER") != "1" {
+		return
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	fmt.Println("READY")
+	select {
+	case <-sigCh:
+		time.Sleep(100 * time.Millisecond)
+		os.Exit(0)
+	case <-time.After(10 * time.Second):
+		os.Exit(1)
+	}
+}
+
+func TestUninstallDaemonWaitsForProcessExit(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	tmpDir := t.TempDir()
+	vaultDir := filepath.Join(tmpDir, "local")
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir memory: %v", err)
+	}
+	t.Setenv("HQ_SYSTEMD_DIR", filepath.Join(tmpDir, "systemd"))
+	t.Setenv("HQ_LAUNCHD_DIR", filepath.Join(tmpDir, "LaunchAgents"))
+	t.Setenv("HQ_SKIP_SYSTEMCTL", "1")
+	t.Setenv("HQ_SKIP_LAUNCHCTL", "1")
+
+	cmd := exec.Command(exe, "-test.run=^TestUninstallDaemonHelper$", "--", "daemon")
+	cmd.Env = append(os.Environ(), "GO_WANT_UNINSTALL_DAEMON_HELPER=1")
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	cmd.Stdout = pipeW
+	if err := cmd.Start(); err != nil {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+		t.Fatalf("Start helper: %v", err)
+	}
+	_ = pipeW.Close()
+
+	var waitErr error
+	waitDone := make(chan struct{})
+	go func() {
+		waitErr = cmd.Wait()
+		close(waitDone)
+	}()
+	defer func() {
+		select {
+		case <-waitDone:
+		default:
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-waitDone
+		}
+		_ = pipeR.Close()
+	}()
+
+	readyCh := make(chan bool, 1)
+	go func() {
+		defer pipeR.Close()
+		sc := bufio.NewScanner(pipeR)
+		sent := false
+		for sc.Scan() {
+			if !sent && strings.TrimSpace(sc.Text()) == "READY" {
+				readyCh <- true
+				sent = true
+			}
+		}
+		if !sent {
+			readyCh <- false
+		}
+	}()
+	select {
+	case ok := <-readyCh:
+		if !ok {
+			t.Fatalf("daemon helper exited before signaling READY")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for daemon helper READY")
+	}
+
+	stateBytes := []byte(fmt.Sprintf(`{"pid":%d,"addr":"127.0.0.1:4799"}`, cmd.Process.Pid))
+	statePath := filepath.Join(vaultDir, "memory", "daemon.json")
+	if err := os.WriteFile(statePath, stateBytes, 0o600); err != nil {
+		t.Fatalf("write daemon.json: %v", err)
+	}
+
+	msg, err := UninstallDaemon(vaultDir)
+	if err != nil {
+		t.Fatalf("UninstallDaemon failed: %v", err)
+	}
+	if !strings.Contains(msg, fmt.Sprintf("Stopped running daemon process (PID %d)", cmd.Process.Pid)) {
+		t.Fatalf("expected UninstallDaemon message to confirm PID stop, got: %q", msg)
+	}
+	if _, statErr := os.Stat(statePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected daemon.json to be removed after UninstallDaemon, statErr=%v", statErr)
+	}
+
+	select {
+	case <-waitDone:
+		if waitErr != nil {
+			t.Fatalf("expected helper daemon to exit cleanly on SIGTERM, got err=%v", waitErr)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("UninstallDaemon returned before daemon helper finished graceful shutdown")
 	}
 }

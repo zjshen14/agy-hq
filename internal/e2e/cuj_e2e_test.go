@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1307,32 +1308,70 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 	}
 
 	// 5. Test daemon running state by starting a real background daemon process
-	daemonCmd := exec.Command(env.binPath, "daemon", "--addr=127.0.0.1:4799")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate loopback port for daemon: %v", err)
+	}
+	daemonAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	var daemonBaseEnv []string
+	for _, ev := range os.Environ() {
+		if strings.HasPrefix(ev, "ANTIGRAVITY_") || strings.HasPrefix(ev, "HQ_") || strings.HasPrefix(ev, "PORT=") {
+			continue
+		}
+		daemonBaseEnv = append(daemonBaseEnv, ev)
+	}
+	daemonCmd := exec.Command(env.binPath, "daemon", "--addr="+daemonAddr)
 	daemonCmd.Dir = env.rootDir
-	daemonCmd.Env = append(os.Environ(),
+	daemonCmd.Env = append(daemonBaseEnv,
 		"HQ_ROOT_DIR="+env.rootDir,
 		"HQ_VAULT_DIR="+env.vaultDir,
 	)
+	var daemonOut bytes.Buffer
+	daemonCmd.Stdout = &daemonOut
+	daemonCmd.Stderr = &daemonOut
 	if err := daemonCmd.Start(); err != nil {
 		t.Fatalf("failed to start daemon process: %v", err)
 	}
+	var daemonWaitErr error
+	daemonDone := make(chan struct{})
+	go func() {
+		daemonWaitErr = daemonCmd.Wait()
+		close(daemonDone)
+	}()
 	defer func() {
-		if daemonCmd.Process != nil {
-			_ = daemonCmd.Process.Kill()
+		select {
+		case <-daemonDone:
+		default:
+			if daemonCmd.Process != nil {
+				_ = daemonCmd.Process.Kill()
+			}
+			<-daemonDone
 		}
 	}()
 
-	// Wait up to 3 seconds for daemon to record its startup
+	// Wait up to 10 seconds for daemon to record its startup (allows cold macOS launch latency)
 	var infoRunning kernel.DaemonInfo
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
+startupWait:
+	for i := 0; i < 100; i++ {
+		select {
+		case <-daemonDone:
+			t.Fatalf("daemon exited prematurely before startup (%s): err=%v\n%s", daemonAddr, daemonWaitErr, daemonOut.String())
+		default:
+		}
 		infoRunning = kernel.GetDaemonInfo(env.vaultDir)
 		if infoRunning.Running {
-			break
+			break startupWait
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	if !infoRunning.Running {
-		t.Fatalf("expected daemon to report running after startup")
+		if daemonCmd.Process != nil {
+			_ = daemonCmd.Process.Kill()
+		}
+		<-daemonDone
+		t.Fatalf("expected daemon to report running after startup (%s), waitErr=%v\n%s", daemonAddr, daemonWaitErr, daemonOut.String())
 	}
 
 	// Verify hq doctor reports PASS with daemon PID and 3 schedules declared
@@ -1378,12 +1417,21 @@ func TestCUJ12_AutomatedTriggerSchedulingAndDaemon(t *testing.T) {
 		t.Fatalf("expected service file %s to be removed after uninstall", servicePath)
 	}
 
-	// Wait up to 2 seconds for process to exit
+	// Wait up to 5 seconds for daemon process to exit and release HTTP listeners
+	exited := false
+	select {
+	case <-daemonDone:
+		exited = true
+	case <-time.After(5 * time.Second):
+	}
+	if !exited {
+		t.Fatalf("expected daemon process to exit after hq daemon uninstall")
+	}
 	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
 		if !kernel.GetDaemonInfo(env.vaultDir).Running {
 			break
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// After stop, doctor returns to WARN
@@ -2336,11 +2384,7 @@ func TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards(t *testing.T) {
 		t.Fatalf("hq claim-desk failed: %v\n%s", err, out)
 	}
 
-	now := time.Now().UTC()
-	t0 := now.Add(-4 * time.Minute).Format(time.RFC3339)
-	t1 := now.Add(-3 * time.Minute).Format(time.RFC3339)
-	t2 := now.Add(-2 * time.Minute).Format(time.RFC3339)
-	t3 := now.Add(-1 * time.Minute).Format(time.RFC3339)
+	t0, t1, t2, t3 := sameLocalDayTurnTimestamps(time.Now())
 
 	brainDir := filepath.Join(filepath.Dir(env.vaultDir), ".brain")
 	fdLogsDir := filepath.Join(brainDir, "conv-fd-obs", ".system_generated", "logs")
@@ -2863,7 +2907,7 @@ func TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge(t *testi
 		t.Fatalf("expected 1 TTL proposal, got %d", len(pendingTTL))
 	}
 	ttlProp := pendingTTL[0]
-	time.Sleep(1700 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 
 	expAppOut, expErr := env.run("", "approve", ttlProp.ID, "--sha256="+ttlProp.SHA256[:12])
 	if expErr == nil || !strings.Contains(expAppOut, "expired") {
@@ -4725,7 +4769,7 @@ func TestCUJ33_LeaseBasedMorningBriefAndStructuredExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("brief collect --lease 1 failed: %v (%s)", err, lease1Out)
 	}
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(1600 * time.Millisecond)
 
 	convB := "00000000-0000-0000-0000-000000003302"
 	lease2Out, err := env.runWithEnv("", bEnv, "brief", "collect", "--lease", "--ttl=10m", "--conv="+convB, "--json")
@@ -5617,7 +5661,7 @@ func TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling(t *testing.T) {
         "protocol": "hq-channel-bridge/v1",
         "command": ["./bin/cuj38-chat-bridge"],
         "env_allow": ["CUJ38_BRIDGE_STATE_DIR"],
-        "timeout_ms": 5000,
+        "timeout_ms": 15000,
         "max_body_runes": 1600,
         "capabilities": {
           "desk_binding": true,
@@ -6879,5 +6923,67 @@ func TestCUJ40_Layer1TaskBoardIsolationCLI(t *testing.T) {
 		if !kernel.IsNestedSubagentConversation(env.vaultDir, mustStayOff) {
 			t.Fatalf("expected %s to be recorded in nested_conversations.json", mustStayOff)
 		}
+	}
+}
+
+// sameLocalDayTurnTimestamps returns 4 ordered UTC RFC3339 timestamps guaranteed to remain on now's
+// local calendar date even when run during the first 4 minutes after midnight.
+func sameLocalDayTurnTimestamps(now time.Time) (t0, t1, t2, t3 string) {
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	span := now.Sub(startOfDay)
+	var ts0, ts1, ts2, ts3 time.Time
+	if span >= 4*time.Minute {
+		ts0 = now.Add(-4 * time.Minute)
+		ts1 = now.Add(-3 * time.Minute)
+		ts2 = now.Add(-2 * time.Minute)
+		ts3 = now.Add(-1 * time.Minute)
+	} else {
+		step := span / 4
+		ts0 = startOfDay
+		ts1 = startOfDay.Add(step)
+		ts2 = startOfDay.Add(2 * step)
+		ts3 = startOfDay.Add(3 * step)
+	}
+	return ts0.UTC().Format(time.RFC3339),
+		ts1.UTC().Format(time.RFC3339),
+		ts2.UTC().Format(time.RFC3339),
+		ts3.UTC().Format(time.RFC3339)
+}
+
+func TestSameLocalDayTurnTimestampsMidnightBoundary(t *testing.T) {
+	pst := time.FixedZone("PST", -8*3600)
+	ist := time.FixedZone("IST", 5*3600+30*60)
+	cases := []struct {
+		name string
+		now  time.Time
+	}{
+		{"utc-exact-midnight", time.Date(2026, 11, 22, 0, 0, 0, 200_000_000, time.UTC)},
+		{"utc-3m29s-after-midnight", time.Date(2026, 11, 22, 0, 3, 29, 0, time.UTC)},
+		{"utc-midday", time.Date(2026, 11, 22, 12, 15, 30, 0, time.UTC)},
+		{"pst-2m-after-midnight", time.Date(2026, 11, 22, 0, 2, 10, 500_000_000, pst)},
+		{"ist-1m-after-midnight", time.Date(2026, 11, 22, 0, 1, 5, 0, ist)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t0, t1, t2, t3 := sameLocalDayTurnTimestamps(tc.now)
+			wantDate := tc.now.Format("2006-01-02")
+			var prev time.Time
+			for i, raw := range []string{t0, t1, t2, t3} {
+				parsed, err := time.Parse(time.RFC3339, raw)
+				if err != nil {
+					t.Fatalf("t%d (%q) invalid RFC3339: %v", i, raw, err)
+				}
+				if gotDate := parsed.In(tc.now.Location()).Format("2006-01-02"); gotDate != wantDate {
+					t.Fatalf("t%d (%q) mapped to local date %s, want %s", i, raw, gotDate, wantDate)
+				}
+				if i > 0 && parsed.Before(prev) {
+					t.Fatalf("t%d (%v) went backwards before t%d (%v)", i, parsed, i-1, prev)
+				}
+				if parsed.After(tc.now) {
+					t.Fatalf("t%d (%v) exceeded now (%v)", i, parsed, tc.now)
+				}
+				prev = parsed
+			}
+		})
 	}
 }

@@ -495,6 +495,25 @@ func isProcessAlive(pid int) bool {
 	return err == nil
 }
 
+func isZombieProcess(pid int) bool {
+	if pid <= 0 || runtime.GOOS == "windows" {
+		return false
+	}
+	if runtime.GOOS == "linux" {
+		if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+			s := string(data)
+			if idx := strings.LastIndex(s, ") "); idx != -1 && idx+2 < len(s) {
+				return s[idx+2] == 'Z'
+			}
+		}
+		return false
+	}
+	if out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output(); err == nil {
+		return strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
+	}
+	return false
+}
+
 func isDaemonProcess(pid int) bool {
 	if pid <= 0 || !isProcessAlive(pid) {
 		return false
@@ -1044,6 +1063,13 @@ func UninstallDaemon(vaultDir string) (string, error) {
 			if isDaemonProcess(st.PID) {
 				if proc, err := os.FindProcess(st.PID); err == nil {
 					_ = proc.Signal(syscall.SIGTERM)
+					deadline := time.Now().Add(2 * time.Second)
+					for time.Now().Before(deadline) {
+						if !isProcessAlive(st.PID) || isZombieProcess(st.PID) {
+							break
+						}
+						time.Sleep(50 * time.Millisecond)
+					}
 					msgs = append(msgs, fmt.Sprintf("Stopped running daemon process (PID %d)", st.PID))
 				}
 			}
