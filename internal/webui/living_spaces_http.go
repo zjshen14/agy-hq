@@ -68,6 +68,7 @@ func enrichProactiveV3State(vaultDir string, state *DashboardState, now time.Tim
 }
 
 func formatHumanNextRun(nextAt, now time.Time) string {
+	nextAt = nextAt.In(now.Location())
 	diff := nextAt.Sub(now)
 	if diff < 0 {
 		return "due now"

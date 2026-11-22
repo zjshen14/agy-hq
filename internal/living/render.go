@@ -174,12 +174,15 @@ func RenderHTML(doc SpaceDoc, opts RenderOptions) ([]byte, error) {
 	body.WriteString(fmt.Sprintf(`<footer class="ftr">Living Space <code>%s</code> · Updated %s · 0-token local build</footer>`,
 		html.EscapeString(doc.Slug), html.EscapeString(doc.UpdatedAt)))
 
-	i18nJSON := safeJSONForScript(map[string]interface{}{
+	i18nPayload := map[string]interface{}{
 		"locales":            locales,
 		"default":            primary,
 		"defaultPerspective": strings.ToLower(strings.TrimSpace(doc.DefaultPerspective)),
-		"dicts":              col.dicts,
-	})
+	}
+	if len(locales) > 1 {
+		i18nPayload["dicts"] = col.dicts
+	}
+	i18nJSON := safeJSONForScript(i18nPayload)
 
 	surfaceClass := "surface-webui"
 	if opts.Surface == "artifact" {
