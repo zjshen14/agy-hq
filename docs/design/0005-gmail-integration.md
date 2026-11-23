@@ -1,7 +1,9 @@
 # RFC-0005: Decoupled Gmail Infrastructure (Layer 1) & Product Workflows (Layer 2)
 
-- **Status:** Approved
+- **Status:** Implemented
 - **Related Documents:** [RFC-0001](0001-vault-and-task-isolation.md), [RFC-0003](0003-approval-bound-execution.md), [RFC-0004](0004-heartbeat-and-channels.md)
+
+> **Extended / Updated By:** [RFC-0015](./0015-global-plugin-packaging.md) (`hq` on `PATH` & `.agents/plugins/agy-hq/skills/`), [RFC-0017a](./0017a-connector-protocol-and-watcher-engine.md) (`hq watch precheck|read|ack` unifying watcher polling), [RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md) (moved taint state from `local/memory/tainted_sessions.json` to `<vault>/private/taint/` and locked tainted sessions to `hq offer stage` — denying direct `hq gmail draft` and `hq propose`), and [RFC-0019](./0019-two-tier-rsi-vault-overlay.md) (`templates/skills/{ledger-ingest,tax-prep}`).
 
 ---
 

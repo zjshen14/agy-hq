@@ -43,9 +43,9 @@ func TestWorkspaceCoreRulesGateDestructiveVerbs(t *testing.T) {
 	}
 	for cmd, rule := range gated {
 		for _, auto := range []bool{false, true} {
-			d := EvaluateCommand(pol, cmd, auto, "")
+			d := EvaluateCommandForSession(pol, cmd, auto, false, "")
 			if !d.Gated || d.RuleID != rule || d.Mode != ModeAlways {
-				t.Fatalf("EvaluateCommand(%q, auto=%v) = %+v, want gated by %s", cmd, auto, d, rule)
+				t.Fatalf("EvaluateCommandForSession(%q, auto=%v) = %+v, want gated by %s", cmd, auto, d, rule)
 			}
 		}
 	}
@@ -62,8 +62,8 @@ func TestWorkspaceCoreRulesGateDestructiveVerbs(t *testing.T) {
 		`hq propose --type=workspace_remove --summary="Remove hq-owned workspace acme-monorepo/client:ledger-fix (2 open change(s))" --cmd=""`,
 	}
 	for _, cmd := range allowed {
-		if d := EvaluateCommand(pol, cmd, false, ""); d.Gated {
-			t.Fatalf("EvaluateCommand(%q) unexpectedly gated: %+v", cmd, d)
+		if d := EvaluateCommandForSession(pol, cmd, false, false, ""); d.Gated {
+			t.Fatalf("EvaluateCommandForSession(%q) unexpectedly gated: %+v", cmd, d)
 		}
 	}
 }
@@ -89,7 +89,7 @@ func TestWorkspaceCoreRulesCannotBeWeakenedByPacks(t *testing.T) {
 		t.Fatalf("expected weakening warnings, got %v", warnings)
 	}
 	for _, cmd := range []string{"hq workspace remove a/b:c --force", "hq workspace own a/b:c"} {
-		if d := EvaluateCommand(pol, cmd, false, ""); !d.Gated || d.Mode != ModeAlways {
+		if d := EvaluateCommandForSession(pol, cmd, false, false, ""); !d.Gated || d.Mode != ModeAlways {
 			t.Fatalf("pack weakening must be ignored for %q: %+v", cmd, d)
 		}
 	}
@@ -99,10 +99,10 @@ func TestWorkspaceCoreRulesCannotBeWeakenedByPacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := EvaluateCommand(pol, "acme-ws purge ledger-fix", false, ""); !d.Gated || d.RuleID != "workspace_remove" {
+	if d := EvaluateCommandForSession(pol, "acme-ws purge ledger-fix", false, false, ""); !d.Gated || d.RuleID != "workspace_remove" {
 		t.Fatalf("expected the tightened pattern to gate: %+v", d)
 	}
-	if d := EvaluateCommand(pol, "hq workspace remove a/b:c --force", false, ""); !d.Gated {
+	if d := EvaluateCommandForSession(pol, "hq workspace remove a/b:c --force", false, false, ""); !d.Gated {
 		t.Fatalf("built-in pattern must survive a pack extension: %+v", d)
 	}
 	if !strings.Contains(FormatActivePolicySummary(DefaultPolicyConfig()), "`workspace_remove`") {
@@ -210,11 +210,11 @@ func TestWorkspaceExecApprovalCapEnforcement(t *testing.T) {
 		"hq subagent --workspace=acme/client --role=ops --prompt=bar",
 		"hq archive some-task",
 	} {
-		if d := EvaluateCommand(pol, cmd, true, ""); !d.Gated || d.RuleID != "workspace_auto_guard" {
-			t.Fatalf("P1-5: expected [Auto] EvaluateCommand(%q) gated by workspace_auto_guard, got %+v", cmd, d)
+		if d := EvaluateCommandForSession(pol, cmd, true, false, ""); !d.Gated || d.RuleID != "workspace_auto_guard" {
+			t.Fatalf("P1-5: expected [Auto] EvaluateCommandForSession(%q) gated by workspace_auto_guard, got %+v", cmd, d)
 		}
-		if d := EvaluateCommand(pol, cmd, false, ""); d.Gated {
-			t.Fatalf("P1-5: interactive EvaluateCommand(%q) must not be gated by workspace_auto_guard, got %+v", cmd, d)
+		if d := EvaluateCommandForSession(pol, cmd, false, false, ""); d.Gated {
+			t.Fatalf("P1-5: interactive EvaluateCommandForSession(%q) must not be gated by workspace_auto_guard, got %+v", cmd, d)
 		}
 	}
 }

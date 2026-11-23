@@ -20,6 +20,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // Supported attention delivery tiers.
@@ -165,17 +166,6 @@ func DefaultAttentionConfig() AttentionConfig {
 	}
 }
 
-func cleanYAMLVal(s string) string {
-	s = strings.TrimSpace(s)
-	if idx := strings.Index(s, " #"); idx >= 0 {
-		s = strings.TrimSpace(s[:idx])
-	}
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
 // ParseAttentionConfig parses the top-level `attention:` block from YAML content.
 func ParseAttentionConfig(content string) AttentionConfig {
 	cfg := DefaultAttentionConfig()
@@ -184,28 +174,14 @@ func ParseAttentionConfig(content string) AttentionConfig {
 	inScopeRules := false
 	curRuleIdx := -1
 
-	parseYAMLList := func(raw string) []string {
-		s := strings.TrimSpace(raw)
-		s = strings.TrimPrefix(s, "[")
-		s = strings.TrimSuffix(s, "]")
-		var out []string
-		for _, part := range strings.Split(s, ",") {
-			v := cleanYAMLVal(part)
-			if v != "" {
-				out = append(out, v)
-			}
-		}
-		return out
-	}
-
-	for _, rawLine := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(rawLine)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, rawLine := range yamlmini.Lines(content) {
+		clean := yamlmini.StripComment(rawLine)
+		if clean == "" {
 			continue
 		}
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		indent := yamlmini.LeadingIndent(rawLine)
 		if indent == 0 {
-			inAttention = strings.HasPrefix(trimmed, "attention:")
+			inAttention = strings.HasPrefix(clean, "attention:")
 			inQuietHours = false
 			inScopeRules = false
 			curRuleIdx = -1
@@ -218,12 +194,11 @@ func ParseAttentionConfig(content string) AttentionConfig {
 			inQuietHours = false
 			inScopeRules = false
 			curRuleIdx = -1
-			idx := strings.Index(trimmed, ":")
-			if idx < 0 {
+			key, rawVal, ok := yamlmini.SplitKV(clean)
+			if !ok {
 				continue
 			}
-			key := strings.TrimSpace(trimmed[:idx])
-			val := cleanYAMLVal(trimmed[idx+1:])
+			val := yamlmini.UnquoteScalar(rawVal)
 			switch key {
 			case "mode":
 				m := strings.ToLower(val)
@@ -255,12 +230,11 @@ func ParseAttentionConfig(content string) AttentionConfig {
 			continue
 		}
 		if inQuietHours && indent >= 4 {
-			idx := strings.Index(trimmed, ":")
-			if idx < 0 {
+			key, rawVal, ok := yamlmini.SplitKV(clean)
+			if !ok {
 				continue
 			}
-			key := strings.TrimSpace(trimmed[:idx])
-			val := cleanYAMLVal(trimmed[idx+1:])
+			val := yamlmini.UnquoteScalar(rawVal)
 			switch key {
 			case "enabled":
 				cfg.QuietHours.Enabled = strings.EqualFold(val, "true") || val == "1" || strings.EqualFold(val, "yes")
@@ -282,24 +256,33 @@ func ParseAttentionConfig(content string) AttentionConfig {
 			continue
 		}
 		if inScopeRules && indent >= 4 {
-			line := trimmed
-			if strings.HasPrefix(line, "- ") {
+			line := clean
+			if rest, isItem := yamlmini.TrimListItem(line); isItem {
 				cfg.ScopeRules = append(cfg.ScopeRules, ScopeAttentionRule{DowngradeNonCriticalTo: TierBriefRollup})
 				curRuleIdx = len(cfg.ScopeRules) - 1
-				line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+				line = rest
 			}
 			if curRuleIdx < 0 {
 				continue
 			}
-			idx := strings.Index(line, ":")
-			if idx < 0 {
+			key, rawVal, ok := yamlmini.SplitKV(line)
+			if !ok {
 				continue
 			}
-			key := strings.TrimSpace(line[:idx])
-			val := cleanYAMLVal(line[idx+1:])
+			val := yamlmini.UnquoteScalar(rawVal)
 			switch key {
 			case "scopes":
-				cfg.ScopeRules[curRuleIdx].Scopes = parseYAMLList(line[idx+1:])
+				if arr, isArr := yamlmini.ParseInlineList(rawVal); isArr {
+					cfg.ScopeRules[curRuleIdx].Scopes = arr
+				} else {
+					var scopes []string
+					for _, part := range strings.Split(rawVal, ",") {
+						if v := yamlmini.UnquoteScalar(part); v != "" {
+							scopes = append(scopes, v)
+						}
+					}
+					cfg.ScopeRules[curRuleIdx].Scopes = scopes
+				}
 			case "schedule":
 				cfg.ScopeRules[curRuleIdx].Schedule = val
 			case "downgrade_non_critical_interrupt_to", "downgrade_to":
@@ -335,7 +318,8 @@ func ParseHHMM(s string) (hour, minute int, ok bool) {
 	return h, m, true
 }
 
-func parseHHMM(s string) (int, bool) {
+// ParseHHMMMinutes parses a 24-hour "HH:MM" clock string into total minutes since midnight.
+func ParseHHMMMinutes(s string) (int, bool) {
 	h, m, ok := ParseHHMM(s)
 	if !ok {
 		return 0, false
@@ -348,8 +332,8 @@ func InQuietHours(cfg AttentionConfig, now time.Time) bool {
 	if !cfg.QuietHours.Enabled {
 		return false
 	}
-	startMin, ok1 := parseHHMM(cfg.QuietHours.Start)
-	endMin, ok2 := parseHHMM(cfg.QuietHours.End)
+	startMin, ok1 := ParseHHMMMinutes(cfg.QuietHours.Start)
+	endMin, ok2 := ParseHHMMMinutes(cfg.QuietHours.End)
 	if !ok1 || !ok2 {
 		return false
 	}
@@ -387,9 +371,7 @@ func WithOutboxLock(vaultDir string, fn func() error) error {
 }
 
 func generateID(now time.Time) string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("idea-%d-%s", now.Unix(), hex.EncodeToString(b))
+	return fmt.Sprintf("idea-%d-%s", now.Unix(), store.RandomHex(4))
 }
 
 func normalizeTier(tier string) string {
@@ -602,8 +584,8 @@ func MatchesScopeSchedule(schedule string, now time.Time) bool {
 	if len(parts) != 2 {
 		return false
 	}
-	startMin, ok1 := parseHHMM(parts[0])
-	endMin, ok2 := parseHHMM(parts[1])
+	startMin, ok1 := ParseHHMMMinutes(parts[0])
+	endMin, ok2 := ParseHHMMMinutes(parts[1])
 	if !ok1 || !ok2 || startMin == endMin {
 		return false
 	}
@@ -921,40 +903,6 @@ func List(vaultDir, tierFilter, statusFilter string, now time.Time) ([]OutboxIte
 		return out[i].CreatedAt > out[j].CreatedAt
 	})
 	return out, nil
-}
-
-// DrainBriefRollup returns all pending brief_rollup items, marks them "delivered",
-// and records each item in local/memory/reported.jsonl so future runs do not repeat them.
-func DrainBriefRollup(vaultDir string, now time.Time) ([]OutboxItem, error) {
-	if now.IsZero() {
-		now = time.Now()
-	}
-	var drained []OutboxItem
-	err := WithOutboxLock(vaultDir, func() error {
-		items, lErr := LoadAllUnlocked(vaultDir)
-		if lErr != nil {
-			return lErr
-		}
-		nowStr := now.UTC().Format(time.RFC3339)
-		for i := range items {
-			if items[i].Tier == TierBriefRollup && items[i].Status == StatusPending && !hasActiveBriefLease(items[i], now) {
-				items[i].Status = StatusDelivered
-				items[i].UpdatedAt = nowStr
-				drained = append(drained, items[i])
-			}
-		}
-		if len(drained) > 0 {
-			return SaveCanonicalUnlocked(vaultDir, items)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	for _, it := range drained {
-		_ = RecordReportedFromItem(vaultDir, it, now)
-	}
-	return drained, nil
 }
 
 func hashBriefLeaseToken(rawTok string) string {

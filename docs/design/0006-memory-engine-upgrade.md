@@ -6,6 +6,8 @@
 - **Supersedes / Extends:** [RFC-0002 (Zero-Token Journaling & Sleep-Time Memory Consolidation)](./0002-memory-and-consolidation.md)
 - **Related Docs:** [RFC-0001](./0001-vault-and-task-isolation.md), [ADR-0005](../decisions/0005-zero-token-stop-hook-vs-blocking-gate.md)
 
+> **Extended By:** [RFC-0024 (Memory Engine v2)](./0024-memory-v2-prediction-and-eval.md) — tightens `MEMORY.md` to an `Active Priorities`-only index (`<= 40 lines & <= 2,200 bytes`, removing `Knowledge Map`), replaces `vault.LoadActiveFacts` / `AddFact` with `LoadFactsState` / `LoadFactsStateAt` / `AddFactWithOptions`, adds orthogonal `Scopes`/`ExpiresAt`/`Pinned` physics, BM25 `hq memory search`, `dream-plan`, and `hq memory eval` (and moves `sleep-consolidate` default routing to `deep-medium` / `gemini-4-neon-high`).
+
 ---
 
 ## 1. Motivation & Research Grounding

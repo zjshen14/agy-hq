@@ -4,6 +4,8 @@
 - **Date:** 2026-11-07
 - **References:** [03 — Technical Build Options](../research/03_technical.md), [04 — Antigravity Audit](../research/04_antigravity_audit.md)
 
+> **Evolution Note:** Hooks and sidecar descriptors now live under `.agents/plugins/agy-hq/` ([RFC-0015](../design/0015-global-plugin-packaging.md)), and background routing uses 3-family Hydrogen/Neon/Carbon tiers.
+
 ---
 
 ## Context

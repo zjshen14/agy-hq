@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // SearchOptions configures a lock-free BM25 search across safe Vault memory layers.
@@ -539,7 +541,7 @@ func collectJournalSearchDocs(vaultDir string, includeArchive bool) []bm25Doc {
 		if ts, ok := parseAnyTimestamp(rec.Timestamp); ok {
 			day = int(ts.Unix() / 86400)
 		}
-		title := fmt.Sprintf("Journal %s (turn %d)", shortConvID(rec.ConversationID), rec.ExecutionNum)
+		title := fmt.Sprintf("Journal %s (turn %d)", store.ShortConvID(rec.ConversationID), rec.ExecutionNum)
 		docs = append(docs, bm25Doc{
 			layer:      "journal",
 			title:      title,
@@ -554,17 +556,6 @@ func collectJournalSearchDocs(vaultDir string, includeArchive bool) []bm25Doc {
 		return true
 	})
 	return docs
-}
-
-func shortConvID(id string) string {
-	id = strings.TrimSpace(id)
-	if len(id) > 8 {
-		return id[:8]
-	}
-	if id == "" {
-		return "unknown"
-	}
-	return id
 }
 
 // NormalizeScope canonicalizes a single scope tag (e.g. "repo:agy-hq", "domain:investing", "global").
@@ -601,15 +592,4 @@ func parseAnyTimestamp(raw string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	if maxRunes <= 1 {
-		return string(runes[:maxRunes])
-	}
-	return string(runes[:maxRunes-1]) + "…"
 }

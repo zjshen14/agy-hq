@@ -397,6 +397,9 @@ func LoadInstance(vaultDir, connID string) (InstanceConfig, error) {
 	if strings.TrimSpace(vaultDir) == "" || connID == "" {
 		return ic, nil
 	}
+	if !reValidConnID.MatchString(connID) {
+		return ic, fmt.Errorf("invalid connector ID %q", connID)
+	}
 	p := instanceFilePath(vaultDir, connID)
 	st, err := os.Lstat(p)
 	if err == nil {

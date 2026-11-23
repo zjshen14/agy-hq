@@ -1,12 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -48,79 +46,6 @@ const workspaceUsage = `usage: hq workspace <subcommand> [flags]
   prune [--dry-run] [--json]                             Remove clean, fully landed owned workspaces no live task uses
 
 --task defaults to the task that owns $ANTIGRAVITY_CONVERSATION_ID. Keys look like <provider-fqid>:<workspace-id>.`
-
-type workspaceArgs struct {
-	pos   []string
-	vals  map[string]string
-	bools map[string]bool
-}
-
-func (a workspaceArgs) val(name string) string { return strings.TrimSpace(a.vals[name]) }
-
-// parseWorkspaceArgs accepts flags anywhere (before or after positionals) as --name=value, --name value, or
-// -name; bool flags also accept --name=true|false.
-func parseWorkspaceArgs(args []string, valueFlags, boolFlags []string) (workspaceArgs, error) {
-	isVal := make(map[string]bool, len(valueFlags))
-	for _, f := range valueFlags {
-		isVal[f] = true
-	}
-	isBool := make(map[string]bool, len(boolFlags))
-	for _, f := range boolFlags {
-		isBool[f] = true
-	}
-	out := workspaceArgs{vals: make(map[string]string), bools: make(map[string]bool)}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			out.pos = append(out.pos, args[i+1:]...)
-			break
-		}
-		if !strings.HasPrefix(a, "-") || a == "-" {
-			out.pos = append(out.pos, a)
-			continue
-		}
-		if strings.HasPrefix(a, "---") {
-			return out, fmt.Errorf("invalid flag %s", a)
-		}
-		var name string
-		if strings.HasPrefix(a, "--") {
-			name = a[2:]
-		} else {
-			name = a[1:]
-		}
-		if name == "" || strings.HasPrefix(name, "-") {
-			return out, fmt.Errorf("invalid flag %s", a)
-		}
-		val, hasVal := "", false
-		if k, v, ok := strings.Cut(name, "="); ok {
-			name, val, hasVal = k, v, true
-		}
-		switch {
-		case isVal[name]:
-			if !hasVal {
-				if i+1 >= len(args) {
-					return out, fmt.Errorf("flag --%s needs a value", name)
-				}
-				i++
-				val = args[i]
-			}
-			out.vals[name] = val
-		case isBool[name]:
-			b := true
-			if hasVal {
-				parsed, err := strconv.ParseBool(val)
-				if err != nil {
-					return out, fmt.Errorf("flag --%s expects true or false", name)
-				}
-				b = parsed
-			}
-			out.bools[name] = b
-		default:
-			return out, fmt.Errorf("unknown flag %s", a)
-		}
-	}
-	return out, nil
-}
 
 func workspaceCallerBlockedByTaint(vaultDir, verb string, stderr io.Writer) bool {
 	if rec, ok := checkCallerTaintedEnv(vaultDir); ok {
@@ -181,12 +106,6 @@ func resolveWorkspaceTaskFlag(vaultDir, explicit string) (kernel.ActiveTask, boo
 func validWorkspaceKey(key string) bool {
 	provider, id, ok := workspace.ParseLedgerKey(strings.TrimSpace(key))
 	return ok && provider != "" && workspace.ValidWorkspaceID(id)
-}
-
-func encodeWorkspaceJSON(w io.Writer, v interface{}) {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
 }
 
 func workspaceChangesSummary(row kernel.WorkspaceInventoryRow) string {
@@ -321,13 +240,13 @@ func workspaceUsageError(stderr io.Writer, line string) int {
 }
 
 func runWorkspaceProviders(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, nil, []string{"json"})
+	a, err := parseFlexibleArgs(args, nil, []string{"json"})
 	if err != nil || len(a.pos) != 0 {
 		return workspaceUsageError(stderr, "providers [--json]")
 	}
 	provs := workspace.ListProviders(vaultDir)
 	if a.bools["json"] {
-		encodeWorkspaceJSON(stdout, provs)
+		writeJSON(stdout, provs)
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -369,7 +288,7 @@ func runWorkspaceProviders(vaultDir string, args []string, stdout, stderr io.Wri
 }
 
 func runWorkspaceList(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, []string{"provider"}, []string{"all", "json"})
+	a, err := parseFlexibleArgs(args, []string{"provider"}, []string{"all", "json"})
 	if err != nil || len(a.pos) != 0 {
 		return workspaceUsageError(stderr, "list [--provider=<fqid>] [--all] [--json]")
 	}
@@ -393,7 +312,7 @@ func runWorkspaceList(vaultDir string, args []string, stdout, stderr io.Writer) 
 		if rows == nil {
 			rows = []kernel.WorkspaceInventoryRow{}
 		}
-		encodeWorkspaceJSON(stdout, rows)
+		writeJSON(stdout, rows)
 		return 0
 	}
 	printWorkspaceRows(stdout, rows)
@@ -415,7 +334,7 @@ func printWorkspaceAcquired(w io.Writer, verb, taskSlug string, acq kernel.Works
 }
 
 func runWorkspaceCreate(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, []string{"task", "share-from"}, nil)
+	a, err := parseFlexibleArgs(args, []string{"task", "share-from"}, nil)
 	if err != nil || len(a.pos) != 2 {
 		return workspaceUsageError(stderr, "create <provider-fqid> <name> [--task=<slug-or-conv>] [--share-from=<key-or-workspace-id>]")
 	}
@@ -450,7 +369,7 @@ func runWorkspaceCreate(vaultDir string, args []string, stdout, stderr io.Writer
 }
 
 func runWorkspaceAdopt(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, []string{"task", "role"}, nil)
+	a, err := parseFlexibleArgs(args, []string{"task", "role"}, nil)
 	if err != nil || len(a.pos) != 1 {
 		return workspaceUsageError(stderr, "adopt <path> [--task=<slug-or-conv>] [--role=primary|secondary|readonly]")
 	}
@@ -485,7 +404,7 @@ func runWorkspaceAdopt(vaultDir string, args []string, stdout, stderr io.Writer)
 }
 
 func runWorkspaceStatus(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, nil, []string{"refresh", "json"})
+	a, err := parseFlexibleArgs(args, nil, []string{"refresh", "json"})
 	if err != nil || len(a.pos) > 1 {
 		return workspaceUsageError(stderr, "status [<key>] [--refresh] [--json]")
 	}
@@ -533,7 +452,7 @@ func runWorkspaceStatus(vaultDir string, args []string, stdout, stderr io.Writer
 			return 1
 		}
 		if a.bools["json"] {
-			encodeWorkspaceJSON(stdout, kernel.WorkspaceRowFromEntry(e))
+			writeJSON(stdout, kernel.WorkspaceRowFromEntry(e))
 		} else {
 			printWorkspaceEntry(stdout, e)
 		}
@@ -549,7 +468,7 @@ func runWorkspaceStatus(vaultDir string, args []string, stdout, stderr io.Writer
 		for _, k := range keys {
 			rows = append(rows, kernel.WorkspaceRowFromEntry(l.Entries[k]))
 		}
-		encodeWorkspaceJSON(stdout, rows)
+		writeJSON(stdout, rows)
 		return exit
 	}
 	if len(keys) == 0 {
@@ -563,7 +482,7 @@ func runWorkspaceStatus(vaultDir string, args []string, stdout, stderr io.Writer
 }
 
 func runWorkspaceHandoff(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, []string{"to"}, nil)
+	a, err := parseFlexibleArgs(args, []string{"to"}, nil)
 	if err != nil || len(a.pos) != 1 || a.val("to") == "" {
 		return workspaceUsageError(stderr, "handoff <key> --to=<slug-or-conv>")
 	}
@@ -582,7 +501,7 @@ func runWorkspaceHandoff(vaultDir string, args []string, stdout, stderr io.Write
 }
 
 func runWorkspaceUnbind(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, []string{"task"}, nil)
+	a, err := parseFlexibleArgs(args, []string{"task"}, nil)
 	if err != nil || len(a.pos) != 1 {
 		return workspaceUsageError(stderr, "unbind <key> [--task=<slug-or-conv>]")
 	}
@@ -605,7 +524,7 @@ func runWorkspaceUnbind(vaultDir string, args []string, stdout, stderr io.Writer
 }
 
 func runWorkspaceRemove(rootDir, vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, nil, []string{"force"})
+	a, err := parseFlexibleArgs(args, nil, []string{"force"})
 	if err != nil || len(a.pos) != 1 {
 		return workspaceUsageError(stderr, "remove <key> [--force]")
 	}
@@ -650,7 +569,7 @@ func runWorkspaceRemove(rootDir, vaultDir string, args []string, stdout, stderr 
 }
 
 func runWorkspaceOwn(rootDir, vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, nil, nil)
+	a, err := parseFlexibleArgs(args, nil, nil)
 	if err != nil || len(a.pos) != 1 {
 		return workspaceUsageError(stderr, "own <key>")
 	}
@@ -683,7 +602,7 @@ func runWorkspaceOwn(rootDir, vaultDir string, args []string, stdout, stderr io.
 }
 
 func runWorkspacePrune(vaultDir string, args []string, stdout, stderr io.Writer) int {
-	a, err := parseWorkspaceArgs(args, nil, []string{"dry-run", "json"})
+	a, err := parseFlexibleArgs(args, nil, []string{"dry-run", "json"})
 	if err != nil || len(a.pos) != 0 {
 		return workspaceUsageError(stderr, "prune [--dry-run] [--json]")
 	}
@@ -699,7 +618,7 @@ func runWorkspacePrune(vaultDir string, args []string, stdout, stderr io.Writer)
 		_ = syncConsoleFn(vaultDir)
 	}
 	if a.bools["json"] {
-		encodeWorkspaceJSON(stdout, rep)
+		writeJSON(stdout, rep)
 		return 0
 	}
 	if a.bools["dry-run"] {

@@ -415,26 +415,27 @@ func TestLayer1TaskInvariantAndNestedSubagents(t *testing.T) {
 		t.Fatalf("expected IsFrontDeskConversation == false for conv-other")
 	}
 
-	// 2. IsLayer1Task check
+	// 2. isLayer1TaskWithFDSet check
+	knownFDs := map[string]bool{normalizeUUID(deskConv): true}
 	task1 := ActiveTask{Kind: "task", TaskSlug: "test-task"}
 	auto1 := ActiveTask{Kind: "auto", TaskSlug: "auto-morning"}
 	subLayer1 := ActiveTask{Kind: "subagent", TaskSlug: "sub-layer1", ParentConversationID: deskConv}
 	subLegacy := ActiveTask{Kind: "subagent", TaskSlug: "sub-legacy"}
 	subNested := ActiveTask{Kind: "subagent", TaskSlug: "sub-nested", ParentConversationID: "conv-other"}
 
-	if !IsLayer1Task(task1, deskConv) {
+	if !isLayer1TaskWithFDSet(task1, knownFDs, true) {
 		t.Fatalf("expected task1 to be Layer 1")
 	}
-	if !IsLayer1Task(auto1, deskConv) {
+	if !isLayer1TaskWithFDSet(auto1, knownFDs, true) {
 		t.Fatalf("expected auto1 to be Layer 1")
 	}
-	if !IsLayer1Task(subLayer1, deskConv) {
+	if !isLayer1TaskWithFDSet(subLayer1, knownFDs, true) {
 		t.Fatalf("expected subLayer1 to be Layer 1")
 	}
-	if !IsLayer1Task(subLegacy, deskConv) {
+	if !isLayer1TaskWithFDSet(subLegacy, knownFDs, true) {
 		t.Fatalf("expected legacy subagent with empty parent to be Layer 1")
 	}
-	if IsLayer1Task(subNested, deskConv) {
+	if isLayer1TaskWithFDSet(subNested, knownFDs, true) {
 		t.Fatalf("expected subNested with non-desk parent to NOT be Layer 1")
 	}
 
@@ -1041,7 +1042,7 @@ func TestVaultQuotaConfigMaxDailySpawnsAndInteractiveExemption(t *testing.T) {
 		Date:           time.Now().Format("2006-01-02"),
 		MaxDailySpawns: 15,
 	})
-	cfgYAML := "# Vault config\nquota:\n  max_parallel_runs: 4\n  max_daily_spawns: 2 # custom cap\n  background_model: flash\n"
+	cfgYAML := "# Vault config\nquota:\n  max_parallel_runs: 4\n  max_daily_spawns: 2 # custom cap\n"
 	if err := os.WriteFile(filepath.Join(vaultDir, "config.yaml"), []byte(cfgYAML), 0o600); err != nil {
 		t.Fatalf("write config.yaml: %v", err)
 	}
@@ -1219,7 +1220,8 @@ func TestLayer1LSLineageAndCleanNestedTasksLeakFixes(t *testing.T) {
 		t.Fatalf("expected standaloneID to be Layer-1 standalone conversation, got ok=%v %+v", okStandalone, linStandalone)
 	}
 
-	// 2. IsLayer1Task rejects leaked Kind:"task" with non-FD parent or subagent markers
+	// 2. isLayer1TaskWithFDSet rejects leaked Kind:"task" with non-FD parent or subagent markers
+	knownFDs := map[string]bool{normalizeUUID(fdID): true}
 	leakedKindTaskWithParent := ActiveTask{
 		TaskSlug:             "conv-aaaa0004",
 		Title:                "[Task:core] Leaked Nested",
@@ -1232,11 +1234,11 @@ func TestLayer1LSLineageAndCleanNestedTasksLeakFixes(t *testing.T) {
 		Title:    "[Subagent:core] Leaked Marker [quick]",
 		Kind:     "task",
 	}
-	if IsLayer1Task(leakedKindTaskWithParent, fdID) {
-		t.Fatalf("expected IsLayer1Task to reject Kind=task with non-FD ParentConversationID")
+	if isLayer1TaskWithFDSet(leakedKindTaskWithParent, knownFDs, true) {
+		t.Fatalf("expected isLayer1TaskWithFDSet to reject Kind=task with non-FD ParentConversationID")
 	}
-	if IsLayer1Task(leakedKindTaskWithSubMarker, fdID) {
-		t.Fatalf("expected IsLayer1Task to reject Kind=task with subagent markers")
+	if isLayer1TaskWithFDSet(leakedKindTaskWithSubMarker, knownFDs, true) {
+		t.Fatalf("expected isLayer1TaskWithFDSet to reject Kind=task with subagent markers")
 	}
 
 	// 3. CleanNestedTasks prunes leaked Kind:"task" subagents & LS workflow children while keeping standalone & explicit tasks

@@ -146,11 +146,11 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 			})
 			return
 		}
-		fmt.Printf("Refreshed %s@%s and staged trust proposal %s (sha256:%s)\n", m.ID, m.Version, prop.ID, prop.SHA256[:12])
+		fmt.Printf("Refreshed %s@%s and staged trust proposal %s (sha256:%s)\n", m.ID, m.Version, prop.ID, shortPrefix(prop.SHA256, 12))
 		for _, ln := range bundle.SummaryLines {
 			fmt.Printf("  %s\n", ln)
 		}
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 
 	case "disable":
 		denyIfCallerTainted(vaultDir, "extension disable")
@@ -202,11 +202,11 @@ func runExtensionCLI(rootDir, vaultDir string, args []string) {
 			})
 			return
 		}
-		fmt.Printf("Staged extension trust proposal %s for %s (sha256:%s)\n", prop.ID, bundle.Target.SourceID, prop.SHA256[:12])
+		fmt.Printf("Staged extension trust proposal %s for %s (sha256:%s)\n", prop.ID, bundle.Target.SourceID, shortPrefix(prop.SHA256, 12))
 		for _, ln := range bundle.SummaryLines {
 			fmt.Printf("  %s\n", ln)
 		}
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 
 	case "apply-trust":
 		denyIfCallerTainted(vaultDir, "extension apply-trust")
@@ -529,11 +529,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		_ = fs.Parse(rest)
 		var keys []string
 		for _, raw := range append([]string(threadFlags), itemFlags...) {
-			for _, part := range strings.Split(raw, ",") {
-				if trimmed := strings.TrimSpace(part); trimmed != "" {
-					keys = append(keys, trimmed)
-				}
-			}
+			keys = append(keys, splitCSV(raw)...)
 		}
 		if strings.TrimSpace(*connFlag) == "" || len(keys) == 0 {
 			fmt.Fprintln(os.Stderr, "usage: hq watch read --connector=<id> [--account=<acct>] --thread=<t1>[,<t2>...] [--spawn-token=...]")
@@ -580,11 +576,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		if *endFlag != "" {
 			params["end"] = *endFlag
 		}
-		for _, kv := range kvFlags {
-			if k, v, ok := strings.Cut(kv, "="); ok && strings.TrimSpace(k) != "" {
-				params[strings.TrimSpace(k)] = v
-			}
-		}
+		_, _ = parseKVFlags(params, kvFlags, false)
 		data, err := watcher.Query(context.Background(), vaultDir, *connFlag, *acctFlag, *queryName, params, *convFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq watch query failed: %v\n", err)
@@ -606,11 +598,7 @@ func runWatchCLI(vaultDir string, args []string) {
 		var allIDs []string
 		if !*ackAll {
 			for _, raw := range append([]string(items), pos...) {
-				for _, part := range strings.Split(raw, ",") {
-					if trimmed := strings.TrimSpace(part); trimmed != "" {
-						allIDs = append(allIDs, trimmed)
-					}
-				}
+				allIDs = append(allIDs, splitCSV(raw)...)
 			}
 		}
 		n, err := watcher.Ack(context.Background(), vaultDir, allIDs, *convFlag, time.Now())
@@ -731,11 +719,7 @@ func runOfferCLI(vaultDir string, args []string) {
 	if *spaceFlag != "" {
 		params["space"] = *spaceFlag
 	}
-	for _, kv := range kvFlags {
-		if k, v, ok := strings.Cut(kv, "="); ok && strings.TrimSpace(k) != "" {
-			params[strings.TrimSpace(k)] = v
-		}
-	}
+	_, _ = parseKVFlags(params, kvFlags, false)
 	sup := *supersedeFlag
 	prop, err := offer.StageOffer(context.Background(), vaultDir, offer.StageRequest{
 		Connector:      *connFlag,
@@ -760,7 +744,7 @@ func runOfferCLI(vaultDir string, args []string) {
 		return
 	}
 	fmt.Printf("Staged offer proposal %s [connector=%s, thread=%s, sha256=%s]\n",
-		prop.ID, prop.TargetConnector, prop.TargetThreadKey, prop.SHA256[:12])
+		prop.ID, prop.TargetConnector, prop.TargetThreadKey, shortPrefix(prop.SHA256, 12))
 }
 
 func runBriefCLI(vaultDir string, args []string) {

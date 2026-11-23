@@ -6,6 +6,8 @@
 - **Companion Research:** [19 — Anthropic's *"The Components of Agent Memory"* & 12-Day Production Vault Telemetry Audit](../research/19_anthropic_memory_components_and_vault_audit.md)
 - **Extends / Updates:** [RFC-0002 (Zero-Token Journaling & Consolidation)](0002-memory-and-consolidation.md), [RFC-0006 (4-Layer Memory Hierarchy & Dreaming)](0006-memory-engine-upgrade.md), [RFC-0010 (Bounded Agent RSI)](0010-agent-recursive-self-improvement.md), [RFC-0012 (Token Observability)](0012-token-observability.md), [RFC-0014 (Proactive Engine v2 & Living Context)](0014-proactive-engine-and-living-context.md), [RFC-0017b (Provenance Taint & Offer Gateway)](0017b-provenance-taint-and-offer-gateway.md), [RFC-0018 (Always-On Runtime Hardening)](0018-always-on-agent-runtime-hardening.md), [RFC-0019 (Two-Tier RSI & Vault Skill Overlay)](0019-two-tier-rsi-vault-overlay.md)
 
+> **Evolution Note (Round 3 M2):** `vault.AddFact` was consolidated into `vault.AddFactWithOptions` (`FactOptions`).
+
 ---
 
 ## 1. Motivation & Design Philosophy ("Organic Synthesis, Zero Frankenstein")

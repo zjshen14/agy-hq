@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/connector"
 )
 
 // HostResolverJailRule restricts headless Chrome DNS resolution strictly to Google domains,
@@ -185,7 +187,7 @@ func EnsureCDPSession(vaultDir, accountAlias string, allowInteractiveLogin bool)
 	if err != nil {
 		return "", err
 	}
-	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
+	if connector.MockDir(vaultDir, "HQ_GCHAT_MOCK_DIR", "gchat") != "" || cfg.Transport != "cdp" {
 		return cfg.CDPEndpoint, nil
 	}
 	// If a custom non-default CDP endpoint is configured (e.g. unit test httptest server), do not spawn Chrome.
@@ -699,7 +701,7 @@ func waitForCDPReady(wsURL, readyJS string, attempts int, interval time.Duration
 // and navigates the background headless Chrome tab to spaceID so that when the user taps
 // Approve on the 1-tap prompt seconds later, the composer box is already loaded and ready.
 func PreWarmSpace(vaultDir string, cfg AccountConfig, spaceID string) error {
-	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
+	if connector.MockDir(vaultDir, "HQ_GCHAT_MOCK_DIR", "gchat") != "" || cfg.Transport != "cdp" {
 		return nil
 	}
 	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {
@@ -1313,7 +1315,7 @@ func sendDraftViaWebSocket(targets []cdpTarget, spec DraftSpec) (string, error) 
 // or start a Direct Message with an email address, username handle, or contact not currently visible
 // in the top 20 sidebar items.
 func resolveOrCreateDMViaCDP(vaultDir string, cfg AccountConfig, rawQuery string) (SpaceSummary, error) {
-	if mockDir(vaultDir) != "" || cfg.Transport != "cdp" {
+	if connector.MockDir(vaultDir, "HQ_GCHAT_MOCK_DIR", "gchat") != "" || cfg.Transport != "cdp" {
 		return SpaceSummary{}, fmt.Errorf("live CDP DM resolution unavailable in non-CDP mode")
 	}
 	if cfg.CDPEndpoint != "" && cfg.CDPEndpoint != DefaultCDPEndpoint {

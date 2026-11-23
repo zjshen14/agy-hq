@@ -27,30 +27,30 @@ This audit inspects every place where `agy-hq` hard-codes git-worktree semantics
 
 ### `C1` — Workspace Creation Is Git-Only (`internal/worktree/`)
 
-- [`worktree.Add`](../../internal/worktree/worktree.go#L14-L91) accepts only (a) a local directory that answers `git rev-parse --show-toplevel`, or (b) a remote URL / GitHub `owner/repo` slug that it `git clone --bare`s into `<vault>/repos/`. It then runs `git worktree add -b hq/<task>`.
+- [`worktree.Add`](../../internal/worktree/worktree.go) accepts only (a) a local directory that answers `git rev-parse --show-toplevel`, or (b) a remote URL / GitHub `owner/repo` slug that it `git clone --bare`s into `<vault>/repos/`. It then runs `git worktree add -b hq/<task>`.
 - There is no branch for "ask some other tool to make an isolated workspace". A local directory that is not a git repo silently becomes `gitRepoDir` and fails at `git worktree add`.
-- [`worktree.List`](../../internal/worktree/worktree.go#L160-L176) is a plain `os.ReadDir(<vault>/worktrees)`. Anything outside that directory is invisible.
+- [`worktree.List`](../../internal/worktree/worktree.go) is a plain `os.ReadDir(<vault>/worktrees)`. Anything outside that directory is invisible.
 
 ### `C2` — The Ring-0 Removal Guard Is Defined by Path, Not Ownership (`internal/kernel/worktree_sync.go`)
 
-- [`IsManagedWorktreeDir`](../../internal/kernel/worktree_sync.go#L46-L56) returns true only for a direct child of `<vault>/worktrees/`. Every destructive path checks it first: [`removeManagedWorktree`](../../internal/kernel/worktree_sync.go#L423-L452), [`validateTaskWorktreesForArchive`](../../internal/kernel/worktree_sync.go#L402-L421), and [`PruneOrphanWorktrees`](../../internal/kernel/worktree_sync.go#L597-L646).
+- [`IsManagedWorktreeDir`](../../internal/kernel/worktree_sync.go) returns true only for a direct child of `<vault>/worktrees/`. Every destructive path checks it first: [`removeManagedWorktree`](../../internal/kernel/worktree_sync.go), [`validateTaskWorktreesForArchive`](../../internal/kernel/worktree_sync.go), and [`PruneOrphanWorktrees`](../../internal/kernel/worktree_sync.go).
 - This is a sound safety property: `agy-hq` can never delete a directory it did not create. But it equates *"created by hq"* with *"lives under `<vault>/worktrees/`"*. Workspace systems that dictate their own mount root (e.g. `/srv/ws/<user>/<name>/`) can never satisfy it, so they can never be cleaned up, even when `agy-hq` created them.
-- [`AttachWorktreeToTaskWithOptions`](../../internal/kernel/worktree_sync.go#L185-L259) also returns early when `!IsManagedWorktreeDir`, so a non-git workspace cannot even be *recorded* against a task.
+- [`AttachWorktreeToTaskWithOptions`](../../internal/kernel/worktree_sync.go) also returns early when `!IsManagedWorktreeDir`, so a non-git workspace cannot even be *recorded* against a task.
 
 ### `C3` — Task Metadata Has Only Git-Shaped Fields (`internal/kernel/kernel.go`)
 
-- [`ActiveTask`](../../internal/kernel/kernel.go#L196-L219) carries `WorktreeDir`, `WorktreeDirs`, and `RepoRoot`. There is no field for *which tool* owns the workspace, its stable identifier, or the changes/reviews it holds.
-- [`ManagedWorktreeStatus`](../../internal/kernel/worktree_sync.go#L472-L484) exposes `Branch`, `Clean`, `MergedIntoMain`, and `PushedToOrigin`, all computed by shelling out to `git`. A change that is "in review", "approved, waiting to land", or "landed as a different identifier after server-side rebase" has no representation.
+- [`ActiveTask`](../../internal/kernel/kernel.go) carries `WorktreeDir`, `WorktreeDirs`, and `RepoRoot`. There is no field for *which tool* owns the workspace, its stable identifier, or the changes/reviews it holds.
+- [`ManagedWorktreeStatus`](../../internal/kernel/worktree_sync.go) exposes `Branch`, `Clean`, `MergedIntoMain`, and `PushedToOrigin`, all computed by shelling out to `git`. A change that is "in review", "approved, waiting to land", or "landed as a different identifier after server-side rebase" has no representation.
 
 ### `C4` — Archive / Reopen / Compact Lifecycle Shells Out to Git
 
 | Lifecycle step | Code | Git assumption |
 | :--- | :--- | :--- |
-| Dirty check before archive | [`validateTaskWorktreesForArchive`](../../internal/kernel/worktree_sync.go#L402-L421), [`isWorktreeCleanOrAbsent`](../../internal/kernel/kernel.go#L1221-L1235) | `git status --porcelain` |
-| Removal on archive | [`removeManagedWorktree`](../../internal/kernel/worktree_sync.go#L423-L452) | `git worktree remove` + `git worktree prune` |
-| Restore on reopen | [`restoreWorktreeForReopen`](../../internal/kernel/kernel.go#L1046-L1074) | `git worktree add` from branch `hq/<slug>` |
-| Dormant auto-archive | [`CompactTasks`](../../internal/kernel/kernel.go#L1243-L1513) via `areAllTaskWorktreesMergedAndClean` | `git merge-base --is-ancestor` / `git cherry` against `origin/main` |
-| Orphan pruning | [`PruneOrphanWorktrees`](../../internal/kernel/worktree_sync.go#L597-L646) | `keep:unmerged` derived from `git` default-branch refs |
+| Dirty check before archive | [`validateTaskWorktreesForArchive`](../../internal/kernel/worktree_sync.go), [`isWorktreeCleanOrAbsent`](../../internal/kernel/kernel.go) | `git status --porcelain` |
+| Removal on archive | [`removeManagedWorktree`](../../internal/kernel/worktree_sync.go) | `git worktree remove` + `git worktree prune` |
+| Restore on reopen | [`restoreWorktreeForReopen`](../../internal/kernel/kernel.go) | `git worktree add` from branch `hq/<slug>` |
+| Dormant auto-archive | [`CompactTasks`](../../internal/kernel/kernel.go) via `areAllTaskWorktreesMergedAndClean` | `git merge-base --is-ancestor` / `git cherry` against `origin/main` |
+| Orphan pruning | [`PruneOrphanWorktrees`](../../internal/kernel/worktree_sync.go) | `keep:unmerged` derived from `git` default-branch refs |
 
 For a non-git workspace, every one of these either no-ops (not managed) or would return wrong answers (e.g. `git status` failing would mark the workspace dirty forever).
 
@@ -58,10 +58,10 @@ For a non-git workspace, every one of these either no-ops (not managed) or would
 
 Antigravity scopes each conversation to a **project** (a `<ConfigDir>/projects/<id>.json` entry listing folder resources). Plugin hooks, project-scoped plugin installs, and agent-API messaging are all project-relative. `agy-hq` therefore takes great care to start every spawned conversation in a *verified* project:
 
-- [`resolveSpawnTarget`](../../internal/kernel/kernel.go#L2974-L3036) derives `(workDir, projectID)` from the Front Desk lease, the cached Language Server session, or `ANTIGRAVITY_PROJECT_ID`, then calls [`ResolveVerifiedWorkspaceProjectID`](../../internal/kernel/project_registry.go#L288-L347) to repair poisoned IDs.
-- Managed worktrees work only because of a special case: [`ResolveVerifiedWorkspaceProjectID`](../../internal/kernel/project_registry.go#L298-L306) lets a directory under `<vault>/worktrees/` borrow the **primary Vault project** (`IsManagedWorktreeDir` → `primaryVaultWorkspaceDir`). A worktree is a sub-folder of the Vault project's resource tree.
-- [`buildCascadeRequestBody`](../../internal/kernel/kernel.go#L4320-L4367) sends either `projectEnvConfig.projectId` **or** `workspaceUris`, never both (`StartCascade` rejects both with HTTP 400, see the comment at `L4354`).
-- [`spawnTaskViaLS`](../../internal/kernel/kernel.go#L3120-L3198) refuses an unverified `agentapi` fallback when no verified `projectId` exists (`TestProjectIDPoisoningRepairAndWorkspaceSafeSpawn` in [`project_and_auto_test.go`](../../internal/kernel/project_and_auto_test.go#L44-L152)).
+- [`resolveSpawnTarget`](../../internal/kernel/kernel.go) derives `(workDir, projectID)` from the Front Desk lease, the cached Language Server session, or `ANTIGRAVITY_PROJECT_ID`, then calls [`ResolveVerifiedWorkspaceProjectID`](../../internal/kernel/project_registry.go) to repair poisoned IDs.
+- Managed worktrees work only because of a special case: [`ResolveVerifiedWorkspaceProjectID`](../../internal/kernel/project_registry.go) lets a directory under `<vault>/worktrees/` borrow the **primary Vault project** (`IsManagedWorktreeDir` → `primaryVaultWorkspaceDir`). A worktree is a sub-folder of the Vault project's resource tree.
+- [`buildCascadeRequestBody`](../../internal/kernel/kernel.go) sends either `projectEnvConfig.projectId` **or** `workspaceUris`, never both (`StartCascade` rejects both with HTTP 400, see the comment at `L4354`).
+- [`spawnTaskViaLS`](../../internal/kernel/kernel.go) refuses an unverified `agentapi` fallback when no verified `projectId` exists (`TestProjectIDPoisoningRepairAndWorkspaceSafeSpawn` in [`project_and_auto_test.go`](../../internal/kernel/project_and_auto_test.go)).
 
 **Consequence for non-git workspaces:** a workspace at an arbitrary mount root is *not* inside the Vault project. Starting the conversation "in" that workspace means starting it in a **different project**, where:
 
@@ -73,8 +73,8 @@ This is the root cause of the operational rule "keep task conversations in the V
 
 ### `C6` — Front Desk Hygiene Hooks Know Only `<vault>/worktrees/`
 
-- [`shouldAutoClaimVacantFrontDesk`](../../internal/hooks/hooks.go#L133-L175) treats paths inside `<vault>/worktrees/` (and git/language-project markers) as "regular coding sessions" that must not claim the Front Desk lease. When the hook payload carries `workspacePaths`, any non-Vault path correctly returns `false`. But on the cwd fallback path (empty `workspacePaths`, `L141-L161`), a non-git workspace root has none of `.git`, `go.mod`, `package.json`, `Cargo.toml`, or `pyproject.toml` at its top, so the function falls through to `return true` and a conversation started there while the lease is vacant **can claim the Front Desk**.
-- [Rule A](../../internal/hooks/hooks.go#L1957-L2008) (no source edits on the Front Desk) works by deny-by-default outside the artifact dir and `<vault>` non-worktree paths, so it already covers external workspaces. That is correct, but by accident rather than by design.
+- [`shouldAutoClaimVacantFrontDesk`](../../internal/hooks/session_start.go) treats paths inside `<vault>/worktrees/` (and git/language-project markers) as "regular coding sessions" that must not claim the Front Desk lease. When the hook payload carries `workspacePaths`, any non-Vault path correctly returns `false`. But on the cwd fallback path (empty `workspacePaths`, `L141-L161`), a non-git workspace root has none of `.git`, `go.mod`, `package.json`, `Cargo.toml`, or `pyproject.toml` at its top, so the function falls through to `return true` and a conversation started there while the lease is vacant **can claim the Front Desk**.
+- [Rule A](../../internal/hooks/hooks.go) (no source edits on the Front Desk) works by deny-by-default outside the artifact dir and `<vault>` non-worktree paths, so it already covers external workspaces. That is correct, but by accident rather than by design.
 - Nothing prevents **two task conversations from writing into the same workspace**. For DVCS front-ends that auto-snapshot the working copy into the current change, two concurrent writers silently mix their edits into one change. Git worktrees avoid this structurally (one branch per worktree); other systems need an explicit single-writer rule.
 - Destructive workspace verbs (delete workspace, purge untracked files, drop a change) are not covered by any default approval rule. [RFC-0021](../design/0021-customizable-approval-policy-and-ux.md) `approval_rules` can express them per pack, but no pack component ties them to the workspace they protect.
 
@@ -82,11 +82,11 @@ This is the root cause of the operational rule "keep task conversations in the V
 
 | Surface | Code | What it shows |
 | :--- | :--- | :--- |
-| `SessionStart` Zone 2 | [`hooks.go`](../../internal/hooks/hooks.go#L545-L551) | `## Active Git Worktrees`: basename + path from `worktree.List` |
-| `CONSOLE.md` / `hq_console.md` | [`webui.go`](../../internal/webui/webui.go#L2406-L2414) | `## 3. Active Parallel Git Worktrees` |
-| Task Board badge | [`webui.go`](../../internal/webui/webui.go#L2382-L2386) | `🌿 wt` / `🌿 N wts` from `ExistingWorktreeDirs` |
-| `:4242` WebUI | [`webui.go`](../../internal/webui/webui.go#L1785-L1794), [`DashboardState.Worktrees`](../../internal/webui/webui.go#L69) | `[]string` of paths |
-| `hq status` | [`main.go`](../../cmd/hq/main.go#L346-L371) | `Active Worktrees: N` |
+| `SessionStart` Zone 2 | [`hooks.go`](../../internal/hooks/hooks.go) | `## Active Git Worktrees`: basename + path from `worktree.List` |
+| `CONSOLE.md` / `hq_console.md` | [`webui.go`](../../internal/webui/webui.go) | `## 3. Active Parallel Git Worktrees` |
+| Task Board badge | [`webui.go`](../../internal/webui/webui.go) | `🌿 wt` / `🌿 N wts` from `ExistingWorktreeDirs` |
+| `:4242` WebUI | [`webui.go`](../../internal/webui/webui.go), [`DashboardState.Worktrees`](../../internal/webui/webui.go) | `[]string` of paths |
+| `hq status` | [`main.go`](../../cmd/hq/main.go) | `Active Worktrees: N` |
 
 None of these surfaces can show *which tool* owns a workspace, whether it holds changes awaiting review, or whether the owning task is still alive.
 
@@ -97,7 +97,7 @@ None of these surfaces can show *which tool* owns a workspace, whether it holds 
 The following sequence is traced through the current `main` code paths cited above (a static walkthrough with synthetic names, not a recorded live run):
 
 1. **Front Desk:** `hq spawn --task=ledger-fix --prompt="Fix the rounding bug"` (no `--repo`, because `--repo` requires git). The task conversation starts in the Vault project (`C5`). Good: hooks fire, the task appears on the Task Board.
-2. **Task conversation:** the agent runs the vendor CLI to create a client at `/srv/ws/user/ledger-fix/` and edits files there. `Stop` journals `filesModified`, but nothing binds the workspace to the task: auto-binding happens only through `hq worktree add|attach` and nested `SpawnSubagent` ([`main.go`](../../cmd/hq/main.go#L662-L672), [`kernel.go`](../../internal/kernel/kernel.go#L4832-L4858)), and even an explicit `hq worktree attach /srv/ws/user/ledger-fix` is rejected because the path is not under `<vault>/worktrees/` (`C2`). The Task Board row shows no workspace badge (`C7`).
+2. **Task conversation:** the agent runs the vendor CLI to create a client at `/srv/ws/user/ledger-fix/` and edits files there. `Stop` journals `filesModified`, but nothing binds the workspace to the task: auto-binding happens only through `hq worktree add|attach` and nested `SpawnSubagent` ([`main.go`](../../cmd/hq/main.go), [`kernel.go`](../../internal/kernel/kernel.go)), and even an explicit `hq worktree attach /srv/ws/user/ledger-fix` is rejected because the path is not under `<vault>/worktrees/` (`C2`). The Task Board row shows no workspace badge (`C7`).
 3. **Parallel task:** a second task for a follow-up change is pointed at the same client by mistake. Both agents edit it; with an auto-snapshotting front-end both sets of edits land in one change (`C6`).
 4. **Completion:** `hq complete ledger-fix` → after 24h, `CompactTasks` archives the task. Its client is not managed, so it is left behind with uncommitted edits and an open change (`C4`).
 5. **Week later:** the user has dozens of orphaned clients. `hq worktree prune` reports `Scanned 0`. No surface lists them (`C7`).

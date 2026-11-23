@@ -2511,13 +2511,15 @@ func TestLateStopOnColdAutoSpawnTokenOrVacantDeskNeverAdopts(t *testing.T) {
 	vaultB := t.TempDir()
 	_ = kernel.SetFrontDesk(vaultB, "00000000-0000-4000-8000-000000000001", t.TempDir())
 	convCold := "77777777-7777-4777-8777-777777777702"
-	_ = kernel.AppendTasksToColdArchive(vaultB, []kernel.ActiveTask{{
-		TaskSlug:       "auto-cold-worker",
-		Title:          "[Auto] Cold Worker",
-		Kind:           "auto",
-		ConversationID: convCold,
-		Status:         "archived",
-	}})
+	_ = kernel.ApplyTaskReconciliation(vaultB, func(tasks []kernel.ActiveTask) ([]kernel.ActiveTask, []kernel.ActiveTask, bool, error) {
+		return tasks, []kernel.ActiveTask{{
+			TaskSlug:       "auto-cold-worker",
+			Title:          "[Auto] Cold Worker",
+			Kind:           "auto",
+			ConversationID: convCold,
+			Status:         "archived",
+		}}, true, nil
+	})
 	stopOut.Reset()
 	_ = HandleStop(strings.NewReader(mustJSONLine(map[string]interface{}{
 		"conversationId": convCold, "executionNum": 2, "terminationReason": "NO_TOOL_CALL", "lastUserInput": "Background finished",
@@ -2716,5 +2718,39 @@ func TestPostCheckpointSuppressesCompactionNudgeAndInvalidatesSummaryCache(t *te
 	}
 	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
 		t.Fatalf("expected HandleStop with CompactionCount > 0 to invalidate summary_cache.json, stat err=%v", err)
+	}
+}
+
+func TestProtectedCredentialTargetsAndShellRegexParity(t *testing.T) {
+	for _, sub := range protectedPrivateSubs {
+		cmd := "cat local/private/" + sub
+		if !reLocalCredentialShell.MatchString(cmd) {
+			t.Fatalf("reLocalCredentialShell failed to match %q", cmd)
+		}
+	}
+	for _, sub := range append([]string{"channels"}, protectedLedgerMemorySubs...) {
+		cmd := "cat local/memory/" + sub
+		if !reLocalCredentialShell.MatchString(cmd) {
+			t.Fatalf("reLocalCredentialShell failed to match %q", cmd)
+		}
+	}
+	for _, bare := range []string{"workspaces.json", ".workspaces.lock", "workspaces.jso*", "delegates_state.json", ".delegates.lock", "delegates_audit.jsonl"} {
+		cmd := "cat " + bare
+		if !reLocalCredentialShell.MatchString(cmd) {
+			t.Fatalf("reLocalCredentialShell failed to match bare target %q", cmd)
+		}
+	}
+
+	vault := filepath.Join(string(filepath.Separator), "tmp", "vault")
+	withLedgers := protectedCredentialTargets(vault, []string{"/tmp/roots.json"}, true)
+	withoutLedgers := protectedCredentialTargets(vault, nil, false)
+	if len(withLedgers) <= len(withoutLedgers) {
+		t.Fatalf("expected includeLedgers=true (%d) > false (%d)", len(withLedgers), len(withoutLedgers))
+	}
+	joinedWith := strings.Join(withLedgers, "\n")
+	for _, want := range []string{filepath.Join(vault, "approvals"), filepath.Join(vault, "memory", "channels"), filepath.Join(vault, "memory", "workspaces.json"), filepath.Join(vault, "private", "profile.md"), "/tmp/roots.json"} {
+		if !strings.Contains(joinedWith, want) {
+			t.Fatalf("protectedCredentialTargets missing %q", want)
+		}
 	}
 }

@@ -77,10 +77,10 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 				preview = p.Metadata["bodyPreview"]
 			}
 			if preview != "" {
-				bodyParts = append(bodyParts, "Preview: "+truncateRunes(preview, 280))
+				bodyParts = append(bodyParts, "Preview: "+store.TruncateRunes(preview, 280))
 			}
 		}
-		bodyParts = append(bodyParts, "Cmd: "+truncateRunes(p.Command, 180))
+		bodyParts = append(bodyParts, "Cmd: "+store.TruncateRunes(p.Command, 180))
 		actionNotes = append(actionNotes, living.CalloutNote{
 			Tone:         "warn",
 			Title:        living.Text("Pending Approval: " + p.Summary),
@@ -120,12 +120,12 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		actionNotes = append(actionNotes, living.CalloutNote{
 			Tone:         "info",
 			Title:        living.Text("Decision (" + dc.SourceSkill + "): " + dc.Title),
-			Body:         living.Text(truncateRunes(dc.Summary, 240) + "\nOptions: " + strings.Join(optLines, " · ")),
+			Body:         living.Text(store.TruncateRunes(dc.Summary, 240) + "\nOptions: " + strings.Join(optLines, " · ")),
 			Perspectives: []string{"needs_me"},
 			CopyText:     primaryCmd,
-			CopyLabel:    living.Text(truncateRunes(primaryLbl, 28)),
+			CopyLabel:    living.Text(store.TruncateRunes(primaryLbl, 28)),
 			CopyAltText:  altCmd,
-			CopyAltLabel: living.Text(truncateRunes(altLbl, 28)),
+			CopyAltLabel: living.Text(store.TruncateRunes(altLbl, 28)),
 		})
 	}
 	if len(actionNotes) == 0 {
@@ -218,7 +218,7 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			ideaNotes = append(ideaNotes, living.CalloutNote{
 				Tone:         "info",
 				Title:        living.Text("💡 " + it.Title),
-				Body:         living.Text(fmt.Sprintf("[%s] %s", it.SourceSkill, truncateRunes(it.Summary, 220))),
+				Body:         living.Text(fmt.Sprintf("[%s] %s", it.SourceSkill, store.TruncateRunes(it.Summary, 220))),
 				Perspectives: []string{"needs_me"},
 				CopyText:     fmt.Sprintf("hq ideas promote %s", it.ID),
 				CopyLabel:    biText("Copy Promote", "复制升级任务"),
@@ -260,7 +260,7 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 				meta = append(meta, obs.FormatTokensCompact(tb.TreeUncachedTokens)+" tok")
 			}
 			body := strings.Join(meta, " · ")
-			if s := truncateRunes(strings.Join(strings.Fields(t.LastSummary), " "), 160); s != "" {
+			if s := store.TruncateRunes(strings.Join(strings.Fields(t.LastSummary), " "), 160); s != "" {
 				body += "\n" + s
 			}
 			linkURL := ""
@@ -354,10 +354,10 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			if !sc.Enabled {
 				status = "paused"
 			} else if sc.LastError != "" {
-				status = "error: " + truncateRunes(sc.LastError, 60)
+				status = "error: " + store.TruncateRunes(sc.LastError, 60)
 				badge = "warn"
 			} else if sc.LastStatus != "" && sc.LastStatus != "ok" {
-				status = truncateRunes(sc.LastStatus, 60)
+				status = store.TruncateRunes(sc.LastStatus, 60)
 			}
 			nextRun := sc.NextRunHuman
 			if nextRun == "" {
@@ -399,7 +399,7 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			Cells: []living.LocalizedText{
 				living.Text(h.Name),
 				living.Text(h.Status),
-				living.Text(truncateRunes(h.Detail, 120)),
+				living.Text(store.TruncateRunes(h.Detail, 120)),
 			},
 			Badge: badge,
 		})

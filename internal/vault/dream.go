@@ -212,7 +212,7 @@ func BuildDreamPlan(vaultDir string, opts DreamPlanOptions) (*DreamPlan, error) 
 			agg.item.LastTimestamp = rec.Timestamp
 		}
 		if agg.item.PromptSample == "" && strings.TrimSpace(rec.UserPrompt) != "" {
-			agg.item.PromptSample = truncateRunes(strings.Join(strings.Fields(rec.UserPrompt), " "), 140)
+			agg.item.PromptSample = store.TruncateRunesWithSuffix(strings.Join(strings.Fields(rec.UserPrompt), " "), 140, "…")
 		}
 		for _, f := range rec.FilesModified {
 			f = strings.TrimSpace(f)
@@ -363,7 +363,7 @@ func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems in
 		if summary == "" {
 			return
 		}
-		entry := fmt.Sprintf("[%s] %s", strings.TrimSpace(rec.Proposal.ActionType), truncateRunes(summary, 140))
+		entry := fmt.Sprintf("[%s] %s", strings.TrimSpace(rec.Proposal.ActionType), store.TruncateRunesWithSuffix(summary, 140, "…"))
 		key := strings.ToLower(entry)
 		if !seen[key] {
 			seen[key] = true

@@ -14,6 +14,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/workspace"
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // SpaceWidgetOutput holds safe declarative lines rendered by a built-in Console Space widget.
@@ -78,46 +79,9 @@ func SetSpaceOverride(vaultDir, id, mode string) error {
 	})
 }
 
-func parseBracketStrings(raw string) []string {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "[")
-	s = strings.TrimSuffix(s, "]")
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		v := strings.Trim(strings.TrimSpace(part), `"'`)
-		if v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-func stripYAMLInlineComment(s string) string {
-	inSingle := false
-	inDouble := false
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-		case '#':
-			if !inSingle && !inDouble {
-				return strings.TrimSpace(s[:i])
-			}
-		}
-	}
-	return strings.TrimSpace(s)
-}
-
 // ParseSpacesFromConfigYAML extracts the `spaces:` list block from local/config.yaml.
 func ParseSpacesFromConfigYAML(raw string) []ConsoleSpace {
 	var spaces []ConsoleSpace
-	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
 	inSpaces := false
 	var cur *ConsoleSpace
 	inWidgetsList := false
@@ -133,38 +97,40 @@ func ParseSpacesFromConfigYAML(raw string) []ConsoleSpace {
 		inWidgetsList = false
 	}
 
-	for _, rawLine := range lines {
-		trimmed := strings.TrimSpace(rawLine)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, rawLine := range yamlmini.Lines(raw) {
+		clean := yamlmini.StripComment(rawLine)
+		if clean == "" {
 			continue
 		}
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		indent := yamlmini.LeadingIndent(rawLine)
 		if indent == 0 {
 			flush()
-			inSpaces = (trimmed == "spaces:")
+			inSpaces = (clean == "spaces:")
 			continue
 		}
 		if !inSpaces {
 			continue
 		}
-		clean := stripYAMLInlineComment(trimmed)
-		if strings.HasPrefix(clean, "- ") {
-			rest := strings.TrimSpace(strings.TrimPrefix(clean, "- "))
-			if inWidgetsList && !strings.Contains(rest, ":") && cur != nil {
-				cur.Widgets = append(cur.Widgets, strings.Trim(rest, `"'`))
-				continue
+		if rest, isItem := yamlmini.TrimListItem(clean); isItem {
+			if inWidgetsList && cur != nil {
+				if _, _, isKV := yamlmini.SplitKV(rest); !isKV {
+					if item := yamlmini.UnquoteScalar(rest); item != "" {
+						cur.Widgets = append(cur.Widgets, item)
+					}
+					continue
+				}
 			}
 			flush()
 			cur = &ConsoleSpace{}
-			if idx := strings.Index(rest, ":"); idx > 0 {
-				applySpaceKV(cur, strings.TrimSpace(rest[:idx]), strings.TrimSpace(rest[idx+1:]), &inWidgetsList)
+			if k, v, ok := yamlmini.SplitKV(rest); ok {
+				applySpaceKV(cur, k, v, &inWidgetsList)
 			}
 			continue
 		}
 		if cur != nil {
-			if idx := strings.Index(clean, ":"); idx > 0 {
+			if k, v, ok := yamlmini.SplitKV(clean); ok {
 				inWidgetsList = false
-				applySpaceKV(cur, strings.TrimSpace(clean[:idx]), strings.TrimSpace(clean[idx+1:]), &inWidgetsList)
+				applySpaceKV(cur, k, v, &inWidgetsList)
 			}
 		}
 	}
@@ -179,21 +145,20 @@ func ParseStandaloneSpaceYAML(raw, fallbackID string) []ConsoleSpace {
 	}
 	sp := ConsoleSpace{ID: fallbackID}
 	inWidgets := false
-	for _, rawLine := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
-		clean := stripYAMLInlineComment(strings.TrimSpace(rawLine))
-		if clean == "" || strings.HasPrefix(clean, "#") {
+	for _, rawLine := range yamlmini.Lines(raw) {
+		clean := yamlmini.StripComment(rawLine)
+		if clean == "" {
 			continue
 		}
-		if strings.HasPrefix(clean, "- ") && inWidgets {
-			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(clean, "- ")), `"'`)
-			if v != "" {
+		if rest, isItem := yamlmini.TrimListItem(clean); isItem && inWidgets {
+			if v := yamlmini.UnquoteScalar(rest); v != "" {
 				sp.Widgets = append(sp.Widgets, v)
 			}
 			continue
 		}
-		if idx := strings.Index(clean, ":"); idx > 0 {
+		if k, v, ok := yamlmini.SplitKV(clean); ok {
 			inWidgets = false
-			applySpaceKV(&sp, strings.TrimSpace(clean[:idx]), strings.TrimSpace(clean[idx+1:]), &inWidgets)
+			applySpaceKV(&sp, k, v, &inWidgets)
 		}
 	}
 	if sp.ID == "" {
@@ -206,7 +171,7 @@ func ParseStandaloneSpaceYAML(raw, fallbackID string) []ConsoleSpace {
 }
 
 func applySpaceKV(sp *ConsoleSpace, key, val string, inWidgets *bool) {
-	unquoted := strings.Trim(val, `"'`)
+	unquoted := yamlmini.UnquoteScalar(val)
 	switch key {
 	case "id":
 		sp.ID = unquoted
@@ -219,8 +184,10 @@ func applySpaceKV(sp *ConsoleSpace, key, val string, inWidgets *bool) {
 	case "widgets":
 		if val == "" {
 			*inWidgets = true
-		} else {
-			sp.Widgets = parseBracketStrings(val)
+		} else if arr, ok := yamlmini.ParseInlineList(val); ok {
+			sp.Widgets = arr
+		} else if unquoted != "" {
+			sp.Widgets = []string{unquoted}
 		}
 	}
 }
@@ -282,8 +249,8 @@ func MatchesSpaceSchedule(sched string, now time.Time) bool {
 	if len(parts) != 2 {
 		return false
 	}
-	startMin, ok1 := parseClockHHMM(parts[0])
-	endMin, ok2 := parseClockHHMM(parts[1])
+	startMin, ok1 := outbox.ParseHHMMMinutes(parts[0])
+	endMin, ok2 := outbox.ParseHHMMMinutes(parts[1])
 	if !ok1 || !ok2 {
 		return false
 	}
@@ -293,17 +260,6 @@ func MatchesSpaceSchedule(sched string, now time.Time) bool {
 	}
 	// Overnight window (e.g. 21:00-02:00)
 	return curMin >= startMin || curMin < endMin
-}
-
-func parseClockHHMM(s string) (int, bool) {
-	var h, m int
-	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d:%d", &h, &m); err != nil {
-		return 0, false
-	}
-	if h < 0 || h > 23 || m < 0 || m > 59 {
-		return 0, false
-	}
-	return h*60 + m, true
 }
 
 // ListSpaces loads Console Spaces from local/config.yaml and local/console_spaces/*.yaml,

@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // ScheduleTrigger represents a scheduled proactive automation from local/triggers.yaml (and optional extension packs).
@@ -166,25 +166,13 @@ func daemonStatePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "daemon.json")
 }
 
-func cleanVal(s string) string {
-	s = strings.TrimSpace(s)
-	if (strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)) ||
-		(strings.HasPrefix(s, `'`) && strings.HasSuffix(s, `'`)) {
-		return s[1 : len(s)-1]
+func parseTriggersStringList(raw string) []string {
+	if arr, ok := yamlmini.ParseInlineList(raw); ok {
+		return arr
 	}
-	return s
-}
-
-func parseStringList(s string) []string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
-		s = s[1 : len(s)-1]
-	}
-	parts := strings.Split(s, ",")
 	var result []string
-	for _, p := range parts {
-		cleaned := cleanVal(strings.TrimSpace(p))
-		if cleaned != "" {
+	for _, p := range strings.Split(raw, ",") {
+		if cleaned := yamlmini.UnquoteScalar(p); cleaned != "" {
 			result = append(result, cleaned)
 		}
 	}
@@ -192,36 +180,35 @@ func parseStringList(s string) []string {
 }
 
 func parseScheduleField(s *ScheduleTrigger, line string) {
-	idx := strings.Index(line, ":")
-	if idx < 0 {
+	key, rawVal, ok := yamlmini.SplitKV(line)
+	if !ok {
 		return
 	}
-	key := strings.TrimSpace(line[:idx])
-	val := strings.TrimSpace(line[idx+1:])
+	val := yamlmini.UnquoteScalar(rawVal)
 
 	switch key {
 	case "id":
-		s.ID = cleanVal(val)
+		s.ID = val
 	case "cron":
-		s.Cron = cleanVal(val)
+		s.Cron = val
 	case "mode":
-		s.Mode = cleanVal(val)
+		s.Mode = val
 	case "tier":
-		s.Tier = cleanVal(val)
+		s.Tier = val
 	case "model":
-		s.Model = cleanVal(val)
+		s.Model = val
 	case "skill":
-		s.Skill = cleanVal(val)
+		s.Skill = val
 	case "precheck_cmd":
-		s.PrecheckCmd = parseStringList(val)
+		s.PrecheckCmd = parseTriggersStringList(rawVal)
 	case "dedup_mode":
-		s.DedupMode = cleanVal(val)
+		s.DedupMode = val
 	case "delivery":
-		s.Delivery = cleanVal(val)
+		s.Delivery = val
 	case "catch_up":
-		s.CatchUp = cleanVal(val)
+		s.CatchUp = val
 	case "enabled":
-		v := strings.ToLower(cleanVal(val))
+		v := strings.ToLower(val)
 		if v == "true" || v == "false" {
 			b := v == "true"
 			s.Enabled = &b
@@ -230,22 +217,21 @@ func parseScheduleField(s *ScheduleTrigger, line string) {
 }
 
 func parseInboxRuleField(r *InboxRuleTrigger, line string) {
-	idx := strings.Index(line, ":")
-	if idx < 0 {
+	key, rawVal, ok := yamlmini.SplitKV(line)
+	if !ok {
 		return
 	}
-	key := strings.TrimSpace(line[:idx])
-	val := strings.TrimSpace(line[idx+1:])
+	val := yamlmini.UnquoteScalar(rawVal)
 
 	switch key {
 	case "name":
-		r.Name = cleanVal(val)
+		r.Name = val
 	case "skill":
-		r.Skill = cleanVal(val)
+		r.Skill = val
 	case "filename_regex":
-		r.FilenameRegex = cleanVal(val)
+		r.FilenameRegex = val
 	case "extensions":
-		r.Extensions = parseStringList(val)
+		r.Extensions = parseTriggersStringList(rawVal)
 	}
 }
 
@@ -256,7 +242,6 @@ func ParseTriggersContent(content string) (*TriggersConfig, error) {
 		InboxRules: make([]InboxRuleTrigger, 0),
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(content))
 	section := ""
 
 	var curSchedule *ScheduleTrigger
@@ -275,50 +260,43 @@ func ParseTriggersContent(content string) (*TriggersConfig, error) {
 		}
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, line := range yamlmini.Lines(content) {
+		clean := yamlmini.StripComment(line)
+		if clean == "" {
 			continue
 		}
 
 		// Check for top-level sections (no leading whitespace)
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '-' {
-			if strings.HasPrefix(trimmed, "schedules:") {
-				flushSchedule()
-				flushRule()
+		if yamlmini.LeadingIndent(line) == 0 && !strings.HasPrefix(clean, "-") {
+			flushSchedule()
+			flushRule()
+			if strings.HasPrefix(clean, "schedules:") {
 				section = "schedules"
-				continue
-			} else if strings.HasPrefix(trimmed, "inbox_rules:") {
-				flushSchedule()
-				flushRule()
+			} else if strings.HasPrefix(clean, "inbox_rules:") {
 				section = "inbox_rules"
-				continue
 			} else {
-				flushSchedule()
-				flushRule()
 				section = ""
-				continue
 			}
+			continue
 		}
 
 		if section == "schedules" {
-			if strings.HasPrefix(trimmed, "- ") {
+			if rest, isItem := yamlmini.TrimListItem(clean); isItem {
 				flushSchedule()
 				curSchedule = &ScheduleTrigger{}
-				trimmed = strings.TrimPrefix(trimmed, "- ")
+				clean = rest
 			}
 			if curSchedule != nil {
-				parseScheduleField(curSchedule, trimmed)
+				parseScheduleField(curSchedule, clean)
 			}
 		} else if section == "inbox_rules" {
-			if strings.HasPrefix(trimmed, "- ") {
+			if rest, isItem := yamlmini.TrimListItem(clean); isItem {
 				flushRule()
 				curRule = &InboxRuleTrigger{}
-				trimmed = strings.TrimPrefix(trimmed, "- ")
+				clean = rest
 			}
 			if curRule != nil {
-				parseInboxRuleField(curRule, trimmed)
+				parseInboxRuleField(curRule, clean)
 			}
 		}
 	}

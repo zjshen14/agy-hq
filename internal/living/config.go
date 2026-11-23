@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // Config holds framework defaults and optional Vault overrides for Living Spaces (`living_spaces:` in config.yaml).
@@ -30,43 +32,19 @@ func DefaultConfig() Config {
 	}
 }
 
-func cleanYAMLVal(s string) string {
-	s = strings.TrimSpace(s)
-	if idx := strings.Index(s, " #"); idx >= 0 {
-		s = strings.TrimSpace(s[:idx])
-	}
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
-func parseInlineList(raw string) []string {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "[")
-	s = strings.TrimSuffix(s, "]")
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if v := cleanYAMLVal(p); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
 // ParseConfig parses the top-level `living_spaces:` block from config.yaml content.
 func ParseConfig(content string) Config {
 	cfg := DefaultConfig()
 	inLiving := false
 	inLabels := false
-	for _, rawLine := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(rawLine)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, rawLine := range yamlmini.Lines(content) {
+		clean := yamlmini.StripComment(rawLine)
+		if clean == "" {
 			continue
 		}
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		indent := yamlmini.LeadingIndent(rawLine)
 		if indent == 0 {
-			inLiving = strings.HasPrefix(trimmed, "living_spaces:")
+			inLiving = strings.HasPrefix(clean, "living_spaces:")
 			inLabels = false
 			continue
 		}
@@ -75,19 +53,17 @@ func ParseConfig(content string) Config {
 		}
 		if indent == 2 {
 			inLabels = false
-			idx := strings.Index(trimmed, ":")
-			if idx < 0 {
+			key, rawVal, ok := yamlmini.SplitKV(clean)
+			if !ok {
 				continue
 			}
-			key := strings.TrimSpace(trimmed[:idx])
-			rawVal := strings.TrimSpace(trimmed[idx+1:])
 			switch key {
 			case "default_locales":
-				if list := parseInlineList(rawVal); len(list) > 0 {
+				if list, isList := yamlmini.ParseInlineList(rawVal); isList && len(list) > 0 {
 					cfg.DefaultLocales = list
 				}
 			case "default_surfaces":
-				if list := parseInlineList(rawVal); len(list) > 0 {
+				if list, isList := yamlmini.ParseInlineList(rawVal); isList && len(list) > 0 {
 					cfg.DefaultSurfaces = list
 				}
 			case "locale_labels":
@@ -96,12 +72,12 @@ func ParseConfig(content string) Config {
 			continue
 		}
 		if inLabels && indent >= 4 {
-			idx := strings.Index(trimmed, ":")
-			if idx < 0 {
+			rawKey, rawVal, ok := yamlmini.SplitKV(clean)
+			if !ok {
 				continue
 			}
-			k := cleanYAMLVal(trimmed[:idx])
-			v := cleanYAMLVal(trimmed[idx+1:])
+			k := yamlmini.UnquoteScalar(rawKey)
+			v := yamlmini.UnquoteScalar(rawVal)
 			if k != "" && v != "" {
 				cfg.LocaleLabels[k] = v
 			}

@@ -6,6 +6,8 @@
 - **Note on Numbering:** Assigned sequential ID `RFC-0012` (`docs/design/0012-token-observability.md`) because `RFC-0001` through `RFC-0011` (including [RFC-0004: Silent Gatekeeper & Channels](./0004-heartbeat-and-channels.md)) are already allocated and implemented in `docs/design/`.
 - **Related Documents:** [Research 08 (Empirical Token & Caching Audit)](../research/08_token_observability_and_telemetry.md), [RFC-0002 (Zero-Token Journaling)](./0002-memory-and-consolidation.md), [RFC-0004 (Quota Circuit Breaker)](./0004-heartbeat-and-channels.md), [RFC-0009 (Scalable Task Board & Live Console)](./0009-task-board-redesign.md), [RFC-0010 (Bounded Agent RSI)](./0010-agent-recursive-self-improvement.md)
 
+> **Evolution Note:** In Round 3 compaction, `hq console --sync` was consolidated into `hq console` (no `--sync` flag), `internal/hooks/hooks.go` was split into `{pre_tool,session_start,quarantine,stop}.go`, and model tier IDs migrated to 3-family Hydrogen/Neon/Carbon (`gemini-4-{hydrogen,neon,carbon}-*`).
+
 ---
 
 ## 1. Motivation & Problem Statement

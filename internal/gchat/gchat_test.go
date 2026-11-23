@@ -655,3 +655,58 @@ func TestReadQuarantinedThread_CDPGuardAndGmailBridge(t *testing.T) {
 		t.Fatalf("expected explicit gmail-bridge to reject native space ID, got: %v", err)
 	}
 }
+
+func TestGChatOAuthRejectsWhitespaceAccessToken(t *testing.T) {
+	vaultDir := t.TempDir()
+	t.Setenv("HQ_GCHAT_MOCK_DIR", "")
+	t.Setenv("HQ_STRICT_CALLER_ENV", "0")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected HTTP request %s %s (Auth=%q) when OAuth access_token is whitespace", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+	t.Setenv("HQ_GCHAT_API_BASE", srv.URL)
+
+	tokDir := filepath.Join(vaultDir, "private", "gchat", "tokens")
+	if err := os.MkdirAll(tokDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	readTok := filepath.Join(tokDir, "ws-read.json")
+	sendTok := filepath.Join(tokDir, "ws-send.json")
+	if err := os.WriteFile(readTok, []byte(`{"access_token":"   "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sendTok, []byte(`{"access_token":" \t "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InitOrAddAccount(vaultDir, "ws", "user@acme.com", "oauth", "", "", "", readTok, sendTok, "", true); err != nil {
+		t.Fatalf("InitOrAddAccount oauth: %v", err)
+	}
+
+	if _, err := ListSpaces(vaultDir, "ws", "", 10); err == nil {
+		t.Fatal("expected ListSpaces to fail locally on whitespace access_token")
+	}
+	if _, err := SearchMessages(vaultDir, "ws", "spaces/AAA123", "hi", 10); err == nil {
+		t.Fatal("expected SearchMessages to fail locally on whitespace access_token")
+	}
+	if _, _, err := ReadQuarantinedThread(vaultDir, "ws", "spaces/AAA123", "", "conv-gchat-ws-1", 10); err == nil {
+		t.Fatal("expected ReadQuarantinedThread to fail locally on whitespace access_token")
+	}
+
+	if err := saveCachedSpaces(vaultDir, "ws", []SpaceSummary{{
+		SpaceID:     "spaces/AAA123",
+		Account:     "ws",
+		DisplayName: "Test Space",
+		SpaceType:   "SPACE",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := CreateOrUpdateDraft(vaultDir, "ws", "gchat-draft-ws1", "spaces/AAA123", "Test Space", "", "hello", "")
+	if err != nil {
+		t.Fatalf("CreateOrUpdateDraft: %v", err)
+	}
+	if _, err := VerifyAndSendDraft(vaultDir, "ws", spec.DraftID, spec.ContentHash[:12]); err == nil {
+		t.Fatal("expected VerifyAndSendDraft to fail locally on whitespace send access_token")
+	}
+}

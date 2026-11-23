@@ -1,6 +1,6 @@
 ---
 name: Progressive-Disclosure Skill Proposal
-about: Propose a new .agents/plugins/agy-hq/skills/<name>/SKILL.md workflow or enhancement
+about: Propose a new opt-in starter skill (templates/skills/<name>/SKILL.md) or Core OS skill enhancement
 title: "feat(skill): "
 labels: ["enhancement", "skill"]
 ---
@@ -18,5 +18,6 @@ labels: ["enhancement", "skill"]
 - **Approval-Bound Outbound Actions (`./bin/hq propose`)?** (`yes` / `no`)
 
 ## Progressive-Disclosure Budget Check
-- [ ] Proposed `SKILL.md` fits cleanly within the **150-line maximum** (`Gate H1`).
+- [ ] Proposed `SKILL.md` fits cleanly within the **150-line maximum** with `0` tracked `rsi:rule` blocks (`Gate H1`).
+- [ ] Opt-in starter domain/channel skills target `templates/skills/<name>/SKILL.md` (or `<vault>/skills/`), keeping `.agents/plugins/agy-hq/skills/` reserved for Core OS skills (`Gate H1`).
 - [ ] Contains zero external Go module dependencies and zero personal PII (`Invariants P1–P6`).

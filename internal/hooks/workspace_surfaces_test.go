@@ -651,7 +651,7 @@ func TestP0ProposeDashDashChainingAndWorkspaceLedgerShellGuard(t *testing.T) {
 	vaultDir := t.TempDir()
 	key := workspace.LedgerKey(wsTestProvider, "victim")
 
-	// P0-2 regression: `hq propose ... -- <cmd> ; <gated>` and command substitutions must NEVER bypass EvaluateCommand.
+	// P0-2 regression: `hq propose ... -- <cmd> ; <gated>` and command substitutions must NEVER bypass EvaluateCommandForSession.
 	blocked := []string{
 		"hq propose --type=x --summary=y -- hq status ; hq workspace remove " + key + " --force",
 		"hq propose --type=x --summary=y -- hq status && hq workspace own " + key,

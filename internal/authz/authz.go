@@ -581,142 +581,12 @@ func ResolveAt(vaultDir, convID string, hints ResolveHints, now time.Time) Sessi
 	return BuildInteractiveTask()
 }
 
-// Attenuate computes the monotonic downward meet (current ∩ ceiling) in the capability lattice.
-// Capabilities can only narrow, never widen; if the result violates NI-1..NI-4, clamps to ProfileFailClosed.
-func Attenuate(current, ceiling SessionPolicy) SessionPolicy {
-	out := current
-	out.Tainted = current.Tainted || ceiling.Tainted
-	if ceiling.Tainted {
-		out.Profile = ceiling.Profile
-		out.IngressTrust = ceiling.IngressTrust
-		if out.TaintReason == "" {
-			out.TaintReason = ceiling.TaintReason
-		}
-	}
-	if contextRank(ceiling.ContextProjection) < contextRank(current.ContextProjection) {
-		out.ContextProjection = ceiling.ContextProjection
-	}
-	if presetRank(ceiling.HostPreset) < presetRank(current.HostPreset) {
-		out.HostPreset = ceiling.HostPreset
-	}
-	out.Reads = ReadPolicy{
-		HostFS:                current.Reads.HostFS && ceiling.Reads.HostFS,
-		VaultMemory:           current.Reads.VaultMemory && ceiling.Reads.VaultMemory,
-		InboxBoundBatch:       current.Reads.InboxBoundBatch && ceiling.Reads.InboxBoundBatch,
-		InboxLowQuery:         current.Reads.InboxLowQuery && ceiling.Reads.InboxLowQuery,
-		EntityRouting:         current.Reads.EntityRouting && ceiling.Reads.EntityRouting,
-		PendingProposals:      current.Reads.PendingProposals && ceiling.Reads.PendingProposals,
-		DelegateRequest:       current.Reads.DelegateRequest && ceiling.Reads.DelegateRequest,
-		GrantedTasksPublic:    current.Reads.GrantedTasksPublic && ceiling.Reads.GrantedTasksPublic,
-		GrantedWorkspacesProj: current.Reads.GrantedWorkspacesProj && ceiling.Reads.GrantedWorkspacesProj,
-		GrantedPinnedCmds:     current.Reads.GrantedPinnedCmds && ceiling.Reads.GrantedPinnedCmds,
-		AllowArtifactRead:     current.Reads.AllowArtifactRead && ceiling.Reads.AllowArtifactRead,
-		AllowTrustedSkills:    current.Reads.AllowTrustedSkills && ceiling.Reads.AllowTrustedSkills,
-		AllowedSkillPaths:     intersectStrings(current.Reads.AllowedSkillPaths, ceiling.Reads.AllowedSkillPaths),
-	}
-	out.Writes = WritePolicy{
-		WorkspaceEditsLeased: current.Writes.WorkspaceEditsLeased && ceiling.Writes.WorkspaceEditsLeased,
-		VaultMemoryWrite:     current.Writes.VaultMemoryWrite && ceiling.Writes.VaultMemoryWrite,
-		FrontDeskCoordinator: current.Writes.FrontDeskCoordinator && ceiling.Writes.FrontDeskCoordinator,
-		TriageLedger:         current.Writes.TriageLedger && ceiling.Writes.TriageLedger,
-		TypedNudgeQueue:      current.Writes.TypedNudgeQueue && ceiling.Writes.TypedNudgeQueue,
-		DelegateEscalate:     current.Writes.DelegateEscalate && ceiling.Writes.DelegateEscalate,
-		DelegateRoute:        current.Writes.DelegateRoute && ceiling.Writes.DelegateRoute,
-		BlockPolicyFileEdits: current.Writes.BlockPolicyFileEdits || ceiling.Writes.BlockPolicyFileEdits,
-	}
-	if execRank(ceiling.Exec.Mode) < execRank(current.Exec.Mode) {
-		out.Exec.Mode = ceiling.Exec.Mode
-	}
-	if out.Exec.Mode == ExecStrictHQOnly {
-		if current.Exec.Mode == ExecStrictHQOnly && ceiling.Exec.Mode == ExecStrictHQOnly {
-			out.Exec.AllowedHQVerbs = intersectStrings(current.Exec.AllowedHQVerbs, ceiling.Exec.AllowedHQVerbs)
-		} else if ceiling.Exec.Mode == ExecStrictHQOnly {
-			out.Exec.AllowedHQVerbs = append([]string(nil), ceiling.Exec.AllowedHQVerbs...)
-		}
-	}
-	out.Egress = EgressPolicy{
-		HumanPresenceApprove:      current.Egress.HumanPresenceApprove && ceiling.Egress.HumanPresenceApprove,
-		InteractiveApprovalPolicy: current.Egress.InteractiveApprovalPolicy && ceiling.Egress.InteractiveApprovalPolicy,
-		AutoProposeOnly:           current.Egress.AutoProposeOnly || ceiling.Egress.AutoProposeOnly,
-		OfferStageBound:           current.Egress.OfferStageBound && ceiling.Egress.OfferStageBound,
-		OutboxTainted:             current.Egress.OutboxTainted && ceiling.Egress.OutboxTainted,
-		EgressFilteredReply:       current.Egress.EgressFilteredReply && ceiling.Egress.EgressFilteredReply,
-		CanClaimDesk:              current.Egress.CanClaimDesk && ceiling.Egress.CanClaimDesk,
-		CanAskQuestion:            current.Egress.CanAskQuestion && ceiling.Egress.CanAskQuestion,
-		CanProposalAsk:            current.Egress.CanProposalAsk && ceiling.Egress.CanProposalAsk,
-	}
-	if err := ValidateProfile(out); err != nil {
-		return BuildFailClosed(err.Error())
-	}
-	return out
-}
-
-func contextRank(c ContextProjection) int {
-	switch c {
-	case ContextNone:
-		return 0
-	case ContextGrantBanner:
-		return 1
-	case ContextLeanVault:
-		return 2
-	case ContextFullVault:
-		return 3
-	default:
-		return 0
-	}
-}
-
-func execRank(e ExecMode) int {
-	switch e {
-	case ExecStrictHQOnly:
-		return 0
-	case ExecScrubbedShell:
-		return 1
-	case ExecInteractiveShell:
-		return 2
-	default:
-		return 0
-	}
-}
-
-func presetRank(h HostPermissionPreset) int {
-	switch h {
-	case HostPresetRequestReview:
-		return 0
-	case HostPresetDefaultSandbox:
-		return 1
-	case HostPresetAuto:
-		return 2
-	case HostPresetTurbo:
-		return 3
-	default:
-		return 0
-	}
-}
-
-func intersectStrings(a, b []string) []string {
-	if len(a) == 0 || len(b) == 0 {
-		return nil
-	}
-	set := make(map[string]bool, len(b))
-	for _, s := range b {
-		set[s] = true
-	}
-	var out []string
-	for _, s := range a {
-		if set[s] {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // EvalHQArgv enforces strict_hq_only against the session policy's compiled AllowedHQVerbs.
 func (p SessionPolicy) EvalHQArgv(argv []string) error {
 	if p.Profile == ProfileFailClosed {
 		return fmt.Errorf("session is clamped to fail_closed (0 commands permitted)")
 	}
-	if len(argv) < 2 || !isHQBinaryToken(argv[0]) {
+	if len(argv) < 2 || !IsHQBinaryToken(argv[0]) {
 		return fmt.Errorf("only single canonical `hq` commands are permitted in %s sessions", p.Profile)
 	}
 	for _, tok := range argv[1:] {
@@ -741,7 +611,8 @@ func (p SessionPolicy) EvalHQArgv(argv []string) error {
 	return fmt.Errorf("command `hq %s` is forbidden in %s sessions", candidate, p.Profile)
 }
 
-func isHQBinaryToken(bin string) bool {
+// IsHQBinaryToken reports whether bin invokes the `hq` CLI binary (by PATH, ./bin/hq, bin/hq, or .../hq).
+func IsHQBinaryToken(bin string) bool {
 	slash := filepath.ToSlash(strings.TrimSpace(bin))
 	return slash == "hq" || slash == "./bin/hq" || slash == "bin/hq" || strings.HasSuffix(slash, "/hq")
 }

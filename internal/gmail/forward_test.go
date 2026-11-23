@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zjshen14/agy-hq/internal/connector"
 )
 
 func TestBuildForwardedHTML_WithHTMLBodyAndTrackingPixel(t *testing.T) {
@@ -143,21 +145,18 @@ func TestPrepareForward_MockCLI(t *testing.T) {
 	mockGmail := filepath.Join(binDir, "gmail")
 
 	htmlPayload := base64.RawURLEncoding.EncodeToString([]byte(`<html><body><p>Original HTML</p></body></html>`))
-	rawMsg := rawGmailMessage{
+	rawMsg := connector.RawMailMessage{
 		ID:       "msg-123",
 		ThreadID: "thr-123",
 	}
 	rawMsg.Payload.MimeType = "multipart/mixed"
-	rawMsg.Payload.Headers = []struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	}{
+	rawMsg.Payload.Headers = []connector.RawMIMEHeader{
 		{Name: "From", Value: "alice@example.com"},
 		{Name: "To", Value: "me@example.com"},
 		{Name: "Subject", Value: "Monthly Invoice"},
 		{Name: "Date", Value: "Tue, 17 Nov 2026 08:00:00 -0800"},
 	}
-	var htmlPart, att1, att2 rawGmailPart
+	var htmlPart, att1, att2 connector.RawMIMEPart
 	htmlPart.MimeType = "text/html"
 	htmlPart.Body.Data = htmlPayload
 	att1.MimeType = "application/pdf"
@@ -166,7 +165,7 @@ func TestPrepareForward_MockCLI(t *testing.T) {
 	att2.MimeType = "application/pdf"
 	att2.Filename = "receipt.pdf"
 	att2.Body.AttachmentID = "att-2"
-	rawMsg.Payload.Parts = []rawGmailPart{htmlPart, att1, att2}
+	rawMsg.Payload.Parts = []connector.RawMIMEPart{htmlPart, att1, att2}
 
 	rawJSON, err := json.Marshal(rawMsg)
 	if err != nil {
@@ -247,14 +246,14 @@ func TestPrepareForward_CleansTempDirOnAttachmentError(t *testing.T) {
 	binDir := t.TempDir()
 	mockGmail := filepath.Join(binDir, "gmail")
 
-	var rawMsg rawGmailMessage
+	var rawMsg connector.RawMailMessage
 	rawMsg.ID = "msg-fail-att"
 	rawMsg.ThreadID = "thr-fail-att"
-	var att rawGmailPart
+	var att connector.RawMIMEPart
 	att.MimeType = "application/pdf"
 	att.Filename = "broken.pdf"
 	att.Body.AttachmentID = "att-broken"
-	rawMsg.Payload.Parts = []rawGmailPart{att}
+	rawMsg.Payload.Parts = []connector.RawMIMEPart{att}
 	rawJSON, _ := json.Marshal(rawMsg)
 	jsonPath := filepath.Join(binDir, "msg.json")
 	_ = os.WriteFile(jsonPath, rawJSON, 0o600)

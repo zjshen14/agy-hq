@@ -2,8 +2,6 @@ package timers
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -74,12 +72,6 @@ func timersFilePath(vaultDir string) string {
 
 func timersLockPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", ".timers.lock")
-}
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 func withTimersLock(vaultDir string, fn func() error) error {
@@ -192,7 +184,7 @@ func SetFollowUp(vaultDir string, req FollowUpRequest, now time.Time) (Timer, er
 
 		nowStr := now.UTC().Format(time.RFC3339)
 		tm := Timer{
-			ID:              fmt.Sprintf("tmr-%s-%s", now.UTC().Format("20060102-150405"), randomHex(2)),
+			ID:              fmt.Sprintf("tmr-%s-%s", now.UTC().Format("20060102-150405"), store.RandomHex(2)),
 			Category:        TimerFollowUp,
 			Status:          StatusArmed,
 			DueAt:           due.UTC().Format(time.RFC3339),

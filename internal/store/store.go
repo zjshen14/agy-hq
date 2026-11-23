@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -253,10 +254,14 @@ func TryWith(ctx context.Context, rank Rank, lockPath string, fn func(context.Co
 	return true, nil
 }
 
-func randomSuffix() string {
-	var b [6]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+// RandomHex returns a lowercase hex-encoded string of nBytes cryptographically random bytes.
+func RandomHex(nBytes int) string {
+	if nBytes <= 0 {
+		return ""
+	}
+	b := make([]byte, nBytes)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // WriteAtomic writes data to path atomically via same-directory temp file + fsync + rename + dir fsync.
@@ -275,7 +280,7 @@ func WriteAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	tmpName := filepath.Join(dir, fmt.Sprintf(".tmp-%s-%s", filepath.Base(clean), randomSuffix()))
+	tmpName := filepath.Join(dir, fmt.Sprintf(".tmp-%s-%s", filepath.Base(clean), RandomHex(6)))
 	f, err := os.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollowFlag, perm)
 	if err != nil {
 		return err
@@ -364,4 +369,26 @@ func AppendLineNoFollow(path string, line []byte, perm os.FileMode) error {
 		return err
 	}
 	return f.Close()
+}
+
+// WriteJSONAtomic marshals v as indented JSON (with trailing newline) and writes it atomically via WriteAtomic.
+func WriteJSONAtomic(path string, v any, perm os.FileMode) error {
+	raw, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return WriteAtomic(path, append(raw, '\n'), perm)
+}
+
+// ReadJSONFile reads path and unmarshals its JSON contents into T.
+func ReadJSONFile[T any](path string) (T, error) {
+	var out T
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, err
+	}
+	return out, nil
 }

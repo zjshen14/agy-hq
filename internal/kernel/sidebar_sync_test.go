@@ -273,8 +273,10 @@ func TestSidebarSyncWireContractAndBatchChunking(t *testing.T) {
 		})
 	}
 	mockLS.notFoundIDs[missingInBatch] = true
-	if err := AppendTasksToColdArchive(vaultDir, coldBatch); err != nil {
-		t.Fatalf("AppendTasksToColdArchive: %v", err)
+	if err := withTasksLock(vaultDir, func() error {
+		return appendTasksToColdArchiveUnlocked(vaultDir, coldBatch)
+	}); err != nil {
+		t.Fatalf("appendTasksToColdArchiveUnlocked: %v", err)
 	}
 
 	mockLS.mu.Lock()
@@ -412,20 +414,22 @@ func TestSidebarArchiveSevenSafetyGates(t *testing.T) {
 	_ = RegisterTask(vaultDir, ActiveTask{ConversationID: hotActiveID, TaskSlug: "hot-active", Status: "active", LastUpdatedAt: now.Format(time.RFC3339)})
 
 	// Seed cold archive with all remaining candidates to test Backfill Gates S2..S7 in one sweep
-	if err := AppendTasksToColdArchive(vaultDir, []ActiveTask{
-		{ConversationID: fdLeaseID, TaskSlug: "cold-fd1", Status: "archived"},
-		{ConversationID: fdTitleID, TaskSlug: "cold-fd2", Status: "archived"},
-		{ConversationID: callerID, TaskSlug: "cold-caller", Status: "archived"},
-		{ConversationID: vaultPinnedID, TaskSlug: "cold-vpinned", Pinned: true, Status: "archived"},
-		{ConversationID: uiStarredID, TaskSlug: "cold-ustarred", Status: "archived"},
-		{ConversationID: hotActiveID, TaskSlug: "cold-reopened", Status: "archived"},
-		{ConversationID: busyRunningID, TaskSlug: "cold-running", Status: "archived"},
-		{ConversationID: busySubagentID, TaskSlug: "cold-subagent", Status: "archived"},
-		{ConversationID: busyWaitingID, TaskSlug: "cold-waiting", Status: "archived"},
-		{ConversationID: alreadyArchID, TaskSlug: "cold-already", Status: "archived"},
-		{ConversationID: eligibleColdID, TaskSlug: "cold-eligible", Status: "archived"},
+	if err := withTasksLock(vaultDir, func() error {
+		return appendTasksToColdArchiveUnlocked(vaultDir, []ActiveTask{
+			{ConversationID: fdLeaseID, TaskSlug: "cold-fd1", Status: "archived"},
+			{ConversationID: fdTitleID, TaskSlug: "cold-fd2", Status: "archived"},
+			{ConversationID: callerID, TaskSlug: "cold-caller", Status: "archived"},
+			{ConversationID: vaultPinnedID, TaskSlug: "cold-vpinned", Pinned: true, Status: "archived"},
+			{ConversationID: uiStarredID, TaskSlug: "cold-ustarred", Status: "archived"},
+			{ConversationID: hotActiveID, TaskSlug: "cold-reopened", Status: "archived"},
+			{ConversationID: busyRunningID, TaskSlug: "cold-running", Status: "archived"},
+			{ConversationID: busySubagentID, TaskSlug: "cold-subagent", Status: "archived"},
+			{ConversationID: busyWaitingID, TaskSlug: "cold-waiting", Status: "archived"},
+			{ConversationID: alreadyArchID, TaskSlug: "cold-already", Status: "archived"},
+			{ConversationID: eligibleColdID, TaskSlug: "cold-eligible", Status: "archived"},
+		})
 	}); err != nil {
-		t.Fatalf("AppendTasksToColdArchive: %v", err)
+		t.Fatalf("appendTasksToColdArchiveUnlocked: %v", err)
 	}
 
 	backfillCfg := mockLS.config(now)
@@ -650,11 +654,15 @@ func TestSidebarBackfillDryRunZeroWriteGuaranteeAndCompactIntegration(t *testing
 		CreatedAt:      now.Add(-32 * time.Hour).Format(time.RFC3339),
 		LastUpdatedAt:  now.Add(-30 * time.Hour).Format(time.RFC3339),
 	})
-	_ = AppendTasksToColdArchive(vaultDir, []ActiveTask{
-		{ConversationID: uCold1, TaskSlug: "hist-1", Status: "archived"},
-		{ConversationID: uCold2, TaskSlug: "hist-2", Status: "archived"},
-		{ConversationID: uFD, TaskSlug: "hist-fd", Status: "archived"},
-	})
+	if err := withTasksLock(vaultDir, func() error {
+		return appendTasksToColdArchiveUnlocked(vaultDir, []ActiveTask{
+			{ConversationID: uCold1, TaskSlug: "hist-1", Status: "archived"},
+			{ConversationID: uCold2, TaskSlug: "hist-2", Status: "archived"},
+			{ConversationID: uFD, TaskSlug: "hist-fd", Status: "archived"},
+		})
+	}); err != nil {
+		t.Fatalf("appendTasksToColdArchiveUnlocked: %v", err)
+	}
 
 	tasksBefore, _ := os.ReadFile(tasksFilePath(vaultDir))
 	coldBefore, _ := os.ReadFile(tasksArchiveFilePath(vaultDir))
@@ -818,13 +826,15 @@ func TestJetboxUnloadedHistoricalBackfillAndSubtrajectoryFilter(t *testing.T) {
 	}
 
 	_ = SetFrontDesk(vaultDir, uLoaded, "")
-	if err := AppendTasksToColdArchive(vaultDir, []ActiveTask{
-		{ConversationID: uUnloaded1, TaskSlug: "old-1", Status: "archived"},
-		{ConversationID: uUnloaded2, TaskSlug: "old-2", Status: "archived"},
-		{ConversationID: uUnloadedPinned, TaskSlug: "old-pinned", Status: "archived"},
-		{ConversationID: uSubagent, TaskSlug: "old-subagent", Kind: "subagent", Status: "completed"},
+	if err := withTasksLock(vaultDir, func() error {
+		return appendTasksToColdArchiveUnlocked(vaultDir, []ActiveTask{
+			{ConversationID: uUnloaded1, TaskSlug: "old-1", Status: "archived"},
+			{ConversationID: uUnloaded2, TaskSlug: "old-2", Status: "archived"},
+			{ConversationID: uUnloadedPinned, TaskSlug: "old-pinned", Status: "archived"},
+			{ConversationID: uSubagent, TaskSlug: "old-subagent", Kind: "subagent", Status: "completed"},
+		})
 	}); err != nil {
-		t.Fatalf("AppendTasksToColdArchive: %v", err)
+		t.Fatalf("appendTasksToColdArchiveUnlocked: %v", err)
 	}
 
 	// 1. Backfill must discover unloaded conversations via JetboxSubscribeToSummaries, archive uUnloaded1 & uUnloaded2,
@@ -958,15 +968,17 @@ func TestSyncSidebarPreservesSupersededAutoArchiveAndBackfillsSupersededIDs(t *t
 	}, now)
 
 	// Also seed cold archive with u4ColdCurrent superseding u3Cold.
-	_ = AppendTasksToColdArchive(vaultDir, []ActiveTask{
-		{
-			TaskSlug:                  "auto-watch-cold",
-			Title:                     "[Auto] Cold Triage",
-			Kind:                      "auto",
-			ConversationID:            u4ColdCurrent,
-			SupersededConversationIDs: []string{u3Cold},
-			Status:                    "archived",
-		},
+	_ = withTasksLock(vaultDir, func() error {
+		return appendTasksToColdArchiveUnlocked(vaultDir, []ActiveTask{
+			{
+				TaskSlug:                  "auto-watch-cold",
+				Title:                     "[Auto] Cold Triage",
+				Kind:                      "auto",
+				ConversationID:            u4ColdCurrent,
+				SupersededConversationIDs: []string{u3Cold},
+				Status:                    "archived",
+			},
+		})
 	})
 
 	rep, err := SyncSidebar(vaultDir, SyncSidebarOptions{

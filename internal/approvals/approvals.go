@@ -3,7 +3,6 @@ package approvals
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -134,9 +133,7 @@ type InterventionRecord struct {
 }
 
 func generateID() string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("prop-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
+	return fmt.Sprintf("prop-%d-%s", time.Now().Unix(), store.RandomHex(6))
 }
 
 // ComputeHash computes the deterministic SHA-256 checksum over actionType and command.

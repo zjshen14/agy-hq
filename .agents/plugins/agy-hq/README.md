@@ -8,8 +8,8 @@ From an `agy-hq` checkout, install `~/.local/bin/hq` on `PATH` and sync the glob
 
 ```sh
 ./scripts/bootstrap.sh --global
-# or directly:
-./bin/hq plugin install
+# or directly (defaults to project scope unless --global is passed):
+./bin/hq plugin install --global
 ```
 
 Verify installation and bundle/binary version sync at any time:

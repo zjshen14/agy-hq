@@ -122,12 +122,11 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			posQ = *qFlag
 		}
 		if strings.TrimSpace(posQ) == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq memory search <query> [--scope=...] [--layers=facts,topics,entities,notes,journal,progress] [--archive] [--limit=10] [--json]")
-			os.Exit(1)
+			fatalf("usage: hq memory search <query> [--scope=...] [--layers=facts,topics,entities,notes,journal,progress] [--archive] [--limit=10] [--json]")
 		}
 		var layers []string
 		if strings.TrimSpace(*layersFlag) != "" {
-			layers = strings.Split(*layersFlag, ",")
+			layers = splitCSV(*layersFlag)
 		}
 		hits, err := vault.SearchMemory(vaultDir, vault.SearchOptions{
 			Query:          posQ,
@@ -136,10 +135,7 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			IncludeArchive: *includeArchive,
 			Limit:          *limit,
 		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq memory search failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq memory search failed", err)
 		if *asJSON {
 			printJSONUnescaped(hits)
 			return

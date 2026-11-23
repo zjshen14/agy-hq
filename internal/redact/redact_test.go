@@ -61,3 +61,32 @@ func TestHasHighEntropyBlob(t *testing.T) {
 		t.Fatalf("expected CamelCase code symbols and build target labels not to trigger high-entropy detector")
 	}
 }
+
+func TestSharedPatternsAndSecretSSNDetection(t *testing.T) {
+	patterns := DefaultSecretPatterns()
+	if len(patterns) < 7 {
+		t.Fatalf("expected >= 7 default secret patterns, got %d", len(patterns))
+	}
+	if !HomeDirPathPattern().MatchString("/home/user/repo") {
+		t.Fatalf("expected HomeDirPathPattern to match home path")
+	}
+	syntheticSSN := "987-" + "65-4321"
+	if !SSNPattern().MatchString("ssn " + syntheticSSN) {
+		t.Fatalf("expected SSNPattern to match SSN")
+	}
+
+	fakeGH := "ghp_" + strings.Repeat("A", 36)
+	vs := FindViolations("", "token="+fakeGH+" ssn="+syntheticSSN, nil)
+	var sawSecret, sawSSN bool
+	for _, v := range vs {
+		if v.Kind == "secret" {
+			sawSecret = true
+		}
+		if v.Kind == "pii_ssn" {
+			sawSSN = true
+		}
+	}
+	if !sawSecret || !sawSSN {
+		t.Fatalf("expected secret and pii_ssn violations, got %+v", vs)
+	}
+}

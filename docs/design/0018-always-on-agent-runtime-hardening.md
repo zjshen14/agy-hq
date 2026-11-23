@@ -51,7 +51,7 @@ flowchart TB
     end
 
     subgraph Queue["2. Durable Event Inbox & Scope Dispatcher (internal/events)"]
-        EV["local/memory/events.jsonl\n• pending -> leased -> done | dropped\n• Source-ID & SHA-256 deduplication\n• Crash & CircuitOpen retry"]
+        EV["local/memory/events.json (+ events_archive.jsonl)\n• pending -> leased -> done | dropped\n• Source-ID & SHA-256 deduplication\n• Crash & CircuitOpen retry"]
         WD["Single-Active-Worker Scope Lock\n• 1 active run per ScopeKey / SessionID\n• Same-session event batching"]
     end
 
@@ -84,7 +84,7 @@ flowchart TB
 
 ### 4.1 Subsystem 1 (`P0`): Unified Durable Event Inbox & Single-Worker Scope Dispatcher (`internal/events`)
 
-#### A. Durable Event Schema (`local/memory/events.jsonl` + `.events.lock`)
+#### A. Durable Event Schema (`local/memory/events.json` + `events_archive.jsonl` + `.events.lock`)
 
 We introduce package `internal/events` storing active events in `local/memory/events.json` (`0600`, atomic temp-file + `os.Rename` under `syscall.Flock` on `local/memory/.events.lock`) and appending completed/dropped audit transitions to `local/memory/events_archive.jsonl` (retaining active state O(pending + leased) in `< 1ms`):
 
@@ -237,7 +237,7 @@ OriginSkill      string   `json:"origin_skill,omitempty"`      // Attribution fo
 #### C. Unified `OutboxDispatcher` (`internal/outbox/dispatcher.go`)
 Building cleanly on `outbox.Item` (`internal/outbox/outbox.go`) and harmonizing with sibling `proactive-gmail-watcher`'s `DeliverPendingInterrupts`:
 - Adds `DeliveryStatus` (`"pending" | "delivered" | "deferred_quiet_hours" | "failed"`), `DeliveryAttempts int`, and `NextAttemptAt string` to `outbox.Item`.
-- Runs on the daemon dispatch loop: delivers `TierInterrupt` items to `[HQ] Front Desk` (via `agentapi` message injection when Front Desk is leased) and configured `ChannelAdapter`s outside quiet hours, retries transient transport failures with exponential backoff (`30s`, `2m`, `10m`), and appends every delivered user-facing item (`TierInterrupt` + synthesized `TierBriefRollup`) to `local/memory/reported.jsonl`.
+- Runs on the daemon dispatch loop: delivers `TierInterrupt` items to `[HQ] Front Desk` (via `agentapi` message injection when Front Desk is leased) and configured `ChannelAdapter`s *(channel bridges per [RFC-0023](./0023-front-desk-channel-bridge.md))* outside quiet hours, retries transient transport failures with exponential backoff (`30s`, `2m`, `10m`), and appends every delivered user-facing item (`TierInterrupt` + synthesized `TierBriefRollup`) to `local/memory/reported.jsonl`.
 
 ---
 
@@ -258,7 +258,7 @@ Building cleanly on `outbox.Item` (`internal/outbox/outbox.go`) and harmonizing 
 #### C. Static-First, Role-Scoped `SessionStart` Profiles (`full` vs. `lean_auto`)
 To maximize LLM prefix cache hit rates (`CHR`) and slash ephemeral worker input costs, `HandleSessionStart` (`internal/hooks/hooks.go`) reorganizes context assembly into two strict zones:
 1. **Zone 1 — Byte-Stable Cacheable Prefix (Identical Across Runs):**
-   - `USER.md` → `MEMORY.md` (`<=80` lines) → Sorted `topics/*.md` & `entities/*.md` pointer index (no volatile timestamps, byte sizes, or run counters).
+   - `USER.md` → `MEMORY.md` (`<=80` lines; *now `<= 40L / 2.2 KB` and omitted in `lean_auto` per [RFC-0024](./0024-memory-v2-prediction-and-eval.md)*) → Sorted `topics/*.md` & `entities/*.md` pointer index (no volatile timestamps, byte sizes, or run counters).
 2. **Zone 2 — Role-Scoped Dynamic Tail:**
    - **`full` Profile (Interactive Task & `[HQ] Front Desk` Sessions):** Active `Goals`/`WaitingOn`, `reported` digest, matching `progress/<slug>.md` pointer, hot Task Board summary, active worktrees, and pending proposals.
    - **`lean_auto` Profile (`[Auto]` Workers & Ephemeral Subagents):** Only `reported` digest (`<=12` lines), any matching `progress/<slug>.md` file for the target scope, and active `Goals` matching the worker's skill—omitting unrelated git worktrees, unrelated hot tasks, and full `triggers.yaml` listings (`~55%` reduction in `SessionStart` tokens).
@@ -310,7 +310,7 @@ Interactive user-driven coding sessions remain completely unaffected so day-to-d
 
 | Phase | Priority | Packages & Files Touched | Est. Scope | Summary |
 | :--- | :--- | :--- | :--- | :--- |
-| **Phase 2A** | **`P0`** | `internal/events/{events,dispatcher}.go`, `internal/kernel/{kernel,gatekeeper}.go`, `internal/webui/server.go`, `internal/hooks/hooks.go`, `cmd/hq/main.go` | `~550` LOC | Durable Event Inbox (`pending` → `leased` → `done`/`dropped`), single-worker scope lock + batching, stranded `inbox/queued/` recovery, `gatekeeper` `ConsecutiveErrors` bug fix, `hq events` CLI, and `POST /api/events`. |
+| **Phase 2A** | **`P0`** | `internal/events/events.go`, `internal/kernel/{kernel,gatekeeper,events_dispatch}.go`, `internal/webui/webui.go`, `internal/hooks/hooks.go`, `cmd/hq/main.go` | `~550` LOC | Durable Event Inbox (`pending` → `leased` → `done`/`dropped`), single-worker scope lock + batching, stranded `inbox/queued/` recovery, `gatekeeper` `ConsecutiveErrors` bug fix, `hq events` CLI, and `POST /api/events`. |
 | **Phase 2B** | **`P0`** | `internal/timers/timers.go`, `internal/kernel/kernel.go`, `cmd/hq/main.go`, `.agents/plugins/agy-hq/rules/AGENTS.md` | `~280` LOC | Two-class `timers.json` (`follow_up` + `schedule`), `hq timers <set|list|cancel>`, `15s` timer-to-inbox scheduler pass, and `50`-timer safety cap. |
 | **Phase 2C** | **`P1`** | `internal/approvals/approvals.go`, `internal/outbox/{outbox,dispatcher,reported}.go`, `internal/vault/progress.go`, `internal/hooks/hooks.go`, `cmd/hq/main.go` | `~520` LOC | `CommandArgv` + `SanitizedApprovalEnv`, `--resume-on-decide` + `hq reject --reason` resumption events, unified `OutboxDispatcher`, `reported.jsonl` + fuzzy Jaccard dedup, `hq progress`, `120k` pre-compaction nudge, and static-first `lean_auto` `SessionStart`. |
 | **Phase 2D** | **`P2`** | `internal/sandbox/sandbox.go`, `internal/hooks/hooks.go`, `internal/outbox/eval.go`, `internal/rsi/`, `cmd/hq/main.go` | `~420` LOC | Optional `bwrap`/`sandbox-exec` credential jail (`hq doctor` + `hq exec-sandboxed`), unattended `[Auto]` gray-zone command classifier, proposal-rejection RSI mining, and `hq outbox eval` + CI golden fixtures. |

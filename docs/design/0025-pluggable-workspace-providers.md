@@ -186,7 +186,7 @@ type Capabilities struct {
 
 ### 4.2 Built-in `core/git-worktree` Provider
 
-- `Create` → `worktree.Add` ([`internal/worktree/worktree.go`](../../internal/worktree/worktree.go#L14-L91)); `Remove` → `removeManagedWorktree` ([`worktree_sync.go`](../../internal/kernel/worktree_sync.go#L423-L452)); `List` → `InspectWorktrees` ([`worktree_sync.go`](../../internal/kernel/worktree_sync.go#L487-L573)).
+- `Create` → `worktree.Add` ([`internal/worktree/worktree.go`](../../internal/worktree/worktree.go#L14-L91)); `Remove` → `removeManagedWorktree` ([`worktree_sync.go`](../../internal/kernel/worktree_sync.go#L382-L411)); `List` → `InspectWorktrees` ([`worktree_sync.go`](../../internal/kernel/worktree_sync.go#L446-L532)).
 - `Status` maps `ManagedWorktreeStatus` to the normalized model: `Clean` → `StateClean|StateDirty`; the branch becomes one `ChangeRef{ID: "branch:hq/<task>"}` whose state is `landed` when `MergedIntoMain`, `in_review` when `PushedToOrigin`, else `local`.
 - It keeps `IsManagedWorktreeDir` as its **own** additional invariant (git worktrees must still live under `<vault>/worktrees/`). The ledger (§6) is the cross-provider authority; the git provider is stricter on top.
 - The refactor is behavior-preserving: `TestCUJ*` worktree cases and `worktree_sync_test.go` must pass unchanged before any external provider code lands.
@@ -243,11 +243,11 @@ type Capabilities struct {
 }
 ```
 
-Go types extend [`PackComponents`](../../internal/extension/pack.go#L179-L191) with `WorkspaceProviders []WorkspaceProviderSpec`, decoded under the existing `DisallowUnknownFields()` strict parser.
+Go types extend [`PackComponents`](../../internal/extension/pack.go#L271-L286) with `WorkspaceProviders []WorkspaceProviderSpec`, decoded under the existing `DisallowUnknownFields()` strict parser.
 
 ### 5.2 `LintPack` Rules
 
-Added as step 7 of [`LintPack`](../../internal/extension/pack.go#L257-L431), mirroring the `channel_bridges` checks:
+Added as step 7 ([`L507-L529`](../../internal/extension/pack.go#L507-L529)) of [`LintPack`](../../internal/extension/pack.go#L352-L542), mirroring the `channel_bridges` checks:
 
 1. `id` matches `^[a-z0-9][a-z0-9-]{1,62}$`, unique in the pack; runtime FQID is `<pack>/<id>`. `core` is reserved.
 2. `protocol` equals `hq-workspace-provider/v1`.
@@ -319,7 +319,7 @@ Request: `workspace_id`. Response: `workspace: {...}` (the same `Info` shape as 
 
 ### 7.1 Ownership Ledger: `<vault>/memory/workspaces.json`
 
-Locked via `internal/store` at a new rank `RankWorkspaces = 78` (between `RankTasks = 75` and `RankSubagentQueue = 80` in [`store.go`](../../internal/store/store.go#L24-L35), so a task update may nest a ledger update but never the reverse), written atomically, and write-protected from LLM sessions by `PreToolUse` (added to the `extensions.json` / `tasks.json` protected list in [`hooks.go`](../../internal/hooks/hooks.go#L1715-L1733)).
+Locked via `internal/store` at a new rank `RankWorkspaces = 76` (between `RankTasks = 75` and `RankMemory = 78` / `RankSubagentQueue = 80` in [`store.go`](../../internal/store/store.go#L34-L41), so a task update may nest a ledger update but never the reverse), written atomically, and write-protected from LLM sessions by `PreToolUse` (added to the `extensions.json` / `tasks.json` protected list in [`pre_tool.go`](../../internal/hooks/pre_tool.go#L31-L46), `L696-L701`).
 
 ```json
 {
@@ -383,7 +383,7 @@ type ActiveTask struct {
 | **Dormant auto-archive** (`CompactTasks`) | `areAllTaskWorktreesMergedAndClean` | Uses the cached status: eligible only when every binding is `clean` and every change is `landed`/`abandoned`, and the cache is fresher than `2 × status_refresh_seconds`. A stale or errored cache means **not eligible** (fail-closed). |
 | **Orphan prune** (`PruneOrphanWorktrees`) | `keep:linked/dirty/recent/unmerged` | `PruneOrphanWorkspaces` iterates **owned** ledger entries with no live owning task and applies `keep:linked`, `keep:dirty`, `keep:recent` (1h), and `keep:open_changes`. Git keeps `keep:unmerged` as its provider-specific reason. |
 
-All provider subprocess calls happen **outside** `UpdateTasks` / ledger locks: core snapshots, calls the provider, then re-acquires the lock and applies the result with compare-and-set on `refreshed_at`, matching the existing "pure callback" rule documented on [`UpdateTasks`](../../internal/kernel/kernel.go#L347-L361).
+All provider subprocess calls happen **outside** `UpdateTasks` / ledger locks: core snapshots, calls the provider, then re-acquires the lock and applies the result with compare-and-set on `refreshed_at`, matching the existing "pure callback" rule documented on [`UpdateTasks`](../../internal/kernel/kernel.go#L262-L276).
 
 ---
 
@@ -398,7 +398,7 @@ hq subagent --role="..." --workspace=<provider-fqid>[:<id>] --prompt="..."
 
 - `--repo=<path|slug>` remains as an alias for `--workspace=core/git-worktree` with today's semantics.
 - Without `:<id>`, core calls `create` with `name = <slug>` (owned). With `:<id>`, core calls `status` and ledgers the workspace as `attached` (or reuses an existing ledger entry).
-- `hq spawn` pre-registers the task **with the binding** before `SpawnTask` (preserving the [RFC-0007](./0007-front-desk-initialization-hardening.md) race fix), and on spawn failure rolls back the binding and removes only a workspace it just created (`existed: false`), mirroring today's `wtExistedBefore` rollback in [`main.go`](../../cmd/hq/main.go#L1089-L1094).
+- `hq spawn` pre-registers the task **with the binding** before `SpawnTask` (preserving the [RFC-0007](./0007-front-desk-initialization-hardening.md) race fix), and on spawn failure rolls back the binding and removes only a workspace it just created (`existed: false`), mirroring today's `wtExistedBefore` rollback in [`main.go`](../../cmd/hq/main.go).
 
 ### 9.2 Home Placement (Default)
 
@@ -543,8 +543,8 @@ hq workspace prune [--dry-run] [--json]
 
 Approved for implementation on 2026-11-19. These decisions resolve §15 Q1–Q3 and narrow the first landing. Where they conflict with earlier sections, this section wins.
 
-1. **Ledger scope (resolves Q1).** The ledger is a separate `<vault>/memory/workspaces.json` at `RankWorkspaces = 78`. It records **provider** workspaces only. Git worktrees keep their existing storage (`WorktreeDir`/`WorktreeDirs`/`RepoRoot`) and their existing `<vault>/worktrees/` guard, and `hq workspace list` merges both views. There is no backfill and no dual-write (supersedes the last bullet of §7.1 and the migration bullets of §7.2).
-2. **Task bindings.** `ActiveTask.Workspaces []workspace.Binding` stores provider bindings only. `ActiveTask.AllWorkspaceBindings()` synthesizes read-only `core/git-worktree` bindings from the legacy fields. Existing git code paths (`spawn --repo`, archive, reopen, compact, prune) are **not** refactored; provider bindings are handled alongside them (supersedes "route through it" in §4.2 and the Phase 0 rerouting in §14).
+1. **Ledger scope (resolves Q1).** The ledger is a separate `<vault>/memory/workspaces.json` at `RankWorkspaces = 76` *(initially drafted as `78`, adjusted in implementation to stay distinct from `RankMemory = 78`; see §17.2 item 2)*. It records **provider** workspaces only. Git worktrees keep their existing storage (`WorktreeDir`/`WorktreeDirs`/`RepoRoot`) and their existing `<vault>/worktrees/` guard, and `hq workspace list` merges both views. There is no backfill and no dual-write (supersedes the last bullet of §7.1 and the migration bullets of §7.2).
+2. **Task bindings.** `ActiveTask.Workspaces []workspace.Binding` stores provider bindings only. `ActiveTask.AllWorkspaceBindings()` *(removed in Round 3 M2; callers read `Workspaces` and legacy git fields directly)* synthesizes read-only `core/git-worktree` bindings from the legacy fields. Existing git code paths (`spawn --repo`, archive, reopen, compact, prune) are **not** refactored; provider bindings are handled alongside them (supersedes "route through it" in §4.2 and the Phase 0 rerouting in §14).
 3. **Single-writer lease (resolves Q3).** W1 leases are per workspace and enforced only when the ledger entry has `lease_enforced: true`. That flag is set by `hq spawn --workspace`, `hq workspace create --task`, and `hq workspace adopt --task`. Entries auto-attached from `Stop` record `writer_task` but stay advisory until confirmed with `hq workspace handoff` or `adopt --task`. W1 v1 covers `write_file`/`edit_file`; `run_command` relies on the spawn preamble and W4. Parallel subagents use `share_from` sibling workspaces.
 4. **Landed notifications (resolves Q2).** A transition to `landed` emits one deduplicated `brief_rollup` outbox item per `(ledger key, change id)`.
 5. **Foreign placement** (§9.3) is deferred. v1 ships Home placement only and does not expose `--placement`.
@@ -575,7 +575,7 @@ This section records how the first landing behaves and every deviation from §16
 
 1. **Destructive-command rule IDs.** Each provider's `destructive_commands` compile into one `always` approval rule with ID `wsd-<pack>-<id>` (shortened with a stable hash suffix past 63 characters), not `workspace_destructive:<fqid>` (§5.2 rule 7, §10 W4): `:` and `/` are not valid rule-ID characters. These rules are appended after all pack-declared `approval_rules`, and `LintPack` rejects pack rules that use the reserved `wsd-` prefix, so no pack can shadow or weaken the gate.
 2. **Ledger lock rank.** `RankWorkspaces` sits at its own distinct rank `76` strictly between `RankTasks` (`75`) and `RankMemory` (`78`). Both `RankWorkspaces` and `RankMemory` are leaf stores whose callbacks never nest each other; task and ledger updates are separate, non-nested lock acquisitions.
-3. **Built-in git provider.** `core/git-worktree` creates worktrees through `kernel.RegisterGitWorktreeAdder`, which `cmd/hq` wires to `worktree.Add` at startup (the kernel cannot import `internal/worktree` without an import cycle). Its workspace IDs are canonical worktree paths, so its ledger keys match the bindings synthesized by `ActiveTask.AllWorkspaceBindings()`.
+3. **Built-in git provider.** `core/git-worktree` creates worktrees through `kernel.RegisterGitWorktreeAdder`, which `cmd/hq` wires to `worktree.Add` at startup (the kernel cannot import `internal/worktree` without an import cycle). Its workspace IDs are canonical worktree paths, so its ledger keys match the bindings originally synthesized by `ActiveTask.AllWorkspaceBindings()` *(removed in Round 3 M2; callers read `Workspaces` and legacy git fields directly)*.
 4. **Approval forms & binary enforcement.** `hq workspace remove <key>` never deletes a dirty, `unknown`, change-untracked, or open-change workspace; it prints `hq propose --type=workspace_remove … --cmd='hq workspace remove <key> --force'`. Similarly, `hq archive --force` archives the task while keeping and unbinding dirty or `unknown` owned workspaces and printing the same `workspace_remove` proposal command (it never force-deletes dirty work without approval). The approved execution forms `hq workspace remove <key> --force` and `hq workspace own <key>` are protected at three layers: strict CLI flag parsing, shell-dequoted `PreToolUse` matching under core non-disableable rules `workspace_remove` and `workspace_own`, and a one-shot execution capability minted exclusively by `ApproveProposal` under `<vault>/private/approval_caps/` and consumed by the binary.
 5. **Live bindings block removal.** A non-`--force` `hq workspace remove` refuses a workspace that is still bound to a live task; unbind it or archive the task first. The approved `--force` form also drops the workspace's binding from every live task.
 6. **Archived tasks keep bindings.** Archiving releases the task from each entry's `bound_tasks` and writer lease but keeps `ActiveTask.Workspaces` as history, like `WorktreeDir`. `hq reopen` rebinds the entries that still exist and re-creates only the primary binding's workspace when it is gone and the provider supports `create`.

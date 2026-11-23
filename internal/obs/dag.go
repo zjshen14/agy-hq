@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 func rollupsApproxEqual(a, b TokenRollup) bool {
@@ -225,7 +226,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			if len(cm.Turns) > 0 {
 				preview = cm.Turns[0].PromptPreview
 			}
-			shortID := shortConvID(cid)
+			shortID := store.ShortConvID(cid)
 			if preview != "" {
 				cm.Title = kernel.SanitizeTaskTitle(preview, "conv-"+shortID)
 			} else {

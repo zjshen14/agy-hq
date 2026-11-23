@@ -150,8 +150,8 @@ func TestSanitizeInfoClampsChangeCount(t *testing.T) {
 	if len(got.Changes) != MaxChanges {
 		t.Fatalf("len(Changes) = %d, want %d", len(got.Changes), MaxChanges)
 	}
-	if got.OpenChangeCount() != MaxChanges {
-		t.Fatalf("OpenChangeCount = %d, want %d when >MaxChanges are open", got.OpenChangeCount(), MaxChanges)
+	if CountOpenChanges(got.Changes) != MaxChanges {
+		t.Fatalf("CountOpenChanges = %d, want %d when >MaxChanges are open", CountOpenChanges(got.Changes), MaxChanges)
 	}
 
 	// P1-3b regression: open changes appearing after MaxChanges closed ones must never be dropped.
@@ -167,8 +167,8 @@ func TestSanitizeInfoClampsChangeCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SanitizeInfo(mixed): %v", err)
 	}
-	if len(gotMixed.Changes) != MaxChanges || gotMixed.OpenChangeCount() != 10 {
-		t.Fatalf("expected all 10 open changes preserved inside MaxChanges=%d, got len=%d open=%d", MaxChanges, len(gotMixed.Changes), gotMixed.OpenChangeCount())
+	if len(gotMixed.Changes) != MaxChanges || CountOpenChanges(gotMixed.Changes) != 10 {
+		t.Fatalf("expected all 10 open changes preserved inside MaxChanges=%d, got len=%d open=%d", MaxChanges, len(gotMixed.Changes), CountOpenChanges(gotMixed.Changes))
 	}
 }
 
@@ -199,8 +199,8 @@ func TestStateEnumsAndOpenChanges(t *testing.T) {
 		t.Fatal("unexpected valid enum")
 	}
 	info := Info{Changes: []ChangeRef{{State: ChangeLanded}, {State: ChangeAbandoned}, {State: ChangeInReview}, {State: ChangeLocal}}}
-	if n := info.OpenChangeCount(); n != 2 {
-		t.Fatalf("OpenChangeCount = %d, want 2", n)
+	if n := CountOpenChanges(info.Changes); n != 2 {
+		t.Fatalf("CountOpenChanges = %d, want 2", n)
 	}
 }
 

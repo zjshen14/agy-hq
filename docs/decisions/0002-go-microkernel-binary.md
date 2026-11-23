@@ -4,6 +4,8 @@
 - **Date:** 2026-11-07
 - **References:** [RFC-0001](../design/0001-vault-and-task-isolation.md), [RFC-0002](../design/0002-memory-and-consolidation.md)
 
+> **Evolution Note:** Hooks and sidecars moved into `.agents/plugins/agy-hq/{hooks.json,sidecars/}` ([RFC-0015](../design/0015-global-plugin-packaging.md)), `hq notify` evolved into `hq outbox` ([RFC-0014](../design/0014-proactive-engine-and-living-context.md)), and skills split into Core OS + `templates/skills/` ([RFC-0019](../design/0019-two-tier-rsi-vault-overlay.md)).
+
 ---
 
 ## Context

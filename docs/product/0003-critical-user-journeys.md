@@ -1,6 +1,6 @@
 # Product Spec 0003: Critical User Journeys (CUJs) & E2E Acceptance Criteria
 
-> **Status:** Active (`internal/e2e/cuj_e2e_test.go`)
+> **Status:** Active (`internal/e2e/cuj*_test.go` — 49 `TestCUJ*` functions across CUJs 1–47)
 > **Goal:** Define the crisp, deterministic expected behaviors across every core `agy-hq` user journey and enforce them via automated black-box End-to-End (E2E) tests against the compiled `bin/hq` binary.
 
 ---
@@ -14,7 +14,7 @@
 | **CUJ-3** | Dedicated Task Conversation Lifecycle (Spawn, Adopt, Stop Sync, Complete) | `hq spawn`, `hq adopt`, `hq hook stop`, `hq complete` | `TestCUJ3_TaskConversationLifecycle` |
 | **CUJ-4** | Smart Model & Thinking-Depth Routing + 429 Quota Fallback | `hq spawn`, `kernel.ResolveModel`, `kernel.SpawnTask` | `TestCUJ4_SmartModelRoutingAndQuotaFallback` |
 | **CUJ-5** | Approval-Bound Outbound Execution & Tamper Rejection | `hq hook pre-tool`, `hq propose`, `hq approve`, `hq reject` | `TestCUJ5_ApprovalBoundOutboundExecution` |
-| **CUJ-6** | Parallel Multi-Repo Git Worktree Lifecycle & Orphan Prune | `hq worktree add`, `hq worktree list`, `hq worktree remove`, `hq worktree sync` | `TestCUJ6_ParallelWorktreeLifecycle`, `TestCUJ_MultiWorktreeLifecycleAndOrphanPrune` |
+| **CUJ-6** | Parallel Multi-Repo Git Worktree Lifecycle & Orphan Prune | `hq worktree add`, `hq worktree list`, `hq worktree attach`, `hq worktree remove`, `hq worktree prune` | `TestCUJ6_ParallelWorktreeLifecycle`, `TestCUJ_MultiWorktreeLifecycleAndOrphanPrune` |
 | **CUJ-7** | Quarantined Inbox Drop & 0-Token Heartbeat Gatekeeper | `hq heartbeat`, `local/inbox/` | `TestCUJ7_InboxRoutingAndHeartbeatGatekeeper` |
 | **CUJ-8** | Zero-Token Per-Turn Journaling & Live Console Sync | `hq hook stop`, `local/CONSOLE.md`, `hq_console.md` | `TestCUJ8_TurnJournalingAndLiveConsoleSync` |
 | **CUJ-9** | Engine Upgrade & Non-Destructive Vault Migration | `hq upgrade`, `hq migrate` | `TestCUJ9_EngineUpgradeAndVaultMigration` |
@@ -31,7 +31,7 @@
 | **CUJ-18** | Automated CI/CD Pipeline, PII/Vault Guard & Harness/Go/Markdown Gate | `hq ci`, `internal/ci` | `TestCUJ18_CIPipelinePIIGuardAndHarnessContract` |
 | **CUJ-19** | End-to-End Token & Context Observability, Subagent DAG Attribution & Budget Circuit Breaker | `hq obs`, `internal/obs`, `hq hook stop`, `hq doctor` | `TestCUJ19_TokenObservabilityAnomalyAndBudgetGuards` |
 | **CUJ-20** | Open-Source `--demo` Onboarding, Governance TCB & Git History PII Sanitization | `hq init --demo`, `hq doctor --json`, `hq ci check-pii --history`, `hq ci scrub-history` | `TestCUJ20_OpenSourceDemoOnboardingGovernanceAndPIIGuard` |
-| **CUJ-21** | Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox Drain & RSI Proactive Noise Mining | `hq heartbeat --force-gatekeepers`, `hq outbox`, `hq ideas`, `hq rsi mine` | `TestCUJ21_ZeroTokenGatekeepersOutboxDrainAndRSIProactiveNoise` |
+| **CUJ-21** | Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox & RSI Proactive Noise Mining | `hq heartbeat --force-gatekeepers`, `hq outbox`, `hq brief`, `hq ideas`, `hq rsi mine` | `TestCUJ21_ZeroTokenGatekeepersOutboxDrainAndRSIProactiveNoise` |
 | **CUJ-22** | Stateful Multi-Day `Goals`, Milestones & Zero-Token `WaitingOn` SLA Sweep | `hq goals`, `hq heartbeat`, `local/memory/goals.json` | `TestCUJ22_StatefulGoalsMilestonesAndWaitingOnSLASweep` |
 | **CUJ-23** | Context-Scheduled Console `Spaces`, On-Demand Entity Dossiers & 4-Layer Surgical `forget` | `hq spaces`, `hq memory add-entity|lookup|forget` | `TestCUJ23_ScheduledConsoleSpacesEntityLookupAndSurgicalForget` |
 | **CUJ-24** | Universal Credential Vault Read-Guard, `24h` Proposal TTL & Outbound Contextual-PII Badge | `hq hook pre-tool`, `hq propose --ttl`, `hq approve` | `TestCUJ24_UniversalCredentialGuardProposalTTLAndContextualPIIBadge` |
@@ -43,11 +43,11 @@
 | **CUJ-30** | Modular Connector Protocol, CLI Transport & 0-Token Watcher Engine | `hq connector`, `hq watch` | `TestCUJ30_ConnectorProtocolCLITransportAndWatcherEngine` |
 | **CUJ-31** | Provenance Taint, Human-Presence Approval Proof & Offer Gateway | `hq hook session-start`, `hq hook pre-tool`, `hq offer stage`, `hq approve --cap` | `TestCUJ31_ProvenanceTaintApprovalProofAndOfferGateway` |
 | **CUJ-32** | Outbox Quiet-Hours DND, Tainted Dedup Isolation & Fenced System Cards | `hq outbox add`, `hq heartbeat` | `TestCUJ32_OutboxQuietHoursAndFencedSystemDelivery` |
-| **CUJ-33** | Lease-Based Morning Brief, Quarantined Extensions & Backward-Compatible Drain | `hq brief collect`, `hq brief commit` | `TestCUJ33_LeaseBasedMorningBriefAndStructuredExtensions` |
-| **CUJ-34** | Companion Extension Packs, Trust Ceremony, Host Portability & Pure-Go Sidecar | `hq ext`, `hq trust`, `hq dispatch resolve`, `hq sidecar console` | `TestCUJ34_ExtensionPacksTrustAndHostPortability` |
+| **CUJ-33** | Lease-Based Morning Brief & Quarantined Extensions | `hq brief collect`, `hq brief commit` | `TestCUJ33_LeaseBasedMorningBriefAndStructuredExtensions` |
+| **CUJ-34** | Companion Extension Packs, Trust Ceremony, Host Portability & Pure-Go Sidecar | `hq extension`, `hq dispatch resolve`, `hq sidecar console` | `TestCUJ34_ExtensionPacksTrustAndHostPortability` |
 | **CUJ-35** | Two-Tier RSI, Vault Skills (`local/skills/`), Inline Overlays & Tier 2 Upstream Export | `hq skill`, `hq rsi`, `hq dispatch resolve` | `TestCUJ35_TwoTierRSIVaultSkillsAndOverlays` |
 | **CUJ-36** | Customizable Outbound Approval Policy, Native Coexistence & Lifecycle Hardening | `hq propose`, `hq hook pre-tool`, `hq approve`, `hq reject --dismiss` | `TestCUJ36_CustomizableApprovalPolicyAndUXHardening` |
-| **CUJ-38** | Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling | `hq channels`, `hq daemon`, `hq hook stop` | `TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling` |
+| **CUJ-38** | Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling | `hq channel`, `hq daemon`, `hq hook stop` | `TestCUJ38_FrontDeskChannelBridgeAndRotationTunneling` |
 | **CUJ-39** | Memory v2 Orthogonal Vault, Scoped Playbooks, BM25 Search & Eval | `hq memory add-fact|search|dream-plan|eval|compact` | `TestCUJ39_MemoryV2ScopedTopicsSearchDreamPlanAndEval` |
 | **CUJ-40** | Layer-1 Task Board Isolation & Nested Child Filtering | `hq hook pre-tool|session-start|stop`, `hq adopt`, `hq tasks clean-nested` | `TestCUJ40_Layer1TaskBoardIsolationCLI` |
 | **CUJ-41** | Pluggable Workspace Providers: Pack Contract, Home-Placement Spawn, Provider-Delegated Archive & Workspace Hygiene | `hq extension lint`, `hq workspace`, `hq spawn --workspace`, `hq archive`, `hq hook pre-tool`, `hq hook session-start` | `TestCUJ41_PluggableWorkspaceProviders` |
@@ -96,14 +96,14 @@
 
 ### CUJ-4: Smart Model & Thinking-Depth Routing + 429 Quota Fallback
 1. **Automatic Multi-Depth Complexity Tiering:**
-   - `quick` prompts (Hiive polling, `status`, `triage`, `summary`, `typo`) → `gemini-4-hydrogen-low` (`flash_lite`).
+   - `quick` prompts (`watchlist` / gatekeeper polling, `status`, `triage`, `summary`, `typo`) → `gemini-4-hydrogen-low` (`flash_lite`).
    - `routine` / medium synthesis prompts (`morning-brief`, `edgar-close-watch`, filing extraction, multi-source summaries) → `gemini-4-hydrogen-medium` (`flash`, canonical tier `standard`).
-   - `standard` engineering prompts (feature coding, unit tests, bug fixes) → `gemini-4-hydrogen-high` (`flash`).
-   - `heavy` sweep prompts (exhaustive multi-file refactors, hard E2E/test debugging) → `gemini-4-hydrogen-xhigh` (`flash`, canonical tier `standard`).
-   - `deep-medium` consolidation prompts (`sleep-consolidate`, deep research memos) → `gemini-4-carbon-medium` (`pro`, canonical tier `deep`).
+   - `standard` engineering prompts (feature coding, unit tests, bug fixes) → `gemini-4-neon-medium` (`flash`).
+   - `heavy` sweep prompts (exhaustive multi-file refactors, hard E2E/test debugging) → `gemini-4-neon-high` (`flash`, canonical tier `standard`).
+   - `deep-medium` consolidation prompts (`sleep-consolidate`, deep research memos) → `gemini-4-neon-high` (`pro`, canonical tier `deep`).
    - `deep` high-stakes prompts (`architecture`, `design`, `security`, `audit`, `race condition`, `root cause`, `KC-1` / thesis falsification) → `gemini-4-carbon-high` (`pro`).
 2. **User Override Priority:**
-   - Explicit CLI flags (`--model=opus --depth=high`, `--model=sonnet --depth=medium`, `--model=hydrogen --depth=xhigh`, `--tier=routine|heavy|deep-medium`) and natural-language prompt hints (`"use opus"`, `"use sonnet"`, `"use flash"`) always override automatic tiering.
+   - Explicit CLI flags (`--model=opus --depth=high`, `--model=sonnet --depth=medium`, `--model=hydrogen --depth=xhigh`, `--model=neon --depth=xhigh`, `--tier=routine|heavy|deep-medium`) and natural-language prompt hints (`"use opus"`, `"use sonnet"`, `"use neon"`, `"use flash"`) always override automatic tiering.
 3. **429 Quota Fallback & Circuit Breaker:**
    - If a non-Flash model hits `429 RESOURCE_EXHAUSTED`, `SpawnTask` automatically retries once on `gemini-4-hydrogen-medium`.
    - Daily background spawns are capped at `maxDailySpawns` (15), tripping the circuit breaker (`circuitOpen: true`) when exhausted.
@@ -121,6 +121,7 @@
 1. **`hq worktree add <repo> <task>`:** Creates `local/worktrees/<repo>-<task>` (avoiding duplicate `<repo>-<repo>-` prefixes if `<task>` already begins with `<repo>-`) on branch `hq/<task>`.
 2. **`hq worktree list`:** Lists active worktrees and syncs them into `hq_console.md`.
 3. **`hq worktree remove <name>`:** Cleanly removes the worktree directory and prunes the git worktree reference.
+4. **`hq worktree attach` & `hq worktree prune`:** Attaches existing worktrees to tasks and safely prunes merged/clean orphan worktrees (`TestCUJ_MultiWorktreeLifecycleAndOrphanPrune`).
 
 ### CUJ-7: Quarantined Inbox Drop & 0-Token Heartbeat Gatekeeper
 1. **0-Token Idle Heartbeat (`hq heartbeat`):** Returns `HEARTBEAT_OK (0 LLM tokens)` when `local/inbox/` and `local/memory/pending/` are empty and today's brief exists.
@@ -168,7 +169,7 @@
 ## CUJ-13: Front Desk Init Hardening & Trigger Arming
 1. **Persistent Turn-1 Init Banner:** Even if `hq init` or `hq claim-desk` creates `front_desk.json` ahead of time, `SessionStart` persistently injects the Turn-1 initialization directive on every turn until `ConsolePinned` is true and all `triggers.yaml` schedules are armed.
 2. **Console Pinning State Tracking:** Detects `write_file` targeting `hq_console.md` in `PreToolUse` and marks `consolePinned: true` in `front_desk.json`.
-3. **Trigger Reconciliation:** Tracks `schedule` and `manage_task` calls in `PreToolUse` and reconciles against `local/triggers.yaml` so declared jobs (`morning-brief`, `edgar-close-watch`, `sleep-consolidate`) are never left dormant.
+3. **Trigger Reconciliation:** Tracks `schedule` and `manage_task` calls in `PreToolUse` and reconciles against `local/triggers.yaml` so declared jobs (`gmail-inbox-watch`, `morning-brief`, `sleep-consolidate`) are never left dormant.
 4. **Subagent Pointer Isolation:** Subagent and task conversation turns never overwrite the Front Desk's `front_desk_turn.json` lookup counter or `active_artifact_dir.txt`.
 
 ---
@@ -205,8 +206,8 @@
 
 ## CUJ-17: Bounded Agent Recursive Self-Improvement (RSI)
 1. **0-Token Friction Trace Mining (`hq rsi mine`):** Scans `local/memory/journal/` and `interventions.jsonl` to cluster recurring tool errors, hook denials, and user corrections.
-2. **4-Gate Sandboxed Verification (`hq rsi run`):** Synthesizes bounded `<!-- rsi:rule -->` deltas and verifies them against Gate 1 (Ring 0 TCB AST & token budget), Gate 2 (counterfactual trace replay), Gate 3 (`go vet` + unit tests), and Gate 4 (CUJ E2E suite).
-3. **1-Tap Approval & Canary Rollback (`hq approve` / `hq rsi rollback`):** Stages verified patches via `hq propose --type=rsi_patch`, injects the canonical scorecard into `ask_question`, applies on `hq approve`, and supports automatic canary rollback on post-merge friction regression.
+2. **Hypothesis & 4-Gate Sandboxed Verification (`hq rsi hypothesize`, `hq rsi verify`):** Synthesizes bounded `<!-- rsi:rule -->` deltas and verifies them against Gate 1 (Ring 0 TCB AST & token budget), Gate 2 (counterfactual trace replay), Gate 3 (`go vet` + unit tests), and Gate 4 (CUJ E2E suite).
+3. **1-Tap Approval & Canary Tracking (`hq rsi propose`, `hq approve`, `hq rsi status`):** Stages verified patches via `hq propose --type=rsi_patch`, injects the canonical scorecard into `ask_question`, applies on `hq approve`, and tracks canary metrics (`archive.jsonl` / `hq rsi ablate`) on post-merge friction regression.
 
 ---
 
@@ -235,9 +236,9 @@
 
 ---
 
-## CUJ-21: Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox Drain & RSI Proactive Noise Mining ([RFC-0014](../design/0014-proactive-engine-and-living-context.md))
+## CUJ-21: Zero-Token Cursor Gatekeepers, 4-Tier Attention Outbox & RSI Proactive Noise Mining ([RFC-0014](../design/0014-proactive-engine-and-living-context.md))
 1. **Cursor-Deduplicated Pre-Checks (`hq heartbeat --force-gatekeepers`):** Evaluates `daemon_gatekeeper` schedules (`precheck_cmd`) against `local/memory/trigger_cursors.json`. New `stdout_sha256` output dispatches an isolated `flash` worker; identical `stdout_sha256` output on subsequent runs skips execution in **0 LLM tokens** (`gatekeeperSkips=1`).
-2. **Morning Brief Outbox Rollup (`hq outbox add|drain`):** Background runs emit `brief_rollup` items (`hq outbox add --tier=brief_rollup`), which `hq outbox drain` atomically drains once for `/morning-brief` synthesis.
+2. **Morning Brief Outbox Rollup (`hq outbox add`, `hq brief collect --lease` / `hq brief commit`):** Background runs emit `brief_rollup` items (`hq outbox add --tier=brief_rollup`), which `/morning-brief` leases and atomically commits once synthesized into `<vault>/notes/briefs/`.
 3. **Proactive Noise Feedback Loop (`hq ideas dismiss` $\rightarrow$ `hq rsi mine`):** When a skill emits $\ge 5$ resolved `ideas_feed` suggestions with a $> 70\%$ user dismissal rate, `hq rsi mine` deterministically emits a `proactive_noise` friction event to tighten that skill's threshold.
 
 ---
@@ -300,7 +301,7 @@
 
 ## CUJ-30: Modular Connector Protocol, CLI Transport & 0-Token Watcher Engine ([RFC-0017a](../design/0017a-connector-protocol-and-watcher-engine.md))
 1. **Declarative Connector & CLI Transport (`hq connector`):** Separates immutable `connector.json` transport profiles from per-account `instance.json` state across Gmail, Google Chat, Calendar, and companion packs.
-2. **Cursor-Locked Watcher Engine (`hq watch poll|ack`):** Runs scrubbed connector subprocesses under `internal/store` rank locks, paginates `events.Enqueue`, and quarantines poison items after bounded retries.
+2. **Cursor-Locked Watcher Engine (`hq watch precheck|ack`):** Runs scrubbed connector subprocesses under `internal/store` rank locks, paginates `events.Enqueue`, and quarantines poison items after bounded retries.
 
 ---
 
@@ -316,13 +317,13 @@
 
 ---
 
-## CUJ-33: Lease-Based Morning Brief, Quarantined Extensions & Backward-Compatible Drain ([RFC-0017c](../design/0017c-lease-based-morning-brief-and-extensions.md))
+## CUJ-33: Lease-Based Morning Brief & Quarantined Extensions ([RFC-0017c](../design/0017c-lease-based-morning-brief-and-extensions.md))
 1. **Two-Phase Brief Lease (`hq brief collect --lease` / `hq brief commit`):** Collects outbox rollups, `<4h` expiring proposals, tainted reader summaries, and `brief.d` extension sections non-destructively until explicitly committed after brief persistence.
 
 ---
 
 ## CUJ-34: Companion Extension Packs, Trust Ceremony, Host Portability & Pure-Go Sidecar ([RFC-0017d](../design/0017d-enterprise-extensibility-and-portability.md))
-1. **Trust-Pinned Companion Packs (`hq ext`, `hq trust`, `hq dispatch resolve`):** Discovers companion `hq-extension.json` packs, enforces explicit SHA-256 binary pinning in `local/private/trust.json`, resolves role-scoped overlays and `hq triggers pause|resume`, and serves the pure-Go console sidecar (`hq sidecar console`).
+1. **Trust-Pinned Companion Packs (`hq extension lint|enable|trust`, `hq dispatch resolve`):** Discovers companion `hq-extension.json` packs, enforces explicit SHA-256 binary pinning in `local/private/trust.json`, resolves role-scoped overlays and `hq triggers pause|resume`, and serves the pure-Go console sidecar (`hq sidecar console`).
 
 ---
 
@@ -337,7 +338,7 @@
 ---
 
 ## CUJ-38: Vendor-Neutral Front Desk Channel Bridge & Rotation Tunneling ([RFC-0023](../design/0023-front-desk-channel-bridge.md))
-1. **Trust-Pinned `hq-channel-bridge/v1` Lifecycle (`hq channels`, `hq daemon`, `hq hook stop`):** Supervises SHA-256-pinned companion channel bridges with LLM-invisible `0600` credentials (`local/private/channels/`), tunnels inbound messages and `0`-token `desk_reply` mirrors across Front Desk rotations (`bind-desk`), fans out `interrupt` and task `blocked`/`done` cards, and verifies single-use `bca_`/`bcr_` mobile approval/rejection callbacks.
+1. **Trust-Pinned `hq-channel-bridge/v1` Lifecycle (`hq channel`, `hq daemon`, `hq hook stop`):** Supervises SHA-256-pinned companion channel bridges with LLM-invisible `0600` credentials (`local/private/channels/`), tunnels inbound messages and `0`-token `desk_reply` mirrors across Front Desk rotations (`bind-desk`), fans out `interrupt` and task `blocked`/`done` cards, and verifies single-use `bca_`/`bcr_` mobile approval/rejection callbacks.
 
 ---
 

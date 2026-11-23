@@ -27,6 +27,7 @@ var (
 	reVaultPath   = regexp.MustCompile(`(?i)(?:^|[\s"'=(:/])(?:local/private/|private/(?:gmail|gchat|credentials|connectors|channels|delegates|runtime|taint|exec-cache|trust\.json|approval_|pii-denylist\.txt|daemon_token)|\.system_generated/)`)
 	reTokenBlob   = regexp.MustCompile(`[A-Za-z0-9+/_=-]{40,}`)
 
+	// Keep aligned with internal/ci/pii.go's hasSecretCandidate fast pre-filter if new patterns are added.
 	defaultSecretPatterns = []SecretPattern{
 		{"OAuth Access Token", regexp.MustCompile(`\bya29\.[0-9A-Za-z_\-]{20,}\b`)},
 		{"OAuth Refresh Token", regexp.MustCompile(`\b1//[0-9A-Za-z_\-]{40,}\b`)},
@@ -52,11 +53,14 @@ func DefaultSecretPatterns() []SecretPattern {
 	return out
 }
 
-// HarnessTokenPatterns returns compiled internal harness control-token regexes.
-func HarnessTokenPatterns() []SecretPattern {
-	out := make([]SecretPattern, len(harnessTokenPatterns))
-	copy(out, harnessTokenPatterns)
-	return out
+// HomeDirPathPattern returns the compiled regex matching host home directory paths.
+func HomeDirPathPattern() *regexp.Regexp {
+	return reHomeDirPath
+}
+
+// SSNPattern returns the compiled regex matching literal US SSN patterns.
+func SSNPattern() *regexp.Regexp {
+	return reSSNLiteral
 }
 
 // StripInvisibleUnicode strips Unicode Cf (format / bidi-override / zero-width) runes and

@@ -135,7 +135,7 @@ func savePendingSubagentFile(filePath string, items []PendingSubagent) error {
 
 func queuePendingSubagentFile(vaultDir, filePath, parentConvID, role, model, prompt string) (PendingSubagent, error) {
 	tier, scope, _, title, slug := ParseSubagentRole(role, model)
-	promptPrefix := truncateRunes(prompt, 200)
+	promptPrefix := store.TruncateRunes(prompt, 200)
 	item := PendingSubagent{
 		Role:                 role,
 		Model:                model,
@@ -601,15 +601,6 @@ func IsSubagentConversation(vaultDir, convID string) bool {
 		}
 	}
 	return IsNestedSubagentConversation(vaultDir, convID)
-}
-
-// IsLayer1Task returns true if task is a Layer-1 task orchestrated by the Front Desk.
-func IsLayer1Task(task ActiveTask, frontDeskConvID string) bool {
-	knownFDs := make(map[string]bool)
-	if nid := normalizeUUID(frontDeskConvID); nid != "" {
-		knownFDs[nid] = true
-	}
-	return isLayer1TaskWithFDSet(task, knownFDs, true)
 }
 
 func isLayer1TaskWithFDSet(task ActiveTask, knownFDs map[string]bool, strictWhenNoFD bool) bool {

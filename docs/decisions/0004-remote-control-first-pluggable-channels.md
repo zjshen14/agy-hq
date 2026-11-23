@@ -4,6 +4,8 @@
 - **Date:** 2026-11-07
 - **References:** [RFC-0004](../design/0004-heartbeat-and-channels.md), [PRD-0001](../product/0001-vision-and-ux.md)
 
+> **Evolution Note:** The compiled-in `ChannelAdapter` (`internal/channels/adapter.go`) sketch was superseded by the vendor-neutral `hq-channel-bridge/v1` companion-pack protocol in [RFC-0023](../design/0023-front-desk-channel-bridge.md) (and `internal/gchat/` in [RFC-0008](../design/0008-gchat-integration.md)).
+
 ---
 
 ## Context

@@ -93,7 +93,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 				}
 			}
 			if payload != "" {
-				previewText := truncateRunes(payload, 600)
+				previewText := store.TruncateRunes(payload, 600)
 				b.WriteString(">   > **Message Preview:**\n")
 				for _, line := range strings.Split(strings.TrimSpace(previewText), "\n") {
 					fmt.Fprintf(&b, ">   > %s\n", line)
@@ -122,7 +122,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 				opts = append(opts, fmt.Sprintf("`%s`: %s", d.ID, d.Label))
 			}
 			fmt.Fprintf(&b, "- **`%s`** (`%s`): **%s** — %s\n  - Options: %s *(run `./bin/hq outbox act %s --option=<id>`)*\n",
-				dc.ID, dc.SourceSkill, dc.Title, truncateRunes(dc.Summary, 160), strings.Join(opts, " · "), dc.ID)
+				dc.ID, dc.SourceSkill, dc.Title, store.TruncateRunes(dc.Summary, 160), strings.Join(opts, " · "), dc.ID)
 		}
 		b.WriteString("\n---\n\n")
 	}
@@ -188,7 +188,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			b.WriteString("| Status | Task Conversation | Slug | Latest Progress |\n| :--- | :--- | :--- | :--- |\n")
 			for _, t := range sel.VisibleRows {
 				cleanTitle := kernel.SanitizeTaskTitle(t.Title, t.TaskSlug)
-				oneLine := truncateRunes(strings.ReplaceAll(strings.Join(strings.Fields(t.LastSummary), " "), "|", "\\|"), 130)
+				oneLine := store.TruncateRunes(strings.ReplaceAll(strings.Join(strings.Fields(t.LastSummary), " "), "|", "\\|"), 130)
 				eff := t.EffectiveStatus(now)
 				badge := "🟢 `active`"
 				switch eff {
@@ -358,7 +358,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			}
 			nameCell := fmt.Sprintf("%s **`%s`**", stateIcon, sc.ID)
 			if sc.Summary != "" {
-				sumClean := truncateRunes(strings.ReplaceAll(strings.Join(strings.Fields(sc.Summary), " "), "|", "\\|"), 70)
+				sumClean := store.TruncateRunes(strings.ReplaceAll(strings.Join(strings.Fields(sc.Summary), " "), "|", "\\|"), 70)
 				nameCell += " — " + sumClean
 			}
 			var actParts []string
@@ -413,7 +413,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			if strings.TrimSpace(rawPrompt) == "" {
 				rawPrompt = j.ResponseSummary
 			}
-			prompt := truncateRunes(strings.Join(strings.Fields(rawPrompt), " "), 90)
+			prompt := store.TruncateRunes(strings.Join(strings.Fields(rawPrompt), " "), 90)
 			shortConv := j.ConversationID
 			if len(shortConv) > 8 {
 				shortConv = shortConv[:8]

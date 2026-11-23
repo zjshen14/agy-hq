@@ -98,11 +98,6 @@ func CountOpenChanges(changes []ChangeRef) int {
 	return n
 }
 
-// OpenChangeCount returns how many changes in i still hold unlanded work.
-func (i Info) OpenChangeCount() int {
-	return CountOpenChanges(i.Changes)
-}
-
 // Capabilities declares which optional verbs a provider supports.
 type Capabilities struct {
 	Create        bool `json:"create"`

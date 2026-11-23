@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -135,14 +134,8 @@ func daemonTokenPath(vaultDir string) string {
 	return filepath.Join(vaultDir, "private", "daemon_token")
 }
 
-func generateHex(nBytes int) string {
-	b := make([]byte, nBytes)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 func generateEventID(now time.Time) string {
-	return fmt.Sprintf("evt-%s-%s", now.UTC().Format("20060102-150405"), generateHex(3))
+	return fmt.Sprintf("evt-%s-%s", now.UTC().Format("20060102-150405"), store.RandomHex(3))
 }
 
 func withEventsLock(vaultDir string, fn func() error) error {
@@ -243,11 +236,6 @@ func loadRecentArchivedDedupWithDroppedUnlocked(vaultDir string, now time.Time, 
 		}
 	}
 	return done, dropped
-}
-
-func loadRecentArchivedDedupUnlocked(vaultDir string, now time.Time, window time.Duration) map[string]bool {
-	done, _ := loadRecentArchivedDedupWithDroppedUnlocked(vaultDir, now, window)
-	return done
 }
 
 func parseEventTime(raw string) (time.Time, error) {
@@ -474,7 +462,7 @@ func HasActiveOrCompletedDedup(vaultDir, dedupKey string, now time.Time) bool {
 				}
 			}
 		}
-		recentDone := loadRecentArchivedDedupUnlocked(vaultDir, now, DedupArchiveWindow)
+		recentDone, _ := loadRecentArchivedDedupWithDroppedUnlocked(vaultDir, now, DedupArchiveWindow)
 		if recentDone[dedupKey] {
 			found = true
 		}
@@ -718,11 +706,11 @@ func LeaseNextBatches(vaultDir string, now time.Time, leaseTTL time.Duration) ([
 		expStr := now.Add(leaseTTL).UTC().Format(time.RFC3339)
 		for _, sk := range groupOrder {
 			g := groups[sk]
-			leaseID := fmt.Sprintf("lease-%s-%s", now.UTC().Format("150405"), generateHex(3))
+			leaseID := fmt.Sprintf("lease-%s-%s", now.UTC().Format("150405"), store.RandomHex(3))
 			spawnToken := ""
 			spawnTokenHash := ""
 			if g.sessionID == "" {
-				spawnToken = generateHex(16)
+				spawnToken = store.RandomHex(16)
 				sum := sha256.Sum256([]byte(spawnToken))
 				spawnTokenHash = hex.EncodeToString(sum[:])
 			}
@@ -1608,7 +1596,7 @@ func EnsureDaemonToken(vaultDir string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return "", err
 	}
-	tok := generateHex(32)
+	tok := store.RandomHex(32)
 	if err := os.WriteFile(p, []byte(tok+"\n"), 0o600); err != nil {
 		return "", err
 	}

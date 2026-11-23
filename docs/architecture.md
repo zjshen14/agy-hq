@@ -8,9 +8,9 @@
 
 **`agy-hq` (Headquarter)** turns an always-on Mac or Linux workstation running Google Antigravity into a 24/7 general-purpose, proactive personal assistant using four core principles:
 
-1. **General-Purpose by Default, Boosted by Additive Skills ([ADR-0006](decisions/0006-general-agent-and-skills-over-packs.md), [PRD-0002](product/0002-open-workflows-and-skills.md)):** The agent is never boxed into rigid domain packs. It can handle *any* open-ended request (writing a post, planning a trip, debugging code, researching a stock) out of the box, while progressive-disclosure `.agents/plugins/agy-hq/skills/*/SKILL.md` files provide expert runbooks when relevant.
+1. **General-Purpose by Default, Boosted by Additive Skills ([ADR-0006](decisions/0006-general-agent-and-skills-over-packs.md), [PRD-0002](product/0002-open-workflows-and-skills.md)):** The agent is never boxed into rigid domain packs. It can handle *any* open-ended request (writing a post, planning a trip, debugging code, researching a stock) out of the box, while progressive-disclosure Core OS skills (`.agents/plugins/agy-hq/skills/*/SKILL.md`) and opt-in starter templates (`templates/skills/*/SKILL.md`, installed into `local/skills/` via `hq skill add`) provide expert runbooks when relevant.
 2. **Piggyback on Antigravity's Native Strengths ([ADR-0001](decisions/0001-option-1.5-hybrid-on-antigravity.md)):** Reuse Antigravity's code execution, macOS Seatbelt sandbox, Chrome DevTools browser automation, MCP client, subagents, cron scheduler, and mobile **Remote Control** PWA.
-3. **A Thin Go Microkernel (`bin/hq`, [ADR-0002](decisions/0002-go-microkernel-binary.md)):** Plug into Antigravity's `hooks.json` and `sidecar.json` interfaces to add cross-session memory, zero-token event pre-checks, lock-free per-task parallel isolation, and deterministic approval gates.
+3. **A Thin Go Microkernel (`bin/hq`, [ADR-0002](decisions/0002-go-microkernel-binary.md)):** Plug into Antigravity's `.agents/plugins/agy-hq/hooks.json` and `.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json` interfaces (plus native `hq sidecar console`) to add cross-session memory, zero-token event pre-checks, lock-free per-task parallel isolation, and deterministic approval gates.
 4. **Strict Two-Layer Separation ([ADR-0003](decisions/0003-two-layer-oss-and-private-vault.md), [RFC-0001](design/0001-vault-and-task-isolation.md)):** Keep the open-source engine and reusable skills in the public-safe root repository, while isolating 100% of personal profile data, memories, journals, triggers, and files inside `local/` (an independent private git repository).
 
 ---
@@ -26,26 +26,26 @@ flowchart TB
     DROP["Zero-Prompt Drop Folder\nlocal/inbox/"]
   end
 
-  subgraph DaemonLayer["2. Always-On Background Daemon (RFC-0004, systemd / launchd)"]
-    DAEMON["hq daemon (run / service)\n• 15s Drop Folder Router (fsnotify / polling)\n• 30m Zero-Token Heartbeat Gatekeeper & Dead-Man's Switch\n• Native Gmail & Google Chat Sidecar Watchers"]
+  subgraph DaemonLayer["2. Always-On Background Daemon (RFC-0004, RFC-0018, systemd / launchd)"]
+    DAEMON["hq daemon (run / service)\n• 15s Pure-Go Fast-Tick Poller (timers, inbox/, delegates, events, outbox, channels)\n• 30s Gatekeeper Cron, 15m Pulse Look-Ahead & 30m Heartbeat / Dead-Man's Switch\n• Modular Connector Watchers (hq watch) & Channel Bridges (hq channel)"]
     WEBUI["HQ Console Web Server\nhttp://127.0.0.1:4242 (Aux Dashboard)"]
   end
 
   subgraph Microkernel["3. Go Microkernel Engine (bin/hq)"]
-    HOOKS["Lifecycle Hooks (RFC-0002, RFC-0003, RFC-0007)\n• SessionStart: Injects USER.md, MEMORY.md, Topic Wiki Index\n• PreToolUse: Non-blocking Front Desk guard & SHA-256 action blocklist\n• Stop: 0-token transcript extraction & monotonic turn journaling"]
+    HOOKS["Lifecycle Hooks (RFC-0002, RFC-0003, RFC-0007, RFC-0024)\n• SessionStart: Injects USER.md, MEMORY.md, scoped facts, 1:1 Active Playbook, Topic Wiki Index & Zone-2 nudges\n• PreToolUse: Non-blocking Front Desk guard & SHA-256 action blocklist\n• Stop: 0-token transcript extraction & monotonic turn journaling"]
     EXEC["Approval-Bound Executor (RFC-0003)\n• Watches local/memory/pending/<id>.json\n• SHA-256 verification + 0-LLM deterministic execution"]
     TASKS["Layer-1 Task Engine (RFC-0001, RFC-0007, RFC-0009)\n• local/memory/tasks.json (active) vs tasks_archive.jsonl (cold)\n• Isolated git worktrees (local/worktrees/<repo>-<task>/)"]
     WS["Pluggable Workspace Providers (RFC-0025)\n• internal/workspace seam + pinned pack providers (hq-workspace-provider/v1)\n• local/memory/workspaces.json ownership ledger, W1-W4 hygiene"]
-    GCHAT["Google Chat CDP & Gmail Transports (RFC-0005, RFC-0008)\n• Headless Chrome CDP WebSocket (127.0.0.1:9222)\n• Quarantined readers & 1-step proposal staging"]
+    GCHAT["Connectors, Channel Bridges & Transports (RFC-0005, RFC-0008, RFC-0017a, RFC-0023)\n• Modular connectors (hq watch) & vendor-neutral hq-channel-bridge/v1 (hq channel)\n• Headless Chrome CDP WebSocket (127.0.0.1:9222), quarantined readers & 1-step staging"]
     RSI["Recursive Self-Improvement Engine (RFC-0010)\n• 4-stage friction mining, hypothesis, 4-gate verification"]
     OBS["Token & Latency Observability (RFC-0012)\n• Stat-cached transcript burn, subagent DAG & budget guards"]
-    CI["CI/CD & Harness Contracts (RFC-0011, RFC-0013)\n• Mathematical PII guards (P1-P6) & Harness gates (H1-H4B)"]
+    CI["CI/CD & Harness Contracts (RFC-0011, RFC-0013)\n• Mathematical PII guards (P1-P6) & Harness gates (H1-H5F)"]
   end
 
   subgraph AgentLayer["4. Antigravity Agent Sessions (PRD-0002)"]
     FD["[HQ] Front Desk Coordinator\n(Non-blocking intake, <=3 lookups, 0 source edits)"]
-    SUB["Direct In-Session Subagents\n(invoke_subagent bounded tasks -> tasks.json)"]
-    TASKCONV["Dedicated Task Conversations\n(hq spawn open-ended sidebar threads -> tasks.json)"]
+    SUB["Direct In-Session Subagents\n(invoke_subagent / hq subagent -> tasks.json)"]
+    TASKCONV["Dedicated Task Conversations\n(hq spawn --repo / --workspace -> tasks.json)"]
     CHILD["Ephemeral Child Subagents\n(nested subagents -> nested_conversations.json)"]
   end
 
@@ -77,11 +77,13 @@ flowchart TB
 To deliver genuine 24/7 proactive personal assistance without requiring open IDE windows or manual CLI runs, `agy-hq` includes an always-on background daemon:
 
 - **OS Service Management:** Installed and uninstalled via `./bin/hq daemon install`, `./bin/hq daemon status`, and `./bin/hq daemon uninstall`.
-  - On **macOS**: Configures a user LaunchAgent in `~/Library/LaunchAgents/com.antigravity.hq.daemon.plist` with `RunAtLoad` and `KeepAlive`.
-  - On **Linux**: Configures a user systemd service unit in `~/.config/systemd/user/hq-daemon.service` with automatic restarts and journal logging.
-- **Zero-Token Idle Pre-Checks (RFC-0004):** The daemon executes two high-frequency pure-Go timers in 0 LLM tokens:
-  1. **15-Second Inbox Scanner:** Scans `local/inbox/`, routes incoming files (CSVs → `ledger-ingest`, tax PDFs → `tax-prep`, SEC filings → `thesis-check`, general → `inbox-triage`), moves them to `local/inbox/queued/`, and triggers quarantined execution.
-  2. **30-Minute Heartbeat Gatekeeper & Dead-Man's Switch:** Evaluates daily quota caps, checks unread status, and monitors whether today's `brief-YYYY-MM-DD.md` has been compiled by 08:00 AM, firing a high-priority alert if missed.
+  - On **macOS**: Configures a user LaunchAgent in `~/Library/LaunchAgents/com.antigravity.agy-hq.plist` (`Label`: `com.antigravity.agy-hq`) with `RunAtLoad` and `KeepAlive`.
+  - On **Linux**: Configures a user systemd service unit in `~/.config/systemd/user/agy-hq.service` with automatic restarts and journal logging.
+- **Zero-Token Idle Pre-Checks (RFC-0004, RFC-0018, RFC-0027):** The daemon executes four pure-Go tickers in `cmd/hq/ops_cli.go` (zero `fsnotify` or external dependencies) consuming 0 LLM tokens when idle:
+  1. **15-Second Fast-Tick Poller:** Sweeps due `timers`, routes `local/inbox/` drops (`*.csv` → `ledger-ingest`, tax PDFs → `tax-prep`, SEC filings → `thesis-check`, general → `inbox-triage` into `local/inbox/queued/`), dispatches `delegates`, drains durable `events` and `outbox` deliveries, and polls `channel` bridges.
+  2. **30-Second Gatekeeper Cron & Workspace Maintenance:** Evaluates declarative schedules (`local/triggers.yaml` cursor pre-checks) and reconciles workspace ownership leases.
+  3. **15-Minute Pulse Look-Ahead:** Runs `hq pulse` anticipation checks (`D1`–`D10`) across Goals, calendars, and workspaces in 0 LLM tokens.
+  4. **30-Minute Heartbeat & Dead-Man's Switch:** Runs `RunHeartbeat`, evaluates daily quota caps, checks whether today's `brief-YYYY-MM-DD.md` was compiled by 08:00 AM, and compacts audit logs.
 - **Embedded Aux Web UI:** Hosts the local HTTP server (`127.0.0.1:4242`) powering both the Antigravity Sidecar pane (`sidecar://agy-hq-console/`) and standalone browser dashboard.
 
 ---
@@ -99,7 +101,7 @@ flowchart TD
 ```
 
 - **Zero Source/Worktree Edits:** Direct file modifications (`edit_file`, `write_file`) in source code or worktrees are hard-blocked by `PreToolUse` on the Front Desk thread.
-- **Zero Heavy Build/Test Suites:** Commands like `go test`, `npm test`, `cargo test`, or `make test` are rejected inline; they must be executed inside dedicated subagents or task worktrees.
+- **Zero Heavy Build/Test Suites:** Commands like `go test`, `go build`, `npm test`, `npm run build`, `pnpm test`, `pytest`, `cargo test`, or `cargo build` are rejected inline; they must be executed inside dedicated subagents or task worktrees.
 - **Inline Lookup Cap:** Inline research tool calls (`read_file`, grep, find, shell lookups) are capped at **3 calls per turn**. (Turn-1 initialization housekeeping reads of `local/CONSOLE.md`, `hq_console.md`, and `local/triggers.yaml` are explicitly exempted).
 - **Silent Ledger Discipline:** Subagent logs, quota counters, and task board tables stay strictly inside the live `hq_console.md` artifact; the Front Desk only delivers synthesized executive takeaways upon task completion.
 
@@ -116,7 +118,7 @@ stateDiagram-v2
     Active --> Completed: hq complete / subagent Stop turn
     Completed --> Archived: hq archive
     Archived --> Active: hq reopen
-    Active --> Cancelled: manage_subagents(kill)
+    Active --> Cancelled: manage_subagents / manage_task(kill)
     Completed --> [*]
     Archived --> [*]
     Cancelled --> [*]
@@ -128,7 +130,7 @@ stateDiagram-v2
 | **`✅ completed`** | `hq complete <slug-or-id>` or child subagent `Stop` hook | Updates task status to `completed`, preserves summary and timing, updates Task Board. |
 | **`📦 archived`** | `hq archive <slug-or-id>` | Moves completed task to archived section on Task Board, freeing active view space while preserving history. |
 | **`🟢 active` (reopened)** | `hq reopen <slug-or-id>` | Restores archived task back to active state for further work. |
-| **`🛑 cancelled`** | `manage_subagents(Action: "kill")` | Subagent killed before normal turn completion; marked cancelled in `tasks.json`. |
+| **`🛑 cancelled`** | `manage_subagents` / `manage_task(Action: "kill")` | Subagent killed before normal turn completion; marked cancelled in `tasks.json`. |
 
 ### 5.1 Layer-1 Taskboard & Quota Invariant (`tasks.json` vs. `nested_conversations.json`)
 
@@ -163,8 +165,8 @@ To support Google Chat across both Google Workspace and personal `@gmail.com` ac
      ```
    - Automatically resolves names via fuzzy cache (`spaces_cache.json`) or PeopleKit search, pre-warms the target space tab in headless Chrome, drafts the message, and stages a SHA-256 bound `gchat_send` proposal (`local/memory/pending/<id>.json`).
 3. **Quarantine Reader Gate (`hq gchat read-quarantined`):**
-   - Full message body inspection is restricted to quarantined subagents. Calling `read-quarantined` permanently flags the conversation ID in `local/memory/tainted_sessions.json`.
-   - Tainted sessions have `search_web`, `write_file`, `edit_file`, `invoke_subagent`, `send_message`, `schedule`, and `call_mcp_tool` blocked, symlink-resolved reads of `local/private/**` denied, and `run_command` restricted strictly to newline-free read/draft/propose operations—neutralizing prompt-injection exfiltration attacks from untrusted messages.
+   - Full message body inspection is restricted to quarantined subagents. Calling `read-quarantined` permanently flags the conversation ID in `local/private/taint/<sha256(convID)>.json` and `local/private/taint/ledger.jsonl` (retaining `tainted_sessions.json` strictly as a 1-release read-only fallback).
+   - Tainted sessions deny `search_web`, `grep_search`, `find_by_name`, `write_file`, `edit_file`, `invoke_subagent`, `send_message`, `schedule`, and `call_mcp_tool` by default, restrict `read_file` to authorized `SKILL.md` files and the session's own artifact directory (denying `local/private/**` and `local/MEMORY.md`), and restrict `run_command` strictly to newline-free allowlisted `hq` verbs (`watch read|query|ack`, `offer stage`, `outbox add`, `timers set`, `goals mark-replied`, `memory lookup`, `brief format-quarantined`, `gmail|gchat read|read-quarantined|triage-result`)—explicitly denying `hq gmail draft`, `hq gchat draft`, and `hq propose` so tainted outbound intents must pass through `hq offer stage`.
 4. **1-Tap Mobile Approval:**
    - Outbound messages are presented via `ask_question` with exact SHA-256 prefixes and recipient previews, executed deterministically by `./bin/hq approve <id> --sha256=<prefix>` with zero LLM intervention.
 
@@ -188,14 +190,14 @@ The HQ Console provides real-time visibility and control across both Desktop and
 
 ---
 
-## 8. Four-Layer Memory Hierarchy & Silent Dreaming (RFC-0006)
+## 8. Four-Layer Memory Hierarchy & Silent Dreaming (RFC-0006, RFC-0024)
 
 To prevent long-running agents from suffering from memory bloat or compounding false self-reported summaries, `agy-hq` implements Anthropic-grounded four-layer memory architecture:
 
 ```mermaid
 flowchart TD
-    subgraph L1["Layer 1: Injected Context / Roadmap Index"]
-        M["local/MEMORY.md (< 2,500 tokens)\nTightly bounded index auto-injected by SessionStart on every turn"]
+    subgraph L1["Layer 1: Injected Context / Active Priorities Index"]
+        M["local/MEMORY.md (<= 40 lines, <= 2,200 bytes, <= 180 bytes/line)\nTightly bounded index auto-injected by SessionStart on every turn"]
     end
     subgraph L2["Layer 2: Knowledge Wiki / Topic Pages"]
         TOPICS["local/memory/topics/*.md\nCurated markdown wiki pages for domains, architecture, and projects\nLoaded on-demand via explicit retrieval directives"]
@@ -211,10 +213,10 @@ flowchart TD
     L3 -->|Verified against| L4
 ```
 
-1. **Layer 1: Roadmap Index (`local/MEMORY.md`):** Tightly capped summary (<2,500 tokens) of active priorities, durable user preferences, and a clickable index of topic pages.
-2. **Layer 2: Knowledge Wiki (`local/memory/topics/*.md`):** Modular topic pages covering system architecture, project playbooks, and domain lessons. `SessionStart` injects retrieval directives so the agent reads matching topic files before re-investigating.
-3. **Layer 3: Bi-Temporal Atomic Facts (`local/memory/facts.jsonl`):** Structured facts with provenance timestamps (`valid_from`, `valid_to`, `source_conv`, `superseded_by`). Managed via CLI commands: `hq memory add-fact`, `hq memory prune-fact`, and `hq memory compact`.
-4. **Layer 4: Immutable Raw Transcripts (`transcript.jsonl`):** The ground-truth log of every tool call, input, and response. Nightly consolidation ("dreaming" via `/sleep-consolidate`) runs `hq memory verify-transcript` to falsify self-reported claims against raw execution before promoting them into durable memory.
+1. **Layer 1: Active Priorities Index (`local/MEMORY.md`):** Tightly capped summary (`<= 40 lines`, `<= 2,200 bytes`, `<= 180 bytes/line`) of active priorities and durable pointers.
+2. **Layer 2: Knowledge Wiki (`local/memory/topics/*.md`):** Modular topic pages covering system architecture, project playbooks (`## Active Playbook` 1:1 injection), and domain lessons. `SessionStart` injects retrieval directives and pure-Go BM25 recall (`hq memory search`) surfaces matching snippets before re-investigating.
+3. **Layer 3: Bi-Temporal Atomic Facts (`local/memory/facts.jsonl`):** Scoped facts (`--scope`, `--expires`, `--pinned`) with provenance timestamps (`valid_from`, `valid_to`, `source_conv`, `superseded_by`). Managed via CLI commands: `hq memory add-fact`, `hq memory prune-fact`, `hq memory compact`, `hq memory lookup`, `hq memory profile`, and `hq memory forget`.
+4. **Layer 4: Immutable Raw Transcripts (`transcript.jsonl`):** The ground-truth log of every tool call, input, and response. Nightly consolidation ("dreaming" via `/sleep-consolidate`, gated by `hq memory dream-plan` and tested via `hq memory eval`) runs `hq memory verify-transcript` to falsify self-reported claims against raw execution before promoting them into durable memory.
 
 ### 8.1 Silent Night Consolidation Invariant (Zero-Output Background Dreaming)
 
@@ -226,7 +228,7 @@ Automated nightly sleep consolidation (`sleep-consolidate` / `[Auto] Nightly Sle
 ### 8.2 Silent Memory & Ledger Operations Invariant
 
 Internal memory updates and bookkeeping operations must be 100% transparent and silent:
-- **Zero Implementation Details in Conversation:** Never announce file modifications or path references (e.g., `project-notes.md`, `facts.jsonl`, `MEMORY.md`, `tasks.json`) in conversational replies.
+- **Zero Implementation Details in Conversation:** Never announce file modifications or path references (e.g., `facts.jsonl`, `MEMORY.md`, `tasks.json`) in conversational replies.
 - **Seamless Experience:** Fact indexing, topic page refreshes, and turn logging occur quietly in the background without cognitive clutter, allowing the user to experience seamless continuity without being burdened with internal bookkeeping mechanics.
 
 ---
@@ -236,74 +238,96 @@ Internal memory updates and bookkeeping operations must be 100% transparent and 
 ```text
 agy-hq/                                # LAYER 1: Open-Source Agent OS (Root Git Repo)
 ├── .gitignore                         # Ignores /local/, /bin/, and *.secret*
-├── AGENTS.md                          # General-purpose assistant rules (mounts ./local/)
-├── go.mod                             # Go module for bin/hq
-├── cmd/hq/                            # CLI: init | hook | daemon | propose | status | memory | outbox | ideas | goals | spaces | gmail | gchat | spawn | subagent | tasks | obs | rsi | ci
-├── internal/                          # Go microkernel packages
-│   ├── kernel/                        # Trigger gatekeepers, goals/SLA sweep, worker pool, daemon installer, quota breaker
-│   ├── hooks/                         # SessionStart, PreToolUse action/credential/PII guard, Stop parser
-│   ├── approvals/                     # SHA-256 pending queue, 24h TTL, contextual-PII badge & CLI executor
-│   ├── ci/                            # CI/CD PII scanners, harness contracts & git hook installer
-│   ├── doctor/                        # Diagnostic checks for sandbox, CLI, and Vault health
-│   ├── e2e/                           # Black-box E2E tests for CUJs 1–24
-│   ├── gchat/                         # Decoupled Google Chat CDP WebSocket & REST transports
+├── AGENTS.md                          # agy-hq contributor & architecture invariants (OS rules live in .agents/plugins/agy-hq/rules/AGENTS.md)
+├── go.mod                             # Pure-stdlib Go module for bin/hq (go 1.24, 0 external deps)
+├── cmd/hq/                            # CLI: init | hook | daemon | webui | propose | approve | reject | approvals | cancel | status | doctor | version | vault-path | plugin | skill | console | migrate | upgrade | memory | outbox | ideas | goals | spaces | space | pulse | events | timers | triggers | progress | exec-sandboxed | dispatch | extension | channel | delegate | connector | watch | offer | brief | sidecar | worktree | workspace | gmail | gchat | spawn | subagent | tasks | complete | archive | reopen | adopt | claim-desk | release-desk | heartbeat | obs | rsi | ci
+├── internal/                          # Go microkernel packages (37 packages)
+│   ├── approvals/                     # SHA-256 pending queue, 24h TTL, contextual-PII badge & policy engine
 │   ├── authz/                         # Unified 5-axis Session Authorization Lattice & NI-1..NI-4 (RFC-0026)
+│   ├── brief/                         # Lease-based Morning Brief packet assembly & commit (RFC-0017c)
+│   ├── channels/                      # Vendor-neutral hq-channel-bridge/v1 supervisor & callbacks (RFC-0023)
+│   ├── ci/                            # CI/CD PII scanners (P1-P6), harness & anti-slop gates (H1-H5F)
+│   ├── connector/                     # Modular JSON-RPC/CLI connector profiles & instances (RFC-0017a)
 │   ├── delegates/                     # Declarative JSONC scoped delegates, CaMeL nudges & egress gateway (RFC-0026)
+│   ├── doctor/                        # Diagnostic checks for sandbox, CLI, and Vault health
+│   ├── e2e/                           # Black-box E2E tests for CUJs 1–47 (49 TestCUJ* functions)
+│   ├── events/                        # Durable crash-safe Event Inbox & webhook tokens (RFC-0018)
+│   ├── extension/                     # Companion hq-extension.json pack discovery & trust pinning (RFC-0017d)
+│   ├── gchat/                         # Decoupled Google Chat CDP WebSocket & REST transports
+│   ├── githooks/                      # Pure-stdlib Git pre-commit / pre-push hook installer
 │   ├── gmail/                         # Decoupled Gmail Layer 1 primitives & sidecar engine
+│   ├── hooks/                         # SessionStart, PreToolUse action/credential/PII guard, Stop parser
+│   ├── hostpaths/                     # Cross-platform host path normalization & temp detection
+│   ├── kernel/                        # Trigger gatekeepers, goals/SLA sweep, worker pool, daemon installer, quota breaker
+│   ├── living/                        # Composable Living Spaces & CSP-sandboxed compiler (RFC-0027)
 │   ├── obs/                           # Token, prefix-cache, latency & context observability engine
+│   ├── offer/                         # Taint-safe outbound offer gateway with /dev/fd/3 & participant locks (RFC-0017b)
 │   ├── outbox/                        # 4-tier attention router, Quiet Hours gate & Ideas feed (RFC-0014)
+│   ├── plugin/                        # Project & global plugin packaging, SemVer & sidecar sync (RFC-0015)
+│   ├── pulse/                         # 0-token proactive look-ahead anticipation engine D1-D10 (RFC-0027)
 │   ├── redact/                        # Shared zero-dep leaf PII, secret, path & Unicode sanitizer (RFC-0026)
-│   ├── rsi/                           # 4-stage recursive self-improvement & proactive noise engine
-│   ├── vault/                         # Memory auditing, 4-layer topics, entities, surgical forget & facts
+│   ├── routing/                       # 3-family Hydrogen/Neon/Carbon complexity & tier router
+│   ├── rsi/                           # Two-tier 4-stage recursive self-improvement & proactive noise engine
+│   ├── sandbox/                       # OS credential & network-isolated command sandbox (RFC-0018)
+│   ├── store/                         # Rank-ordered lock manager & atomic JSON file persistence
+│   ├── taint/                         # Fail-closed O_EXCL provenance taint records & session grants (RFC-0017b)
+│   ├── timers/                        # Durable one-shot & recurring follow-up timers (RFC-0018)
+│   ├── vault/                         # Memory v2, 4-layer topics, BM25 search, entities, surgical forget, profile & facts
+│   ├── version/                       # Canonical SemVer & embedded VCS commit metadata
+│   ├── watcher/                       # Cursor-locked 0-token connector watcher engine (RFC-0017a)
 │   ├── webui/                         # Interactive Aux Console & Scheduled Spaces (http://127.0.0.1:4242)
 │   ├── workspace/                     # Pluggable workspace provider seam, ownership ledger & pinned stdio adapter (RFC-0025)
-│   └── worktree/                      # Isolated git worktree lifecycle manager
-├── templates/                         # Starter blueprints copied into ./local/ by `hq init`
+│   ├── worktree/                      # Isolated git worktree lifecycle manager
+│   └── yamlmini/                      # Zero-dependency minimal YAML parser/emitter
+├── templates/                         # Embedded (//go:embed) starter blueprints, 6 opt-in skills (skills/), connectors/ & sidecars/
 ├── docs/                              # Documentation Hub (product/, design/, decisions/, research/)
 ├── .agents/
-│   ├── hooks.json                     # Connects Antigravity lifecycle hooks to ./bin/hq
-│   └── plugins/agy-hq/                # Official plugin bundle:
-│       ├── sidecars.json              # Sidecar manifest for agy-hq-console aux pane
-│       ├── sidecars/agy-hq-console/   # Aux Pane entrypoint and sidecar bridge
-│       └── skills/                    # Additive, progressive-disclosure SKILL.md workflows:
-│           ├── morning-brief/
-│           ├── sleep-consolidate/
-│           ├── swe-pulse/
-│           ├── thesis-check/
+│   ├── skills.json                    # Registers private <vault>/skills/ (local/skills) for Antigravity discovery
+│   └── plugins/agy-hq/                # Official plugin bundle (v0.3.1-dev):
+│       ├── plugin.json                # Plugin manifest & SemVer parity target
+│       ├── hooks.json                 # Single-source Antigravity lifecycle hooks -> ./bin/hq
+│       ├── README.md & assets/        # Plugin README & icon assets
+│       ├── rules/AGENTS.md            # Core Personal Agent OS rules
+│       ├── sidecars/agy-hq-console/   # Aux Pane entrypoint (launch.sh, main.mjs, sidecar.json)
+│       └── skills/                    # 3 Core OS progressive-disclosure SKILL.md workflows:
 │           ├── inbox-triage/
-│           ├── ledger-ingest/
-│           ├── tax-prep/
-│           ├── filing-diff/
-│           └── gchat/
+│           ├── morning-brief/
+│           └── sleep-consolidate/
 │
 └── local/                             # LAYER 2: Private User Vault (Independent Private Git Repo)
     ├── .git/                          # Backed up to private remote (never public)
     ├── .gitignore                     # Ignores worktrees/ and repos/ inside the Vault git repo
-    ├── config.yaml                    # Channel settings, concurrency & daily quota budgets
+    ├── config.yaml                    # Channel settings, approval rules, concurrency & daily quota budgets
     ├── triggers.yaml                  # Declarative cron schedules, 0-token pre-checks & inbox rules
     ├── USER.md                        # Personal profile, preferences, writing voice & goals
-    ├── MEMORY.md                      # Consolidated Roadmap Index (<2,500 tokens)
+    ├── MEMORY.md                      # Consolidated Active Priorities index (<= 40 lines / <= 2,200 bytes)
     ├── CONSOLE.md                     # Live status artifact & task board template
+    ├── skills/                        # Opt-in user-space & starter skills installed via `hq skill add`
     ├── console_spaces/                # Custom schedule-aware Console Space YAML cards (RFC-0014)
+    ├── living_spaces/                 # Composable Living Space specs & compiled HTML bundles (RFC-0027)
     ├── inbox/                         # Drag-and-drop folder (CSVs, PDFs, notes, receipts)
-    ├── notes/                         # Open-ended non-repo work (posts, research, theses, plans)
+    ├── notes/                         # Open-ended non-repo work (briefs/, investing/, writing/, general/)
     ├── worktrees/                     # Parallel git worktrees (<repo>-<task>/) across any GitHub repo
     ├── repos/                         # Optional bare git clones for external GitHub repos
-    ├── private/                       # High-PII records (ledger/, taxes/), isolated credentials & delegates/policy.json
+    ├── private/                       # High-PII records (ledger/, taxes/, profile.md, trust.json, pii-denylist.txt), isolated credentials, taint/, channels/, connectors/ & delegates/
     └── memory/                        # 4-layer memory & proactive state store:
         ├── delegates_state.json       # Lock-ranked (RankDelegates=66) delegate cursors, cooldowns & rate counters
         ├── delegates_queues/          # Protected per-task CaMeL queue_only peer priority nudges (Zone 2)
-        ├── topics/                    # Topic wiki pages (RFC-0006)
+        ├── topics/                    # Topic wiki pages (RFC-0006, RFC-0024)
         ├── entities/                  # On-demand contact & counterparty dossiers (RFC-0014)
-        ├── facts.jsonl                # Bi-temporal atomic facts (RFC-0006)
-        ├── goals.json                 # Stateful multi-day Goals & WaitingOn SLAs (RFC-0014)
+        ├── facts.jsonl                # Scoped bi-temporal atomic facts (RFC-0006, RFC-0024)
+        ├── goals.json                 # Stateful multi-day Goals & WaitingOn SLAs (RFC-0014, RFC-0027)
         ├── trigger_cursors.json       # 0-token pre-check SHA-256 cursors (RFC-0014)
+        ├── events/, timers/, progress/ # Durable runtime queues, timers & checkpoints (RFC-0018)
+        ├── extensions.json, watchers/ # Companion extension registry & cursor-locked watcher state
+        ├── obs/, rsi/                 # Token observability state & two-tier RSI hypotheses/rules
         ├── journal/YYYY-MM-DD/        # Monotonic per-turn execution journals
         ├── tasks.json                 # Tracked Layer-1 task conversations & lifecycle states
         ├── tasks_archive.jsonl        # Cold storage for archived tasks (RFC-0009)
         ├── workspaces.json            # Provider workspace ownership ledger, writer leases & status cache (RFC-0025)
         ├── nested_conversations.json  # Ephemeral child subagent processes
         ├── front_desk.json            # Active Front Desk intake lease & armed triggers
+        ├── daemon.json, quota_state.json, reported.jsonl
         ├── gmail/                     # Gmail registry, drafts, and quarantine staging (RFC-0005)
         ├── gchat/                     # Google Chat spaces cache, drafts, and session state (RFC-0008)
         ├── pending/                   # Staged proposals for 1-tap approval (RFC-0003)

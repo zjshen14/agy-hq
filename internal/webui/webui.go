@@ -2,10 +2,8 @@ package webui
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -31,6 +29,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/timers"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
@@ -126,12 +125,6 @@ func isAllowedSameOriginRequest(r *http.Request) bool {
 	return true
 }
 
-func generateCSRFToken() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 func validCSRFToken(expected, candidate string) bool {
 	c := strings.TrimSpace(candidate)
 	if expected == "" || len(c) != len(expected) {
@@ -215,7 +208,7 @@ func wantsJSONResponse(r *http.Request) bool {
 // NewHandler creates the HTTP mux for the HQ Console side pane and API.
 func NewHandler(vaultDir string) http.Handler {
 	mux := http.NewServeMux()
-	csrfToken := generateCSRFToken()
+	csrfToken := store.RandomHex(16)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -654,7 +647,7 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 				target = p.Metadata["spaceId"]
 			}
 			if target != "" {
-				prev := truncateRunes(strings.Join(strings.Fields(strings.TrimSpace(payload)), " "), 120)
+				prev := store.TruncateRunes(strings.Join(strings.Fields(strings.TrimSpace(payload)), " "), 120)
 				p.Summary = fmt.Sprintf("Send Google Chat to %s: %q", target, prev)
 			}
 		}
@@ -960,13 +953,6 @@ const (
 	maxDashboardQuotaEvents    = 15
 )
 
-func truncateRunes(s string, maxRunes int) string {
-	if runes := []rune(s); len(runes) > maxRunes {
-		return string(runes[:maxRunes]) + "..."
-	}
-	return s
-}
-
 func trimQuotaForDashboard(q kernel.QuotaState) kernel.QuotaState {
 	if len(q.Events) == 0 {
 		return q
@@ -977,7 +963,7 @@ func trimQuotaForDashboard(q kernel.QuotaState) kernel.QuotaState {
 	}
 	trimmed := make([]kernel.SpawnEvent, 0, len(q.Events)-start)
 	for _, ev := range q.Events[start:] {
-		ev.Outcome = truncateRunes(ev.Outcome, 240)
+		ev.Outcome = store.TruncateRunes(ev.Outcome, 240)
 		trimmed = append(trimmed, ev)
 	}
 	q.Events = trimmed
@@ -1026,8 +1012,8 @@ func loadTodayJournals(vaultDir string) []hooks.JournalEntry {
 		}
 		var j hooks.JournalEntry
 		if json.Unmarshal(data, &j) == nil {
-			j.UserPrompt = truncateRunes(strings.Join(strings.Fields(j.UserPrompt), " "), 240)
-			j.ResponseSummary = truncateRunes(strings.Join(strings.Fields(j.ResponseSummary), " "), 240)
+			j.UserPrompt = store.TruncateRunes(strings.Join(strings.Fields(j.UserPrompt), " "), 240)
+			j.ResponseSummary = store.TruncateRunes(strings.Join(strings.Fields(j.ResponseSummary), " "), 240)
 			j.TranscriptPath = ""
 			j.ToolsUsed = nil
 			out = append(out, j)

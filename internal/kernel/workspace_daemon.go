@@ -30,7 +30,7 @@ const (
 	DefaultWorkspaceMaintenanceBudget = 45 * time.Second
 )
 
-// WorkspaceMaintenanceReport summarizes one RunWorkspaceMaintenance tick.
+// WorkspaceMaintenanceReport summarizes one RunWorkspaceMaintenanceContext tick.
 type WorkspaceMaintenanceReport struct {
 	ProbesDrained  int      `json:"probesDrained,omitempty"`
 	Attached       []string `json:"attached,omitempty"` // ledger keys newly attached from probe candidates
@@ -44,13 +44,6 @@ type WorkspaceMaintenanceReport struct {
 // Changed reports whether the tick changed anything a console render would show.
 func (r WorkspaceMaintenanceReport) Changed() bool {
 	return len(r.Attached) > 0 || len(r.Bound) > 0 || r.Refreshed > 0 || r.RefreshErrors > 0 || r.LandedNotified > 0 || len(r.Forgotten) > 0
-}
-
-// RunWorkspaceMaintenance runs one daemon maintenance tick bounded by DefaultWorkspaceMaintenanceBudget.
-func RunWorkspaceMaintenance(vaultDir string, now time.Time) (WorkspaceMaintenanceReport, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultWorkspaceMaintenanceBudget)
-	defer cancel()
-	return RunWorkspaceMaintenanceContext(ctx, vaultDir, now)
 }
 
 // RunWorkspaceMaintenanceContext runs one daemon maintenance tick bounded by ctx (see the file comment).

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 )
@@ -207,7 +208,7 @@ func TestAttachDetachProjectPluginAndSanitizedDaemonEnv(t *testing.T) {
 	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "54321")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "localhost:43701")
 
-	env := SanitizedDaemonEnv()
+	env := extension.SanitizedDaemonEnv(nil)
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "ANTIGRAVITY_PROJECT_ID=") ||
 		strings.Contains(joined, "ANTIGRAVITY_CONVERSATION_ID=") ||

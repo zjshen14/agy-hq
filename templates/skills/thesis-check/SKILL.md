@@ -9,7 +9,7 @@ description: >-
 # Investment Thesis & Falsification Check (`/thesis-check`)
 
 > **Model Routing Tiering (`local/config.yaml` `routing.tiers`):**
-> - **High-frequency polling** (e.g., Hiive inbox scans): `--tier=quick` (`hq dispatch resolve`).
+> - **High-frequency polling** (e.g., watchlist inbox scans): `--tier=quick` (`hq dispatch resolve --skill=thesis-check`).
 > - **Routine close watch & filing extraction** (e.g., `edgar-close-watch`): `--tier=routine` (`hq dispatch resolve --skill=thesis-check`).
 > - **High-stakes thesis falsification / `KC-1` breach audits:** `--tier=deep`.
 
@@ -33,8 +33,8 @@ Evaluate new filings or news against an explicit investment thesis and falsifica
 
 ## Pre-IPO Secondary Opportunities & Deal-Flow Watchdog
 
-1. **Automated Secondary Watchdog (`secondary-deal-watch`):**
-   - Optional scheduled trigger (configured in `local/triggers.yaml` with `mode: daemon_gatekeeper`) to ingest inbound private-market or secondary deal flow.
+1. **Automated Secondary Watchdog:**
+   - Optional recurring watch (using Antigravity's native `schedule` tool, or a 0-token `daemon_gatekeeper` in `local/triggers.yaml`) to ingest inbound private-market or secondary deal flow.
 2. **Autonomous Document Pulls (Zero Friction Invariant):**
    - Never ask the user whether to pull financials or term sheets. Autonomously pull all prospectuses, cap tables, valuation metrics, and transaction history proactively.
 3. **Master Retrospective Ledger (`local/notes/investing/opportunities/INDEX.md`):**

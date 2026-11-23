@@ -4,6 +4,8 @@
 - **Date:** 2026-11-07
 - **References:** [RFC-0001](../design/0001-vault-and-task-isolation.md)
 
+> **Evolution Note:** Skills split into Core OS (`.agents/plugins/agy-hq/skills/`) + opt-in starters (`templates/skills/` → `<vault>/skills/`, [RFC-0019](../design/0019-two-tier-rsi-vault-overlay.md)), and `ResolveVaultDir()` also supports global Vaults (`~/.gemini/antigravity/hq/vault`, [RFC-0015](../design/0015-global-plugin-packaging.md)).
+
 ---
 
 ## Context

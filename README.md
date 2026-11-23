@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/zjshen14/agy-hq/actions/workflows/ci.yml"><img src="https://github.com/zjshen14/agy-hq/actions/workflows/ci.yml/badge.svg" alt="CI Gate" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0" /></a>
-  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.22%2B_(0_External_Deps)-00ADD8?logo=go&logoColor=white" alt="Go 1.22+ Zero External Deps" /></a>
+  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.24%2B_(0_External_Deps)-00ADD8?logo=go&logoColor=white" alt="Go 1.24+ Zero External Deps" /></a>
   <a href="docs/architecture.md"><img src="https://img.shields.io/badge/Platform-macOS_%7C_Linux-334155" alt="macOS and Linux" /></a>
 </p>
 
@@ -43,7 +43,7 @@ Most agent setups fail in daily life for one of three reasons: long coding/resea
 
 ### Prerequisites
 - **OS:** macOS (`launchd`) or Linux (`systemd`)
-- **Runtime:** **Google Antigravity** desktop app + **Git** + **Go 1.22+** *(auto-installed via Homebrew on macOS if missing)*
+- **Runtime:** **Google Antigravity** desktop app + **Git** + **Go 1.24+** *(auto-installed via Homebrew on macOS if missing)*
 
 ### Option A: Try Instantly with Synthetic `--demo` Data *(Recommended First Run)*
 
@@ -67,19 +67,19 @@ git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter &
 git clone https://github.com/zjshen14/agy-hq.git headquarter && cd headquarter && ./scripts/bootstrap.sh --global
 ```
 
-Installs `~/.local/bin/hq` on `PATH` and syncs the validated `agy-hq` v0.3.0 plugin bundle into `~/.gemini/config/plugins/agy-hq/` (`hq plugin status` / `hq plugin validate`) so your personal Agent OS, 9 skills, Console sidecar, and private Vault work seamlessly from any folder or repository.
+Installs `~/.local/bin/hq` on `PATH` and syncs the validated `agy-hq` v0.3.1-dev plugin bundle into `~/.gemini/config/plugins/agy-hq/` (`hq plugin status` / `hq plugin validate`) so your personal Agent OS, 3 Core OS skills (plus 6 opt-in starter templates installable into `<vault>/skills/` via `hq skill add`), Console sidecar, and private Vault work seamlessly from any folder or repository.
 
 **What `bootstrap.sh` sets up automatically:**
 1. Compiles `./bin/hq` locally in `< 2s` from pure Go standard library source (`0` external `go.mod` dependencies, embedded starter `templates/`).
 2. Runs `./bin/hq init` to scaffold your git-ignored private Vault (`./local/USER.md`, `./local/MEMORY.md`, `./local/CONSOLE.md`, `./local/.git`, and `0700`-permissioned private directories; or `~/.gemini/antigravity/hq/vault` via `hq init --global-vault`).
-3. Installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` mathematical PII & harness guards (`Invariants P1–P6`, `Gates H1–H4B`).
+3. Installs `.git/hooks/pre-commit` and `.git/hooks/pre-push` mathematical PII & harness guards (`Invariants P1–P6`, `Gates H1–H5F`).
 4. Installs the background `hq daemon` user service and runs `./bin/hq doctor` to verify environment health.
 
 > **Zero-Touch GUI Option:** Even if you only `git clone` and open `headquarter` directly in Antigravity without running `./scripts/bootstrap.sh`, the `SessionStart` hook in [`.agents/plugins/agy-hq/hooks.json`](.agents/plugins/agy-hq/hooks.json) automatically compiles `./bin/hq`, initializes `./local/`, claims your `[HQ] Front Desk` conversation, and pins the live `hq_console.md` artifact on Turn 1.
 >
 > **Tip — Pin Your Front Desk:** Pin your `[HQ] Front Desk` conversation to the top of the Antigravity sidebar (via the conversation header menu) so your coordinator stays anchored above ephemeral task threads.
 >
-> **Live Aux Console:** Open the embedded Antigravity Sidecar pane via [`sidecar://agy-hq/agy-hq-console/`](.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) or run `hq webui` for the standalone dashboard at `http://127.0.0.1:4242`.
+> **Live Aux Console:** Open the embedded Antigravity Sidecar pane via [`sidecar://agy-hq-console/`](.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) or run `hq webui` for the standalone dashboard at `http://127.0.0.1:4242`.
 
 ---
 
@@ -89,23 +89,24 @@ Installs `~/.local/bin/hq` on `PATH` and syncs the validated `agy-hq` v0.3.0 plu
 agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked Root Git Repo)
 ├── AGENTS.md                          # Contributor, RFC & CI engineering rules for agy-hq
 ├── cmd/hq/                            # Single static Go CLI entrypoint (zero external dependencies)
-├── internal/                          # Go microkernel (hooks, kernel, plugin, version, outbox, approvals, obs, rsi, ci, webui, gmail, gchat)
-├── templates/                         # Embedded (//go:embed) starter blueprints copied into Vault by `hq init`
-├── docs/                              # PRDs, technical RFCs (0001–0015), ADRs & research archive
+├── internal/                          # Pure-stdlib Go microkernel (approvals, authz, brief, channels, ci, connector, delegates, events, extension, gchat, gmail, hooks, kernel, living, obs, offer, outbox, plugin, pulse, rsi, sandbox, store, taint, timers, vault, version, watcher, webui, workspace, worktree, etc.)
+├── templates/                         # Embedded (//go:embed) starter blueprints, 6 opt-in skill templates (skills/), connectors & sidecar
+├── docs/                              # PRDs (0001–0003), technical RFCs (0001–0027), ADRs (0001–0006) & research archive (01–22)
 ├── assets/branding/                   # Official Asymmetric Wing Cradle icon pack & social preview
 ├── .agents/
-│   └── plugins/agy-hq/                # Standalone global & workspace plugin (plugin.json, hooks.json, rules/AGENTS.md, Sidecar + 9 skills)
+│   ├── skills.json                    # Registers private <vault>/skills/ (local/skills) for Antigravity discovery
+│   └── plugins/agy-hq/                # Standalone plugin bundle (plugin.json, hooks.json, rules/AGENTS.md, Sidecar + 3 Core OS skills)
 │
 └── local/                             # LAYER 2: Your Private Vault (Git-Ignored; or ~/.gemini/antigravity/hq/vault globally)
     ├── USER.md                        # Your profile, communication preferences & goals
-    ├── MEMORY.md                      # Bounded Roadmap Index (< 2,500 tokens) auto-injected at SessionStart
+    ├── MEMORY.md                      # Bounded Active Priorities index (<= 40 lines / <= 2,200 bytes) auto-injected at SessionStart
     ├── CONSOLE.md                     # Zero-token live Task Board, Console Spaces & Ideas snapshot
     ├── config.yaml & triggers.yaml    # Attention/Quiet Hours, Spaces, quota budgets & 0-token cursor gatekeepers
     ├── inbox/                         # Zero-prompt drop folder (CSVs, PDFs, filings, receipts)
     ├── notes/                         # Personal notes, research, drafts & investment theses
     ├── worktrees/                     # Isolated parallel git worktrees (<repo>-<task>/)
-    ├── private/                       # High-PII records (ledger/, taxes/) & isolated credentials (gmail/, gchat/)
-    └── memory/                        # topics/*.md, entities/*.md, goals.json, outbox/, facts.jsonl, journal/, pending/
+    ├── private/                       # High-PII records (ledger/, taxes/, profile.md) & isolated credentials/taint/bridges
+    └── memory/                        # topics/*.md, entities/*.md, goals.json, tasks.json, events/, timers/, outbox/, facts.jsonl, journal/, pending/, progress/, living-spaces/, obs/, rsi/
 ```
 
 ---
@@ -151,69 +152,90 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 | `./bin/hq spaces [list\|active\|pin\|hide\|auto]` | Inspect or pin schedule-aware Console Spaces (`morning-ops`, `market-watch`, `engineering`) |
 | `./bin/hq obs tokens` | View daily uncached token burn, prefix-cache hit ratio (`CHR %`), and latency |
 | `./bin/hq upgrade` | Snapshot `local/.git`, pull latest `agy-hq` commits, recompile `bin/hq`, and migrate |
-| `./bin/hq ci pre-push` | Run full local verification gate (`P1–P6` PII, `H1–H4B` contracts, unit & CUJ E2E tests) |
+| `./bin/hq ci pre-push` | Run full local verification gate (`P1–P6` PII, `H1–H5F` contracts/anti-slop, unit & CUJ E2E tests) |
 
 <details>
-<summary><b>Expand Full CLI Subcommand Reference (Task Lifecycle, Approvals, Daemon, Observability, Gmail, GChat, Memory & RSI)</b></summary>
+<summary><b>Expand Full CLI Subcommand Reference (Task Lifecycle, Approvals, Extensions, Channels, Delegates, Daemon, Observability, Gmail, GChat, Memory & RSI)</b></summary>
 
 <br />
 
 | Category | Command | Description |
 | :--- | :--- | :--- |
-| **Core & Diagnostics** | `./bin/hq init [--demo]` | Initialize git-ignored private `local/` Vault (optionally seed `[Sample]` dataset) |
+| **Core & Diagnostics** | `./bin/hq version [--json]` | Show `hq` binary SemVer, git commit, Vault path, and schema version |
+| | `./bin/hq vault-path [--json]` | Print resolved private Vault directory and resolution source |
+| | `./bin/hq plugin <install\|uninstall\|status\|validate>` | Manage project-scoped (default) or `--global` plugin bundle & binary (`--strict`, `--console-sidecar`) |
+| | `./bin/hq skill <list\|add\|remove>` | Manage opt-in Vault skills (`<vault>/skills/`) from `templates/skills/` |
+| | `./bin/hq init [--demo] [--global-vault] [--attach-plugin] [--starters=...\|--all-starters]` | Initialize git-ignored private `local/` (or global) Vault and optionally seed `[Sample]` data |
+| | `./bin/hq console` | Sync `local/CONSOLE.md` and active Front Desk `hq_console.md` artifact |
 | | `./bin/hq doctor [--json]` | Verify Go toolchain, Antigravity sandbox, Remote Control, CLI tools, and Vault health |
-| | `./bin/hq status` | Display pending approvals queue, active worktrees, and health |
-| | `./bin/hq upgrade [--no-pull]` | Snapshot Vault, pull latest commits, recompile CLI, and migrate |
-| | `./bin/hq migrate` | Run non-destructive Vault schema and template migrations |
-| **Task Board & Lifecycle** | `./bin/hq tasks [--active\|--all\|--archive]` | Query tiered Task Board, active tasks, and cold archive |
-| | `./bin/hq tasks stats` | Task Board telemetry, hot/cold distribution, and slot usage |
-| | `./bin/hq tasks compact` | Rotate dormant/completed tasks into cold archive (`tasks_archive.jsonl`) |
-| | `./bin/hq tasks pin / unpin <slug>` | Pin or unpin high-priority tasks to the top of the Task Board |
-| | `./bin/hq spawn --task=<slug> --prompt="..."` | Spawn dedicated Task Conversation in isolated worktree |
-| | `./bin/hq subagent --role="..." --prompt="..."` | Launch nested child subagent under current conversation |
-| | `./bin/hq complete <slug-or-id>` | Mark an active task conversation as completed |
-| | `./bin/hq archive <slug-or-id>` | Archive a completed task conversation |
-| | `./bin/hq reopen <slug-or-id>` | Reopen an archived task conversation (recalls from cold archive if needed) |
-| | `./bin/hq adopt --conv=<id> --task=<slug>` | Adopt existing conversation (or demote Front Desk to a Task) |
+| | `./bin/hq status [--quiet]` | Display pending approvals queue, active worktrees, workspaces, and channel bridges |
+| | `./bin/hq upgrade [--no-pull]` | Snapshot Vault, pull latest commits, recompile CLI, sync plugin, and migrate |
+| | `./bin/hq migrate [--quiet]` | Run non-destructive Vault schema and template migrations |
+| | `./bin/hq hook <session-start\|pre-tool\|stop>` | Antigravity `hooks.json` lifecycle handlers |
+| **Task Board & Lifecycle** | `./bin/hq tasks [--active\|--all\|--archive\|--kind=\|--scope=\|--search=]` | Query tiered Task Board, active tasks, and cold archive |
+| | `./bin/hq tasks <stats\|compact\|sync-sidebar\|pin\|unpin\|clean-nested>` | Task Board telemetry, cold compaction, sidebar archive sync, pinning, and nested cleanup |
+| | `./bin/hq spawn --task=<slug> --prompt="..." [--repo=...\|--workspace=...] [--tier=\|--model=\|--depth=]` | Spawn dedicated Task Conversation in isolated git worktree or provider workspace |
+| | `./bin/hq subagent --role="..." --prompt="..." [--model=\|--depth=]` | Launch nested child subagent under current conversation |
+| | `./bin/hq complete <slug-or-id> [--summary="..."]` | Mark an active task conversation as completed |
+| | `./bin/hq archive <slug-or-id> [--force] [--no-sidebar]` | Archive a completed task conversation |
+| | `./bin/hq reopen <slug-or-id> [--no-worktree] [--no-sidebar]` | Reopen an archived task conversation (recalls from cold archive if needed) |
+| | `./bin/hq adopt --conv=<id> --task=<slug> [--title="..."]` | Adopt existing conversation (or demote Front Desk to a Task) |
 | | `./bin/hq claim-desk / release-desk` | Manage the single active `[HQ] Front Desk` intake lease |
-| | `./bin/hq worktree add <repo> <task>` | Create isolated git worktree in `local/worktrees/<repo>-<task>/` |
-| **Safety & Approvals** | `./bin/hq propose --type=... --summary="..." --cmd="..." [--ttl=24h]` | Stage irreversible outbound action (`24h` TTL + contextual-PII scan) for 1-tap approval |
-| | `./bin/hq approve <id> --sha256=<prefix>` | Verify `>= 8`-char SHA-256 prefix, check TTL expiry, and execute staged action |
-| | `./bin/hq reject <id>` | Reject and remove pending outbound proposal |
-| **Proactive Outbox, Goals & Spaces** | `./bin/hq outbox <add\|list\|drain>` | Route background insights across `interrupt`, `brief_rollup`, `ideas_feed`, and `silent_ledger` |
+| | `./bin/hq progress <save\|show\|list\|archive>` | Structured cross-run & pre-compaction task checkpoints |
+| **Worktrees & Workspaces** | `./bin/hq worktree <add\|list\|attach\|remove\|prune>` | Create, list, attach, remove, or prune isolated git worktrees in `<vault>/worktrees/` |
+| | `./bin/hq workspace <providers\|list\|create\|adopt\|status\|handoff\|unbind\|remove\|own\|prune>` | Manage pluggable provider workspaces (`RFC-0025`) |
+| **Safety & Approvals** | `./bin/hq propose --type=... --summary="..." (--cmd="..." \| --draft=... \| --rsi-id=...) [--ttl=24h]` | Stage outbound action (`24h` TTL + contextual-PII scan) for 1-tap approval |
+| | `./bin/hq approve <id> [--sha256=<prefix>] [--cap=<token>]` | Verify `>= 8`-char SHA-256 prefix, check TTL/capability, and execute staged action |
+| | `./bin/hq reject <id> [--reason="..."] [--dismiss]` | Reject (or quietly dismiss) a pending outbound proposal |
+| | `./bin/hq approvals <list\|expired\|restage\|dismiss>` | Inspect pending/expired approvals, restage timed-out cards, or bulk-dismiss |
+| | `./bin/hq cancel <id-or-scope> [--reason="..."]` | Cancel pending outbound proposals or background runs |
+| | `./bin/hq exec-sandboxed [--workdir=...] [--net-isolated] -- <cmd>` | Execute subprocess inside OS credential sandbox |
+| **Proactive Engine, Goals & Spaces** | `./bin/hq outbox <add\|list\|act\|eval>` | Route background insights (`interrupt`, `brief_rollup`, `ideas_feed`, `silent_ledger`), act on cards, and eval SNR |
+| | `./bin/hq pulse <precheck\|status>` | Run or inspect 0-token proactive look-ahead checks (`RFC-0027`) |
 | | `./bin/hq ideas <list\|promote\|snooze\|dismiss>` | Manage proactive `ideas_feed` queue (dismissals feed `hq rsi mine`) |
-| | `./bin/hq goals <list\|add\|milestone\|check-off\|wait-on\|mark-replied\|due\|complete>` | Manage multi-day Goals and 0-token counterparty `WaitingOn` reply SLAs |
+| | `./bin/hq goals <list\|add\|milestone\|check-off\|checklist\|park\|unpark\|wait-on\|mark-replied\|due\|complete>` | Manage multi-day Goals, 3-state checklists, and counterparty `WaitingOn` SLAs |
 | | `./bin/hq spaces <list\|active\|pin\|hide\|auto>` | Inspect or override schedule-aware Console Spaces |
-| **Daemon, Web UI & Heartbeat** | `./bin/hq daemon install / status / uninstall` | Manage `launchd` (macOS) or `systemd` (Linux) background HQ daemon service |
-| | `./bin/hq daemon [--addr=127.0.0.1:4242]` | Run background daemon watcher and loopback HTTP server |
-| | `./bin/hq webui [--addr=127.0.0.1:4242]` | Start interactive Web UI Console & Antigravity Sidecar |
+| | `./bin/hq space <list\|create\|show\|build\|refresh\|sync-goal\|export-artifact\|export>` | Manage composable Living Spaces (`RFC-0027`) |
+| **Events, Timers & Triggers** | `./bin/hq events <enqueue\|list\|inspect\|retry\|drop\|dispatch\|token>` | Manage durable crash-safe Event Inbox and webhook tokens |
+| | `./bin/hq timers <set\|list\|cancel>` | Manage durable one-shot Follow-Up and recurring Schedule timers |
+| | `./bin/hq triggers <list\|pause\|resume\|fire>` | Inspect, pause, resume, or fire declarative gatekeeper schedules |
+| **Connectors, Extensions, Channels & Delegates** | `./bin/hq extension <list\|lint\|enable\|refresh\|disable\|trust\|apply-trust\|doctor>` | Manage companion `hq-extension.json` packs and SHA-256 trust hashes |
+| | `./bin/hq dispatch resolve [<skill>] [--trigger=<fqid>] [--json]` | Resolve active Core OS skill, Vault skill, or RSI overlay rules |
+| | `./bin/hq connector <list\|lint\|migrate\|doctor\|test\|apply-offer>` | Manage modular JSON-RPC/CLI connectors (`RFC-0017a`) |
+| | `./bin/hq watch <status\|precheck\|read\|query\|ack\|prune-backlog\|reset-poisoned>` | Run 0-token watcher prechecks, quarantined read/query, and item acks |
+| | `./bin/hq offer stage --connector=... [--thread=...] [--to=...] [--body=...]` | Stage taint-safe outbound offers with `participant_lock` and `/dev/fd/3` |
+| | `./bin/hq brief <collect\|commit\|format-quarantined>` | Lease-based Morning Brief packet assembly and commit (`RFC-0017c`) |
+| | `./bin/hq channel <list\|status\|test\|pause\|resume\|audit\|configure>` | Manage Front Desk `hq-channel-bridge/v1` bridges & SHA-256 audit log (`RFC-0023`) |
+| | `./bin/hq delegate <list\|show\|validate\|configure\|trust-command\|test\|bind-target\|ack-nudge\|audit>` | Manage declarative scoped peer delegates (`RFC-0026`) |
+| **Daemon, Web UI, Sidecar & Heartbeat** | `./bin/hq daemon [install\|uninstall\|status\|run] [--addr=127.0.0.1:4242]` | Run or manage `launchd` (macOS) / `systemd` (Linux) background daemon service |
+| | `./bin/hq webui [--addr=127.0.0.1:4242]` | Start interactive Web UI Console & Antigravity Sidecar server |
+| | `./bin/hq sidecar console [--listen=...] [--supervise]` | Run native Go stdio JSON-RPC console sidecar |
 | | `./bin/hq heartbeat [--dry-run] [--force-gatekeepers]` | Run 0-token cursor pre-checks, `WaitingOn` SLA sweep, Dead-Man's Switch, and inbox router |
 | **Token & Cost Observability** | `./bin/hq obs tokens [--days=7]` | Daily uncached input, cache read, output tokens, `CHR %`, and latency breakdown |
 | | `./bin/hq obs top [--tree]` | Rank conversations by self or full parent-child tree uncached token burn |
 | | `./bin/hq obs inspect <conv-or-slug>` | Per-turn context growth, prefix-cache hits, and compaction telemetry |
 | | `./bin/hq obs anomalies / budget / reconcile` | Detect cold-cache thrash or runaway turns, check daily budgets, and reconcile DAGs |
-| **Google Chat Primitives** | `./bin/hq gchat propose --to=... --body=...` | 1-step stage Google Chat draft & proposal (spaces, DMs, emails, handles) |
-| | `./bin/hq gchat spaces` | List Google Chat spaces and DMs (fuzzy name cache) |
-| | `./bin/hq gchat search [--query="..."]` | Search Chat messages without LLM exposure |
+| **Google Chat Primitives** | `./bin/hq gchat init / add-account / accounts / status` | Configure Google Chat accounts and inspect CDP / OAuth / bridge status |
+| | `./bin/hq gchat propose --to=... --body=...` | 1-step stage Google Chat draft & proposal (spaces, DMs, emails, handles) |
+| | `./bin/hq gchat spaces / search [--query="..."]` | List spaces/DMs or search Chat messages without LLM exposure |
 | | `./bin/hq gchat read-quarantined --space=...` | Read Chat messages in sandboxed quarantine (taints session against egress) |
-| | `./bin/hq gchat login [--remote] [--reset]` | Guided 1-time Chrome login (desktop or phone prompt via `--remote`) |
-| **Gmail Primitives** | `./bin/hq gmail init --email=<email>` | Configure primary or secondary Gmail account |
-| | `./bin/hq gmail status / list` | Inspect configured Gmail accounts or list messages without LLM exposure |
-| | `./bin/hq gmail read --thread=<id>` | Read email thread in quarantined plain-text format |
-| | `./bin/hq gmail draft --to=... --body=...` | Create or update draft email for staged review |
-| | `./bin/hq gmail triage` | Run pure-Go unread sidecar precheck and batch triage items |
-| **Memory & RSI Engine** | `./bin/hq memory status / topics / entities` | Inspect 4-layer memory hierarchy, Knowledge Wiki pages, and Entity Dossiers |
-| | `./bin/hq memory lookup <query>` | On-demand (`< 5ms`, `0` `SessionStart` tokens) contact & counterparty dossier lookup |
-| | `./bin/hq memory add-entity --name=...` | Create or merge an Entity Dossier in `local/memory/entities/<slug>.md` |
+| | `./bin/hq gchat draft / send-draft / precheck / triage / triage-result` | Draft management, pure-Go unread precheck, and quarantined triage |
+| | `./bin/hq gchat login / logout / restore-session / launch-chrome` | Guided Chrome login (`--remote` / `--reset`) and CDP session management |
+| **Gmail Primitives** | `./bin/hq gmail init / add-account / accounts / status / list` | Configure Gmail accounts, inspect status, or list messages without LLM exposure |
+| | `./bin/hq gmail search / read --thread=<id> / read-quarantined` | Search threads or read email in quarantined plain-text format |
+| | `./bin/hq gmail draft / send-draft / forward` | Create, send, or forward draft emails for staged review |
+| | `./bin/hq gmail precheck / triage / triage-result / attachment-quarantine` | Run pure-Go unread sidecar precheck, batch triage, and attachment quarantine |
+| **Memory & RSI Engine** | `./bin/hq memory status / topics / entities / search` | Inspect 4-layer memory hierarchy, Wiki pages, Entity Dossiers, and BM25 search |
+| | `./bin/hq memory lookup / add-entity / profile <get\|set\|unset>` | On-demand dossier lookup (`< 5ms`) and private household profile autofill |
 | | `./bin/hq memory forget "<query>" [--block-pii]` | Cascading 4-layer surgical scrub across facts, `MEMORY.md`, topics, entities, and notes |
-| | `./bin/hq memory verify-transcript <convId>` | Verify claims against raw transcripts before promoting memory |
-| | `./bin/hq memory add-fact / prune-fact / compact` | Record, soft-prune, or compact bi-temporal atomic facts with provenance |
+| | `./bin/hq memory dream-plan / eval / verify-transcript / commit` | Dreaming precheck, `F1`–`F4` memory eval, transcript verification, and Vault commit |
+| | `./bin/hq memory add-fact / prune-fact / compact` | Record, soft-prune, or compact scoped bi-temporal facts with provenance |
 | | `./bin/hq rsi mine [--since=24h]` | Mine 0-token ground-truth friction events from journals |
-| | `./bin/hq rsi hypothesize / verify / propose / status` | Synthesize, 4-gate verify, and stage bounded self-improvement patches |
+| | `./bin/hq rsi hypothesize / verify / propose / apply / ablate / export / migrate-overlays / status` | Synthesize, 4-gate verify, stage, apply, ablate, and export two-tier RSI patches |
 | **CI/CD & Harness Contracts** | `./bin/hq ci pre-push / pre-commit` | Run full local CI gate or fast pre-commit PII/format/link check |
 | | `./bin/hq ci check-pii [--staged\|--history]` | Mathematical PII & Vault boundary scanner (`Invariants P1–P6`) |
-| | `./bin/hq ci scrub-history --replacements=...` | Preview or apply (`--apply`) deterministic git commit history sanitization |
-| | `./bin/hq ci check-harness` | Verify skills (`H1`), hook parity & security (`H2`), routing (`H3`), and Go/docs (`H4`) |
+| | `./bin/hq ci denylist-add / scrub-history --replacements=...` | Manage local PII denylist or preview/apply (`--apply`) git history sanitization |
+| | `./bin/hq ci check-harness` | Verify skills (`H1`), hook parity & security (`H2`), routing (`H3`), Go/docs (`H4`), and anti-slop & CUJ/LOC contracts (`H5-A`–`H5-F`) |
 | | `./bin/hq ci install-hooks` | Install `.git/hooks/pre-commit` and `.git/hooks/pre-push` |
 
 </details>
@@ -224,9 +246,9 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 
 Explore the **[Documentation Hub (`docs/README.md`)](docs/README.md)** for guided reading paths across:
 - **[System Architecture Overview](docs/architecture.md)** & **[Implementation Roadmap](docs/roadmap.md)**
-- **Product Specs (`PRD-0001` – `PRD-0003`):** Day-in-the-life UX, open-ended skills, and all 24 E2E Critical User Journeys
-- **Technical RFCs (`RFC-0001` – `RFC-0014`):** Two-Layer Vault, 4-layer memory dreaming, SHA-256 approval gates, Gmail & Google Chat quarantine transports, bounded RSI, token observability, CI/privacy verification, and Proactive Engine v2
-- **Architecture Decision Records (`ADR-0001` – `ADR-0006`)** & **Research Archive (`01` – `10`)**
+- **Product Specs (`PRD-0001` – `PRD-0003`):** Day-in-the-life UX, open-ended skills, and all 49 E2E Critical User Journey tests (`CUJs 1–47`)
+- **Technical RFCs (`RFC-0001` – `RFC-0027`):** Two-Layer Vault, 4-layer memory v2 & dreaming, SHA-256 approval policy, Gmail & Google Chat quarantine transports, bounded two-tier RSI, token observability, CI/anti-slop gates, global plugin packaging, sidebar archive sync, modular connectors/taint/brief/extensions, durable runtime hardening, channel bridges, pluggable workspaces, scoped delegates, and Muse proactive actions/Living Spaces
+- **Architecture Decision Records (`ADR-0001` – `ADR-0006`)** & **Research Archive (`01` – `22`)**
 
 ---
 

@@ -6,6 +6,8 @@
 - **Companion Research:** [11 — Antigravity Global Plugin Packaging & Vault Isolation Audit](../research/11_plugin_packaging_audit.md)
 - **Extends / Integrates With:** [ADR-0001 (Hybrid Antigravity Architecture)](../decisions/0001-option-1.5-hybrid-on-antigravity.md), [ADR-0002 (Go Microkernel Binary)](../decisions/0002-go-microkernel-binary.md), [ADR-0003 (Two-Layer Vault)](../decisions/0003-two-layer-oss-and-private-vault.md), [RFC-0001 (Vault & Task Isolation)](./0001-vault-and-task-isolation.md), [RFC-0003 (Approval-Bound Execution & Quarantine)](./0003-approval-bound-execution.md), [RFC-0007 (Front Desk Initialization Hardening)](./0007-front-desk-initialization-hardening.md), [RFC-0010 (Bounded Agent RSI)](./0010-agent-recursive-self-improvement.md), [RFC-0011 (CI & Harness Regression Gate)](./0011-ci-pipeline-and-regression-harness.md), [RFC-0014 (Proactive Engine v2)](./0014-proactive-engine-and-living-context.md)
 
+> **Evolution Note:** Post-RFC-0015 enhancements split `.agents/plugins/agy-hq/skills/` into `3` Core OS skills + `6` `templates/skills/` starters ([RFC-0019](./0019-two-tier-rsi-vault-overlay.md)), switched `hooks.json` `PreToolUse` to universal `".*"` ([RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md)), split `internal/hooks/hooks.go` into `{pre_tool,session_start,quarantine,stop}.go`, expanded CI gates `H1`–`H4B` to `H1`–`H5F`, and updated model IDs to 3-family Hydrogen/Neon/Carbon (`0.3.1-dev` / schema `v10`).
+
 ---
 
 ## 1. Motivation & Problem Statement
@@ -86,7 +88,7 @@ flowchart TB
 
 1. **Delete `.agents/plugins/agy-hq/sidecars.json`:**
    - Upstream Antigravity discovers sidecars inside plugins automatically by scanning `<plugin_root>/sidecars/*/sidecar.json`.
-   - Removing `.agents/plugins/agy-hq/sidecars.json` eliminates the `customizations.JSONConfig` unmarshal error while keeping [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) auto-discovered as `agy-hq/agy-hq-console` (`sidecar://agy-hq/agy-hq-console/`).
+   - Removing `.agents/plugins/agy-hq/sidecars.json` eliminates the `customizations.JSONConfig` unmarshal error while keeping [`.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json`](../../.agents/plugins/agy-hq/sidecars/agy-hq-console/sidecar.json) auto-discovered as `agy-hq-console` (`sidecar://agy-hq-console/`).
 2. **Delete Root `.agents/hooks.json` (Single-Source Hook Registration):**
    - Removing `.agents/hooks.json` makes [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json) the single source of truth inside the `headquarter` workspace as well as globally.
    - This immediately fixes the 2x `SessionStart` token injection and 2x `PreToolUse` Front Desk lookup counter increment documented in [Research 11](../research/11_plugin_packaging_audit.md).
@@ -353,5 +355,5 @@ Upon approval of RFC-0015, Phase 2 executes in a single atomic, CI-verified comm
    - Add `internal/plugin/plugin.go` (`install`, `uninstall`, `status`, `validate`), wire `hq plugin` + `hq upgrade` auto-sync in [`cmd/hq/main.go`](../../cmd/hq/main.go), add Check #11 in [`internal/doctor/doctor.go`](../../internal/doctor/doctor.go), and add `--global` to [`scripts/bootstrap.sh`](../../scripts/bootstrap.sh).
 4. **CI Gate `H2`, Ring-0 TCB & `CUJ-25` Tests:**
    - Update [`internal/ci/harness.go`](../../internal/ci/harness.go) (`H2-A`, `H2-B`, `H2-C`) and [`internal/rsi/tcb.go`](../../internal/rsi/tcb.go).
-   - Add unit tests (`internal/vault/vault_test.go`, `internal/hooks/hooks_test.go`, `internal/plugin/plugin_test.go`) and `TestCUJ25_GlobalPluginPackagingAndStandaloneVault` in [`internal/e2e/cuj_e2e_test.go`](../../internal/e2e/cuj_e2e_test.go).
+   - Add unit tests (`internal/vault/memory_test.go`, `internal/hooks/hooks_test.go`, `internal/plugin/plugin_test.go`) and `TestCUJ25_GlobalPluginPackagingAndStandaloneVault` in [`internal/e2e/cuj_e2e_test.go`](../../internal/e2e/cuj_e2e_test.go).
    - Run `agy plugin validate --strict .agents/plugins/agy-hq` and `./bin/hq ci pre-push` to 100% green before requesting merge review.

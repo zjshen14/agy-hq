@@ -68,29 +68,29 @@ approvals:
 	}
 
 	// Custom rules gate in interactive sessions
-	if dec := approvals.EvaluateCommand(pol, "pulumi apply --yes", false, ""); !dec.Gated || dec.RuleID != "cloud_infra" {
+	if dec := approvals.EvaluateCommandForSession(pol, "pulumi apply --yes", false, false, ""); !dec.Gated || dec.RuleID != "cloud_infra" {
 		t.Fatalf("expected pulumi apply to be gated by cloud_infra, got %+v", dec)
 	}
-	if dec := approvals.EvaluateCommand(pol, "stripe payouts create --amount=5000", false, ""); !dec.Gated || dec.RuleID != "payments" {
+	if dec := approvals.EvaluateCommandForSession(pol, "stripe payouts create --amount=5000", false, false, ""); !dec.Gated || dec.RuleID != "payments" {
 		t.Fatalf("expected stripe payouts create to be gated by payments, got %+v", dec)
 	}
 
 	// third_party_only (`pr_merge`): owned repo exempt interactively, gated in [Auto]; third-party repo gated interactively
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge 42 --squash -R alice/demo-repo", false, ""); dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge 42 --squash -R alice/demo-repo", false, false, ""); dec.Gated {
 		t.Fatalf("expected owned-repo gh pr merge to be exempt in interactive session, got %+v", dec)
 	}
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge https://github.com/alice-org/service-billing/pull/99", false, ""); dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge https://github.com/alice-org/service-billing/pull/99", false, false, ""); dec.Gated {
 		t.Fatalf("expected owned URL gh pr merge to be exempt in interactive session, got %+v", dec)
 	}
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge 42 --squash -R alice/demo-repo", true, ""); !dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge 42 --squash -R alice/demo-repo", true, false, ""); !dec.Gated {
 		t.Fatalf("expected owned-repo gh pr merge to STILL gate fail-closed in [Auto]/tainted session")
 	}
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge 42 --squash -R bob/upstream-repo", false, ""); !dec.Gated || dec.RuleID != "pr_merge" {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge 42 --squash -R bob/upstream-repo", false, false, ""); !dec.Gated || dec.RuleID != "pr_merge" {
 		t.Fatalf("expected third-party gh pr merge to gate in interactive session, got %+v", dec)
 	}
 	// Unparseable target repo fails closed to gated
 	nonGitDir := t.TempDir()
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge 42 --squash", false, nonGitDir); !dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge 42 --squash", false, false, nonGitDir); !dec.Gated {
 		t.Fatalf("expected unparseable repo target to fail closed to gated")
 	}
 
@@ -98,15 +98,15 @@ approvals:
 	gitRepo := t.TempDir()
 	runGitCmd(t, gitRepo, "init", "-b", "main")
 	runGitCmd(t, gitRepo, "remote", "add", "origin", "git@example.com:alice/local-repo.git")
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge 7 --merge", false, gitRepo); dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge 7 --merge", false, false, gitRepo); dec.Gated {
 		t.Fatalf("expected local origin git@example.com:alice/local-repo.git to match owned_repos alice/*, got %+v", dec)
 	}
 
 	// auto_only (`forge_git`): git push & gh issue create exempt interactively, gated in [Auto]
-	if dec := approvals.EvaluateCommand(pol, "git push origin main", false, gitRepo); dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "git push origin main", false, false, gitRepo); dec.Gated {
 		t.Fatalf("expected git push to be exempt in interactive session under default auto_only, got %+v", dec)
 	}
-	if dec := approvals.EvaluateCommand(pol, "git push origin main", true, gitRepo); !dec.Gated || dec.RuleID != "forge_git" {
+	if dec := approvals.EvaluateCommandForSession(pol, "git push origin main", true, false, gitRepo); !dec.Gated || dec.RuleID != "forge_git" {
 		t.Fatalf("expected git push to gate in [Auto] session, got %+v", dec)
 	}
 }
@@ -169,10 +169,10 @@ func TestExtensionPackApprovalRulesMergeAndLatticeGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPolicy with pack: %v", err)
 	}
-	if dec := approvals.EvaluateCommand(pol, "flyway migrate -url=jdbc:postgres://prod", false, ""); !dec.Gated || dec.RuleID != "db_migrate" {
+	if dec := approvals.EvaluateCommandForSession(pol, "flyway migrate -url=jdbc:postgres://prod", false, false, ""); !dec.Gated || dec.RuleID != "db_migrate" {
 		t.Fatalf("expected trusted pack rule db_migrate to gate flyway migrate, got %+v", dec)
 	}
-	if dec := approvals.EvaluateCommand(pol, "gh pr merge 12 -R enterprise-org/backend", false, ""); dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(pol, "gh pr merge 12 -R enterprise-org/backend", false, false, ""); dec.Gated {
 		t.Fatalf("expected pack owned_repos enterprise-org/* to exempt interactive PR merge, got %+v", dec)
 	}
 
@@ -188,10 +188,10 @@ approvals:
 	if err != nil {
 		t.Fatalf("LoadPolicy override: %v", err)
 	}
-	if dec := approvals.EvaluateCommand(polOverridden, "flyway migrate", false, ""); dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(polOverridden, "flyway migrate", false, false, ""); dec.Gated {
 		t.Fatalf("expected user config.yaml mode=auto_only to override pack mode=always in interactive session, got %+v", dec)
 	}
-	if dec := approvals.EvaluateCommand(polOverridden, "flyway migrate", true, ""); !dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(polOverridden, "flyway migrate", true, false, ""); !dec.Gated {
 		t.Fatalf("expected overridden auto_only rule to still gate in [Auto] session")
 	}
 }
@@ -484,10 +484,10 @@ func TestReadOnlySearchSegmentFilteringAndAdversarialBypassDefense(t *testing.T)
 		`grep "gh release create" file.txt 2>/dev/null | sort`,
 	}
 	for _, cmd := range allowed {
-		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); dec.Gated {
+		if dec := approvals.EvaluateCommandForSession(pol, cmd, false, false, ""); dec.Gated {
 			t.Fatalf("expected pure read-only search command %q to pass without gating, got %+v", cmd, dec)
 		}
-		if dec := approvals.EvaluateCommand(pol, cmd, true, ""); dec.Gated {
+		if dec := approvals.EvaluateCommandForSession(pol, cmd, true, false, ""); dec.Gated {
 			t.Fatalf("expected pure read-only search command %q to pass in [Auto], got %+v", cmd, dec)
 		}
 	}
@@ -520,8 +520,8 @@ func TestReadOnlySearchSegmentFilteringAndAdversarialBypassDefense(t *testing.T)
 		`(grep "gh release create" f.txt)`,
 	}
 	for _, cmd := range blocked {
-		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); !dec.Gated {
-			t.Fatalf("SECURITY REGRESSION: adversarial command %q bypassed EvaluateCommand!", cmd)
+		if dec := approvals.EvaluateCommandForSession(pol, cmd, false, false, ""); !dec.Gated {
+			t.Fatalf("SECURITY REGRESSION: adversarial command %q bypassed EvaluateCommandForSession!", cmd)
 		}
 	}
 }
@@ -573,11 +573,11 @@ func TestInteractivePresetsAndGateModes(t *testing.T) {
 		"hq workspace own acme/p:ws1",
 		"hq workspace remove acme/p:ws1 --force",
 	} {
-		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); dec.Gated {
+		if dec := approvals.EvaluateCommandForSession(pol, cmd, false, false, ""); dec.Gated {
 			t.Fatalf("expected low_friction to allow %q in interactive mode, got %+v", cmd, dec)
 		}
 		// Below top of lattice (isAuto=true): MUST STILL BE 100% GATED!
-		if dec := approvals.EvaluateCommand(pol, cmd, true, ""); !dec.Gated {
+		if dec := approvals.EvaluateCommandForSession(pol, cmd, true, false, ""); !dec.Gated {
 			t.Fatalf("SECURITY REGRESSION: low_friction leaked into unattended/auto mode for %q", cmd)
 		}
 	}
@@ -589,7 +589,7 @@ func TestInteractivePresetsAndGateModes(t *testing.T) {
 		"hq delegate apply-policy /tmp/draft.json",
 		"hq delegate apply-reply /tmp/reply.json",
 	} {
-		if dec := approvals.EvaluateCommand(pol, cmd, false, ""); !dec.Gated {
+		if dec := approvals.EvaluateCommandForSession(pol, cmd, false, false, ""); !dec.Gated {
 			t.Fatalf("expected core rule to remain gated under low_friction for %q", cmd)
 		}
 	}
@@ -602,7 +602,7 @@ func TestInteractivePresetsAndGateModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPolicy strict: %v", err)
 	}
-	if dec := approvals.EvaluateCommand(strictPol, "git push origin main", false, ""); !dec.Gated {
+	if dec := approvals.EvaluateCommandForSession(strictPol, "git push origin main", false, false, ""); !dec.Gated {
 		t.Fatalf("expected strict preset to gate git push interactively")
 	}
 

@@ -78,6 +78,8 @@ flowchart TD
 ```
 
 > **Lattice Invariant:** `quarantined_reader` and `scoped_delegate` are **incomparable siblings** — their join does not exist in the valid lattice. Dynamic tainting (e.g., an interactive session reading untrusted inbox data) performs **monotonic downward attenuation** (`Attenuate(current, ceiling)`), permanently lowering the session's active profile and never widening it.
+>
+> **Evolution Note (Round 3 M2):** `authz.Attenuate` was later removed as unused; dynamic tainting resolves directly via `taint.Mark*` + `authz.ResolveAt`.
 
 ### 3.2 Complete 8-Profile Capability Matrix (5 Orthogonal Axes)
 
@@ -103,7 +105,7 @@ Enforced deterministically at config validation, grant creation, and `authz.Reso
 
 ### 3.4 Unified `taint.Record` v2 & `internal/authz` Go API
 
-Instead of creating a duplicate `private/delegates/grants/` store and a second bind path, extend [`internal/taint/taint.go`](../../internal/taint/taint.go#L25-L36) in place under existing `store.RankTaint = 70`:
+Instead of creating a duplicate `private/delegates/grants/` store and a second bind path, extend [`internal/taint/taint.go`](../../internal/taint/taint.go#L26-L62) in place under existing `store.RankTaint = 70`:
 
 ```go
 // internal/taint/taint.go (SchemaVersion bumped to 2; v1 records decode with Grant == nil => ProfileQuarantinedReader)
@@ -152,17 +154,17 @@ type ResolveHints struct {
   2. Any marker with `strings.HasPrefix(rec.Source, "fail_closed:")` or any `ledger.jsonl` failover where `schema_version >= 2 || grant_profile != ""` MUST clamp to **`ProfileFailClosed` (`⊥_deny`)** — never silently upgrading a `classifier` or `scoped_delegate` into `quarantined_reader`. Only clean v1 records (`schema_version <= 1`, `grant_profile == ""`, non-`fail_closed:`) map to `ProfileQuarantinedReader`.
   3. In `taint.Mark()`'s `os.ErrExist` branch, `Grant` is **strictly write-once immutable** — if `existing.Grant != nil || rec.Grant != nil`, cross-profile merges are refused (never attaching a `Grant` onto an existing `quarantined_reader` or widening an existing `Grant`).
   4. If `Grant.ExpiresAt` has passed, `authz.Resolve` keeps `Tainted: true` and clamps to `ProfileFailClosed`.
-- **Pending grant staging & single atomic bind helper:** Pre-spawn grants stage in `<vault>/private/taint/pending/<grantID>.json` (`0600`, already protected by `protectedPrivateSubs: "taint"`) referenced via `Event.Metadata["authz_grant_id"]`. `authz.BindSessionFromEvents(vaultDir, convID, boundEvents)` is called from **both** [`events_dispatch.go:bindSpawnedConv`](../../internal/kernel/events_dispatch.go#L312-L337) and [`quarantine.go:bindSpawnTokenFromTranscript`](../../internal/hooks/quarantine.go#L107-L228) (`O_EXCL` idempotent).
+- **Pending grant staging & single atomic bind helper:** Pre-spawn grants stage in `<vault>/private/taint/pending/<grantID>.json` (`0600`, already protected by `protectedPrivateSubs: "taint"`) referenced via `Event.Metadata["authz_grant_id"]`. `authz.BindSessionFromEvents(vaultDir, convID, boundEvents)` is called from **both** [`events_dispatch.go:bindSpawnedConv`](../../internal/kernel/events_dispatch.go#L294-L313) and [`quarantine.go:bindSpawnTokenFromTranscript`](../../internal/hooks/quarantine.go#L107-L180) (`O_EXCL` idempotent).
 - **Single evaluator per hook:** `authz.Resolve(vaultDir, convID, hints) SessionPolicy` computes the authoritative policy once per `SessionStart` / `PreToolUse` / `Stop` invocation, replacing ad-hoc role checks with `pol.EvalHQArgv(argv)` and `pol.IsAllowedReadPath(vaultDir, artifactDirs, rawPath)`.
 
 ### 3.5 Phase 2A-0 Prerequisite: Live Quarantine Hardening
 
 Before enabling any delegated egress, Phase 2A-0 fixes all live-codebase Quarantine security bugs uncovered in [Research 21 §2 `D2`](../research/21_declarative_scoped_delegates_audit.md):
 
-1. **`triage-result` path traversal:** Validate `batchID` against `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` and explicitly reject `..`, `/`, and `\` in [`internal/gmail/gmail.go`](../../internal/gmail/gmail.go#L1109-L1152) and [`internal/gchat/gchat.go`](../../internal/gchat/gchat.go#L1203-L1249).
-2. **`hq watch read` fail-open & `read-quarantined` check-before-mark:** In [`internal/watcher/watcher.go`](../../internal/watcher/watcher.go#L1085-L1099), fail CLOSED whenever `alreadyTainted && len(rec.ItemKeys) == 0` (reject instead of `return nil`). In `gmail`/`gchat` `ReadQuarantinedThread`, enforce existing taint scope **before** calling `MarkSessionTainted` (preventing foreign threads from being appended to `rec.ItemKeys`), and add `denyIfCallerTainted` to `hq gmail attachment-quarantine`.
-3. **`hq status` & `hq memory lookup` taint leaks:** Remove `hq status` from all tainted profiles (and redact `vaultDir` + omit pending proposals if ever invoked under taint); in [`internal/vault/entities_and_forget.go`](../../internal/vault/entities_and_forget.go#L325-L356) + `cmd/hq/memory_cli.go`, reject empty query under taint and match ONLY against redacted routing fields (`Slug`, `Name`, `Emails`, `Handles`) — never `Context`/`Spaces`/`Notes`.
-4. **`hq brief format-quarantined --file`:** Reject `--file` under tainted profiles (`--json-input` / stdin only) in [`cmd/hq/extensions_cli.go`](../../cmd/hq/extensions_cli.go#L829-L842).
+1. **`triage-result` path traversal:** Validate `batchID` against `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` and explicitly reject `..`, `/`, and `\` via `ValidateTriageBatchID` / `WriteTriageResults` in [`internal/connector/messaging_helpers.go`](../../internal/connector/messaging_helpers.go#L165-L222) (called by [`internal/gmail/gmail.go`](../../internal/gmail/gmail.go#L1048-L1073) and [`internal/gchat/gchat.go`](../../internal/gchat/gchat.go#L1152-L1181)).
+2. **`hq watch read` fail-open & `read-quarantined` check-before-mark:** In [`internal/watcher/watcher.go`](../../internal/watcher/watcher.go#L1107-L1123), fail CLOSED whenever `alreadyTainted && len(rec.ItemKeys) == 0` (reject instead of `return nil`). In `gmail`/`gchat` `ReadQuarantinedThread`, enforce existing taint scope **before** calling `MarkSessionTainted` (preventing foreign threads from being appended to `rec.ItemKeys`), and add `denyIfCallerTainted` to `hq gmail attachment-quarantine`.
+3. **`hq status` & `hq memory lookup` taint leaks:** Remove `hq status` from all tainted profiles (and redact `vaultDir` + omit pending proposals if ever invoked under taint); in [`internal/vault/entities_and_forget.go`](../../internal/vault/entities_and_forget.go#L343-L379) + `cmd/hq/memory_cli.go`, reject empty query under taint and match ONLY against redacted routing fields (`Slug`, `Name`, `Emails`, `Handles`) — never `Context`/`Spaces`/`Notes`.
+4. **`hq brief format-quarantined --file`:** Reject `--file` under tainted profiles (`--json-input` / stdin only) in [`cmd/hq/extensions_cli.go`](../../cmd/hq/extensions_cli.go#L813-L841).
 5. **`stop.go` taint ordering, up-front redaction & 120k checkpoint guard:** Run `bindSpawnTokenFromTranscript` **before** `authz.Resolve` (`stop.go` currently checks taint at `L95` before binding at `L151`), redact `summary` once up front whenever `pol.Tainted == true` (covering all `LastSummary` write paths at `L212`, `L247-288`, `L351`), and guard the 120k auto-checkpoint (`L364-393`) with `!pol.Tainted`.
 
 ### 3.6 Asymmetric Interactive Friction (Eliminating Approval Fatigue in `owner_interactive` `⊤`)
@@ -595,7 +597,7 @@ L7 (CLI & daemon loop):    cmd/hq (ops_cli.go ticks delegates.Poll/SyncSnapshots
 | Package / File | Role | Monolith LOC Budget (`Gate H5-F`) |
 | :--- | :--- | :--- |
 | `internal/redact/` | Shared zero-dep leaf PII/secret/path/Unicode sanitizer (used by `ci`, `approvals`, `delegates`, `hooks`) | New package |
-| `internal/authz/` | 5-axis `SessionPolicy` lattice, `ResolveHints`, `ValidateProfile` (`NI-1`–`NI-4`), `Resolve`, `Attenuate`, `BindSessionFromEvents`, `EvalHQArgv`, `HostPermissionPreset` | New package |
+| `internal/authz/` | 5-axis `SessionPolicy` lattice, `ResolveHints`, `ValidateProfile` (`NI-1`–`NI-4`), `Resolve`, `Attenuate` *(later removed in M2)*, `BindSessionFromEvents`, `EvalHQArgv`, `HostPermissionPreset` | New package |
 | `internal/delegates/` | `config.go` (JSONC), `configure.go` (`ClassifyPolicyDiff`), `protocol.go`, `egress.go`, `nudge.go`, `readonly.go`, `dispatcher.go`, `delegates_test.go` | New package |
 | `internal/hooks/authz_hooks.go` | Unified `PreToolUse` / `SessionStart` / `Stop` lattice glue (`hooks.go`: **+0 LOC**; thin wiring in `pre_tool.go`, `session_start.go`, `quarantine.go`, `stop.go`) | `hooks.go` `405 / 415` (**+0 LOC**) |
 | `cmd/hq/delegate_cmd.go` & `ops_cli.go` | All `hq delegate *` CLI commands + daemon poll/snapshot ticker in `ops_cli.go` (`kernel.go`: **+0 LOC**!) | `main.go` `595 / 615` (`<= +4` LOC), `kernel.go` `1991 / 2015` (**+0 LOC**) |
@@ -660,7 +662,7 @@ L7 (CLI & daemon loop):    cmd/hq (ops_cli.go ticks delegates.Poll/SyncSnapshots
 ### Phase 2A — Live Quarantine Hardening (`2A-0`) + Unified `internal/authz`, `internal/redact` & Host Preset Bridge
 1. **Phase 2A-0 (Prerequisite Security Fixes + Regression Tests):** Fix `triage-result` `batchID` path traversal (`gmail.go`, `gchat.go`), `hq watch read` empty-`ItemKeys` fail-open (`watcher.go`), `gmail`/`gchat` `ReadQuarantinedThread` check-before-mark + `gmail attachment-quarantine` taint guard, `hq status` & `hq memory lookup` taint leaks (`main.go`, `entities_and_forget.go`, `memory_cli.go`), `hq brief format-quarantined --file` under taint (`extensions_cli.go`), and `stop.go` bind-before-taint-check + up-front tainted `summary` redaction + `!pol.Tainted` 120k auto-checkpoint guard.
 2. Extract shared zero-dep **`internal/redact`** (moving pure-stdlib PII/secret/path/Unicode regexes out of `internal/ci/pii.go`).
-3. Implement **`internal/authz`** (5-axis `SessionPolicy` across all 8 profiles including `ProfileFailClosed` `⊥_deny`, `ResolveHints`, `ValidateProfile` `NI-1`–`NI-4`, `Resolve`, `Attenuate`, `EvalHQArgv`, `IsAllowedReadPath`, `HostPermissionPreset`) + `taint.Record` v2 (`SchemaVersion: 2`, `Grant *SessionGrant`, `ledger.jsonl` v2 fields, write-once `Grant`, `private/taint/pending/`, unified `BindSessionFromEvents` across `events_dispatch.go` & `quarantine.go`).
+3. Implement **`internal/authz`** (5-axis `SessionPolicy` across all 8 profiles including `ProfileFailClosed` `⊥_deny`, `ResolveHints`, `ValidateProfile` `NI-1`–`NI-4`, `Resolve`, `Attenuate` *(later removed in M2)*, `EvalHQArgv`, `IsAllowedReadPath`, `HostPermissionPreset`) + `taint.Record` v2 (`SchemaVersion: 2`, `Grant *SessionGrant`, `ledger.jsonl` v2 fields, write-once `Grant`, `private/taint/pending/`, unified `BindSessionFromEvents` across `events_dispatch.go` & `quarantine.go`).
 4. Add `approvals.interactive_preset` (`strict | balanced | low_friction`) and optional `interactive_gate_mode` (`native_force_ask | propose`) in `internal/approvals/policy.go`, refactor `pre_tool.go`, `session_start.go`, `quarantine.go`, and `stop.go` onto `internal/authz` (`hooks.go` +0 LOC), and wire best-effort per-conversation `UpdateConversationAnnotations` host preset sync on spawn (`ls_client.go` / `events_dispatch.go`).
 5. Add `DelegateTransportProtocolV1` + `DelegateTransportSpec` to `internal/extension/pack.go`, pin declared pack skill files in `TrustedTarget.Files` (`D3` fix), add `RankDelegates = 66` to `internal/store/store.go` + `delegates_state.json` to `internal/ci/slop.go`, and verify 100% of existing unit & CUJ E2E tests stay green.
 

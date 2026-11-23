@@ -2701,20 +2701,34 @@ func TestCUJ21_ZeroTokenGatekeepersOutboxDrainAndRSIProactiveNoise(t *testing.T)
 		t.Fatalf("expected second forced gatekeeper heartbeat to skip unchanged SHA-256 in 0 tokens, got err=%v out=\n%s", err, hb2)
 	}
 
-	// 2. Add brief_rollup items and drain via `hq outbox drain` (used by /morning-brief)
+	// 2. Add brief_rollup items and collect/commit via lease-based `hq brief collect --lease` / `hq brief commit`
 	addOut, err := env.run("", "outbox", "add", "--tier=brief_rollup", "--scope=ACME", "--skill=thesis-check",
 		"--title=ACME Q3 Margin Intact", "--summary=No kill criteria breached; roll into 7:30 AM Morning Brief.")
 	if err != nil || !strings.Contains(addOut, "tier=brief_rollup") {
 		t.Fatalf("hq outbox add brief_rollup failed: %v\n%s", err, addOut)
 	}
-	drainOut, err := env.run("", "outbox", "drain")
-	if err != nil || !strings.Contains(drainOut, "Drained 1 brief_rollup item(s)") || !strings.Contains(drainOut, "ACME Q3 Margin Intact") {
-		t.Fatalf("expected hq outbox drain to drain 1 brief_rollup item, got err=%v out=\n%s", err, drainOut)
+	collectOut, err := env.run("", "brief", "collect", "--lease", "--json")
+	if err != nil {
+		t.Fatalf("hq brief collect --lease --json failed: %v\n%s", err, collectOut)
 	}
-	// Second drain is empty (idempotent)
-	drainOut2, err := env.run("", "outbox", "drain")
-	if err != nil || !strings.Contains(drainOut2, "Drained 0 brief_rollup item(s)") {
-		t.Fatalf("expected second hq outbox drain to return 0 items, got err=%v out=\n%s", err, drainOut2)
+	var collectPkt brief.Packet
+	if err := json.Unmarshal([]byte(collectOut), &collectPkt); err != nil || collectPkt.LeaseToken == "" || len(collectPkt.OutboxItems) != 1 || collectPkt.OutboxItems[0].Title != "ACME Q3 Margin Intact" {
+		t.Fatalf("expected 1 brief_rollup item leased via hq brief collect, got pkt=%+v err=%v raw=%s", collectPkt, err, collectOut)
+	}
+	briefPath := filepath.Join(env.vaultDir, "notes", "briefs", "cuj21-brief.md")
+	_ = os.MkdirAll(filepath.Dir(briefPath), 0o755)
+	_ = os.WriteFile(briefPath, []byte("# Morning Brief\n\n- ACME Q3 Margin Intact\n"), 0o600)
+	if commitOut, err := env.run("", "brief", "commit", "--lease="+collectPkt.LeaseToken, "--brief-file="+briefPath); err != nil {
+		t.Fatalf("hq brief commit failed: %v\n%s", err, commitOut)
+	}
+	// Follow-up collect is empty (idempotent)
+	collectOut2, err := env.run("", "brief", "collect", "--json")
+	if err != nil {
+		t.Fatalf("second hq brief collect --json failed: %v\n%s", err, collectOut2)
+	}
+	var collectPkt2 brief.Packet
+	if err := json.Unmarshal([]byte(collectOut2), &collectPkt2); err != nil || len(collectPkt2.OutboxItems) != 0 {
+		t.Fatalf("expected follow-up hq brief collect to return 0 outbox_items, got pkt=%+v err=%v", collectPkt2, err)
 	}
 
 	// 3. Emit 5 ideas_feed items from `inbox-triage` and dismiss all 5 (>70% dismissal rate over >=5 items) -> `hq rsi mine` flags `proactive_noise`
@@ -3337,15 +3351,17 @@ func TestCUJ_SidebarConversationArchiveSync(t *testing.T) {
 	}
 
 	// 4. Seed historical cold archive (including protected threads to test Gates S2, S4, S5, S6) and run `--backfill --dry-run --json`
-	if err := kernel.AppendTasksToColdArchive(env.vaultDir, []kernel.ActiveTask{
-		{ConversationID: uFD, TaskSlug: "cold-fd", Status: "archived"},
-		{ConversationID: uUIPin, TaskSlug: "cold-uipin", Status: "archived"},
-		{ConversationID: uRunning, TaskSlug: "cold-running", Status: "archived"},
-		{ConversationID: uActive, TaskSlug: "cold-active-dup", Status: "archived"},
-		{ConversationID: uCold1, TaskSlug: "cold-legacy-1", Status: "archived"},
-		{ConversationID: uCold2, TaskSlug: "cold-legacy-2", Status: "archived"},
+	if err := kernel.ApplyTaskReconciliation(env.vaultDir, func(tasks []kernel.ActiveTask) ([]kernel.ActiveTask, []kernel.ActiveTask, bool, error) {
+		return tasks, []kernel.ActiveTask{
+			{ConversationID: uFD, TaskSlug: "cold-fd", Status: "archived"},
+			{ConversationID: uUIPin, TaskSlug: "cold-uipin", Status: "archived"},
+			{ConversationID: uRunning, TaskSlug: "cold-running", Status: "archived"},
+			{ConversationID: uActive, TaskSlug: "cold-active-dup", Status: "archived"},
+			{ConversationID: uCold1, TaskSlug: "cold-legacy-1", Status: "archived"},
+			{ConversationID: uCold2, TaskSlug: "cold-legacy-2", Status: "archived"},
+		}, true, nil
 	}); err != nil {
-		t.Fatalf("AppendTasksToColdArchive: %v", err)
+		t.Fatalf("ApplyTaskReconciliation: %v", err)
 	}
 
 	mu.Lock()
@@ -4807,31 +4823,13 @@ func TestCUJ33_LeaseBasedMorningBriefAndStructuredExtensions(t *testing.T) {
 		t.Fatalf("hq brief commit failed: err=%v out=%s", err, commitOut)
 	}
 
-	// 4. `hq brief format-quarantined` strict JSON schema + nonce fence, and `hq outbox drain` backward compatibility
+	// 4. `hq brief format-quarantined` strict JSON schema + nonce fence
 	if badFmt, fErr := env.run(`[{"item_id":"th-1","urgency_enum":"high","category_enum":"schedule","bounded_subject":"hello","extra":"bad"}]`, "brief", "format-quarantined"); fErr == nil {
 		t.Fatalf("expected unknown JSON field rejected by format-quarantined, got: %s", badFmt)
 	}
 	goodFmt, err := env.run(`[{"item_id":"th-brief-1","urgency_enum":"high","category_enum":"schedule","bounded_subject":"Architecture sync request from @example.com <script>x</script>"}]`, "brief", "format-quarantined")
 	if err != nil || !strings.Contains(goodFmt, "<<<HQ_BRIEF_NONCE_") || strings.Contains(goodFmt, "<script>") {
 		t.Fatalf("hq brief format-quarantined failed: err=%v out=%s", err, goodFmt)
-	}
-
-	// Verify `hq outbox drain --json` keeps clean JSON stdout while emitting deprecation notice on stderr
-	cmd := exec.Command(env.binPath, "outbox", "drain", "--json")
-	cmd.Dir = env.rootDir
-	cmd.Env = append(os.Environ(), "HQ_ROOT_DIR="+env.rootDir, "HQ_VAULT_DIR="+env.vaultDir)
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hq outbox drain --json failed: %v (stderr=%s)", err, stderrBuf.String())
-	}
-	var drained []outbox.OutboxItem
-	if err := json.Unmarshal(stdoutBuf.Bytes(), &drained); err != nil {
-		t.Fatalf("expected hq outbox drain stdout to remain valid JSON, got %q (err=%v)", stdoutBuf.String(), err)
-	}
-	if !strings.Contains(strings.ToLower(stderrBuf.String()), "deprecated") {
-		t.Fatalf("expected deprecation warning on stderr, got %q", stderrBuf.String())
 	}
 }
 
@@ -5532,8 +5530,8 @@ approvals:
 	if finalPending, _ := approvals.List(env.vaultDir); len(finalPending) != 0 {
 		t.Fatalf("expected 0 pending proposals after Stop hook reconciliation, got %+v", finalPending)
 	}
-	if _, err := env.run("", "console", "--sync"); err != nil {
-		t.Fatalf("hq console --sync: %v", err)
+	if _, err := env.run("", "console"); err != nil {
+		t.Fatalf("hq console: %v", err)
 	}
 	consoleMD, _ := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
 	if !strings.Contains(string(consoleMD), "Pending Approvals (`0` items)") {
@@ -6637,8 +6635,8 @@ printf '00000000-0000-4000-8000-%%012d\n' "$n"
 	}
 	tasks, _ := kernel.ListTasks(env.vaultDir)
 	lt, ok := findTask(tasks, "legacy-fix")
-	if bs := lt.AllWorkspaceBindings(); !ok || len(lt.Workspaces) != 0 || len(bs) != 2 || bs[0].Provider != workspace.CoreGitProviderID || bs[0].Role != workspace.RolePrimary {
-		t.Fatalf("legacy worktrees must surface only as synthesized core/git-worktree bindings: %+v (bindings %+v)", lt, bs)
+	if wts := lt.AllWorktreeDirs(); !ok || len(lt.Workspaces) != 0 || len(wts) != 2 || lt.WorktreeDir == "" || wts[0] != lt.WorktreeDir {
+		t.Fatalf("legacy worktrees must remain in WorktreeDir/WorktreeDirs with no synthesized Workspaces: %+v (wts %+v)", lt, wts)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/zjshen14/agy-hq/internal/delegates"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 // appendDelegatesMarkdownSection appends the read-only Delegated Peers status snippet
@@ -25,7 +26,7 @@ func appendDelegatesMarkdownSection(b *strings.Builder, sum delegates.DashboardS
 	}
 	for _, a := range sum.RecentAudit[:limit] {
 		fmt.Fprintf(b, "- `%s` · **%s** (`%s` · `%s` -> `%s`): %s\n",
-			a.Timestamp, mdEscapeInline(a.Action), mdEscapeInline(a.PolicyID), mdEscapeInline(a.CallerID), mdEscapeInline(a.Outcome), mdEscapeInline(truncateRunes(a.Detail, 100)))
+			a.Timestamp, mdEscapeInline(a.Action), mdEscapeInline(a.PolicyID), mdEscapeInline(a.CallerID), mdEscapeInline(a.Outcome), mdEscapeInline(store.TruncateRunes(a.Detail, 100)))
 	}
 	b.WriteString("\n---\n\n")
 }

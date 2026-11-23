@@ -25,7 +25,7 @@ if ! command -v go >/dev/null 2>&1; then
     echo "    Go not found; installing via Homebrew..."
     brew install go
   else
-    echo "ERROR: Go 1.22+ is required. Install from https://go.dev/dl/ or 'brew install go'." >&2
+    echo "ERROR: Go 1.24+ is required. Install from https://go.dev/dl/ or 'brew install go'." >&2
     exit 1
   fi
 fi
@@ -37,7 +37,6 @@ go build -ldflags "-X github.com/zjshen14/agy-hq/internal/version.GitCommit=${GI
 
 echo "==> [3/5] Initializing private Vault (./local/), CI git hooks, & project-scoped hq binary (~/.local/bin/hq)..."
 ./bin/hq init "${INIT_FLAGS[@]}"
-./bin/hq ci install-hooks 2>/dev/null || true
 ./bin/hq plugin install "${PLUGIN_FLAGS[@]}"
 
 echo "==> [4/5] Auto-arming background daemon & scheduled triggers..."

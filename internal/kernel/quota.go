@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // QuotaState tracks daily background spawns and circuit-breaker status in local/memory/quota-YYYY-MM-DD.json.
@@ -69,31 +70,9 @@ func quotaFilePath(vaultDir string, now time.Time) string {
 type VaultQuotaConfig struct {
 	MaxParallelRuns int
 	MaxDailySpawns  int
-	BackgroundModel string
 }
 
-func stripInlineYAMLComment(val string) string {
-	inSingle, inDouble := false, false
-	for i := 0; i < len(val); i++ {
-		switch val[i] {
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-		case '#':
-			if !inSingle && !inDouble && (i == 0 || val[i-1] == ' ' || val[i-1] == '\t') {
-				return strings.TrimSpace(val[:i])
-			}
-		}
-	}
-	return strings.TrimSpace(val)
-}
-
-// LoadVaultQuotaConfig reads top-level `quota:` settings (`max_daily_spawns`, `max_parallel_runs`, `background_model`)
+// LoadVaultQuotaConfig reads top-level `quota:` settings (`max_daily_spawns`, `max_parallel_runs`)
 // from <vault>/config.yaml if present.
 func LoadVaultQuotaConfig(vaultDir string) VaultQuotaConfig {
 	var cfg VaultQuotaConfig
@@ -105,25 +84,24 @@ func LoadVaultQuotaConfig(vaultDir string) VaultQuotaConfig {
 		return cfg
 	}
 	inQuota := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, line := range yamlmini.Lines(string(raw)) {
+		clean := yamlmini.StripComment(line)
+		if clean == "" {
 			continue
 		}
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		indent := yamlmini.LeadingIndent(line)
 		if indent == 0 {
-			inQuota = trimmed == "quota:" || strings.HasPrefix(trimmed, "quota:")
+			inQuota = strings.HasPrefix(clean, "quota:")
 			continue
 		}
 		if !inQuota {
 			continue
 		}
-		k, v, ok := strings.Cut(trimmed, ":")
+		key, rawVal, ok := yamlmini.SplitKV(clean)
 		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(k)
-		val := strings.Trim(stripInlineYAMLComment(v), `"'`)
+		val := yamlmini.UnquoteScalar(rawVal)
 		switch key {
 		case "max_daily_spawns":
 			if n, pErr := strconv.Atoi(val); pErr == nil && n > 0 {
@@ -133,8 +111,6 @@ func LoadVaultQuotaConfig(vaultDir string) VaultQuotaConfig {
 			if n, pErr := strconv.Atoi(val); pErr == nil && n > 0 {
 				cfg.MaxParallelRuns = n
 			}
-		case "background_model":
-			cfg.BackgroundModel = val
 		}
 	}
 	return cfg
@@ -336,7 +312,7 @@ func UpdateQuota(vaultDir string, fn func(state *QuotaState) (bool, error)) erro
 // RecordSubagentSpawn records an interactive Layer-1 subagent invocation (`InteractiveSpawnsToday` + `SpawnsToday`)
 // without consuming the daemon's automated background spawn budget (`AutoSpawnsToday`).
 func RecordSubagentSpawn(vaultDir, role, model, prompt string) error {
-	summary := truncateRunes(prompt, 200)
+	summary := store.TruncateRunes(prompt, 200)
 	now := time.Now()
 	return UpdateQuota(vaultDir, func(state *QuotaState) (bool, error) {
 		if n := len(state.Events); n > 0 {

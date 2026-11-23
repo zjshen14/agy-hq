@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/githooks"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/templates"
@@ -42,11 +43,6 @@ type Fact struct {
 	Scopes       []string `json:"scopes,omitempty"`
 	ExpiresAt    string   `json:"expires_at,omitempty"`
 	Pinned       bool     `json:"pinned,omitempty"`
-}
-
-// IsTempPath returns true if p resides inside os.TempDir() (handling macOS /private/var symlink resolution).
-func IsTempPath(p string) bool {
-	return hostpaths.IsTempPath(p)
 }
 
 // IsAgyHQRepo returns true iff dir contains a go.mod declaring module github.com/zjshen14/agy-hq.
@@ -492,56 +488,9 @@ func Init(vaultDir, templateDir string) ([]string, error) {
 	if strings.TrimSpace(templateDir) != "" {
 		repoRoot := filepath.Dir(filepath.Clean(templateDir))
 		if IsAgyHQRepo(repoRoot) {
-			rootHooksDir := filepath.Join(repoRoot, ".git", "hooks")
-			if info, err := os.Stat(rootHooksDir); err == nil && info.IsDir() {
-				preCommitPath := filepath.Join(rootHooksDir, "pre-commit")
-				if _, err := os.Stat(preCommitPath); os.IsNotExist(err) {
-					hookScript := "#!/bin/sh\n" +
-						"# agy-hq managed pre-commit hook (Ring 0 TCB — RFC-0011)\n" +
-						"set -e\n\n" +
-						"# 1. Fast shell fallback guard on local/ and vault/ paths\n" +
-						"if git diff --cached --name-only | grep -qE '^(local|vault)/'; then\n" +
-						"  echo \"ERROR: Refusing to commit files inside private local/ Vault.\" >&2\n" +
-						"  exit 1\n" +
-						"fi\n" +
-						"USER_EMAIL=\"$(git config user.email 2>/dev/null || true)\"\n" +
-						"HOME_DIR=\"$HOME\"\n" +
-						"if [ -n \"$HOME_DIR\" ] && git diff --cached -U0 | grep -E '^\\+' | grep -qF \"$HOME_DIR\"; then\n" +
-						"  echo \"ERROR: Staged diff contains your local HOME path ($HOME_DIR). Keep personal paths in local/.\" >&2\n" +
-						"  exit 1\n" +
-						"fi\n" +
-						"if [ -n \"$USER_EMAIL\" ] && git diff --cached -U0 | grep -E '^\\+' | grep -qFi \"$USER_EMAIL\"; then\n" +
-						"  echo \"ERROR: Staged diff contains your personal email ($USER_EMAIL). Keep personal state in local/.\" >&2\n" +
-						"  exit 1\n" +
-						"fi\n\n" +
-						"# 2. Full 5-invariant staged PII & plugin hooks check via ./bin/hq\n" +
-						"if [ -x \"./bin/hq\" ]; then\n" +
-						"  ./bin/hq ci pre-commit\n" +
-						"fi\n"
-					if err := os.WriteFile(preCommitPath, []byte(hookScript), 0o755); err == nil {
-						created = append(created, "../.git/hooks/pre-commit (PII guard)")
-					}
-				}
-				prePushPath := filepath.Join(rootHooksDir, "pre-push")
-				if _, err := os.Stat(prePushPath); os.IsNotExist(err) {
-					pushScript := "#!/bin/sh\n" +
-						"# agy-hq managed pre-push hook (Ring 0 TCB — RFC-0011)\n" +
-						"set -e\n\n" +
-						"if [ \"${HQ_IN_PRE_PUSH:-0}\" = \"1\" ]; then\n" +
-						"  exit 0\n" +
-						"fi\n" +
-						"export HQ_IN_PRE_PUSH=1\n" +
-						"export PATH=\"/opt/homebrew/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/.local/bin:$PATH\"\n\n" +
-						"if [ ! -x \"./bin/hq\" ] && command -v go >/dev/null 2>&1 && [ -d \"./cmd/hq\" ]; then\n" +
-						"  mkdir -p ./bin\n" +
-						"  go build -o ./bin/hq ./cmd/hq\n" +
-						"fi\n\n" +
-						"if [ -x \"./bin/hq\" ]; then\n" +
-						"  exec ./bin/hq ci pre-push\n" +
-						"fi\n"
-					if err := os.WriteFile(prePushPath, []byte(pushScript), 0o755); err == nil {
-						created = append(created, "../.git/hooks/pre-push (CI & regression guard)")
-					}
+			if installed, gErr := githooks.Install(repoRoot); gErr == nil {
+				for _, rel := range installed {
+					created = append(created, "../"+rel)
 				}
 			}
 		}
@@ -573,18 +522,4 @@ func CommitVault(vaultDir, message string) (bool, error) {
 		return false, fmt.Errorf("git commit: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return true, nil
-}
-
-// LoadActiveFacts reads active facts (valid_to == null) from local/memory/facts.jsonl,
-// deduplicating records by Fact.ID in chronological order so superseded or expired facts
-// are never returned as active.
-func LoadActiveFacts(vaultDir string, limit int) ([]Fact, error) {
-	active, _, _, err := LoadFactsState(vaultDir)
-	if err != nil {
-		return nil, err
-	}
-	if limit > 0 && len(active) > limit {
-		active = active[len(active)-limit:]
-	}
-	return active, nil
 }

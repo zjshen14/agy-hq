@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -522,11 +523,11 @@ func TestMissingAttachedWorkspaceAutoPrunedOnlyWhenParentExists(t *testing.T) {
 		t.Fatalf("UpdateLedger: %v", err)
 	}
 
-	// RunWorkspaceMaintenance drops ws-deleted (and detaches its dead task binding) without calling Remove,
+	// RunWorkspaceMaintenanceContext drops ws-deleted (and detaches its dead task binding) without calling Remove,
 	// while preserving ws-unmounted because its parent directory does not exist.
-	mRep, err := RunWorkspaceMaintenance(vaultDir, now)
+	mRep, err := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, now)
 	if err != nil {
-		t.Fatalf("RunWorkspaceMaintenance: %v", err)
+		t.Fatalf("RunWorkspaceMaintenanceContext: %v", err)
 	}
 	if len(mRep.Forgotten) != 1 || mRep.Forgotten[0] != keyDeleted {
 		t.Fatalf("expected only %s forgotten, got %+v", keyDeleted, mRep.Forgotten)

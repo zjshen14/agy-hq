@@ -113,3 +113,57 @@ func TestWriteAtomicRejectsSymlinkTarget(t *testing.T) {
 		t.Fatalf("victim file mutated via symlink: %q", string(got))
 	}
 }
+
+func TestRandomHex(t *testing.T) {
+	if got := RandomHex(0); got != "" {
+		t.Fatalf("RandomHex(0) = %q, want empty", got)
+	}
+	if got := RandomHex(-3); got != "" {
+		t.Fatalf("RandomHex(-3) = %q, want empty", got)
+	}
+	a := RandomHex(8)
+	b := RandomHex(8)
+	if len(a) != 16 || len(b) != 16 {
+		t.Fatalf("expected 16-char hex strings, got %q and %q", a, b)
+	}
+	if a == b {
+		t.Fatalf("expected distinct random hex strings, both %q", a)
+	}
+	for _, r := range a {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			t.Fatalf("unexpected non-lowercase-hex char %q in %q", r, a)
+		}
+	}
+}
+
+func TestWriteJSONAtomicAndReadJSONFile(t *testing.T) {
+	type payload struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "item.json")
+
+	if _, err := ReadJSONFile[payload](path); !os.IsNotExist(err) {
+		t.Fatalf("expected IsNotExist for missing file, got %v", err)
+	}
+
+	want := payload{Name: "alpha", Count: 42}
+	if err := WriteJSONAtomic(path, want, 0o600); err != nil {
+		t.Fatalf("WriteJSONAtomic: %v", err)
+	}
+	got, err := ReadJSONFile[payload](path)
+	if err != nil {
+		t.Fatalf("ReadJSONFile: %v", err)
+	}
+	if got != want {
+		t.Fatalf("ReadJSONFile = %+v, want %+v", got, want)
+	}
+
+	if err := os.WriteFile(path, []byte("{bad-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadJSONFile[payload](path); err == nil {
+		t.Fatal("expected error for corrupt JSON")
+	}
+}

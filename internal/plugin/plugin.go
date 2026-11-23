@@ -20,6 +20,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 )
@@ -445,18 +446,11 @@ func isHQPluginsEntryPath(rawPath, cleanSharedSlash string) bool {
 }
 
 func writeJSONManifestAtomic(manifestPath string, v interface{}) error {
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
-		return err
-	}
 	outBytes, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmpPath := manifestPath + ".tmp"
-	if err := os.WriteFile(tmpPath, append(outBytes, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, manifestPath)
+	return store.WriteAtomic(manifestPath, append(outBytes, '\n'), 0o644)
 }
 
 // AttachProjectPlugin writes or updates `<projectDir>/.agents/plugins.json` so Antigravity loads
@@ -637,12 +631,6 @@ func DetachProjectPlugin(projectDir string) (bool, error) {
 	return true, nil
 }
 
-// SanitizedDaemonEnv strips session- and sidecar-scoped Antigravity environment variables
-// (such as ANTIGRAVITY_PROJECT_ID and ANTIGRAVITY_CREDENTIAL_SCOPE) while keeping Language Server connectivity.
-func SanitizedDaemonEnv() []string {
-	return extension.SanitizedDaemonEnv(nil)
-}
-
 func ensureConvenienceBinSymlink(pluginDir, targetBin string) {
 	pluginBinDir := filepath.Join(pluginDir, "bin")
 	if err := os.MkdirAll(pluginBinDir, 0o755); err == nil {
@@ -744,7 +732,7 @@ func Install(opts InstallOptions) (*InstallReport, error) {
 	exePath, _ := os.Executable()
 
 	builtFromSource := false
-	if sourceRepo != "" && !vault.IsTempPath(exePath) {
+	if sourceRepo != "" && !hostpaths.IsTempPath(exePath) {
 		if goPath, gErr := exec.LookPath("go"); gErr == nil && goPath != "" {
 			ldflags := fmt.Sprintf("-X github.com/zjshen14/agy-hq/internal/version.GitCommit=%s", resolveRepoHeadShort(sourceRepo))
 			buildCmd := exec.Command(goPath, "build", "-ldflags", ldflags, "-o", tmpBin, "./cmd/hq")
@@ -987,7 +975,7 @@ func inspectConsoleSidecar(cfg *vault.GlobalConfig, scope, legacySidecarDir stri
 }
 
 // EnsureDaemonSynced checks whether a local `hq daemon` is skewed (or forceRestart is set)
-// and restarts it cleanly using targetBin and SanitizedDaemonEnv().
+// and restarts it cleanly using targetBin and extension.SanitizedDaemonEnv(nil).
 func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) bool {
 	dInfo := kernel.GetDaemonInfo(vaultDir)
 	if !dInfo.Running || dInfo.PID <= 0 {
@@ -1005,7 +993,7 @@ func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) 
 	if !skewed {
 		return false
 	}
-	if !vault.IsTempPath(targetBin) && dInfo.ServiceInstalled {
+	if !hostpaths.IsTempPath(targetBin) && dInfo.ServiceInstalled {
 		switch runtime.GOOS {
 		case "linux":
 			if os.Getenv("HQ_SKIP_SYSTEMCTL") != "1" {
@@ -1026,9 +1014,9 @@ func EnsureDaemonSynced(vaultDir, targetBin, workDir string, forceRestart bool) 
 		_ = proc.Signal(syscall.SIGTERM)
 		time.Sleep(150 * time.Millisecond)
 	}
-	if !vault.IsTempPath(targetBin) {
+	if !hostpaths.IsTempPath(targetBin) {
 		cmd := exec.Command(targetBin, "daemon", "--addr="+addr)
-		cmd.Env = SanitizedDaemonEnv()
+		cmd.Env = extension.SanitizedDaemonEnv(nil)
 		if workDir != "" {
 			if st, sErr := os.Stat(workDir); sErr == nil && st.IsDir() {
 				cmd.Dir = workDir

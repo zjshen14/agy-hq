@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/gchat"
 	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/obs"
 )
 
 var (
@@ -35,7 +37,7 @@ func isSingleHQCommand(cmdLine string) bool {
 	if len(fields) == 0 {
 		return false
 	}
-	if isHQBinaryToken(fields[0]) {
+	if authz.IsHQBinaryToken(fields[0]) {
 		if len(fields) >= 2 && fields[1] == "exec-sandboxed" {
 			return false
 		}
@@ -43,60 +45,6 @@ func isSingleHQCommand(cmdLine string) bool {
 	}
 	first := filepath.ToSlash(fields[0])
 	return first == "./scripts/bootstrap.sh" || first == "scripts/bootstrap.sh"
-}
-
-func splitShellSegmentsUnquoted(cmd string) []string {
-	var out []string
-	var cur strings.Builder
-	inSingle := false
-	inDouble := false
-	escaped := false
-	for i := 0; i < len(cmd); i++ {
-		ch := cmd[i]
-		if escaped {
-			cur.WriteByte(ch)
-			escaped = false
-			continue
-		}
-		if inSingle {
-			if ch == '\'' {
-				inSingle = false
-			}
-			cur.WriteByte(ch)
-			continue
-		}
-		if inDouble {
-			if ch == '\\' {
-				escaped = true
-			} else if ch == '"' {
-				inDouble = false
-			}
-			cur.WriteByte(ch)
-			continue
-		}
-		switch ch {
-		case '\\':
-			escaped = true
-			cur.WriteByte(ch)
-		case '\'':
-			inSingle = true
-			cur.WriteByte(ch)
-		case '"':
-			inDouble = true
-			cur.WriteByte(ch)
-		case ';', '|', '&', '\n', '\r', '(', ')', '`':
-			if s := strings.TrimSpace(cur.String()); s != "" {
-				out = append(out, s)
-			}
-			cur.Reset()
-		default:
-			cur.WriteByte(ch)
-		}
-	}
-	if s := strings.TrimSpace(cur.String()); s != "" {
-		out = append(out, s)
-	}
-	return out
 }
 
 // isBlockedChannelGatewayShell structurally detects quote/env/`go run`-wrapped invocations of
@@ -125,7 +73,7 @@ func isBlockedDelegateGatewayShell(cmdLine string) bool {
 }
 
 func hasBlockedHQSubcommandPair(cmdLine, topCmd string, blockedSubs map[string]bool) bool {
-	for _, seg := range splitShellSegmentsUnquoted(cmdLine) {
+	for _, seg := range obs.SplitShellSegmentsUnquoted(cmdLine) {
 		toks, _ := approvals.TokenizeShellWords(seg, false)
 		// Strip leading env assignments (`FOO=bar`), `env [-u X / --unset=X / -i / --]`, `command`, `exec`, `nohup`, `nice`, `timeout <dur>`
 		i := 0
@@ -356,7 +304,7 @@ func hasUnquotedShellChainingOrSubst(s string) bool {
 // (single-quoted, double-quoted without command substitution or \<LF> continuation, or unquoted without shell
 // metacharacters) and immediately followed by whitespace or end-of-string. Anything suspicious (including
 // bash $'...' / $"..." quoting, \<LF> line continuations, unclosed quotes, `--cmd=hq;evil`, or `--cmd=$(evil)`)
-// causes the entire command line to be returned unstripped so EvaluateCommand inspects and blocks it fail-closed.
+// causes the entire command line to be returned unstripped so EvaluateCommandForSession inspects and blocks it fail-closed.
 func stripSafeProposeCmdFlag(cmdLine string) string {
 	var out strings.Builder
 	out.Grow(len(cmdLine))

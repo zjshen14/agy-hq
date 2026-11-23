@@ -14,11 +14,11 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/channels"
-	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gchat"
+	"github.com/zjshen14/agy-hq/internal/githooks"
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
@@ -34,11 +34,6 @@ type CheckResult struct {
 	Name   string `json:"name"`
 	Status string `json:"status"` // PASS, WARN, FAIL
 	Detail string `json:"detail"`
-}
-
-// Run executes environment, sandbox, CLI, and Vault health checks.
-func Run(vaultDir string) []CheckResult {
-	return RunWithObs(vaultDir, nil)
 }
 
 // RunWithObs executes all doctor checks, reusing a precomputed DashboardSummary when non-nil
@@ -179,7 +174,7 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 				results = append(results, CheckResult{
 					Name:   "Front Desk Console Artifact",
 					Status: "WARN",
-					Detail: fmt.Sprintf("Missing %s; run './bin/hq console --sync'", artPath),
+					Detail: fmt.Sprintf("Missing %s; run './bin/hq console'", artPath),
 				})
 			}
 		}
@@ -331,7 +326,7 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 	rootDir, rootErr := vault.ResolveRoot()
 	if rootErr == nil && vault.IsAgyHQRepo(rootDir) {
 		if _, sErr := os.Stat(filepath.Join(rootDir, ".git")); sErr == nil {
-			if hooksOK, hooksDetail := ci.CheckGitHooksInstalled(rootDir); hooksOK {
+			if hooksOK, hooksDetail := githooks.CheckInstalled(rootDir); hooksOK {
 				results = append(results, CheckResult{
 					Name:   "CI & Git Hook Guards",
 					Status: "PASS",

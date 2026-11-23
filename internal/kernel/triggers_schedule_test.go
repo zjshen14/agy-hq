@@ -2,7 +2,6 @@ package kernel
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,28 +202,6 @@ func TestScheduleSidecarTemplatesAndTriggersYAMLHaveNoHardcodedModels(t *testing
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "model:") || strings.HasPrefix(trimmed, "#   model:") {
 			t.Fatalf("templates/triggers.yaml still contains hardcoded model field: %q", line)
-		}
-	}
-
-	// 2. Check schedule sidecars dispatch through `hq triggers tick` instead of `agentapi new-conversation --model=...`
-	for _, sc := range []string{"hq-morning-brief", "hq-sleep-consolidate", "hq-edgar-close-watch"} {
-		p := filepath.Join(repoRoot, "templates", "sidecars", sc, "sidecar.json")
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
-		}
-		var doc struct {
-			Builtin string   `json:"builtin"`
-			Args    []string `json:"args"`
-		}
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			t.Fatalf("unmarshal %s: %v", p, err)
-		}
-		if doc.Builtin != "schedule" || len(doc.Args) < 4 || doc.Args[1] != "hq" || doc.Args[2] != "triggers" || doc.Args[3] != "tick" {
-			t.Fatalf("expected %s to invoke `hq triggers tick ...`, got args=%v", sc, doc.Args)
-		}
-		if strings.Contains(string(raw), "agentapi") || strings.Contains(string(raw), "--model=") {
-			t.Fatalf("expected %s to be free of hardcoded agentapi/--model args, got:\n%s", sc, string(raw))
 		}
 	}
 }

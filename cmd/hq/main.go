@@ -12,9 +12,10 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/channels"
-	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/doctor"
+	"github.com/zjshen14/agy-hq/internal/githooks"
 	"github.com/zjshen14/agy-hq/internal/hooks"
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/rsi"
@@ -31,15 +32,9 @@ func main() {
 	}
 
 	rootDir, err := vault.ResolveRoot()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hq: resolve root: %v\n", err)
-		os.Exit(1)
-	}
+	dieIfErr("hq: resolve root", err)
 	vaultDir, vaultSource, err := vault.ResolveVaultDirWithSource()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hq: resolve vault: %v\n", err)
-		os.Exit(1)
-	}
+	dieIfErr("hq: resolve vault", err)
 	isPreToolHook := os.Args[1] == "hook" && len(os.Args) >= 3 && (os.Args[2] == "pre-tool" || os.Args[2] == "pre-tool-use")
 	if !isPreToolHook {
 		kernel.BackfillFrontDeskProjectID(vaultDir)
@@ -50,8 +45,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "version", "--version", "-v":
-		fs := flag.NewFlagSet("version", flag.ExitOnError)
-		asJSON := fs.Bool("json", false, "Output version metadata as JSON")
+		fs, asJSON := newJSONFlagSet("version")
 		_ = fs.Parse(os.Args[2:])
 		if *asJSON {
 			printJSON(map[string]interface{}{
@@ -66,8 +60,7 @@ func main() {
 		fmt.Printf("hq v%s (commit %s, vault-schema v%d)\n", version.Version, version.EffectiveCommit(), vault.CurrentSchemaVersion)
 
 	case "vault-path":
-		fs := flag.NewFlagSet("vault-path", flag.ExitOnError)
-		asJSON := fs.Bool("json", false, "Output resolved Vault path and source as JSON")
+		fs, asJSON := newJSONFlagSet("vault-path")
 		_ = fs.Parse(os.Args[2:])
 		if *asJSON {
 			printJSON(map[string]string{
@@ -103,25 +96,17 @@ func main() {
 		}
 		templateDir := resolveTemplateDir(rootDir)
 		created, err := vault.Init(vaultDir, templateDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq init failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq init failed", err)
 		var starterSlugs []string
 		if *allStarters || strings.EqualFold(strings.TrimSpace(*startersFlag), "all") {
 			starterSlugs = append(starterSlugs, vault.StarterSkillSlugs...)
 		} else if strings.TrimSpace(*startersFlag) != "" {
-			for _, part := range strings.Split(*startersFlag, ",") {
-				if s := strings.TrimSpace(part); s != "" {
-					starterSlugs = append(starterSlugs, s)
-				}
-			}
+			starterSlugs = append(starterSlugs, splitCSV(*startersFlag)...)
 		}
 		for _, slug := range starterSlugs {
-			if changed, dst, sErr := vault.AddStarterSkill(vaultDir, templateDir, slug, false); sErr != nil {
-				fmt.Fprintf(os.Stderr, "hq init starter skill %q failed: %v\n", slug, sErr)
-				os.Exit(1)
-			} else if changed {
+			changed, dst, sErr := vault.AddStarterSkill(vaultDir, templateDir, slug, false)
+			dieIfErr(fmt.Sprintf("hq init starter skill %q failed", slug), sErr)
+			if changed {
 				created = append(created, dst+" (--starters)")
 			}
 		}
@@ -146,10 +131,7 @@ func main() {
 		}
 		if *demo || *withSample {
 			demoSeeded, dErr := vault.SeedDemoData(vaultDir)
-			if dErr != nil {
-				fmt.Fprintf(os.Stderr, "hq init --demo failed: %v\n", dErr)
-				os.Exit(1)
-			}
+			dieIfErr("hq init --demo failed", dErr)
 			for _, ds := range demoSeeded {
 				created = append(created, ds+" (--demo)")
 			}
@@ -161,7 +143,7 @@ func main() {
 			}
 		}
 		if vault.IsAgyHQRepo(rootDir) {
-			_, _ = ci.InstallGitHooks(rootDir)
+			_, _ = githooks.Install(rootDir)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Initialized agy-hq private Vault at %s\n", vaultDir)
@@ -172,12 +154,8 @@ func main() {
 
 	case "console":
 		fs := flag.NewFlagSet("console", flag.ExitOnError)
-		_ = fs.Bool("sync", true, "Regenerate local/CONSOLE.md and <artifactDir>/hq_console.md")
 		_ = fs.Parse(os.Args[2:])
-		if err := webui.SyncMarkdownConsole(vaultDir); err != nil {
-			fmt.Fprintf(os.Stderr, "hq console sync failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq console sync failed", webui.SyncMarkdownConsole(vaultDir))
 		fmt.Println("Synced local/CONSOLE.md and active Front Desk hq_console.md artifact")
 
 	case "migrate":
@@ -186,13 +164,10 @@ func main() {
 		_ = fs.Parse(os.Args[2:])
 		templateDir := resolveTemplateDir(rootDir)
 		rep, err := vault.Migrate(vaultDir, templateDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq migrate failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq migrate failed", err)
 		var rsiMig *rsi.OverlayMigrationReport
 		if vault.IsAgyHQRepo(rootDir) {
-			_, _ = ci.InstallGitHooks(rootDir)
+			_, _ = githooks.Install(rootDir)
 			if mr, mErr := rsi.MigrateOverlays(rootDir, vaultDir); mErr == nil {
 				rsiMig = mr
 			}
@@ -249,7 +224,7 @@ func main() {
 
 		// 3. Recompile ./bin/hq from the updated Go source (embedding GitCommit via -ldflags)
 		targetBin := filepath.Join(rootDir, "bin", "hq")
-		if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
+		if exe, err := os.Executable(); err == nil && hostpaths.IsTempPath(exe) {
 			targetBin = exe
 		}
 		fmt.Printf("==> [3/5] Rebuilding hq microkernel (%s)...\n", targetBin)
@@ -267,7 +242,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "hq upgrade: go build failed (%v):\n%s\n", err, string(out))
 			os.Exit(1)
 		}
-		if !vault.IsTempPath(targetBin) {
+		if !hostpaths.IsTempPath(targetBin) {
 			switch runtime.GOOS {
 			case "linux":
 				if os.Getenv("HQ_SKIP_SYSTEMCTL") != "1" {
@@ -308,7 +283,7 @@ func main() {
 				}
 			}
 		}
-		if !vault.IsTempPath(targetBin) {
+		if !hostpaths.IsTempPath(targetBin) {
 			if st, sErr := plugin.Status(vaultDir, rootDir); sErr == nil && st != nil && (st.GlobalPluginInstalled || st.SharedPluginInstalled || st.GlobalBinaryInstalled) {
 				syncArgs := []string{"plugin", "install", "--vault-dir=" + vaultDir}
 				if cfg, cErr := vault.LoadGlobalConfig(); cErr == nil && cfg != nil {
@@ -333,15 +308,14 @@ func main() {
 
 		// 5. Run health check
 		fmt.Println("==> [5/5] Verifying system health (hq doctor)...")
-		for _, r := range doctor.Run(vaultDir) {
+		for _, r := range doctor.RunWithObs(vaultDir, nil) {
 			fmt.Printf("    [%s] %-30s %s\n", r.Status, r.Name, r.Detail)
 		}
 
 	case "doctor":
-		fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-		asJSON := fs.Bool("json", false, "Output diagnostic results as JSON")
+		fs, asJSON := newJSONFlagSet("doctor")
 		_ = fs.Parse(os.Args[2:])
-		results := doctor.Run(vaultDir)
+		results := doctor.RunWithObs(vaultDir, nil)
 		if *asJSON {
 			printJSON(results)
 		} else {
@@ -377,40 +351,29 @@ func main() {
 				}
 			}
 			for _, p := range pending {
-				fmt.Printf("  - [%s] %s (%s) sha256:%s\n", p.ID, p.Summary, p.ActionType, p.SHA256[:12])
+				fmt.Printf("  - [%s] %s (%s) sha256:%s\n", p.ID, p.Summary, p.ActionType, shortPrefix(p.SHA256, 12))
 			}
 		}
 
 	case "hook":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: hq hook <session-start|pre-tool|stop>")
-			os.Exit(1)
+			fatalf("usage: hq hook <session-start|pre-tool|stop>")
 		}
 		switch os.Args[2] {
 		case "session-start":
-			if err := hooks.HandleSessionStart(os.Stdin, os.Stdout, vaultDir); err != nil {
-				fmt.Fprintf(os.Stderr, "hq hook session-start: %v\n", err)
-				os.Exit(1)
-			}
+			dieIfErr("hq hook session-start", hooks.HandleSessionStart(os.Stdin, os.Stdout, vaultDir))
 			webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 		case "pre-tool", "pre-tool-use":
 			needsSync, err := hooks.HandlePreToolUseWithSync(os.Stdin, os.Stdout, vaultDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hq hook pre-tool: %v\n", err)
-				os.Exit(1)
-			}
+			dieIfErr("hq hook pre-tool", err)
 			if needsSync {
 				webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 			}
 		case "stop":
-			if err := hooks.HandleStop(os.Stdin, os.Stdout, vaultDir); err != nil {
-				fmt.Fprintf(os.Stderr, "hq hook stop: %v\n", err)
-				os.Exit(1)
-			}
+			dieIfErr("hq hook stop", hooks.HandleStop(os.Stdin, os.Stdout, vaultDir))
 			webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 		default:
-			fmt.Fprintf(os.Stderr, "unknown hook subcommand: %s\n", os.Args[2])
-			os.Exit(1)
+			fatalf("unknown hook subcommand: %s", os.Args[2])
 		}
 
 	case "propose":
@@ -444,7 +407,7 @@ func main() {
 		runArchiveCLI(vaultDir, os.Args[2:])
 
 	case "reopen":
-		runReopenTaskCLI(vaultDir, "hq reopen", os.Args[2:])
+		runReopenTaskCLI(vaultDir, os.Args[2:])
 
 	case "workspace":
 		if code := runWorkspaceCLI(rootDir, vaultDir, os.Args[2:], os.Stdout, os.Stderr); code != 0 {
@@ -560,7 +523,7 @@ Commands:
   tasks [--active|--all|--archive|--kind=|--scope=|--search=]  Query tiered Task Board & cold archive
   tasks <stats|compact|sync-sidebar|pin|unpin>  Task Board telemetry, compaction, sidebar archive sync, and pinning
   goals <list|add|milestone|check-off|wait-on|mark-replied|due|complete>  Stateful multi-day goals & counterparty SLAs
-  outbox <add|list|drain|eval>        4-tier attention outbox, quiet-hours DND & signal-to-noise eval
+  outbox <add|list|act|eval>        4-tier attention outbox, quiet-hours DND & signal-to-noise eval
   events <enqueue|list|inspect|retry|drop|dispatch|token>  Durable crash-safe Event Inbox & webhook token
   timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
   triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
@@ -578,7 +541,7 @@ Commands:
   ideas <list|promote|snooze|dismiss> Triage non-interrupting proactive suggestions
   spaces <list|active|pin|hide|auto>  Manage schedule-aware Console Spaces
   obs <tokens|top|inspect|anomalies|budget|reconcile>  Token, prefix cache, latency & context observability
-  memory <status|topics|add-fact|prune-fact|forget|entities|add-entity|lookup|compact|verify-transcript|commit>  5-layer living memory engine
+  memory <status|topics|add-fact|prune-fact|forget|entities|add-entity|lookup|compact|verify-transcript|commit>  4-layer living memory engine
   rsi <mine|hypothesize|verify|propose|apply|ablate|export|migrate-overlays|status>  Two-Tier 4-Stage Agent Recursive Self-Improvement engine
   ci <check-pii|check-harness|scrub-history|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once

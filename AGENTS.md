@@ -14,12 +14,12 @@ Welcome to the **`agy-hq` (Headquarter)** engine and plugin source repository.
 2. **Two-Layer Repo Hygiene & Ring-0 Trusted Computing Base:**
    - Keep `go.mod` 100% pure Go stdlib (`0` external dependencies, enforced by CI Gate `H4-A`).
    - Never commit personal identity information (PII), workstation home paths, or `local/` Vault state to this repository (enforced by mathematical PII scanner `P1`–`P6` in `hq ci check-pii`).
-   - Maintain SemVer parity between `internal/version/version.go` (`Version`) and `.agents/plugins/agy-hq/plugin.json` (`"version"`), and byte-parity between `.agents/plugins/agy-hq/sidecars/agy-hq-console/main.mjs` and `templates/sidecars/agy-hq-console/main.mjs` (enforced by CI Gate `H2-C`).
+   - Maintain SemVer parity between `internal/version/version.go` (`Version`) and `.agents/plugins/agy-hq/plugin.json` (`"version"`), and byte- and mode-parity between `.agents/plugins/agy-hq/sidecars/agy-hq-console/{main.mjs,launch.sh,sidecar.json}` and `templates/sidecars/agy-hq-console/` (enforced by CI Gates `H2-C` and `H5-D`).
    - Keep `.agents/plugins/agy-hq/hooks.json` as the single hook registration file (never recreate a duplicate root `.agents/hooks.json` or `.agents/plugins/agy-hq/sidecars.json`, enforced by `H2-A` and `H2-C`).
 
 3. **Pre-Submit Local CI Gate & Zero-Dirty-Tree Auto-Push Invariant:**
    - Routine git commits and pushes to this repository (`git push origin main` or `git push -u origin hq/<task>`) are **exempt** from `hq propose` approval once:
-     1. `go build -o ./bin/hq ./cmd/hq && ./bin/hq ci pre-push` passes `100%` (`P1`–`P6` PII checks, `H1`–`H4B` skill/hook/plugin/Go/Markdown contracts, `agy plugin validate --strict .agents/plugins/agy-hq`, `go vet ./...`, and all unit + CUJ E2E tests).
+     1. `go build -o ./bin/hq ./cmd/hq && ./bin/hq ci pre-push` passes `100%` (`P1`–`P6` PII checks, `H1`–`H5F` skill/hook/plugin/Go/Markdown/anti-slop/CUJ/LOC contracts, `agy plugin validate --strict .agents/plugins/agy-hq`, `go vet ./...`, and all unit + CUJ E2E tests).
      2. Pre-commit checks (`./bin/hq ci pre-commit`) pass cleanly.
      3. Feature branches are cleanly rebased onto `origin/main` before merging.
    - Every subagent and task conversation modifying `agy-hq` must ensure `git status -s` is completely clean and pushed to `origin` before ending a turn.

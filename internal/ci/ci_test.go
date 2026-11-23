@@ -182,33 +182,6 @@ func TestCheckHarness_RealRepositoryAndMutations(t *testing.T) {
 	}
 }
 
-func TestInstallAndCheckGitHooks(t *testing.T) {
-	tmpRepo := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tmpRepo, ".git", "hooks"), 0o755)
-
-	if ok, _ := CheckGitHooksInstalled(tmpRepo); ok {
-		t.Fatalf("expected CheckGitHooksInstalled to be false before installation")
-	}
-
-	installed, err := InstallGitHooks(tmpRepo)
-	if err != nil {
-		t.Fatalf("InstallGitHooks failed: %v", err)
-	}
-	if len(installed) != 2 {
-		t.Fatalf("expected 2 hooks installed (pre-commit, pre-push), got %v", installed)
-	}
-
-	if ok, detail := CheckGitHooksInstalled(tmpRepo); !ok {
-		t.Fatalf("expected CheckGitHooksInstalled to pass after installation, got: %s", detail)
-	}
-
-	// Second run should be idempotent (0 files rewritten)
-	installedAgain, err := InstallGitHooks(tmpRepo)
-	if err != nil || len(installedAgain) != 0 {
-		t.Fatalf("expected idempotent InstallGitHooks to rewrite 0 files, got %v (%v)", installedAgain, err)
-	}
-}
-
 func TestP6ContextualPIIAndLocalDenylist(t *testing.T) {
 	tmpRepo := t.TempDir()
 	runGit := newHermeticGitRunner(t, tmpRepo)

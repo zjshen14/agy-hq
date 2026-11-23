@@ -1,7 +1,9 @@
 # RFC-0003: Safety, Quarantined Readers & Approval-Bound Execution
 
-- **Status:** Approved
+- **Status:** Implemented
 - **Related Docs:** [02 — Academic Frontier §5](../research/02_academic.md), [04 — Antigravity Audit §4](../research/04_antigravity_audit.md)
+
+> **Extended By:** [RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md) (provenance taint & HMAC human-presence caps), [RFC-0018](./0018-always-on-agent-runtime-hardening.md) (`CommandArgv`, `SanitizedApprovalEnv`, OS sandbox), [RFC-0021](./0021-customizable-approval-policy-and-ux.md) (data-driven `approvals.rules` in `<vault>/config.yaml`), and [RFC-0026](./0026-declarative-scoped-delegates.md) (unified `internal/authz` capability lattice).
 
 ---
 

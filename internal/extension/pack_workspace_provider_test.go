@@ -175,7 +175,7 @@ func TestWorkspaceProviderTrustPinningAndApprovalRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPolicy: %v", err)
 	}
-	if d := approvals.EvaluateCommand(pol, "acme-ws client delete ledger-fix", false, ""); d.Gated {
+	if d := approvals.EvaluateCommandForSession(pol, "acme-ws client delete ledger-fix", false, false, ""); d.Gated {
 		t.Fatalf("untrusted pack must not contribute rules, got %+v", d)
 	}
 
@@ -222,12 +222,12 @@ func TestWorkspaceProviderTrustPinningAndApprovalRules(t *testing.T) {
 		t.Fatalf("expected an always-gated wsd-acme-monorepo-client rule, got %+v (warnings %v)", found, warnings)
 	}
 	for _, cmd := range []string{"acme-ws client delete ledger-fix", "cd /srv/ws/user && acme-ws purge --all"} {
-		d := approvals.EvaluateCommand(pol, cmd, false, "")
+		d := approvals.EvaluateCommandForSession(pol, cmd, false, false, "")
 		if !d.Gated || d.RuleID != "wsd-acme-monorepo-client" {
-			t.Fatalf("EvaluateCommand(%q) = %+v, want gated by the workspace destructive rule", cmd, d)
+			t.Fatalf("EvaluateCommandForSession(%q) = %+v, want gated by the workspace destructive rule", cmd, d)
 		}
 	}
-	if d := approvals.EvaluateCommand(pol, "acme-ws client status ledger-fix", false, ""); d.Gated {
+	if d := approvals.EvaluateCommandForSession(pol, "acme-ws client status ledger-fix", false, false, ""); d.Gated {
 		t.Fatalf("non-destructive provider command must not be gated: %+v", d)
 	}
 }

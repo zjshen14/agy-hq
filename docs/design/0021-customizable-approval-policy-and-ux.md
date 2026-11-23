@@ -6,18 +6,20 @@
 - **Extends / Updates:** [RFC-0003](./0003-approval-bound-execution.md), [RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md), [RFC-0017d](./0017d-enterprise-extensibility-and-portability.md), [RFC-0018](./0018-always-on-agent-runtime-hardening.md)
 - **Closes Issues:** `#28`
 
+> **Evolution Note (Round 3 M2):** `EvaluateCommand` was folded into `EvaluateCommandForSession`, and `internal/hooks/hooks.go` was split into `{pre_tool,propose_guards,session_start,quarantine,stop}.go`.
+
 ---
 
 ## 1. Problem Summary (`F1`–`F6`)
 
 Production operation of the `hq propose` / `CONSOLE.md` / `:4242` Web Console approval queue revealed six recurring failure modes (documented empirically in [Research 16](../research/16_approval_ux_and_customizable_policy_audit.md)):
 
-- **`F1` — Policy / Hook Asymmetry & Native Bypass:** Broad instructions in [`.agents/plugins/agy-hq/rules/AGENTS.md`](../../.agents/plugins/agy-hq/rules/AGENTS.md) §4 conflict with a narrow hardcoded regex gate ([`outboundCommandPatterns`](../../internal/hooks/hooks.go#L619-L632)) and Antigravity's native permission presets (`AGENT_PERMISSION_PRESET_TURBO`), causing duplicate prompts on routine single-player actions and leaving orphaned pending entries whenever work ships via unblocked paths.
-- **`F2` — Dummy No-Op `--cmd` Placeholders:** Because [`cmd/hq/main.go`](../../cmd/hq/main.go#L508) requires `--cmd`, non-CLI browser/MCP tasks stage fake commands such as `echo 'Approved: post announcement...'`, giving zero cryptographic binding (`ApproveProposal` runs `echo`) and non-functional **Approve** buttons on `:4242`.
-- **`F3` — 30-Minute `AskTTL` vs. 24-Hour `ProposalTTL` Mismatch:** [`DefaultAskTTL`](../../internal/approvals/presence.go#L25) expires human-presence records 30 minutes after `ask_question` renders, while proposals remain alive for `24h` ([`DefaultProposalTTL`](../../internal/approvals/approvals.go#L25)). Delayed user taps (40–69 minutes later) fail validation cleanly and push sessions to bypass `hq approve`.
-- **`F4` — Blanket `ask_question` Overwrite & Dropped Rejects:** [`HandlePreToolUse`](../../internal/hooks/hooks.go#L1280-L1388) overwrites the entire `questions` array if any `prop-*` ID appears anywhere in serialized arguments—destroying sibling questions and custom options—and fails to auto-reconcile `Reject (<id>)` UI selections when the model omits `hq reject`.
-- **`F5` — Missing Auto-Supersede, Spurious Reject Wakeups & Stale Git Refs:** Sequential drafts from the same `(ConversationID, ActionType)` accumulate duplicates in `Pending Approvals`; [`RejectProposal`](../../internal/approvals/approvals.go#L872) triggers an LLM resumption event on any custom `--reason`; `hq propose` omits `ask_question` pairing hints; and already-pushed git tags/commits linger until 24h expiration.
-- **`F6` (Issue `#28`) — 5s Hook Timeout & Non-Idempotent `askPath` Deletion:** [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json#L17) caps `PreToolUse` at 5 seconds, and [`VerifyAskAndMintCap`](../../internal/approvals/presence.go#L356-L366) deletes `askPath` before `ApproveFromCLI` consumes `approval_caps/<id>.json`. A transient timeout or downstream check error permanently invalidates a valid user confirmation.
+- **`F1` — Policy / Hook Asymmetry & Native Bypass:** Broad instructions in [`.agents/plugins/agy-hq/rules/AGENTS.md`](../../.agents/plugins/agy-hq/rules/AGENTS.md) §4 conflict with a narrow hardcoded regex gate ([`outboundCommandPatterns`](../../internal/hooks/hooks.go)) and Antigravity's native permission presets (`AGENT_PERMISSION_PRESET_TURBO`), causing duplicate prompts on routine single-player actions and leaving orphaned pending entries whenever work ships via unblocked paths.
+- **`F2` — Dummy No-Op `--cmd` Placeholders:** Because [`cmd/hq/main.go`](../../cmd/hq/main.go) requires `--cmd`, non-CLI browser/MCP tasks stage fake commands such as `echo 'Approved: post announcement...'`, giving zero cryptographic binding (`ApproveProposal` runs `echo`) and non-functional **Approve** buttons on `:4242`.
+- **`F3` — 30-Minute `AskTTL` vs. 24-Hour `ProposalTTL` Mismatch:** [`DefaultAskTTL`](../../internal/approvals/presence.go#L24) expires human-presence records 30 minutes after `ask_question` renders, while proposals remain alive for `24h` ([`DefaultProposalTTL`](../../internal/approvals/approvals.go#L25)). Delayed user taps (40–69 minutes later) fail validation cleanly and push sessions to bypass `hq approve`.
+- **`F4` — Blanket `ask_question` Overwrite & Dropped Rejects:** [`HandlePreToolUse`](../../internal/hooks/hooks.go) overwrites the entire `questions` array if any `prop-*` ID appears anywhere in serialized arguments—destroying sibling questions and custom options—and fails to auto-reconcile `Reject (<id>)` UI selections when the model omits `hq reject`.
+- **`F5` — Missing Auto-Supersede, Spurious Reject Wakeups & Stale Git Refs:** Sequential drafts from the same `(ConversationID, ActionType)` accumulate duplicates in `Pending Approvals`; [`RejectProposalWithOptions`](../../internal/approvals/approvals.go#L841-L880) triggers an LLM resumption event on any custom `--reason`; `hq propose` omits `ask_question` pairing hints; and already-pushed git tags/commits linger until 24h expiration.
+- **`F6` (Issue `#28`) — 5s Hook Timeout & Non-Idempotent `askPath` Deletion:** [`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json#L17) caps `PreToolUse` at 5 seconds, and [`VerifyAskAndMintCap`](../../internal/approvals/presence.go) deletes `askPath` before `ApproveFromCLI` consumes `approval_caps/<id>.json`. A transient timeout or downstream check error permanently invalidates a valid user confirmation.
 
 ---
 
@@ -70,7 +72,7 @@ flowchart TD
 
 ### 4.1 Uniform Data-Driven Approval Policy (`config.yaml` + `hq-extension.json`)
 
-To unify built-in defaults, user overrides, and user-defined categories without touching Go source, replace disparate hardcoded Go lists ([`outboundCommandPatterns`](../../internal/hooks/hooks.go#L619-L632) and `classifyUnattendedAutoCommand`) with a single ordered list-of-objects policy loader implemented in `internal/approvals/policy.go` (Phase 2).
+To unify built-in defaults, user overrides, and user-defined categories without touching Go source, replace disparate hardcoded Go lists ([`outboundCommandPatterns`](../../internal/hooks/hooks.go) and `classifyUnattendedAutoCommand`) with a single ordered list-of-objects policy loader implemented in `internal/approvals/policy.go` (Phase 2).
 
 #### Vault Configuration Schema ([`templates/config.yaml`](../../templates/config.yaml))
 
@@ -164,7 +166,7 @@ When a rule specifies `mode: third_party_only` in an interactive trusted session
 
 #### Dynamic `SessionStart` Active Policy Summary & Self-Tamper Guard
 
-- **`HandleSessionStart` Dynamic Rendering:** Replace static rule duplication in [`HandleSessionStart`](../../internal/hooks/hooks.go#L206-L613) with a compact injected block titled `Active Outbound Policy`, listing each active rule's `id`, resolved interactive mode vs. `[Auto]`/`tainted` mode, `owned_repos` count, and the browser/GUI rule (native `ask_question` + blockquote preview in interactive sessions, `hq outbox add` in `[Auto]`). Rule changes in `<vault>/config.yaml` take effect immediately on the next session/hook invocation with zero plugin edits.
+- **`HandleSessionStart` Dynamic Rendering:** Replace static rule duplication in [`HandleSessionStart`](../../internal/hooks/hooks.go) with a compact injected block titled `Active Outbound Policy`, listing each active rule's `id`, resolved interactive mode vs. `[Auto]`/`tainted` mode, `owned_repos` count, and the browser/GUI rule (native `ask_question` + blockquote preview in interactive sessions, `hq outbox add` in `[Auto]`). Rule changes in `<vault>/config.yaml` take effect immediately on the next session/hook invocation with zero plugin edits.
 - **`PreToolUse` Self-Tamper Protection:** Any shell command or `edit_file` / `write_file` call targeting `<vault>/config.yaml` (or active pack `hq-extension.json`) in an `[Auto]` or `tainted` session is unconditionally blocked (`fail-closed`). Even in interactive sessions, `PreToolUse` validates proposed YAML rule changes before permitting persistence if malformed regexes or unknown modes are detected.
 - **Validation & Non-Destructive Migration (`hq doctor` & `hq migrate`):**
   - `hq doctor` compiles every `commands` regex (`regexp.Compile`), verifies unique `id`s, checks `mode` in `{always, third_party_only, auto_only, never}`, parses `ask_ttl` / `proposal_ttl` durations, and warns if `third_party_only` is active while `owned_repos` is empty.
@@ -204,7 +206,7 @@ RFC-0021 splits human-presence consumption into a two-phase commit:
 #### C. Bump `PreToolUse` Timeout ([`.agents/plugins/agy-hq/hooks.json`](../../.agents/plugins/agy-hq/hooks.json#L17))
 - Increase `"PreToolUse"` hook `"timeout"` from `5` seconds to `15` seconds so cold Vault scans or git remote checks never sever valid `hq approve` invocations under load.
 
-#### D. Surgical Per-Question `ask_question` Handling ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go#L1269-L1408))
+#### D. Surgical Per-Question `ask_question` Handling ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go))
 Replace whole-payload `strings.Contains(rawStr, prop.ID)` matching and blanket `questions` replacement (`L1388`) with per-element inspection:
 1. Iterate `questions[i]` individually. Match a `ProposalID` only when `questions[i].question` (or existing `questions[i].options[k].label`) references `<prop.ID>` (or `prop.Summary` confirmation phrasing where `prop.ID` is bound).
 2. Mutate **only** matching `questions[i].options`: prepend verified options (`Approve (<prop.ID>, code:<challenge>)`, `Reject (<prop.ID>)`) and append any distinct author-supplied secondary options for that question (e.g., `"Edit tone first"`, `"Send tomorrow morning"`) stripped of spoofed `Approve (`/`Reject (` strings.
@@ -218,13 +220,13 @@ Replace whole-payload `strings.Contains(rawStr, prop.ID)` matching and blanket `
    - Extend `Proposal` and `CreateOptions` with `KeepPrior bool` (exposed on `hq propose` as `--keep-prior`).
    - When creating a new proposal with non-empty `ConversationID` and `ActionType`, if `KeepPrior == false` and `SupersedePrior` isn't disabled, automatically mark older `pending` proposals matching `(ConversationID, ActionType)` (in addition to explicit `ThreadKey` superseding via `SupersedeByThread`) as `superseded` (`SupersedeReason: "superseded by newer proposal in same conversation"`).
    - Batch workflows proposing multiple distinct actions of the same type simultaneously inside one turn pass `--keep-prior`.
-2. **`hq reject --dismiss` / `--no-resume` Flag ([`internal/approvals/approvals.go`](../../internal/approvals/approvals.go#L872) + [`cmd/hq/main.go`](../../cmd/hq/main.go)):**
+2. **`hq reject --dismiss` / `--no-resume` Flag ([`internal/approvals/approvals.go`](../../internal/approvals/approvals.go#L834-L880) + [`cmd/hq/main.go`](../../cmd/hq/main.go)):**
    - Add `SuppressResume bool` to rejection options (`--dismiss` / `--no-resume` on CLI). When true, `RejectProposal` skips `enqueueApprovalDecisionEvent` even when a descriptive `--reason` (such as `"already landed manually"` or `"cleanup"`) is recorded.
    - [`internal/webui/webui.go`](../../internal/webui/webui.go) `/api/reject` defaults `SuppressResume: true` unless the user enters explicit steering instructions intended to wake the conversation.
 3. **`hq propose` Stdout Pairing Reminder ([`cmd/hq/main.go`](../../cmd/hq/main.go)):**
    - Print a single concise line after staging:
      `Next: Present a markdown blockquote preview + ask_question referencing <prop.ID> (or run from :4242 Web Console).`
-4. **Zero-Token Reconciliation in `HandleStop` ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go#L1624-L1923)) & `SyncMarkdownConsole` ([`internal/webui/webui.go`](../../internal/webui/webui.go)):**
+4. **Zero-Token Reconciliation in `HandleStop` ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go)) & `SyncMarkdownConsole` ([`internal/webui/webui.go`](../../internal/webui/webui.go)):**
    - **Transcript `Reject (<id>)` Reconciler (`0` LLM tokens):** Read recent `ask_records` linked to the current `ConversationID` and inspect bounded trailing transcript entries (`turn` user selections); if the user explicitly tapped `Reject (<prop.ID>)` and `prop.ID` is still `pending` at `Stop` (or console sync), mark it `rejected` with `SuppressResume: true` and `Reason: "reconciled from ask_question reject selection"`.
    - **Offline Local Git Ref / Tag Reconciler (`<2ms`, `0` network calls, `0` LLM tokens):** For `pending` proposals whose command targets an explicit local `WorkDir` git tag creation/push or commit ref (parsed at creation/inspection without invoking network I/O): run `git -C <WorkDir> rev-parse --verify` against local `refs/remotes/origin/<branch>` or `refs/tags/<tag>` with a strict `2ms` per-item context deadline (`git fetch` is strictly forbidden). If local tracking metadata proves the exact proposed commit/tag has already landed, transition the proposal to `reconciled_external` so `Pending Approvals` and `CONSOLE.md` self-clean automatically.
 

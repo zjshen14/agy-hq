@@ -152,12 +152,3 @@ func TestResolveAllEightProfilesAndExpirationClamp(t *testing.T) {
 		t.Fatalf("expected missing pending grant to clamp to ProfileFailClosed, got %+v", got)
 	}
 }
-
-func TestAttenuateMonotonicMeet(t *testing.T) {
-	top := BuildInteractiveTask()
-	qr := BuildQuarantinedReader(taint.Record{ConvID: "c1", Source: "gmail:thread:t1"})
-	met := Attenuate(top, qr)
-	if !met.Tainted || met.Profile != ProfileQuarantinedReader || met.Reads.HostFS || met.Writes.WorkspaceEditsLeased || met.Egress.HumanPresenceApprove {
-		t.Fatalf("expected monotonic downward meet to strip interactive privileges, got %+v", met)
-	}
-}

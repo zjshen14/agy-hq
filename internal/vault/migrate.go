@@ -13,6 +13,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // CurrentSchemaVersion is the monotonic schema version for the private local/ Vault.
@@ -127,9 +128,9 @@ func Migrate(vaultDir, templateDir string) (*MigrationReport, error) {
 	}
 
 	// Migration v2 -> v3: Normalize tasks.json titles to [Task:<scope>] convention & remove legacy hq_console_mobile.md
-	normalized := normalizeLegacyTaskTitles(vaultDir)
-	removedLegacy := removeLegacyMobileConsole(vaultDir)
-	if prev.Version < 3 || normalized > 0 || removedLegacy {
+	if prev.Version < 3 {
+		normalized := normalizeLegacyTaskTitles(vaultDir)
+		removedLegacy := removeLegacyMobileConsole(vaultDir)
 		recordStep("v3_task_titles_and_console", fmt.Sprintf("Normalized %d task title(s) to [Task:<scope>] convention; cleaned legacy mobile console=%v", normalized, removedLegacy))
 	}
 
@@ -285,7 +286,7 @@ func normalizeLegacyTaskTitles(vaultDir string) int {
 			if title == "" {
 				continue
 			}
-			sanitized := sanitizeMigratedTitle(title, slug)
+			sanitized := kernel.SanitizeTaskTitle(title, slug)
 			if sanitized != title {
 				item["title"] = sanitized
 				count++
@@ -299,57 +300,6 @@ func normalizeLegacyTaskTitles(vaultDir string) int {
 		return nil
 	})
 	return count
-}
-
-func sanitizeMigratedTitle(title, slug string) string {
-	s := strings.TrimSpace(title)
-	if idx := strings.Index(s, "<USER_REQUEST>"); idx >= 0 {
-		s = s[idx+len("<USER_REQUEST>"):]
-	}
-	if idx := strings.Index(s, "</USER_REQUEST>"); idx >= 0 {
-		s = s[:idx]
-	}
-	if idx := strings.Index(s, "<ADDITIONAL_METADATA>"); idx >= 0 {
-		s = s[:idx]
-	}
-	s = strings.TrimSpace(s)
-
-	lines := strings.Split(s, "\n")
-	var chosen string
-	prefixOnly := ""
-	for _, line := range lines {
-		l := strings.TrimSpace(line)
-		if l == "" {
-			continue
-		}
-		if prefixOnly == "" && (l == "[Task:general]" || strings.HasSuffix(l, "]")) && !strings.Contains(l, " ") {
-			prefixOnly = l
-			continue
-		}
-		if prefixOnly != "" {
-			chosen = prefixOnly + " " + l
-		} else {
-			chosen = l
-		}
-		break
-	}
-	if chosen == "" {
-		chosen = prefixOnly
-	}
-	chosen = strings.Join(strings.Fields(chosen), " ")
-	chosen = strings.ReplaceAll(chosen, "|", "-")
-
-	if chosen != "" && !strings.HasPrefix(chosen, "[Task:") && !strings.HasPrefix(chosen, "[Subagent:") && !strings.HasPrefix(chosen, "[HQ]") && !strings.HasPrefix(chosen, "[Auto]") {
-		scope := "general"
-		if parts := strings.SplitN(slug, "-", 2); len(parts) > 0 && parts[0] != "" && parts[0] != "conv" {
-			scope = parts[0]
-		}
-		chosen = fmt.Sprintf("[Task:%s] %s", scope, chosen)
-	}
-	if runes := []rune(chosen); len(runes) > 88 {
-		chosen = string(runes[:85]) + "..."
-	}
-	return chosen
 }
 
 func removeLegacyMobileConsole(vaultDir string) bool {
@@ -379,11 +329,11 @@ func ensureStarterTopicPage(vaultDir string) bool {
 	}
 	starterPath := filepath.Join(topicsDir, "agy-hq-architecture.md")
 	content := "# agy-hq Architecture & Harness Invariants\n" +
-		"> **Summary:** Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory hierarchy.\n\n" +
+		"> **Summary:** Two-Layer Vault boundaries, Front Desk non-blocking rules, and 4-layer memory engine.\n\n" +
 		"## Core Invariants\n" +
 		"- **Two-Layer Vault Split:** Never commit PII or `local/` files to the public root repository; store personal notes in `local/notes/` and financial/tax records in `local/private/`.\n" +
 		"- **Non-Blocking Front Desk:** The single Front Desk thread is strictly for coordination and quick answers (<= 3 lookup tool calls). Delegate coding, debugging, and open-ended research to background subagents (`invoke_subagent`) or dedicated task conversations (`hq spawn`).\n" +
-		"- **Four-Layer Memory Stack (RFC-0006):** Keep `local/MEMORY.md` under 80 lines as a Roadmap Index; distill deep technical or domain lessons into `local/memory/topics/<slug>.md` and verify turn claims against `transcript.jsonl` during `/sleep-consolidate`.\n"
+		"- **Four-Layer Memory Engine (RFC-0006 / RFC-0024):** Keep `local/MEMORY.md` as a compact Active Priorities index (<= 40 lines & <= 2,200 bytes); distill deep technical or domain lessons into `local/memory/topics/<slug>.md` and verify turn claims via `hq memory verify-transcript` during `/sleep-consolidate`.\n"
 	if err := os.WriteFile(starterPath, []byte(content), 0o644); err != nil {
 		return false
 	}
@@ -728,16 +678,19 @@ func mergeMissingTopLevelYAMLBlocksFromTemplate(templateDir, tmplName, dstPath s
 }
 
 func mergeMissingTopLevelYAMLBlocksBytes(tmplBytes, dstBytes []byte, dstPath string) []string {
-	dstKeys := parseTopLevelYAMLKeys(string(dstBytes))
-	blocks := splitTopLevelYAMLBlocks(string(tmplBytes))
+	dstKeys := make(map[string]bool)
+	for _, blk := range yamlmini.SplitTopLevelBlocks(string(dstBytes)) {
+		dstKeys[blk.Key] = true
+	}
+	blocks := yamlmini.SplitTopLevelBlocks(string(tmplBytes))
 
 	var addedKeys []string
 	var appendedBlocks []string
 	for _, blk := range blocks {
-		if blk.key != "" && !dstKeys[blk.key] {
-			addedKeys = append(addedKeys, blk.key)
-			appendedBlocks = append(appendedBlocks, blk.content)
-			dstKeys[blk.key] = true
+		if blk.Key != "" && !dstKeys[blk.Key] {
+			addedKeys = append(addedKeys, blk.Key)
+			appendedBlocks = append(appendedBlocks, blk.Content)
+			dstKeys[blk.Key] = true
 		}
 	}
 	if len(appendedBlocks) > 0 {
@@ -747,53 +700,4 @@ func mergeMissingTopLevelYAMLBlocksBytes(tmplBytes, dstBytes []byte, dstPath str
 		_ = os.WriteFile(dstPath, []byte(updated), 0o644)
 	}
 	return addedKeys
-}
-
-type yamlBlock struct {
-	key     string
-	content string
-}
-
-func parseTopLevelYAMLKeys(content string) map[string]bool {
-	keys := make(map[string]bool)
-	for _, line := range strings.Split(content, "\n") {
-		if len(line) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#' || line[0] == '-' {
-			continue
-		}
-		if idx := strings.Index(line, ":"); idx > 0 {
-			keys[strings.TrimSpace(line[:idx])] = true
-		}
-	}
-	return keys
-}
-
-func splitTopLevelYAMLBlocks(content string) []yamlBlock {
-	var blocks []yamlBlock
-	var curKey string
-	var curLines []string
-
-	flush := func() {
-		if curKey != "" && len(curLines) > 0 {
-			blocks = append(blocks, yamlBlock{
-				key:     curKey,
-				content: strings.TrimRight(strings.Join(curLines, "\n"), "\n"),
-			})
-		}
-	}
-
-	for _, line := range strings.Split(content, "\n") {
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '#' && line[0] != '-' {
-			if idx := strings.Index(line, ":"); idx > 0 {
-				flush()
-				curKey = strings.TrimSpace(line[:idx])
-				curLines = []string{line}
-				continue
-			}
-		}
-		if curKey != "" {
-			curLines = append(curLines, line)
-		}
-	}
-	flush()
-	return blocks
 }

@@ -60,11 +60,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 		}
 		var propIDs []string
 		if strings.TrimSpace(*proposalIDsRaw) != "" {
-			for _, part := range strings.Split(*proposalIDsRaw, ",") {
-				if p := strings.TrimSpace(part); p != "" {
-					propIDs = append(propIDs, p)
-				}
-			}
+			propIDs = splitCSV(*proposalIDsRaw)
 		}
 		taintRec, isTainted := checkCallerTaintedEnv(vaultDir)
 		obItem := outbox.OutboxItem{
@@ -132,26 +128,6 @@ func runOutboxCLI(vaultDir string, args []string) {
 			fmt.Printf("- [%s] (%s/%s) %s — %s\n", it.ID, it.Tier, it.Status, it.Title, it.Summary)
 		}
 
-	case "drain":
-		fs := flag.NewFlagSet("outbox drain", flag.ExitOnError)
-		asJSON := fs.Bool("json", false, "Output JSON")
-		_ = fs.Parse(rest)
-		fmt.Fprintln(os.Stderr, "warning: 'hq outbox drain' is deprecated; use 'hq brief collect --lease' and 'hq brief commit' instead.")
-		drained, err := outbox.DrainBriefRollup(vaultDir, now)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq outbox drain failed: %v\n", err)
-			os.Exit(1)
-		}
-		_ = webui.SyncMarkdownConsole(vaultDir)
-		if *asJSON {
-			printJSON(drained)
-			return
-		}
-		fmt.Printf("Drained %d brief_rollup item(s) for Morning Brief:\n", len(drained))
-		for _, it := range drained {
-			fmt.Printf("- [%s] (%s) %s: %s\n", it.ID, it.Scope, it.Title, it.Summary)
-		}
-
 	case "eval":
 		fs := flag.NewFlagSet("outbox eval", flag.ExitOnError)
 		fixturesPath := fs.String("fixtures", "", "Optional newline-delimited JSON EvalFixture file (defaults to built-in 10-case calibration corpus)")
@@ -211,7 +187,7 @@ func runOutboxCLI(vaultDir string, args []string) {
 		fmt.Printf("Executed decision %s/%s (%s): %s\n", res.ItemID, res.OptionID, res.Kind, res.Summary)
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown outbox subcommand: %s (expected add, list, act, drain, or eval)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown outbox subcommand: %s (expected add, list, act, or eval)\n", sub)
 		os.Exit(1)
 	}
 }
@@ -1467,42 +1443,11 @@ func runTriggersCLI(vaultDir string, args []string) {
 			fmt.Printf("Resumed schedule %s (catch_up=%s)\n", fqid, ov.CatchUp)
 		}
 
-	case "tick":
-		targetID, flagArgs := splitFirstPositionalAndFlags(rest)
-		fs := flag.NewFlagSet("triggers tick", flag.ExitOnError)
-		dryRun := fs.Bool("dry-run", false, "Simulate scheduled tick without spawning a live conversation")
-		asJSON := fs.Bool("json", false, "Output JSON")
-		_ = fs.Parse(flagArgs)
-		if targetID == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq triggers tick <schedule-id> [--dry-run] [--json]")
-			os.Exit(1)
-		}
-		actions, skipReason, err := kernel.TickScheduleOnce(vaultDir, targetID, *dryRun, now)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq triggers tick failed: %v\n", err)
-			os.Exit(1)
-		}
-		if *asJSON {
-			printJSON(map[string]interface{}{
-				"schedule":   targetID,
-				"skipped":    skipReason != "",
-				"skipReason": skipReason,
-				"actions":    actions,
-			})
-			return
-		}
-		if skipReason != "" {
-			return
-		}
-		for _, act := range actions {
-			fmt.Println(act)
-		}
-
 	case "fire":
 		targetID, flagArgs := splitFirstPositionalAndFlags(rest)
 		fs := flag.NewFlagSet("triggers fire", flag.ExitOnError)
 		bypassPrecheck := fs.Bool("bypass-precheck", false, "Bypass 0-token precheck and enqueue immediately")
-		scheduled := fs.Bool("scheduled", false, "Respect pause/enabled state, cron schedule, and Front Desk lease (same as `hq triggers tick`)")
+		scheduled := fs.Bool("scheduled", false, "Respect pause/enabled state, cron schedule, and Front Desk lease")
 		dryRun := fs.Bool("dry-run", false, "Simulate dispatch without spawning a live conversation")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(flagArgs)
@@ -1512,10 +1457,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 		if *scheduled {
 			actions, skipReason, err := kernel.TickScheduleOnce(vaultDir, targetID, *dryRun, now)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hq triggers fire --scheduled failed: %v\n", err)
-				os.Exit(1)
-			}
+			dieIfErr("hq triggers fire --scheduled failed", err)
 			if *asJSON {
 				printJSON(map[string]interface{}{
 					"schedule":   targetID,
@@ -1534,10 +1476,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 			return
 		}
 		actions, err := kernel.FireScheduleOnce(vaultDir, targetID, *bypassPrecheck, *dryRun, now)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq triggers fire failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq triggers fire failed", err)
 		if *asJSON {
 			printJSON(map[string]interface{}{
 				"schedule": targetID,
@@ -1554,7 +1493,7 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown triggers subcommand %q (expected list, pause, resume, tick, fire)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown triggers subcommand %q (expected list, pause, resume, fire)\n", sub)
 		os.Exit(1)
 	}
 }
@@ -1598,7 +1537,7 @@ func runDispatchCLI(vaultDir string, args []string) {
 		res := extension.ResolveSkillDispatch(vaultDir, skillName)
 		tier := "routine"
 		if skillName == "sleep-consolidate" {
-			tier = "deep_routine"
+			tier = "deep-medium"
 		}
 		if trigID == "" {
 			if cfg, _ := kernel.LoadEffectiveTriggers(vaultDir); cfg != nil {

@@ -4,6 +4,8 @@
 - **Date:** 2026-11-07
 - **References:** [PRD-0002](../product/0002-open-workflows-and-skills.md), [RFC-0001](../design/0001-vault-and-task-isolation.md)
 
+> **Evolution Note:** Core OS skills moved to `.agents/plugins/agy-hq/skills/` and opt-in starter/user skills moved to `templates/skills/` → `<vault>/skills/` ([RFC-0015](../design/0015-global-plugin-packaging.md), [RFC-0019](../design/0019-two-tier-rsi-vault-overlay.md)).
+
 ---
 
 ## Context

@@ -1,7 +1,9 @@
 # RFC-0004: Silent Gatekeeper, Quota Circuit Breaker & Channel Adapters
 
-- **Status:** Approved
+- **Status:** Implemented
 - **Related Docs:** [ADR-0004](../decisions/0004-remote-control-first-pluggable-channels.md), [04 — Antigravity Audit §1 & §3](../research/04_antigravity_audit.md)
+
+> **Superseded / Extended By:** [RFC-0014](./0014-proactive-engine-and-living-context.md) & [RFC-0018](./0018-always-on-agent-runtime-hardening.md) (`hq daemon` gatekeepers, `internal/events`, `hq outbox`), [RFC-0015](./0015-global-plugin-packaging.md) (`sidecar://agy-hq-console/`), [RFC-0017d](./0017d-enterprise-extensibility-and-portability.md) (3-family model tier routing replacing `--model=flash`), and [RFC-0023](./0023-front-desk-channel-bridge.md) (`hq-channel-bridge/v1` companion-pack protocol replacing compiled-in `ChannelAdapter` / `hq notify`).
 
 ---
 

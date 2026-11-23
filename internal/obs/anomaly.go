@@ -151,7 +151,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				thresh = cfg.CritContextTokens
 			}
 			anomalies = append(anomalies, TokenAnomaly{
-				ID:             fmt.Sprintf("A1-%s", shortConvID(cid)),
+				ID:             fmt.Sprintf("A1-%s", store.ShortConvID(cid)),
 				Code:           "A1",
 				Kind:           "FrontDeskContextBloat",
 				Severity:       sev,
@@ -176,7 +176,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				sev = "CRITICAL"
 			}
 			anomalies = append(anomalies, TokenAnomaly{
-				ID:             fmt.Sprintf("A2-%s", shortConvID(cid)),
+				ID:             fmt.Sprintf("A2-%s", store.ShortConvID(cid)),
 				Code:           "A2",
 				Kind:           "ColdCacheThrash",
 				Severity:       sev,
@@ -186,7 +186,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				Summary: fmt.Sprintf(
 					"%s (%s) has %.1f%% prefix cache hit ratio across %d turns (peak context %s, uncached burn %s).",
 					cm.Title,
-					shortConvID(cid),
+					store.ShortConvID(cid),
 					cm.Self.CacheHitRatio*100.0,
 					cm.Self.TurnCount,
 					FormatTokensCompact(cm.Self.PeakContextTokens),
@@ -237,7 +237,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 					}
 				}
 				anomalies = append(anomalies, TokenAnomaly{
-					ID:             fmt.Sprintf("A3-%s-T%d", shortConvID(cid), t.TurnIndex),
+					ID:             fmt.Sprintf("A3-%s-T%d", store.ShortConvID(cid), t.TurnIndex),
 					Code:           "A3",
 					Kind:           "RunawayTurnBurn",
 					Severity:       sev,
@@ -249,7 +249,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 						"Turn #%d in %s (%s) consumed %s (gross %s, CHR %.1f%%).",
 						t.TurnIndex,
 						cm.Title,
-						shortConvID(cid),
+						store.ShortConvID(cid),
 						strings.Join(reasons, ", "),
 						FormatTokensCompact(t.GrossTokens),
 						t.CacheHitRatio*100.0,
@@ -265,7 +265,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 		if (cm.Kind == "subagent" || cm.Kind == "nested_subagent") && cm.Tier == "deep" &&
 			(cm.Self.UncachedTokens >= 300_000 || cm.Self.GrossTokens >= 2_500_000) {
 			anomalies = append(anomalies, TokenAnomaly{
-				ID:             fmt.Sprintf("A4-%s", shortConvID(cid)),
+				ID:             fmt.Sprintf("A4-%s", store.ShortConvID(cid)),
 				Code:           "A4",
 				Kind:           "TierMisroutingBurn",
 				Severity:       "WARN",
@@ -275,7 +275,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				Summary: fmt.Sprintf(
 					"Deep-tier subagent %s (%s, model: %s) burned %s uncached (%s gross, %.0f QBU).",
 					cm.Title,
-					shortConvID(cid),
+					store.ShortConvID(cid),
 					cm.Model,
 					FormatTokensCompact(cm.Self.UncachedTokens),
 					FormatTokensCompact(cm.Self.GrossTokens),
@@ -420,11 +420,4 @@ func ResetBudgetCircuitBreaker(vaultDir string) error {
 	q.CircuitOpen = false
 	q.CircuitReason = ""
 	return kernel.SaveQuota(vaultDir, q)
-}
-
-func shortConvID(cid string) string {
-	if len(cid) > 8 {
-		return cid[:8]
-	}
-	return cid
 }

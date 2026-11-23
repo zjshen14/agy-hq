@@ -340,8 +340,8 @@ func main() { fmt.Println("nightly=PASS token=" + "ghp_" + strings.Repeat("a", 3
 	}
 
 	// Verify CONSOLE.md surfaces Delegated Peers section and `hq delegate audit` logs activity.
-	if out, err := env.run("", "console", "--sync"); err != nil {
-		t.Fatalf("hq console --sync failed: %v (%s)", err, out)
+	if out, err := env.run("", "console"); err != nil {
+		t.Fatalf("hq console failed: %v (%s)", err, out)
 	}
 	consoleBytes, _ := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
 	if !strings.Contains(string(consoleBytes), "Delegated Peers") {

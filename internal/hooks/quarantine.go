@@ -265,11 +265,6 @@ func strictArgv(cmdLine string) ([]string, error) {
 	return argv, nil
 }
 
-func isHQBinaryToken(bin string) bool {
-	slash := filepath.ToSlash(strings.TrimSpace(bin))
-	return slash == "hq" || slash == "./bin/hq" || slash == "bin/hq" || strings.HasSuffix(slash, "/hq")
-}
-
 // shellQuoteSingle wraps s in POSIX single quotes (`'...'`), escaping embedded single quotes safely.
 func shellQuoteSingle(s string) string {
 	if s == "" {
@@ -316,7 +311,7 @@ func parseCanonicalHQApprove(cmdLine string) (bin, propID, shaPrefix string, err
 	if err != nil {
 		return "", "", "", fmt.Errorf("`hq approve` must be a single unchained command without shell metacharacters: %w", err)
 	}
-	if len(argv) < 3 || !isHQBinaryToken(argv[0]) || argv[1] != "approve" {
+	if len(argv) < 3 || !authz.IsHQBinaryToken(argv[0]) || argv[1] != "approve" {
 		return "", "", "", fmt.Errorf("canonical `hq approve` syntax required: `hq approve <proposal-id> --sha256=<prefix>`")
 	}
 	for _, a := range argv[2:] {

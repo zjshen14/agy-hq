@@ -454,7 +454,7 @@ func TestRunWorkspaceMaintenanceEmptyLedgerDoesNothing(t *testing.T) {
 	vaultDir := newWorkspaceTestVault(t)
 	fs := newFakeWS(t, vaultDir)
 	registerLiveTask(t, vaultDir, "idle-task", "task")
-	rep, err := RunWorkspaceMaintenance(vaultDir, time.Now())
+	rep, err := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, time.Now())
 	if err != nil || rep.Changed() {
 		t.Fatalf("expected a no-op tick: %+v err=%v", rep, err)
 	}
@@ -498,7 +498,7 @@ func TestRunWorkspaceMaintenanceDrainsProbeCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rep, err := RunWorkspaceMaintenance(vaultDir, time.Now())
+	rep, err := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func TestRunWorkspaceMaintenanceRefreshesOrphanedOpenChangeWorkspaces(t *testing
 	setFreshCache(t, vaultDir, key, time.Now().Add(-time.Hour), workspace.StateClean, "", inReview("c-5", false))
 	fs.set("finished", workspace.StateClean, landed("c-5"))
 
-	rep, err := RunWorkspaceMaintenance(vaultDir, time.Now())
+	rep, err := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, time.Now())
 	if err != nil || rep.Refreshed != 1 || rep.LandedNotified != 1 {
 		t.Fatalf("expected the orphan to be refreshed and its landing noticed: %+v err=%v", rep, err)
 	}
@@ -576,7 +576,7 @@ func TestRunWorkspaceMaintenanceRefreshCadenceBudgetAndLandedDedup(t *testing.T)
 	fs.set("due-task", workspace.StateClean, landed("c-1"))
 	fs.resetCalls()
 
-	rep, err := RunWorkspaceMaintenance(vaultDir, now)
+	rep, err := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,11 +593,11 @@ func TestRunWorkspaceMaintenanceRefreshCadenceBudgetAndLandedDedup(t *testing.T)
 
 	// Next tick at the same time: nothing is due. Forcing it due again does not re-notify.
 	fs.resetCalls()
-	if rep, _ := RunWorkspaceMaintenance(vaultDir, now); rep.Refreshed != 0 || len(fs.callsWith("status:")) != 0 {
+	if rep, _ := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, now); rep.Refreshed != 0 || len(fs.callsWith("status:")) != 0 {
 		t.Fatalf("nothing should be due right after a refresh: %+v", rep)
 	}
 	later := now.Add(11 * time.Minute)
-	if rep, _ := RunWorkspaceMaintenance(vaultDir, later); rep.Refreshed != 2 || rep.LandedNotified != 0 {
+	if rep, _ := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, later); rep.Refreshed != 2 || rep.LandedNotified != 0 {
 		t.Fatalf("expected both bound entries refreshed without new notices: %+v", rep)
 	}
 	if items, _ := outbox.List(vaultDir, outbox.TierBriefRollup, "", time.Now()); len(items) != 1 {
@@ -607,7 +607,7 @@ func TestRunWorkspaceMaintenanceRefreshCadenceBudgetAndLandedDedup(t *testing.T)
 	// On-demand providers (refresh 0) are never refreshed by the daemon.
 	fs.refreshSecs = 0
 	fs.resetCalls()
-	if rep, _ := RunWorkspaceMaintenance(vaultDir, later.Add(time.Hour)); rep.Refreshed != 0 || len(fs.callsWith("status:")) != 0 {
+	if rep, _ := RunWorkspaceMaintenanceContext(context.Background(), vaultDir, later.Add(time.Hour)); rep.Refreshed != 0 || len(fs.callsWith("status:")) != 0 {
 		t.Fatalf("refresh 0 means on demand only: %+v", rep)
 	}
 
@@ -618,7 +618,7 @@ func TestRunWorkspaceMaintenanceRefreshCadenceBudgetAndLandedDedup(t *testing.T)
 		setFreshCache(t, vaultDir, acq.Entry.Key(), now.Add(-2*time.Hour), workspace.StateClean, "")
 	}
 	fs.resetCalls()
-	rep, _ = RunWorkspaceMaintenance(vaultDir, later.Add(2*time.Hour))
+	rep, _ = RunWorkspaceMaintenanceContext(context.Background(), vaultDir, later.Add(2*time.Hour))
 	if rep.Refreshed != MaxWorkspaceRefreshesPerTick || len(fs.callsWith("status:")) != MaxWorkspaceRefreshesPerTick {
 		t.Fatalf("expected the per-tick budget to cap refreshes at %d: %+v", MaxWorkspaceRefreshesPerTick, rep)
 	}

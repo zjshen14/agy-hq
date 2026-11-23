@@ -24,11 +24,6 @@ const (
 	MaxMemoryLineBytes      = 180
 	MaxUserAdvisoryBytes    = 2000
 	MaxFactStatementRunes   = 240
-	MaxHotActiveFacts       = 50
-	MaxTopicPages           = 25
-	MaxTopicLines           = 120
-	MaxTopicBytes           = 6000
-	MaxTopicsTotalBytes     = 100000
 	MaxPlaybookLines        = 25
 	MaxPlaybookBytes        = 1200
 	MaxSessionFullBytes     = 12000
@@ -356,18 +351,6 @@ func CompactFacts(vaultDir string) (int, int, error) {
 		return nil
 	})
 	return rawLines, afterLines, err
-}
-
-// AddFact appends or updates a bi-temporal fact in local/memory/facts.jsonl (backward-compatible wrapper).
-func AddFact(vaultDir, id, topic, statement, sourceConv string, verified bool) (Fact, error) {
-	f, _, err := AddFactWithOptions(vaultDir, AddFactOptions{
-		ID:         id,
-		Topic:      topic,
-		Statement:  statement,
-		SourceConv: sourceConv,
-		Verified:   verified,
-	})
-	return f, err
 }
 
 // AddFactWithOptions adds or updates a fact under store.RankMemory with atomic 0600 persistence,

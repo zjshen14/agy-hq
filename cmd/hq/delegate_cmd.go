@@ -15,27 +15,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/webui"
 )
 
-type multiStringFlag []string
-
-func (m *multiStringFlag) String() string { return strings.Join(*m, "\n") }
-func (m *multiStringFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
-}
-
-func parseKVFlags(items []string) (map[string]string, error) {
-	out := make(map[string]string, len(items))
-	for _, raw := range items {
-		k, v, ok := strings.Cut(raw, "=")
-		k = strings.TrimSpace(k)
-		if !ok || k == "" {
-			return nil, fmt.Errorf("expected key=value pair, got %q", raw)
-		}
-		out[k] = v
-	}
-	return out, nil
-}
-
 // requireInteractiveOwnerOrCLI enforces that privileged management commands (`show`, `ack-nudge`)
 // cannot execute inside tainted, [Auto], or subagent sessions (RFC-0026 §6.1 / §8.3).
 func requireInteractiveOwnerOrCLI(vaultDir, cmdLabel string) (string, bool) {
@@ -366,7 +345,7 @@ func runDelegateCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
-		fmt.Printf("Applied approved delegate policy (sha256:%s).\n", shaHex[:12])
+		fmt.Printf("Applied approved delegate policy (sha256:%s).\n", shortPrefix(shaHex, 12))
 
 	case "apply-reply":
 		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {
@@ -488,27 +467,19 @@ func runDelegateCLI(vaultDir string, args []string) {
 		fmt.Println(out)
 
 	case "nudge":
-		fs := flag.NewFlagSet("delegate nudge", flag.ExitOnError)
+		fs, asJSON := newJSONFlagSet("delegate nudge")
 		reqFlag := fs.String("request", "", "Request ID")
 		nudgeFlag := fs.String("nudge", "", "Granted nudge ID")
-		var params multiStringFlag
+		var params repeatFlag
 		fs.Var(&params, "param", "Typed nudge parameter key=value (repeatable)")
-		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
 		if strings.TrimSpace(*nudgeFlag) == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq delegate nudge --request=<id> --nudge=<id> [--param k=v ...]")
-			os.Exit(1)
+			fatalf("usage: hq delegate nudge --request=<id> --nudge=<id> [--param k=v ...]")
 		}
-		kv, err := parseKVFlags(params)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq delegate nudge invalid --param: %v\n", err)
-			os.Exit(1)
-		}
+		kv, err := parseKVFlags(nil, params, true)
+		dieIfErr("hq delegate nudge invalid --param", err)
 		res, err := delegates.ExecuteNudge(context.Background(), vaultDir, os.Getenv("ANTIGRAVITY_CONVERSATION_ID"), *reqFlag, *nudgeFlag, kv, false)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq delegate nudge failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq delegate nudge failed", err)
 		if *asJSON {
 			printJSON(res)
 			return
@@ -516,34 +487,24 @@ func runDelegateCLI(vaultDir string, args []string) {
 		fmt.Println(res.Detail)
 
 	case "reply":
-		fs := flag.NewFlagSet("delegate reply", flag.ExitOnError)
+		fs, asJSON := newJSONFlagSet("delegate reply")
 		reqFlag := fs.String("request", "", "Request ID")
 		bodyFlag := fs.String("body", "", "Single-line reply body")
-		var lines multiStringFlag
+		var lines repeatFlag
 		fs.Var(&lines, "line", "Repeatable reply line (joined with \\n)")
 		bodyB64 := fs.String("body-b64", "", "RFC-4648 base64-encoded UTF-8 multiline reply body")
-		var fields multiStringFlag
+		var fields repeatFlag
 		fs.Var(&fields, "field", "Typed field key=value for structured_template egress (repeatable)")
-		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(rest)
-		kv, err := parseKVFlags(fields)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq delegate reply invalid --field: %v\n", err)
-			os.Exit(1)
-		}
+		kv, err := parseKVFlags(nil, fields, true)
+		dieIfErr("hq delegate reply invalid --field", err)
 		var rawBody string
 		if len(kv) == 0 {
 			rawBody, err = delegates.DecodeReplyBody(*bodyFlag, lines, *bodyB64)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hq delegate reply failed: %v\n", err)
-				os.Exit(1)
-			}
+			dieIfErr("hq delegate reply failed", err)
 		}
 		res, err := delegates.SendReply(context.Background(), vaultDir, os.Getenv("ANTIGRAVITY_CONVERSATION_ID"), *reqFlag, rawBody, kv, false)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq delegate reply failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq delegate reply failed", err)
 		if *asJSON {
 			printJSON(res)
 			return

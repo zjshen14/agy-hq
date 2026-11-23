@@ -1,42 +1,11 @@
 package channels
 
 import (
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
-
-var (
-	reHTTPScheme  = regexp.MustCompile(`(?i)\bhttp://`)
-	reHTTPSScheme = regexp.MustCompile(`(?i)\bhttps://`)
-)
-
-// DefangURLs neutralizes http:// and https:// schemes in tainted notification bodies
-// so external chat clients never auto-fetch attacker tracking beacons (`Finding R4`).
-func DefangURLs(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return ""
-	}
-	out := reHTTPSScheme.ReplaceAllString(s, "hxxps://")
-	out = reHTTPScheme.ReplaceAllString(out, "hxxp://")
-	return out
-}
-
-func truncateUTF8Runes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return s
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	if maxRunes <= 3 {
-		return string(runes[:maxRunes])
-	}
-	return string(runes[:maxRunes-3]) + "..."
-}
 
 // SanitizeAndFormatNotification applies SanitizeAntiCue, tainted URL defanging, privacy_mode,
 // and UTF-8 rune truncation uniformly across every outbound bridge notification.
@@ -79,10 +48,10 @@ func SanitizeAndFormatNotification(in NotificationPayload, pol ResolvedPolicy) N
 	out.Title = outbox.SanitizeAntiCue(in.Title, 200)
 	body := outbox.SanitizeAntiCue(in.BodyMarkdown, maxRunes)
 	if in.TaintedOrigin {
-		out.Title = DefangURLs(out.Title)
-		body = DefangURLs(body)
+		out.Title = store.DefangURLs(out.Title)
+		body = store.DefangURLs(body)
 	}
-	out.BodyMarkdown = truncateUTF8Runes(body, maxRunes)
+	out.BodyMarkdown = store.TruncateRunes(body, maxRunes)
 	return out
 }
 

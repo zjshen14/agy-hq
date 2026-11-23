@@ -3,10 +3,8 @@ package connector
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"net"
 	"net/http"
 	"net/mail"
@@ -21,7 +19,6 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/extension"
-	"github.com/zjshen14/agy-hq/internal/hostpaths"
 )
 
 // OfferApplyEnvelope is the immutable JSON payload stored in `<vault>/approvals/payloads/<id>.json`
@@ -226,26 +223,8 @@ func resolveVerifiedCLIBinary(vaultDir string, rc ResolvedConnector) (string, er
 	}
 
 	// Built-in host binary discovery via hostpaths (never auto-downloading unpinned plugins!)
-	binName := rc.ID
-	if lp, err := exec.LookPath(binName); err == nil && lp != "" {
-		return lp, nil
-	}
-	roots := hostpaths.Resolve(vaultDir)
-	if roots.AppDataDir != "" {
-		matches, _ := filepath.Glob(filepath.Join(roots.AppDataDir, "plugin_data", binName, "bin", binName+"-*"))
-		if len(matches) > 0 {
-			return matches[0], nil
-		}
-	}
-	if roots.PluginsDir != "" {
-		launcher := filepath.Join(roots.PluginsDir, binName, "skills", binName, "scripts", binName)
-		if st, err := os.Stat(launcher); err == nil && !st.IsDir() {
-			return launcher, nil
-		}
-	}
-	sysMatches, _ := filepath.Glob("/usr/share/antigravity/resources/app/extensions/antigravity/bin/" + binName + "-*")
-	if len(sysMatches) > 0 {
-		return sysMatches[0], nil
+	if bin := FindHostPluginBinary(vaultDir, rc.ID); bin != "" {
+		return bin, nil
 	}
 	return "", &ProtocolError{
 		Code:    "permanent",
@@ -797,145 +776,24 @@ func evalJSONMapConnector(ctx context.Context, vaultDir string, rc ResolvedConne
 
 // --- Built-in Gmail Driver (Mock + Direct OAuth w/ Refresh Expiry + CLI Transport) ---
 
-type rawMIMEPart struct {
-	MimeType string `json:"mimeType"`
-	Filename string `json:"filename"`
-	Body     struct {
-		AttachmentID string `json:"attachmentId"`
-		Size         int64  `json:"size"`
-		Data         string `json:"data"`
-	} `json:"body"`
-	Headers []struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	} `json:"headers"`
-	Parts []rawMIMEPart `json:"parts"`
-}
-
-type rawMailMsg struct {
-	ID           string      `json:"id"`
-	ThreadID     string      `json:"threadId"`
-	Snippet      string      `json:"snippet"`
-	InternalDate string      `json:"internalDate"`
-	From         string      `json:"from"`
-	To           string      `json:"to"`
-	Cc           string      `json:"cc"`
-	Subject      string      `json:"subject"`
-	Date         string      `json:"date"`
-	PlainBody    string      `json:"plainBody"`
-	HTMLBody     string      `json:"htmlBody"`
-	AuthResults  string      `json:"authResults"`
-	LabelIDs     []string    `json:"labelIds"`
-	Payload      rawMIMEPart `json:"payload"`
-}
-
-func decodeB64URL(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
+func normalizeRawMail(rm RawMailMessage) (id, threadID, from, to, cc, subject, ts, body, authRes string) {
+	p := ParseRawMail(rm)
+	body = p.PlainBody
+	if body == "" {
+		body = p.HTMLBody
 	}
-	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
-		return string(b)
+	if body == "" {
+		body = p.Snippet
 	}
-	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
-		return string(b)
-	}
-	return ""
-}
-
-func extractMIMEPlain(p rawMIMEPart) (string, string) {
-	var plainOut, htmlOut string
-	var walk func(part rawMIMEPart)
-	walk = func(part rawMIMEPart) {
-		mt := strings.ToLower(part.MimeType)
-		if mt == "text/plain" && part.Body.Data != "" && plainOut == "" {
-			plainOut = decodeB64URL(part.Body.Data)
-		} else if mt == "text/html" && part.Body.Data != "" && htmlOut == "" {
-			htmlOut = decodeB64URL(part.Body.Data)
-		}
-		for _, sub := range part.Parts {
-			walk(sub)
-		}
-	}
-	walk(p)
-	return plainOut, htmlOut
-}
-
-func normalizeRawMail(rm rawMailMsg) (id, threadID, from, to, cc, subject, ts, body, authRes string) {
-	id = strings.TrimSpace(rm.ID)
-	threadID = strings.TrimSpace(rm.ThreadID)
-	if threadID == "" {
-		threadID = id
-	}
-	from = rm.From
-	to = rm.To
-	cc = rm.Cc
-	subject = rm.Subject
-	ts = rm.Date
-	authRes = rm.AuthResults
-	for _, h := range rm.Payload.Headers {
-		switch strings.ToLower(h.Name) {
-		case "from":
-			if from == "" {
-				from = h.Value
-			}
-		case "to":
-			if to == "" {
-				to = h.Value
-			}
-		case "cc":
-			if cc == "" {
-				cc = h.Value
-			}
-		case "subject":
-			if subject == "" {
-				subject = h.Value
-			}
-		case "date":
-			if ts == "" {
-				ts = h.Value
-			}
-		case "authentication-results":
-			if authRes == "" {
-				authRes = h.Value
-			}
-		}
-	}
-	plainB, htmlB := extractMIMEPlain(rm.Payload)
-	if rm.PlainBody != "" {
-		plainB = rm.PlainBody
-	}
-	if plainB != "" {
-		body = plainB
-	} else if rm.HTMLBody != "" {
-		body = rm.HTMLBody
-	} else if htmlB != "" {
-		body = htmlB
-	} else {
-		body = html.UnescapeString(rm.Snippet)
-	}
-	if rm.InternalDate != "" {
-		if ms, err := strconv.ParseInt(rm.InternalDate, 10, 64); err == nil && ms > 0 {
-			ts = time.UnixMilli(ms).UTC().Format(time.RFC3339)
-		}
-	}
-	return
+	return p.ID, p.ThreadID, p.From, p.To, p.Cc, p.Subject, p.Timestamp, body, p.AuthResults
 }
 
 func hasConnectorMock(vaultDir, connID string) bool {
 	switch connID {
 	case "gmail":
-		if os.Getenv("HQ_GMAIL_MOCK_DIR") != "" {
-			return true
-		}
-		st, err := os.Stat(filepath.Join(vaultDir, "memory", "gmail", "mock"))
-		return err == nil && st.IsDir()
+		return MockDir(vaultDir, "HQ_GMAIL_MOCK_DIR", "gmail") != ""
 	case "gchat":
-		if os.Getenv("HQ_GCHAT_MOCK_DIR") != "" {
-			return true
-		}
-		st, err := os.Stat(filepath.Join(vaultDir, "memory", "gchat", "mock"))
-		return err == nil && st.IsDir()
+		return MockDir(vaultDir, "HQ_GCHAT_MOCK_DIR", "gchat") != ""
 	case "gcalendar":
 		_, err := os.Stat(filepath.Join(vaultDir, "memory", "gcalendar", "mock.json"))
 		return err == nil
@@ -943,43 +801,88 @@ func hasConnectorMock(vaultDir, connID string) bool {
 	return false
 }
 
-// RefreshableOAuthToken loads an OAuth token JSON and refreshes `access_token` when `expiry` has passed (or within 60s).
+func parseOAuthExpiry(expiry string, expiresAt json.RawMessage) (time.Time, bool) {
+	parseTS := func(raw string) (time.Time, bool) {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			return time.Time{}, false
+		}
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return t, true
+		}
+		if t, err := time.Parse("2006-01-02T15:04:05.999999999", s); err == nil {
+			return t.UTC(), true
+		}
+		return time.Time{}, false
+	}
+	if t, ok := parseTS(expiry); ok {
+		return t, true
+	}
+	raw := strings.TrimSpace(string(expiresAt))
+	if raw == "" || raw == "null" {
+		return time.Time{}, false
+	}
+	var asStr string
+	if json.Unmarshal(expiresAt, &asStr) == nil {
+		if t, ok := parseTS(asStr); ok {
+			return t, true
+		}
+		if sec, err := strconv.ParseFloat(strings.TrimSpace(asStr), 64); err == nil && sec > 0 {
+			return time.Unix(int64(sec), 0).UTC(), true
+		}
+		return time.Time{}, false
+	}
+	var asNum float64
+	if json.Unmarshal(expiresAt, &asNum) == nil && asNum > 0 {
+		return time.Unix(int64(asNum), 0).UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// RefreshableOAuthToken loads an OAuth token JSON and refreshes `access_token` when `expiry` (or `expires_at`) has passed (or within 60s).
 func RefreshableOAuthToken(tokenPath string) (string, error) {
+	tokenPath = strings.TrimSpace(tokenPath)
+	if tokenPath == "" {
+		return "", &ProtocolError{Code: "auth_expired", Message: "OAuth token path is empty"}
+	}
 	raw, err := os.ReadFile(tokenPath)
 	if err != nil {
 		return "", err
 	}
 	var tok struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		TokenURI     string `json:"token_uri"`
-		Expiry       string `json:"expiry"`
+		AccessToken  string          `json:"access_token"`
+		RefreshToken string          `json:"refresh_token"`
+		ClientID     string          `json:"client_id"`
+		ClientSecret string          `json:"client_secret"`
+		TokenURI     string          `json:"token_uri"`
+		Expiry       string          `json:"expiry"`
+		ExpiresAt    json.RawMessage `json:"expires_at"`
 	}
 	if err := json.Unmarshal(raw, &tok); err != nil {
 		return "", err
 	}
 	expired := false
-	if strings.TrimSpace(tok.Expiry) != "" {
-		if expTime, pErr := time.Parse(time.RFC3339, strings.TrimSpace(tok.Expiry)); pErr == nil {
-			if !time.Now().Add(60 * time.Second).Before(expTime) {
-				expired = true
-			}
+	if expTime, hasExp := parseOAuthExpiry(tok.Expiry, tok.ExpiresAt); hasExp {
+		if !time.Now().Add(60 * time.Second).Before(expTime) {
+			expired = true
 		}
 	}
-	if tok.AccessToken != "" && !expired {
-		return strings.TrimSpace(tok.AccessToken), nil
+	accessToken := strings.TrimSpace(tok.AccessToken)
+	if accessToken != "" && !expired {
+		return accessToken, nil
 	}
-	if tok.RefreshToken != "" && tok.ClientID != "" && tok.ClientSecret != "" {
+	refreshToken := strings.TrimSpace(tok.RefreshToken)
+	clientID := strings.TrimSpace(tok.ClientID)
+	clientSecret := strings.TrimSpace(tok.ClientSecret)
+	if refreshToken != "" && clientID != "" && clientSecret != "" {
 		tokenURI := strings.TrimSpace(tok.TokenURI)
 		if tokenURI == "" {
 			tokenURI = "https://oauth2.googleapis.com/token"
 		}
 		form := url.Values{}
-		form.Set("client_id", tok.ClientID)
-		form.Set("client_secret", tok.ClientSecret)
-		form.Set("refresh_token", tok.RefreshToken)
+		form.Set("client_id", clientID)
+		form.Set("client_secret", clientSecret)
+		form.Set("refresh_token", refreshToken)
 		form.Set("grant_type", "refresh_token")
 		req, err := http.NewRequest(http.MethodPost, tokenURI, strings.NewReader(form.Encode()))
 		if err != nil {
@@ -992,16 +895,23 @@ func RefreshableOAuthToken(tokenPath string) (string, error) {
 			return "", err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusBadRequest {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden {
 			return "", &ProtocolError{Code: "auth_expired", Message: fmt.Sprintf("OAuth refresh_token rejected (HTTP %d)", resp.StatusCode)}
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", &ProtocolError{Code: "transient", Message: fmt.Sprintf("OAuth token refresh failed (HTTP %d)", resp.StatusCode)}
 		}
 		var refreshed struct {
 			AccessToken string `json:"access_token"`
 			ExpiresIn   int    `json:"expires_in"`
 		}
-		if json.NewDecoder(resp.Body).Decode(&refreshed) == nil && refreshed.AccessToken != "" {
-			return strings.TrimSpace(refreshed.AccessToken), nil
+		if err := json.NewDecoder(resp.Body).Decode(&refreshed); err != nil {
+			return "", &ProtocolError{Code: "transient", Message: fmt.Sprintf("decode OAuth refresh response: %v", err)}
 		}
+		if newTok := strings.TrimSpace(refreshed.AccessToken); newTok != "" {
+			return newTok, nil
+		}
+		return "", &ProtocolError{Code: "auth_expired", Message: "OAuth token refresh returned empty access_token"}
 	}
 	if expired {
 		return "", &ProtocolError{Code: "auth_expired", Message: "OAuth access_token expired and no valid refresh_token available"}
@@ -1020,24 +930,22 @@ func resolveTokenPath(vaultDir string, ref *string) string {
 	return filepath.Join(vaultDir, p)
 }
 
-func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConnector, alias string, accCfg AccountInstance, op, query, threadKey, pageToken string, maxItems int, allowDesktopScope bool) ([]rawMailMsg, string, bool, error) {
+func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConnector, alias string, accCfg AccountInstance, op, query, threadKey, pageToken string, maxItems int, allowDesktopScope bool) ([]RawMailMessage, string, bool, error) {
 	// 1. Mock directory
-	mockDir := strings.TrimSpace(os.Getenv("HQ_GMAIL_MOCK_DIR"))
-	if mockDir == "" {
-		cand := filepath.Join(vaultDir, "memory", "gmail", "mock")
-		if st, err := os.Stat(cand); err == nil && st.IsDir() {
-			mockDir = cand
-		}
-	}
+	mockDir := MockDir(vaultDir, "HQ_GMAIL_MOCK_DIR", "gmail")
 	if mockDir != "" {
 		if op == "thread" {
+			cleanThreadKey, tErr := ValidateSafeID("gmail thread ID", threadKey)
+			if tErr != nil {
+				return nil, "", true, tErr
+			}
 			for _, tp := range []string{
-				filepath.Join(mockDir, "thread-"+threadKey+".json"),
-				filepath.Join(mockDir, "threads", threadKey+".json"),
+				filepath.Join(mockDir, "thread-"+cleanThreadKey+".json"),
+				filepath.Join(mockDir, "threads", cleanThreadKey+".json"),
 			} {
 				if b, err := os.ReadFile(tp); err == nil {
 					var wrap struct {
-						Messages []rawMailMsg `json:"messages"`
+						Messages []RawMailMessage `json:"messages"`
 					}
 					if json.Unmarshal(b, &wrap) == nil && len(wrap.Messages) > 0 {
 						return wrap.Messages, "", true, nil
@@ -1047,16 +955,16 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 		}
 		mp := filepath.Join(mockDir, "messages.json")
 		if b, err := os.ReadFile(mp); err == nil {
-			var list []rawMailMsg
+			var list []RawMailMessage
 			if json.Unmarshal(b, &list) != nil {
 				var wrap struct {
-					Messages []rawMailMsg `json:"messages"`
+					Messages []RawMailMessage `json:"messages"`
 				}
 				_ = json.Unmarshal(b, &wrap)
 				list = wrap.Messages
 			}
 			if op == "thread" {
-				var filtered []rawMailMsg
+				var filtered []RawMailMessage
 				for _, m := range list {
 					if m.ThreadID == threadKey || m.ID == threadKey {
 						filtered = append(filtered, m)
@@ -1097,7 +1005,7 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 				return nil, "", false, fmt.Errorf("Gmail thread REST HTTP %d", resp.StatusCode)
 			}
 			var th struct {
-				Messages []rawMailMsg `json:"messages"`
+				Messages []RawMailMessage `json:"messages"`
 			}
 			if err := json.NewDecoder(resp.Body).Decode(&th); err != nil {
 				return nil, "", false, err
@@ -1135,7 +1043,7 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 			return nil, "", false, err
 		}
-		var msgs []rawMailMsg
+		var msgs []RawMailMessage
 		for _, stub := range listResp.Messages {
 			mu := fmt.Sprintf("%s/gmail/v1/users/me/messages/%s?format=full", apiBase, url.PathEscape(stub.ID))
 			mReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, mu, nil)
@@ -1144,7 +1052,7 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 			if mErr != nil {
 				continue
 			}
-			var full rawMailMsg
+			var full RawMailMessage
 			_ = json.NewDecoder(mResp.Body).Decode(&full)
 			_ = mResp.Body.Close()
 			if full.ID != "" {
@@ -1176,13 +1084,13 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 	if err != nil {
 		return nil, "", false, err
 	}
-	var arr []rawMailMsg
+	var arr []RawMailMessage
 	if json.Unmarshal(stdout, &arr) == nil {
 		return arr, "", false, nil
 	}
 	var wrap struct {
-		Messages      []rawMailMsg `json:"messages"`
-		NextPageToken string       `json:"nextPageToken"`
+		Messages      []RawMailMessage `json:"messages"`
+		NextPageToken string           `json:"nextPageToken"`
 	}
 	if err := json.Unmarshal(stdout, &wrap); err != nil {
 		return nil, "", false, fmt.Errorf("decode Gmail CLI JSON: %w", err)
@@ -1190,7 +1098,7 @@ func loadGmailRawMessages(ctx context.Context, vaultDir string, rc ResolvedConne
 	return wrap.Messages, wrap.NextPageToken, false, nil
 }
 
-func classifyGmailAutomationAndUrgency(rm rawMailMsg, lowerSender, lowerSubj, body string) (isBulkAutomated, hasSecurity, hasSchedule bool) {
+func classifyGmailAutomationAndUrgency(rm RawMailMessage, lowerSender, lowerSubj, body string) (isBulkAutomated, hasSecurity, hasSchedule bool) {
 	hasBulkLabel := false
 	for _, lbl := range rm.LabelIDs {
 		switch strings.ToUpper(strings.TrimSpace(lbl)) {
@@ -1258,7 +1166,7 @@ func classifyGmailAutomationAndUrgency(rm rawMailMsg, lowerSender, lowerSubj, bo
 	return isBulkAutomated, hasSecurity, hasSchedule
 }
 
-func computeAuthenticatedEmailParticipants(ownerEmail string, msgs []rawMailMsg, isMock bool) []string {
+func computeAuthenticatedEmailParticipants(ownerEmail string, msgs []RawMailMessage, isMock bool) []string {
 	ownerEmail = strings.ToLower(strings.TrimSpace(ownerEmail))
 	authSet := make(map[string]bool)
 	if ownerEmail != "" {
@@ -1446,13 +1354,7 @@ func evalBuiltinGmail(ctx context.Context, vaultDir string, rc ResolvedConnector
 
 func evalBuiltinGChat(ctx context.Context, vaultDir string, rc ResolvedConnector, alias string, accCfg AccountInstance, req ProtocolRequest, allowDesktopScope bool) (ProtocolResponse, error) {
 	ownerEmail := strings.ToLower(strings.TrimSpace(accCfg.Email))
-	mockDir := strings.TrimSpace(os.Getenv("HQ_GCHAT_MOCK_DIR"))
-	if mockDir == "" {
-		cand := filepath.Join(vaultDir, "memory", "gchat", "mock")
-		if st, err := os.Stat(cand); err == nil && st.IsDir() {
-			mockDir = cand
-		}
-	}
+	mockDir := MockDir(vaultDir, "HQ_GCHAT_MOCK_DIR", "gchat")
 	if mockDir != "" {
 		mp := filepath.Join(mockDir, "messages.json")
 		raw, _ := os.ReadFile(mp)

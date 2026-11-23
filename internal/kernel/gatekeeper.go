@@ -241,8 +241,8 @@ func EvaluateDaemonGatekeepers(vaultDir string, now time.Time, forceCheck bool, 
 	return evaluateGatekeepersCore(vaultDir, "", now, forceCheck, true, dryRun)
 }
 
-// TickScheduleOnce evaluates a single schedule on a scheduler/sidecar tick (`hq triggers tick <id>`
-// or `hq triggers fire --scheduled <id>`), exiting cleanly with a non-empty skipReason and 0 actions
+// TickScheduleOnce evaluates a single schedule on a scheduler/sidecar tick (`hq triggers fire --scheduled <id>`),
+// exiting cleanly with a non-empty skipReason and 0 actions
 // when the schedule is unconfigured, paused/disabled, not due in the current cron minute, already
 // executed for the current cron slot, or is a `front_desk_cron` with no claimed Front Desk lease.
 func TickScheduleOnce(vaultDir, targetID string, dryRun bool, now time.Time) (actions []string, skipReason string, err error) {
@@ -520,7 +520,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				if trimmedOut != "" {
 					errMsg = errMsg + ": " + trimmedOut
 				}
-				errMsg = truncateRunes(errMsg, 240)
+				errMsg = store.TruncateRunes(errMsg, 240)
 				skillName := s.Skill
 				if skillName == "" {
 					skillName = s.ID
@@ -606,7 +606,7 @@ func evaluateGatekeepersCore(vaultDir, onlyFQID string, now time.Time, forceChec
 				})
 				continue
 			}
-			precheckDigest = truncateRunes(trimmedOut, 300)
+			precheckDigest = store.TruncateRunes(trimmedOut, 300)
 		} else {
 			shouldSpawn = true
 		}

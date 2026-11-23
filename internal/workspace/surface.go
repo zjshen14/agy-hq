@@ -169,11 +169,6 @@ func (s SurfaceEntry) Owners() []string {
 	return out
 }
 
-// StateCounts returns "<n> <state>" fragments for the entry's changes in lifecycle order (abandoned omitted).
-func (s SurfaceEntry) StateCounts() []string {
-	return changeStateCounts(s.Changes)
-}
-
 // changeSummaryOrder lists the change states summarized on surfaces, in lifecycle order. Abandoned changes are
 // omitted because they never block cleanup and carry no actionable information.
 var changeSummaryOrder = []struct {

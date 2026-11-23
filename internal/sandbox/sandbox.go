@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // Mode controls whether OS subprocess credential masking is applied.
@@ -48,31 +50,24 @@ func LoadConfig(vaultDir string) Config {
 		return cfg
 	}
 	inSandbox := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, line := range yamlmini.Lines(string(raw)) {
+		clean := yamlmini.StripComment(line)
+		if clean == "" {
 			continue
 		}
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		indent := yamlmini.LeadingIndent(line)
 		if indent == 0 {
-			inSandbox = strings.HasPrefix(trimmed, "sandbox:")
+			inSandbox = strings.HasPrefix(clean, "sandbox:")
 			continue
 		}
 		if !inSandbox {
 			continue
 		}
-		if idx := strings.Index(trimmed, ":"); idx > 0 {
-			key := strings.TrimSpace(trimmed[:idx])
-			val := strings.TrimSpace(trimmed[idx+1:])
-			if cIdx := strings.Index(val, " #"); cIdx >= 0 {
-				val = strings.TrimSpace(val[:cIdx])
-			}
-			val = strings.Trim(val, `"'`)
-			if key == "mode" {
-				switch strings.ToLower(val) {
-				case ModeAuto, ModeRequired, ModeOff:
-					cfg.Mode = strings.ToLower(val)
-				}
+		if key, rawVal, ok := yamlmini.SplitKV(clean); ok && key == "mode" {
+			val := strings.ToLower(yamlmini.UnquoteScalar(rawVal))
+			switch val {
+			case ModeAuto, ModeRequired, ModeOff:
+				cfg.Mode = val
 			}
 		}
 	}

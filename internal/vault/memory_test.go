@@ -30,17 +30,17 @@ func TestMemoryEngine_TopicDiscoveryAndFactLifecycle(t *testing.T) {
 		t.Fatalf("unexpected page[1]: %+v", pages[1])
 	}
 
-	// 2. Test AddFact, PruneFact, and LoadActiveFacts ID deduplication
-	f1, err := AddFact(vaultDir, "fact-100", "arch", "Old unverified assumption", "conv-1", false)
+	// 2. Test AddFactWithOptions, PruneFact, and LoadFactsState ID deduplication
+	f1, _, err := AddFactWithOptions(vaultDir, AddFactOptions{ID: "fact-100", Topic: "arch", Statement: "Old unverified assumption", SourceConv: "conv-1"})
 	if err != nil || f1.ID != "fact-100" {
-		t.Fatalf("AddFact f1 failed: %v", err)
+		t.Fatalf("AddFactWithOptions f1 failed: %v", err)
 	}
-	f2, err := AddFact(vaultDir, "", "arch", "Verified 4-layer memory hierarchy", "conv-2", true)
+	f2, _, err := AddFactWithOptions(vaultDir, AddFactOptions{Topic: "arch", Statement: "Verified 4-layer memory hierarchy", SourceConv: "conv-2", Verified: true})
 	if err != nil || f2.ID == "" {
-		t.Fatalf("AddFact f2 failed: %v", err)
+		t.Fatalf("AddFactWithOptions f2 failed: %v", err)
 	}
 
-	active, err := LoadActiveFacts(vaultDir, 10)
+	active, _, _, err := LoadFactsState(vaultDir)
 	if err != nil || len(active) != 2 {
 		t.Fatalf("expected 2 active facts, got %d (%v)", len(active), err)
 	}

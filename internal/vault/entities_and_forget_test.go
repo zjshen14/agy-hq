@@ -56,13 +56,13 @@ func TestSurgicalForgetCascadesAndUpdatesDenylist(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(vaultDir, "notes", "general"), 0o700)
 
 	// 1. Seed fact, MEMORY.md, topic page, entity dossier, and general note
-	f1, err := AddFact(vaultDir, "fact-secret-001", "project-zephyr", "Project Zephyr launch codename is Aurora-99.", "conv-1", true)
+	f1, _, err := AddFactWithOptions(vaultDir, AddFactOptions{ID: "fact-secret-001", Topic: "project-zephyr", Statement: "Project Zephyr launch codename is Aurora-99.", SourceConv: "conv-1", Verified: true})
 	if err != nil {
-		t.Fatalf("AddFact f1: %v", err)
+		t.Fatalf("AddFactWithOptions f1: %v", err)
 	}
-	_, err = AddFact(vaultDir, "fact-keep-002", "engineering", "Keep gofmt -s clean on all commits.", "conv-1", true)
+	_, _, err = AddFactWithOptions(vaultDir, AddFactOptions{ID: "fact-keep-002", Topic: "engineering", Statement: "Keep gofmt -s clean on all commits.", SourceConv: "conv-1", Verified: true})
 	if err != nil {
-		t.Fatalf("AddFact f2: %v", err)
+		t.Fatalf("AddFactWithOptions f2: %v", err)
 	}
 
 	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("# Memory\n- Active codename Aurora-99 for Project Zephyr\n- Standard Go stdlib architecture\n"), 0o600)

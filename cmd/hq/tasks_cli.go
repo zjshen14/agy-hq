@@ -224,10 +224,7 @@ func runClaimDeskCLI(vaultDir string, args []string) {
 	}
 	if prev, hadPrev := kernel.GetFrontDesk(vaultDir); hadPrev && prev.ConversationID != "" && prev.ConversationID != *convID {
 		if _, alreadyTracked := kernel.FindTaskByConversationID(vaultDir, prev.ConversationID); !alreadyTracked {
-			shortPrev := prev.ConversationID
-			if len(shortPrev) > 8 {
-				shortPrev = shortPrev[:8]
-			}
+			shortPrev := shortPrefix(prev.ConversationID, 8)
 			_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 				TaskSlug:       "headquarter-front-desk-" + shortPrev,
 				Title:          fmt.Sprintf("[Task:headquarter] Archived Front Desk Shift (%s)", shortPrev),
@@ -718,10 +715,6 @@ func runTasksCLI(vaultDir string, args []string) {
 			}
 			return
 
-		case "reopen":
-			runReopenTaskCLI(vaultDir, "hq tasks reopen", args[1:])
-			return
-
 		case "clean-nested":
 			fs := flag.NewFlagSet("tasks clean-nested", flag.ExitOnError)
 			asJSON := fs.Bool("json", false, "Output JSON")
@@ -747,6 +740,9 @@ func runTasksCLI(vaultDir string, args []string) {
 			}
 			fmt.Printf("Cleaned %d leaked nested/workflow task(s) and reconciled %d attribution(s).\n", len(removed), reconciled)
 			return
+
+		default:
+			fatalf("unknown tasks subcommand %q (expected stats, compact, sync-sidebar, pin, unpin, clean-nested; use 'hq reopen' to reopen a task)", args[0])
 		}
 	}
 
@@ -760,6 +756,9 @@ func runTasksCLI(vaultDir string, args []string) {
 	limit := fs.Int("limit", 0, "Maximum number of tasks to display (0 = default)")
 	asJSON := fs.Bool("json", false, "Output matching tasks as JSON")
 	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		fatalf("unknown tasks argument %q (expected flags or subcommand stats, compact, sync-sidebar, pin, unpin, clean-nested; use 'hq reopen' to reopen a task)", fs.Arg(0))
+	}
 
 	hotTasks, _ := kernel.ListTasks(vaultDir)
 	layer1Tasks := kernel.FilterLayer1Tasks(vaultDir, hotTasks)
@@ -827,10 +826,7 @@ func printTaskBoardLine(t kernel.ActiveTask, now time.Time) {
 	if t.Pinned {
 		pinMark = " 📌"
 	}
-	convShort := t.ConversationID
-	if len(convShort) > 8 {
-		convShort = convShort[:8]
-	}
+	convShort := shortPrefix(t.ConversationID, 8)
 	if convShort == "" {
 		convShort = "pending "
 	}
@@ -900,7 +896,7 @@ func runSubagentSpawnCLI(rootDir, vaultDir, cmdLabel, parentConv, role, scope, r
 	fmt.Println(out)
 }
 
-func runReopenTaskCLI(vaultDir, cmdLabel string, args []string) {
+func runReopenTaskCLI(vaultDir string, args []string) {
 	var target string
 	noWorktree := false
 	noSidebar := false
@@ -917,7 +913,7 @@ func runReopenTaskCLI(vaultDir, cmdLabel string, args []string) {
 		}
 	}
 	if target == "" {
-		fmt.Fprintf(os.Stderr, "usage: %s <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]\n", cmdLabel)
+		fmt.Fprintln(os.Stderr, "usage: hq reopen <task-slug-or-conv-id> [--no-worktree] [--no-sidebar]")
 		os.Exit(1)
 	}
 	if _, err := kernel.ReopenTaskWithOptions(vaultDir, target, kernel.ReopenTaskOptions{
@@ -927,7 +923,7 @@ func runReopenTaskCLI(vaultDir, cmdLabel string, args []string) {
 			fmt.Printf("  workspace: %s\n", note)
 		},
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "%s error: %v\n", cmdLabel, err)
+		fmt.Fprintf(os.Stderr, "hq reopen error: %v\n", err)
 		os.Exit(1)
 	}
 	_ = webui.SyncMarkdownConsole(vaultDir)

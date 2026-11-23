@@ -77,17 +77,26 @@ func TestAttentionQuietHoursCooldownAndIdeasLifecycle(t *testing.T) {
 		t.Fatalf("expected duplicate topic within 4h to hit cooldown, got cooled=%v item=%+v err=%v", cooledDup, itDup, err)
 	}
 
-	// 4. DrainBriefRollup returns item-1 once, marks it delivered, and logs to reported.jsonl
-	drained, err := DrainBriefRollup(vaultDir, nightTime.Add(8*time.Hour))
-	if err != nil || len(drained) != 1 || drained[0].ID != "item-1" {
-		t.Fatalf("expected 1 brief_rollup drained, got %+v (err=%v)", drained, err)
+	// 4. PeekBriefItems -> LeaseBriefItems -> CommitBriefLease returns item-1 once, marks it delivered, and logs to reported.jsonl
+	briefAt := nightTime.Add(8 * time.Hour)
+	peeked, err := PeekBriefItems(vaultDir, briefAt)
+	if err != nil || len(peeked) != 1 || peeked[0].ID != "item-1" {
+		t.Fatalf("expected 1 brief_rollup peeked, got %+v (err=%v)", peeked, err)
 	}
-	if digest := FormatReportedDigest(vaultDir, nightTime.Add(8*time.Hour), 10); !strings.Contains(digest, "ACME 8-K Minor Update") {
-		t.Fatalf("expected drained brief_rollup in FormatReportedDigest, got:\n%s", digest)
+	tok, _, leased, err := LeaseBriefItems(vaultDir, "conv-brief-1", 20*time.Minute, briefAt)
+	if err != nil || tok == "" || len(leased) != 1 || leased[0].ID != "item-1" {
+		t.Fatalf("expected 1 brief_rollup leased, got tok=%q items=%+v (err=%v)", tok, leased, err)
 	}
-	drainedAgain, _ := DrainBriefRollup(vaultDir, nightTime.Add(9*time.Hour))
-	if len(drainedAgain) != 0 {
-		t.Fatalf("expected second DrainBriefRollup to be empty, got %d", len(drainedAgain))
+	committed, err := CommitBriefLease(vaultDir, tok, "conv-brief-1", briefAt)
+	if err != nil || len(committed) != 1 || committed[0].ID != "item-1" {
+		t.Fatalf("expected 1 brief_rollup committed, got %+v (err=%v)", committed, err)
+	}
+	if digest := FormatReportedDigest(vaultDir, briefAt, 10); !strings.Contains(digest, "ACME 8-K Minor Update") {
+		t.Fatalf("expected committed brief_rollup in FormatReportedDigest, got:\n%s", digest)
+	}
+	peekAgain, err := PeekBriefItems(vaultDir, nightTime.Add(9*time.Hour))
+	if err != nil || len(peekAgain) != 0 {
+		t.Fatalf("expected second PeekBriefItems to be empty, got %d (err=%v)", len(peekAgain), err)
 	}
 
 	// 5. Ideas lifecycle: add, snooze, wake after snooze, promote, dismiss, and RSI stats

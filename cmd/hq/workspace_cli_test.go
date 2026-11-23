@@ -142,7 +142,7 @@ func (p cliFakeProvider) Remove(_ context.Context, req workspace.RemoveRequest) 
 	if req.RequireClean && info.State != workspace.StateClean {
 		return &workspace.ProviderError{Code: workspace.CodeDirty, Message: "dirty"}
 	}
-	if req.RequireNoOpenChanges && info.OpenChangeCount() > 0 {
+	if req.RequireNoOpenChanges && workspace.CountOpenChanges(info.Changes) > 0 {
 		return &workspace.ProviderError{Code: workspace.CodeHasOpenChanges, Message: "open"}
 	}
 	delete(s.workspaces, req.WorkspaceID)
@@ -526,8 +526,8 @@ func TestWorkspaceDestructiveVerbsDeniedDirectlyAllowedThroughPropose(t *testing
 		if resp["decision"] != "deny" || !strings.Contains(reason, "workspace_") || !strings.Contains(reason, "hq propose --type=workspace_") {
 			t.Fatalf("direct %q must be denied with a propose hint: %v", cmd, resp)
 		}
-		if d := approvals.EvaluateCommand(approvals.DefaultPolicyConfig(), cmd, false, ""); !d.Gated {
-			t.Fatalf("EvaluateCommand(%q) must gate", cmd)
+		if d := approvals.EvaluateCommandForSession(approvals.DefaultPolicyConfig(), cmd, false, false, ""); !d.Gated {
+			t.Fatalf("EvaluateCommandForSession(%q) must gate", cmd)
 		}
 	}
 	allowed := []string{
@@ -543,8 +543,8 @@ func TestWorkspaceDestructiveVerbsDeniedDirectlyAllowedThroughPropose(t *testing
 	}
 }
 
-func TestParseWorkspaceArgsInterleavedFlags(t *testing.T) {
-	a, err := parseWorkspaceArgs([]string{"--task", "t1", "acme/client", "--json", "name", "--role=readonly", "--force=false"}, []string{"task", "role"}, []string{"json", "force"})
+func TestParseFlexibleArgsInterleavedFlags(t *testing.T) {
+	a, err := parseFlexibleArgs([]string{"--task", "t1", "acme/client", "--json", "name", "--role=readonly", "--force=false"}, []string{"task", "role"}, []string{"json", "force"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestParseWorkspaceArgsInterleavedFlags(t *testing.T) {
 		t.Fatalf("unexpected parse: %+v", a)
 	}
 	for _, bad := range [][]string{{"--task"}, {"--nope"}, {"--json=maybe"}, {"---force"}, {"----force=1"}, {"---task=x"}} {
-		if _, err := parseWorkspaceArgs(bad, []string{"task"}, []string{"json", "force"}); err == nil {
+		if _, err := parseFlexibleArgs(bad, []string{"task"}, []string{"json", "force"}); err == nil {
 			t.Fatalf("expected an error for %v", bad)
 		}
 	}

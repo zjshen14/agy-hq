@@ -25,11 +25,12 @@ var (
 	reWorkflowDescLine   = regexp.MustCompile(`Workflow\s+"([^"]+)"\s+completed`)
 )
 
-// splitShellSegmentsUnquoted splits cmdLine on unquoted &&, ||, ;, |, &, or \n separators.
-func splitShellSegmentsUnquoted(cmdLine string) []string {
+// SplitShellSegmentsUnquoted splits cmdLine on unquoted &&, ||, ;, |, &, \n, \r, (, ), or ` separators.
+func SplitShellSegmentsUnquoted(cmdLine string) []string {
 	var segments []string
 	var cur strings.Builder
-	var quote byte
+	inSingle := false
+	inDouble := false
 	escaped := false
 
 	flush := func() {
@@ -40,39 +41,43 @@ func splitShellSegmentsUnquoted(cmdLine string) []string {
 	}
 
 	for i := 0; i < len(cmdLine); i++ {
-		c := cmdLine[i]
+		ch := cmdLine[i]
 		if escaped {
-			cur.WriteByte(c)
+			cur.WriteByte(ch)
 			escaped = false
 			continue
 		}
-		if quote != 0 {
-			cur.WriteByte(c)
-			if c == quote {
-				quote = 0
-			} else if c == '\\' && quote == '"' {
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			}
+			cur.WriteByte(ch)
+			continue
+		}
+		if inDouble {
+			if ch == '\\' {
 				escaped = true
+			} else if ch == '"' {
+				inDouble = false
 			}
+			cur.WriteByte(ch)
 			continue
 		}
-		if c == '\\' {
-			cur.WriteByte(c)
+		switch ch {
+		case '\\':
 			escaped = true
-			continue
-		}
-		if c == '\'' || c == '"' {
-			cur.WriteByte(c)
-			quote = c
-			continue
-		}
-		if c == '\n' || c == ';' || c == '|' || c == '&' {
+			cur.WriteByte(ch)
+		case '\'':
+			inSingle = true
+			cur.WriteByte(ch)
+		case '"':
+			inDouble = true
+			cur.WriteByte(ch)
+		case ';', '|', '&', '\n', '\r', '(', ')', '`':
 			flush()
-			if (c == '|' || c == '&') && i+1 < len(cmdLine) && cmdLine[i+1] == c {
-				i++
-			}
-			continue
+		default:
+			cur.WriteByte(ch)
 		}
-		cur.WriteByte(c)
 	}
 	flush()
 	return segments
@@ -197,7 +202,7 @@ func IsRawAgentAPINewConversationCommand(cmdLine string) bool {
 	if strings.TrimSpace(cmdLine) == "" {
 		return false
 	}
-	segments := splitShellSegmentsUnquoted(cmdLine)
+	segments := SplitShellSegmentsUnquoted(cmdLine)
 	foundRawAgentAPI := false
 	for _, seg := range segments {
 		words := stripCommandWrappers(tokenizeShellWords(seg))

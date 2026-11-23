@@ -251,15 +251,12 @@ func runChannelCLI(rootDir, vaultDir string, args []string) {
 			ConversationID:    convID,
 			SupersedeConvType: true,
 		})
-		if pErr != nil {
-			fmt.Fprintf(os.Stderr, "hq channel configure proposal failed: %v\n", pErr)
-			os.Exit(1)
-		}
+		dieIfErr("hq channel configure proposal failed", pErr)
 		if *asJSON {
 			printJSON(prop)
 			return
 		}
-		fmt.Printf("Staged channel config proposal %s for %s (sha256:%s)\n", prop.ID, fqid, prop.SHA256[:12])
+		fmt.Printf("Staged channel config proposal %s for %s (sha256:%s)\n", prop.ID, fqid, shortPrefix(prop.SHA256, 12))
 
 	case "apply-config":
 		if strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID")) != "" {

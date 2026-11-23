@@ -1,7 +1,6 @@
 package routing
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/zjshen14/agy-hq/internal/extension"
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 var (
@@ -274,37 +274,11 @@ func ResolveBuiltin(prompt, explicitModel, explicitDepth, explicitTier string) (
 	return fmt.Sprintf("%s-%s", model, depth), tier, subagentModel
 }
 
-func cleanYAMLVal(s string) string {
-	s = strings.TrimSpace(s)
-	if idx := strings.Index(s, " #"); idx >= 0 {
-		s = strings.TrimSpace(s[:idx])
-	}
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
-func leadingIndent(line string) int {
-	n := 0
-	for _, ch := range line {
-		if ch == ' ' {
-			n++
-		} else if ch == '\t' {
-			n += 2
-		} else {
-			break
-		}
-	}
-	return n
-}
-
 // ParseVaultRoutingContent parses the `routing:` section of config.yaml (supporting both nested `{model, subagent_model}` and inline `<tier>: <model>`).
 func ParseVaultRoutingContent(content string) VaultRoutingConfig {
 	out := VaultRoutingConfig{
 		Tiers: make(map[string]TierTarget),
 	}
-	scanner := bufio.NewScanner(strings.NewReader(content))
 	inRouting := false
 	inTiers := false
 	routingIndent := 0
@@ -312,21 +286,20 @@ func ParseVaultRoutingContent(content string) VaultRoutingConfig {
 	activeTier := ""
 	tierEntryIndent := 0
 
-	for scanner.Scan() {
-		raw := scanner.Text()
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, raw := range yamlmini.Lines(content) {
+		clean := yamlmini.StripComment(raw)
+		if clean == "" {
 			continue
 		}
-		ind := leadingIndent(raw)
+		ind := yamlmini.LeadingIndent(raw)
 		if !inRouting {
-			if ind == 0 && strings.HasPrefix(trimmed, "routing:") {
+			if ind == 0 && strings.HasPrefix(clean, "routing:") {
 				inRouting = true
 				routingIndent = 0
 			}
 			continue
 		}
-		if ind <= routingIndent && !strings.HasPrefix(trimmed, "routing:") {
+		if ind <= routingIndent && !strings.HasPrefix(clean, "routing:") {
 			break
 		}
 		if inTiers && ind <= tiersIndent {
@@ -334,12 +307,11 @@ func ParseVaultRoutingContent(content string) VaultRoutingConfig {
 			activeTier = ""
 		}
 
-		colon := strings.Index(trimmed, ":")
-		if colon < 0 {
+		key, rawVal, ok := yamlmini.SplitKV(clean)
+		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(trimmed[:colon])
-		val := cleanYAMLVal(trimmed[colon+1:])
+		val := yamlmini.UnquoteScalar(rawVal)
 
 		if !inTiers {
 			switch key {

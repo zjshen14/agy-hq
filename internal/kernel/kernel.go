@@ -126,45 +126,6 @@ type ActiveTask struct {
 	Workspaces []workspace.Binding `json:"workspaces,omitempty"`
 }
 
-// AllWorkspaceBindings returns every workspace bound to t: read-only core/git-worktree bindings synthesized from
-// the legacy WorktreeDir (role primary) and WorktreeDirs (role secondary) fields, keyed
-// "core/git-worktree:<canonical path>", followed by the provider bindings stored in t.Workspaces.
-func (t ActiveTask) AllWorkspaceBindings() []workspace.Binding {
-	var out []workspace.Binding
-	seen := make(map[string]bool)
-	primary := strings.TrimSpace(t.WorktreeDir)
-	for _, dir := range t.AllWorktreeDirs() {
-		root := workspace.CanonicalPath(dir)
-		if root == "" {
-			continue
-		}
-		key := workspace.LedgerKey(workspace.CoreGitProviderID, root)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		role := workspace.RoleSecondary
-		if primary != "" && sameCleanPath(dir, primary) {
-			role = workspace.RolePrimary
-		}
-		out = append(out, workspace.Binding{
-			Key:      key,
-			Provider: workspace.CoreGitProviderID,
-			Root:     root,
-			WorkDir:  root,
-			Role:     role,
-		})
-	}
-	for _, b := range t.Workspaces {
-		if b.Key == "" || seen[b.Key] {
-			continue
-		}
-		seen[b.Key] = true
-		out = append(out, b)
-	}
-	return out
-}
-
 // EffectiveKind returns "task", "subagent", or "auto", inferring from TaskSlug/Title when Kind is empty.
 func (t ActiveTask) EffectiveKind() string {
 	k := strings.ToLower(strings.TrimSpace(t.Kind))
@@ -212,16 +173,6 @@ func parseFlexibleRFC3339(raw string) time.Time {
 		return ts
 	}
 	return time.Time{}
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	if runes := []rune(s); len(runes) > maxRunes {
-		return string(runes[:maxRunes]) + "..."
-	}
-	return s
 }
 
 // UpdatedTime parses LastUpdatedAt (falling back to CreatedAt) into time.Time.
@@ -437,16 +388,6 @@ func CountColdArchivedTasks(vaultDir string) int {
 		return 0
 	}
 	return total
-}
-
-// AppendTasksToColdArchive appends tasks to local/memory/tasks_archive.jsonl, deduplicating by ConversationID/TaskSlug.
-func AppendTasksToColdArchive(vaultDir string, toArchive []ActiveTask) error {
-	if len(toArchive) == 0 {
-		return nil
-	}
-	return withTasksLock(vaultDir, func() error {
-		return appendTasksToColdArchiveUnlocked(vaultDir, toArchive)
-	})
 }
 
 func appendTasksToColdArchiveUnlocked(vaultDir string, toArchive []ActiveTask) error {

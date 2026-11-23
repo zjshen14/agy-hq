@@ -18,7 +18,7 @@ Welcome to the engineering and product documentation for **`agy-hq` (Headquarter
 | Document | Purpose | Status |
 |---|---|---|
 | [architecture.md](architecture.md) | High-level system map, two-layer (`agy-hq` vs. `Vault`) layout, and component index | Living |
-| [roadmap.md](roadmap.md) | Phased implementation milestones and upcoming `M4` extensions | Living |
+| [roadmap.md](roadmap.md) | Phased implementation milestones and completed/upcoming roadmap | Living |
 
 ---
 
@@ -28,7 +28,7 @@ Welcome to the engineering and product documentation for **`agy-hq` (Headquarter
 |---|---|---|---|
 | [PRD-0001](product/0001-vision-and-ux.md) | **Core Product Vision & Day-in-the-Life UX** | The four user touchpoints: Mobile/Web Remote Control, Desktop + Aux Console, Drop Folder, and Sleep-Time Consolidation | Approved |
 | [PRD-0002](product/0002-open-workflows-and-skills.md) | **Open-Ended Workflows & Additive Skills** | How the agent handles any ad-hoc task out of the box (writing, coding, research, admin), boosted by progressive-disclosure `SKILL.md` skills | Approved |
-| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–47) & E2E Acceptance Criteria** | Deterministic expected behaviors across all core journeys enforced via automated E2E tests (`internal/e2e/cuj_e2e_test.go`) | Approved |
+| [PRD-0003](product/0003-critical-user-journeys.md) | **Critical User Journeys (CUJs 1–47) & E2E Acceptance Criteria** | Deterministic expected behaviors across all core journeys enforced via automated E2E tests (`internal/e2e/cuj*_test.go`) | Active |
 
 ---
 
@@ -41,7 +41,7 @@ Welcome to the engineering and product documentation for **`agy-hq` (Headquarter
 | [RFC-0003](design/0003-approval-bound-execution.md) | **Action-Based Safety, Quarantined Readers & Approval-Bound Execution** | Breaking the Lethal Trifecta, `PreToolUse` hard blocklist, and `hq propose` SHA-256 deterministic execution | Implemented |
 | [RFC-0004](design/0004-heartbeat-and-channels.md) | **Silent Gatekeeper, Quota Circuit Breaker & Channel Adapters** | 0-token Go pre-checks (`local/triggers.yaml`), Flash-only spawn budgets, Remote Control default UX, and pluggable chat drivers | Implemented |
 | [RFC-0005](design/0005-gmail-integration.md) | **Decoupled Native Gmail Integration (Layer 1 Infra & Layer 2 Workflows)** | Layer 1: extensible multi-account registry, pluggable transport, pure Go `hq daemon` sidecar watcher, and safe CRUD primitives (`search`, `read-quarantined`, `draft`, `approve`). Layer 2: Daily Brief, Auto-Draft Triage, and Verified Attachment Routing | Implemented |
-| [RFC-0006](design/0006-memory-engine-upgrade.md) | **4-Layer Memory Hierarchy, Ground-Truth Dreaming & Proactive Fact Pruning** | Anthropic-grounded memory hierarchy (Roadmap Index, Topic Wiki, Bi-Temporal Facts, Raw Transcripts), offline dreaming with transcript verification, and proactive pruning | Implemented |
+| [RFC-0006](design/0006-memory-engine-upgrade.md) | **4-Layer Memory Hierarchy, Ground-Truth Dreaming & Proactive Fact Pruning** | Anthropic-grounded memory hierarchy (Roadmap Index, Topic Wiki, Bi-Temporal Facts, Raw Transcripts), offline dreaming with transcript verification, and proactive pruning *(extended by RFC-0024)* | Implemented |
 | [RFC-0007](design/0007-front-desk-initialization-hardening.md) | **Front Desk Initialization Hardening, Trigger Arming & Shift Handover** | Non-blocking Front Desk state machine, deterministic Turn-1 initialization, `hq_console.md` UI artifact pinning, automated `triggers.yaml` schedule arming, and shift handover coordination | Implemented |
 | [RFC-0008](design/0008-gchat-integration.md) | **Decoupled Google Chat Integration (Layer 1 Infra, Hybrid Transports & Layer 2 Workflows)** | Multi-transport adapter (`oauth` REST API v1 for Workspace, isolated `--headless=new` Chrome `cdp` with DNS/URL network jail + `gmail-bridge` for personal `@gmail.com`, `webhook`), guided 1-time `hq gchat login`, fuzzy space name resolution, 1-step `hq gchat propose`, and 1-tap `gchat_send` approval | Implemented |
 | [RFC-0009](design/0009-task-board-redesign.md) | **Scalable Task Board, Live Console & Hot/Cold Lifecycle Redesign** | Per-tier console visibility (100% active shown, capped idle/completed), two-tier hot/cold storage (`tasks.json` + `tasks_archive.jsonl`), seamless cold recall (`hq reopen`), bounded `SessionStart`, and `hq tasks` CLI | Implemented |

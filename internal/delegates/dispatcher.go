@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
@@ -199,7 +199,7 @@ func DryRunMatch(cfg Config, callerID, sourceSpec, text string) DryRunResult {
 }
 
 func enqueueScopedDelegateWorker(vaultDir string, pol PolicySpec, stored StoredRequest, now time.Time) (string, error) {
-	grantID := "dlg-" + randomHexToken(12)
+	grantID := "dlg-" + store.RandomHex(12)
 	grant := CompilePolicyGrant(pol, grantID, stored.CallerID, stored.RequestID, now)
 	if err := taint.StagePendingGrant(context.Background(), vaultDir, grant); err != nil {
 		return "", err
@@ -231,7 +231,7 @@ func enqueueScopedDelegateWorker(vaultDir string, pol PolicySpec, stored StoredR
 }
 
 func enqueueClassifierWorker(vaultDir string, candidates []string, stored StoredRequest, now time.Time) (string, error) {
-	grantID := "cls-" + randomHexToken(12)
+	grantID := "cls-" + store.RandomHex(12)
 	grant := taint.SessionGrant{
 		GrantID:        grantID,
 		Profile:        string(authz.ProfileClassifier),
@@ -680,10 +680,4 @@ func ListAvailableResources(vaultDir string) map[string]interface{} {
 		"workspaces": wsKeys,
 		"policies":   policyIDs,
 	}
-}
-
-// CheckPolicyExists reports whether <vault>/private/delegates/policy.json exists on disk.
-func CheckPolicyExists(vaultDir string) bool {
-	_, err := os.Stat(PolicyFilePath(vaultDir))
-	return err == nil
 }

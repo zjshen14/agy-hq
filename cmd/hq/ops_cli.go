@@ -19,6 +19,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/ci"
 	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/githooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
@@ -338,8 +339,8 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
-		fmt.Printf("Staged RSI proposal %s for %s (type: %s, sha256: %s)\n", prop.ID, h.ID, prop.ActionType, prop.SHA256[:12])
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("Staged RSI proposal %s for %s (type: %s, sha256: %s)\n", prop.ID, h.ID, prop.ActionType, shortPrefix(prop.SHA256, 12))
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 
 	case "apply":
 		if len(args) == 0 {
@@ -433,8 +434,8 @@ func runRSICLI(rootDir, vaultDir string, args []string) {
 			return
 		}
 		fmt.Printf("Staged Tier 2 upstream RSI PR proposal %s for %s (branch: %s, worktree: %s, sha256: %s)\n",
-			prop.ID, posID, hyp.Branch, hyp.WorktreeDir, prop.SHA256[:12])
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+			prop.ID, posID, hyp.Branch, hyp.WorktreeDir, shortPrefix(prop.SHA256, 12))
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 
 	case "migrate-overlays":
 		fs := flag.NewFlagSet("rsi migrate-overlays", flag.ExitOnError)
@@ -606,7 +607,7 @@ func runCICLI(rootDir string, args []string) {
 		}
 
 	case "install-hooks":
-		updated, err := ci.InstallGitHooks(rootDir)
+		updated, err := githooks.Install(rootDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq ci install-hooks failed: %v\n", err)
 			os.Exit(1)
@@ -678,10 +679,7 @@ func runObsCLI(vaultDir string, args []string) {
 			obs.FormatTokensCompact(rep.Budget.DailyDeepUncachedBudget),
 			deepPct)
 		if rep.FrontDesk != nil {
-			fdID := rep.FrontDeskConvID
-			if len(fdID) > 8 {
-				fdID = fdID[:8]
-			}
+			fdID := shortPrefix(rep.FrontDeskConvID, 8)
 			fdCtxStr := obs.FormatTokensCompact(rep.FrontDeskContext)
 			if rep.FrontDeskCompactedPending {
 				fdCtxStr = "compacted (pending next turn)"
@@ -749,13 +747,9 @@ func runObsCLI(vaultDir string, args []string) {
 			fmt.Printf("  %-4s %-10s %-6s %-26s %6s %10s %10s %7s %9s %8s\n",
 				"RANK", "CONV", "TURN", "TITLE", "STEPS", "UNCACHED", "GROSS", "CHR%", "PEAK_CTX", "LATENCY")
 			for _, item := range rep.TurnItems {
-				cid := item.ConversationID
-				if len(cid) > 8 {
-					cid = cid[:8]
-				}
 				fmt.Printf("  #%-3d %-10s T#%-4d %-26s %6d %10s %10s %6.1f%% %9s %8s\n",
 					item.Rank,
-					cid,
+					shortPrefix(item.ConversationID, 8),
 					item.Turn.TurnIndex,
 					truncateDisplay(item.Title, 26),
 					item.Turn.StepCount,
@@ -776,13 +770,9 @@ func runObsCLI(vaultDir string, args []string) {
 		fmt.Printf("  %-4s %-10s %-11s %-6s %-28s %5s %5s %10s %10s %7s %8s %9s\n",
 			"RANK", "CONV", "KIND", "TIER", "TITLE", "TURNS", "CHILD", "UNCACHED", "GROSS", "CHR%", "QBU", "PEAK_CTX")
 		for _, item := range rep.Items {
-			cid := item.ConversationID
-			if len(cid) > 8 {
-				cid = cid[:8]
-			}
 			fmt.Printf("  #%-3d %-10s %-11s %-6s %-28s %5d %5d %10s %10s %6.1f%% %8.0f %9s\n",
 				item.Rank,
-				cid,
+				shortPrefix(item.ConversationID, 8),
 				truncateDisplay(item.Kind, 11),
 				item.Tier,
 				truncateDisplay(item.Title, 28),
@@ -852,12 +842,8 @@ func runObsCLI(vaultDir string, args []string) {
 		if *showChildren && len(rep.Children) > 0 {
 			fmt.Printf("\nChild Subagents (%d):\n", len(rep.Children))
 			for _, ch := range rep.Children {
-				cid := ch.ConversationID
-				if len(cid) > 8 {
-					cid = cid[:8]
-				}
 				fmt.Printf("  - [%s] %s (%s | %s): Uncached %s, Gross %s, CHR %.1f%%, Turns %d\n",
-					cid,
+					shortPrefix(ch.ConversationID, 8),
 					ch.Title,
 					ch.Tier,
 					ch.Model,
@@ -1096,17 +1082,9 @@ func runPluginCLI(rootDir, vaultDir string, args []string) {
 			printJSON(res)
 			return
 		}
-		shaShort := res.BinarySHA256
-		if len(shaShort) > 12 {
-			shaShort = shaShort[:12]
-		}
-		digShort := res.BundleDigest
-		if len(digShort) > 12 {
-			digShort = digShort[:12]
-		}
 		fmt.Printf("Installed agy-hq plugin v%s (scope: %s · commit %s)\n", res.Version, res.Scope, res.Commit)
-		fmt.Printf("  Binary:       %s (sha256:%s)\n", res.BinaryPath, shaShort)
-		fmt.Printf("  Plugin Dir:   %s (%d files, bundle:%s)\n", res.PluginDir, res.FileCount, digShort)
+		fmt.Printf("  Binary:       %s (sha256:%s)\n", res.BinaryPath, shortPrefix(res.BinarySHA256, 12))
+		fmt.Printf("  Plugin Dir:   %s (%d files, bundle:%s)\n", res.PluginDir, res.FileCount, shortPrefix(res.BundleDigest, 12))
 		if res.ConsoleSidecarDir != "" {
 			fmt.Printf("  Sidecar UI:   %s (sidecar://agy-hq-console/)\n", res.ConsoleSidecarDir)
 		}

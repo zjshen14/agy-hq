@@ -3,8 +3,6 @@ package channels
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +15,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 const MaxInboundTextRunes = 16000
@@ -214,9 +213,7 @@ func HandleInbound(ctx context.Context, vaultDir string, req InboundRequest, now
 		}
 	}
 
-	var rnd [6]byte
-	_, _ = rand.Read(rnd[:])
-	corrID := "corr-" + strconv.FormatInt(now.Unix(), 10) + "-" + hex.EncodeToString(rnd[:])
+	corrID := "corr-" + strconv.FormatInt(now.Unix(), 10) + "-" + store.RandomHex(6)
 
 	// Step 3 (unlocked — RankEvents=40 must NOT be acquired under RankChannels=65!): enqueue durable session event.
 	scopeKey := "front_desk:channel_inbound"
@@ -374,7 +371,7 @@ func EnqueueTurnReplyIfCorrelated(
 	turnStartedAt, now time.Time,
 ) (int, error) {
 	convID = strings.TrimSpace(convID)
-	body := truncateUTF8Runes(strings.TrimSpace(lastResponse), MaxQueuedBodyRunes)
+	body := store.TruncateRunes(strings.TrimSpace(lastResponse), MaxQueuedBodyRunes)
 	if convID == "" || body == "" {
 		return 0, nil
 	}

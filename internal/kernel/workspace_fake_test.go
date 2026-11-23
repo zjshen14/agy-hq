@@ -274,7 +274,7 @@ func (p fakeWSProvider) Remove(_ context.Context, req workspace.RemoveRequest) e
 	if req.RequireClean && info.State != workspace.StateClean {
 		return &workspace.ProviderError{Code: workspace.CodeDirty, Message: "dirty"}
 	}
-	if req.RequireNoOpenChanges && info.OpenChangeCount() > 0 {
+	if req.RequireNoOpenChanges && workspace.CountOpenChanges(info.Changes) > 0 {
 		return &workspace.ProviderError{Code: workspace.CodeHasOpenChanges, Message: "open changes"}
 	}
 	delete(st.workspaces, req.WorkspaceID)

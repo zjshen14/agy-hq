@@ -154,19 +154,10 @@ func runLivingSpaceCLI(vaultDir string, args []string) {
 			doc.Timezone = strings.TrimSpace(*tz)
 		}
 		if strings.TrimSpace(*localesRaw) != "" {
-			var locs []string
-			for _, part := range strings.Split(*localesRaw, ",") {
-				if p := strings.TrimSpace(part); p != "" {
-					locs = append(locs, p)
-				}
-			}
-			doc.Locales = locs
+			doc.Locales = splitCSV(*localesRaw)
 		}
 		saved, err := living.Save(vaultDir, doc, now)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq space create failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq space create failed", err)
 		if saved.GoalSlug != "" {
 			if synced, sErr := living.SyncFromGoal(vaultDir, saved.Slug, saved.GoalSlug, now); sErr == nil {
 				saved = synced
@@ -385,28 +376,19 @@ func runApprovalsCLI(vaultDir string, args []string) {
 
 	case "restage":
 		id, flagArgs := splitFirstPositionalAndFlags(rest)
-		fs := flag.NewFlagSet("approvals restage", flag.ExitOnError)
-		asJSON := fs.Bool("json", false, "Output JSON")
+		fs, asJSON := newJSONFlagSet("approvals restage")
 		_ = fs.Parse(flagArgs)
 		if strings.TrimSpace(id) == "" {
-			fmt.Fprintln(os.Stderr, "usage: hq approvals restage <expired-proposal-id> [--json]")
-			os.Exit(1)
+			fatalf("usage: hq approvals restage <expired-proposal-id> [--json]")
 		}
 		fresh, err := approvals.RestageExpiredProposal(vaultDir, id, now)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hq approvals restage failed: %v\n", err)
-			os.Exit(1)
-		}
+		dieIfErr("hq approvals restage failed", err)
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		if *asJSON {
 			printJSON(fresh)
 			return
 		}
-		short := fresh.SHA256
-		if len(short) > 12 {
-			short = short[:12]
-		}
-		fmt.Printf("Restaged %s as fresh 24h proposal %s (sha256:%s): %s\n", id, fresh.ID, short, fresh.Summary)
+		fmt.Printf("Restaged %s as fresh 24h proposal %s (sha256:%s): %s\n", id, fresh.ID, shortPrefix(fresh.SHA256, 12), fresh.Summary)
 
 	case "dismiss":
 		id, flagArgs := splitFirstPositionalAndFlags(rest)

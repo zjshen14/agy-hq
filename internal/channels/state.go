@@ -372,7 +372,7 @@ func enqueueWithBoundedEviction(queue []QueuedNotification, item QueuedNotificat
 			return queue, false
 		}
 	}
-	item.Notification.BodyMarkdown = truncateUTF8Runes(item.Notification.BodyMarkdown, MaxQueuedBodyRunes)
+	item.Notification.BodyMarkdown = store.TruncateRunes(item.Notification.BodyMarkdown, MaxQueuedBodyRunes)
 	queue = append(queue, item)
 	for len(queue) > MaxRetryQueueEntries {
 		evictIdx := -1

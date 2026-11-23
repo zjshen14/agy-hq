@@ -101,7 +101,7 @@ func PrepareForward(vaultDir string, opts ForwardOptions) (ForwardPlan, error) {
 	if err != nil {
 		return ForwardPlan{}, fmt.Errorf("gmail readonly get %s failed: %w (%s)", messageID, err, strings.TrimSpace(string(rawOut)))
 	}
-	var rm rawGmailMessage
+	var rm connector.RawMailMessage
 	if err := json.Unmarshal(rawOut, &rm); err != nil {
 		return ForwardPlan{}, fmt.Errorf("parse gmail readonly get JSON for %s: %w", messageID, err)
 	}

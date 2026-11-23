@@ -21,7 +21,7 @@ schedules:
   - id: sleep-consolidate
     cron: "CRON_TZ=America/Los_Angeles 30 23 * * *"
     mode: daemon_gatekeeper
-    tier: deep_routine
+    tier: deep-medium
     precheck_cmd: ["hq", "memory", "dream-plan", "--precheck"]
     dedup_mode: exit_zero_nonempty
     delivery: silent_ledger

@@ -15,6 +15,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 func init() {
@@ -53,7 +54,7 @@ func redactDiagnosticError(s string) string {
 		return ""
 	}
 	s = reRedactURL.ReplaceAllString(s, "[redacted-url]")
-	return truncateUTF8Runes(s, 240)
+	return store.TruncateRunes(s, 240)
 }
 
 type channelsVaultFingerprint [8]int64
@@ -1039,7 +1040,7 @@ func enqueueOutboxInterruptsFiltered(vaultDir, deskCID string, items []outbox.Ou
 						SourceSkill:   it.SourceSkill,
 						Scope:         it.Scope,
 						Title:         it.Title,
-						BodyMarkdown:  truncateUTF8Runes(it.Summary, MaxQueuedBodyRunes),
+						BodyMarkdown:  store.TruncateRunes(it.Summary, MaxQueuedBodyRunes),
 						ProposalIDs:   it.ProposalIDs,
 						TaintedOrigin: it.Tainted,
 					},
@@ -1147,7 +1148,7 @@ func EnqueueTaskDone(vaultDir, slug, title, summary, completedAt string, now tim
 	if cleanTitle == "" {
 		cleanTitle = "Task completed: " + slug
 	}
-	body := truncateUTF8Runes(strings.TrimSpace(summary), MaxQueuedBodyRunes)
+	body := store.TruncateRunes(strings.TrimSpace(summary), MaxQueuedBodyRunes)
 	if body == "" {
 		body = "Task `" + slug + "` marked completed."
 	}
@@ -1216,7 +1217,7 @@ func EnqueueTaskBlocked(vaultDir string, prop approvals.Proposal, now time.Time)
 	}
 	idemKey := sanitizeIdempotencyKey("task-blocked:" + prop.ID)
 	title := fmt.Sprintf("Task awaiting approval (%s): %s", prop.ActionType, prop.Summary)
-	body := truncateUTF8Runes(
+	body := store.TruncateRunes(
 		fmt.Sprintf("Proposal `%s` (`%s`) staged and awaiting human approval.\n\n- **Summary:** %s", prop.ID, prop.ActionType, prop.Summary),
 		MaxQueuedBodyRunes,
 	)

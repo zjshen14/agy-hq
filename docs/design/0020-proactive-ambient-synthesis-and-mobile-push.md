@@ -1,6 +1,6 @@
 # RFC-0020: Cross-Source Ambient Synthesis Loop, Pre-Meeting / Deadline Nudges & Optional Zero-Body Mobile Push
 
-- **Status:** Superseded by [RFC-0027](./0027-muse-proactive-actions.md) *(marked superseded 2026-11-22; `RFC-0027` remains Proposed — Awaiting User Review)*
+- **Status:** Superseded by [RFC-0027](./0027-muse-proactive-actions.md) *(superseded 2026-11-22; `RFC-0027` is now Implemented)*
 - **Author:** `[Task:headquarter] Proactive Always-On Synthesis` (`gemini-4-carbon-high`)
 - **Created:** 2026-11-16
 - **Superseded By:** [RFC-0027 (Muse-Informed Proactive Actions)](./0027-muse-proactive-actions.md) & [RFC-0023 (Vendor-Neutral Front Desk Channel Bridge)](./0023-front-desk-channel-bridge.md)

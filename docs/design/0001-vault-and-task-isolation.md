@@ -1,7 +1,9 @@
 # RFC-0001: Two-Layer Vault Split & Per-Task Parallel Isolation
 
-- **Status:** Approved
+- **Status:** Implemented
 - **Related Docs:** [ADR-0003](../decisions/0003-two-layer-oss-and-private-vault.md), [ADR-0006](../decisions/0006-general-agent-and-skills-over-packs.md), [architecture.md](../architecture.md)
+
+> **Extended / Updated By:** [RFC-0015](./0015-global-plugin-packaging.md) (global `hq` CLI, single-source `.agents/plugins/agy-hq/hooks.json`, and 5-step `ResolveVaultDir()`), [RFC-0017a](./0017a-connector-protocol-and-watcher-engine.md) & [RFC-0014](./0014-proactive-engine-and-living-context.md) (`hq check-rss` / `hq notify` evolved into `hq watch` / `hq outbox`), [RFC-0019](./0019-two-tier-rsi-vault-overlay.md) (3 Core OS skills + `templates/skills/` / `<vault>/skills/` and `ledger-ingest`), [RFC-0025](./0025-pluggable-workspace-providers.md) (`internal/workspace`), and [RFC-0026](./0026-declarative-scoped-delegates.md) (`internal/authz`).
 
 ---
 

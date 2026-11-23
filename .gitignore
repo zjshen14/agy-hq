@@ -21,3 +21,7 @@ token*.json
 .DS_Store
 *.swp
 *~
+
+# Teamwork / agent scratch metadata
+/.agents/teamwork/
+

@@ -1,7 +1,9 @@
 # RFC-0002: Zero-Token Journaling & Sleep-Time Memory Consolidation
 
-- **Status:** Approved
+- **Status:** Implemented
 - **Related Docs:** [ADR-0005](../decisions/0005-zero-token-stop-hook-vs-blocking-gate.md), [02 — Academic Frontier §1 & §3](../research/02_academic.md)
+
+> **Extended / Superseded By:** [RFC-0006](./0006-memory-engine-upgrade.md) (4-Layer Memory & `hq memory verify-transcript`), [RFC-0010](./0010-agent-recursive-self-improvement.md) (bounded RSI), [RFC-0015](./0015-global-plugin-packaging.md) (`.agents/plugins/agy-hq/hooks.json`), [RFC-0019](./0019-two-tier-rsi-vault-overlay.md) (`<vault>/skills/` & `memory/rsi/rules/`), and [RFC-0024](./0024-memory-v2-prediction-and-eval.md) (Memory Engine v2: `<= 40L / 2.2 KB` `MEMORY.md`, scoped facts/playbooks, BM25 `hq memory search`, `dream-plan`, & `eval`).
 
 ---
 

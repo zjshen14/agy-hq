@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 const (
@@ -318,196 +320,9 @@ type parsedVaultApprovals struct {
 	Rules                  []Rule
 }
 
-// stripYAMLCommentQuoteAware strips trailing `# ...` comments outside single/double quotes.
-func stripYAMLCommentQuoteAware(s string) string {
-	inSingle := false
-	inDouble := false
-	escaped := false
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inSingle {
-			if ch == '\'' {
-				if i+1 < len(s) && s[i+1] == '\'' {
-					i++
-					continue
-				}
-				inSingle = false
-			}
-			continue
-		}
-		if inDouble {
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == '"' {
-				inDouble = false
-			}
-			continue
-		}
-		switch ch {
-		case '\'':
-			inSingle = true
-		case '"':
-			inDouble = true
-		case '#':
-			if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
-				return strings.TrimRight(s[:i], " \t")
-			}
-		}
-	}
-	return strings.TrimSpace(s)
-}
-
-func unquoteYAMLScalar(raw string) string {
-	s := strings.TrimSpace(raw)
-	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
-		return strings.ReplaceAll(s[1:len(s)-1], "''", "'")
-	}
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		inner := s[1 : len(s)-1]
-		var b strings.Builder
-		for i := 0; i < len(inner); i++ {
-			if inner[i] == '\\' && i+1 < len(inner) {
-				i++
-				switch inner[i] {
-				case 'n':
-					b.WriteByte('\n')
-				case 't':
-					b.WriteByte('\t')
-				case 'r':
-					b.WriteByte('\r')
-				case '"', '\\', '/':
-					b.WriteByte(inner[i])
-				default:
-					// Preserve regex escapes such as \b, \s, \d if someone wrote them inside double quotes
-					b.WriteByte('\\')
-					b.WriteByte(inner[i])
-				}
-				continue
-			}
-			b.WriteByte(inner[i])
-		}
-		return b.String()
-	}
-	return s
-}
-
-func parseYAMLInlineBracketList(raw string) ([]string, bool) {
-	s := strings.TrimSpace(raw)
-	if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") {
-		return nil, false
-	}
-	inner := strings.TrimSpace(s[1 : len(s)-1])
-	if inner == "" {
-		return []string{}, true
-	}
-	var out []string
-	var cur strings.Builder
-	inSingle := false
-	inDouble := false
-	escaped := false
-	for i := 0; i < len(inner); i++ {
-		ch := inner[i]
-		if escaped {
-			cur.WriteByte(ch)
-			escaped = false
-			continue
-		}
-		if inSingle {
-			cur.WriteByte(ch)
-			if ch == '\'' {
-				if i+1 < len(inner) && inner[i+1] == '\'' {
-					cur.WriteByte('\'')
-					i++
-					continue
-				}
-				inSingle = false
-			}
-			continue
-		}
-		if inDouble {
-			if ch == '\\' {
-				cur.WriteByte(ch)
-				escaped = true
-				continue
-			}
-			cur.WriteByte(ch)
-			if ch == '"' {
-				inDouble = false
-			}
-			continue
-		}
-		switch ch {
-		case '\'':
-			inSingle = true
-			cur.WriteByte(ch)
-		case '"':
-			inDouble = true
-			cur.WriteByte(ch)
-		case ',':
-			item := unquoteYAMLScalar(cur.String())
-			if item != "" {
-				out = append(out, item)
-			}
-			cur.Reset()
-		default:
-			cur.WriteByte(ch)
-		}
-	}
-	if last := unquoteYAMLScalar(cur.String()); last != "" {
-		out = append(out, last)
-	}
-	return out, true
-}
-
-func splitYAMLKeyValueQuoteAware(line string) (string, string, bool) {
-	inSingle := false
-	inDouble := false
-	escaped := false
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inSingle {
-			if ch == '\'' {
-				inSingle = false
-			}
-			continue
-		}
-		if inDouble {
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == '"' {
-				inDouble = false
-			}
-			continue
-		}
-		switch ch {
-		case '\'':
-			inSingle = true
-		case '"':
-			inDouble = true
-		case ':':
-			if i+1 == len(line) || line[i+1] == ' ' || line[i+1] == '\t' {
-				return strings.TrimSpace(line[:i]), strings.TrimSpace(line[i+1:]), true
-			}
-		}
-	}
-	return "", "", false
-}
-
 func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 	var out parsedVaultApprovals
-	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	lines := yamlmini.Lines(raw)
 
 	inApprovals := false
 	sectionMode := ""   // "", "owned_repos", "rules"
@@ -527,17 +342,17 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 		ruleListField = ""
 		switch key {
 		case "id":
-			r.ID = unquoteYAMLScalar(val)
+			r.ID = yamlmini.UnquoteScalar(val)
 		case "description":
-			r.Description = unquoteYAMLScalar(val)
+			r.Description = yamlmini.UnquoteScalar(val)
 		case "mode":
-			r.Mode = unquoteYAMLScalar(val)
+			r.Mode = yamlmini.UnquoteScalar(val)
 		case "target_resolver":
-			r.TargetResolver = unquoteYAMLScalar(val)
+			r.TargetResolver = yamlmini.UnquoteScalar(val)
 		case "commands":
 			if val == "" {
 				ruleListField = "commands"
-			} else if arr, ok := parseYAMLInlineBracketList(val); ok {
+			} else if arr, ok := yamlmini.ParseInlineList(val); ok {
 				r.Commands = append(r.Commands, arr...)
 			} else {
 				return fmt.Errorf("approvals.rules[%q].commands must be a YAML list", r.ID)
@@ -545,7 +360,7 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 		case "auto_categories":
 			if val == "" {
 				ruleListField = "auto_categories"
-			} else if arr, ok := parseYAMLInlineBracketList(val); ok {
+			} else if arr, ok := yamlmini.ParseInlineList(val); ok {
 				r.AutoCategories = append(r.AutoCategories, arr...)
 			} else {
 				return fmt.Errorf("approvals.rules[%q].auto_categories must be a YAML list", r.ID)
@@ -557,15 +372,11 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 	}
 
 	for lineIdx, rawLine := range lines {
-		trimmed := strings.TrimSpace(rawLine)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
-		clean := stripYAMLCommentQuoteAware(trimmed)
+		clean := yamlmini.StripComment(rawLine)
 		if clean == "" {
 			continue
 		}
+		indent := yamlmini.LeadingIndent(rawLine)
 
 		if indent == 0 {
 			flushRule()
@@ -583,20 +394,21 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 		}
 
 		// Direct children of `approvals:` (typical indent == 2) when not inside a deeper list
-		if sectionMode == "owned_repos" && strings.HasPrefix(clean, "- ") {
-			item := unquoteYAMLScalar(strings.TrimSpace(strings.TrimPrefix(clean, "- ")))
-			if item != "" {
-				out.OwnedRepos = append(out.OwnedRepos, item)
+		if sectionMode == "owned_repos" {
+			if itemRaw, ok := yamlmini.TrimListItem(clean); ok {
+				item := yamlmini.UnquoteScalar(itemRaw)
+				if item != "" {
+					out.OwnedRepos = append(out.OwnedRepos, item)
+				}
+				continue
 			}
-			continue
 		}
 
 		if sectionMode == "rules" {
-			if strings.HasPrefix(clean, "- ") {
-				rest := strings.TrimSpace(strings.TrimPrefix(clean, "- "))
+			if rest, ok := yamlmini.TrimListItem(clean); ok {
 				if curRule != nil && ruleListField != "" && (ruleIndent < 0 || indent > ruleIndent) {
-					if _, _, isKV := splitYAMLKeyValueQuoteAware(rest); !isKV {
-						val := unquoteYAMLScalar(rest)
+					if _, _, isKV := yamlmini.SplitKV(rest); !isKV {
+						val := yamlmini.UnquoteScalar(rest)
 						if val != "" {
 							if ruleListField == "commands" {
 								curRule.Commands = append(curRule.Commands, val)
@@ -610,7 +422,7 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 				flushRule()
 				ruleIndent = indent
 				curRule = &Rule{Source: "vault"}
-				if k, v, ok := splitYAMLKeyValueQuoteAware(rest); ok {
+				if k, v, ok := yamlmini.SplitKV(rest); ok {
 					if err := applyRuleKV(curRule, k, v); err != nil {
 						return out, fmt.Errorf("config.yaml:%d: %w", lineIdx+1, err)
 					}
@@ -621,7 +433,7 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 			}
 
 			if curRule != nil && (ruleIndent < 0 || indent > ruleIndent) {
-				if k, v, ok := splitYAMLKeyValueQuoteAware(clean); ok {
+				if k, v, ok := yamlmini.SplitKV(clean); ok {
 					if err := applyRuleKV(curRule, k, v); err != nil {
 						return out, fmt.Errorf("config.yaml:%d: %w", lineIdx+1, err)
 					}
@@ -631,7 +443,7 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 		}
 
 		// Top-level keys inside `approvals:`
-		if k, v, ok := splitYAMLKeyValueQuoteAware(clean); ok {
+		if k, v, ok := yamlmini.SplitKV(clean); ok {
 			flushRule()
 			sectionMode = ""
 			ruleIndent = -1
@@ -640,21 +452,21 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 				out.HasOwnedRepos = true
 				if v == "" {
 					sectionMode = "owned_repos"
-				} else if arr, isArr := parseYAMLInlineBracketList(v); isArr {
+				} else if arr, isArr := yamlmini.ParseInlineList(v); isArr {
 					out.OwnedRepos = append([]string(nil), arr...)
 				} else {
 					return out, fmt.Errorf("config.yaml:%d: approvals.owned_repos must be a YAML list", lineIdx+1)
 				}
 			case "ask_ttl":
-				out.AskTTLRaw = unquoteYAMLScalar(v)
+				out.AskTTLRaw = yamlmini.UnquoteScalar(v)
 			case "proposal_ttl":
-				out.ProposalTTLRaw = unquoteYAMLScalar(v)
+				out.ProposalTTLRaw = yamlmini.UnquoteScalar(v)
 			case "interactive_preset":
-				out.InteractivePresetRaw = strings.ToLower(strings.TrimSpace(unquoteYAMLScalar(v)))
+				out.InteractivePresetRaw = strings.ToLower(strings.TrimSpace(yamlmini.UnquoteScalar(v)))
 			case "interactive_gate_mode":
-				out.InteractiveGateModeRaw = strings.ToLower(strings.TrimSpace(unquoteYAMLScalar(v)))
+				out.InteractiveGateModeRaw = strings.ToLower(strings.TrimSpace(yamlmini.UnquoteScalar(v)))
 			case "host_preset_bridge":
-				uv := strings.ToLower(unquoteYAMLScalar(v))
+				uv := strings.ToLower(yamlmini.UnquoteScalar(v))
 				switch uv {
 				case "true", "yes", "1":
 					out.HasHostPresetBridge = true
@@ -666,7 +478,7 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 					return out, fmt.Errorf("config.yaml:%d: invalid boolean %q for %s", lineIdx+1, v, k)
 				}
 			case "reject_noop_commands", "reject_echo_guard":
-				uv := strings.ToLower(unquoteYAMLScalar(v))
+				uv := strings.ToLower(yamlmini.UnquoteScalar(v))
 				switch uv {
 				case "true", "yes", "1":
 					out.HasRejectNoopCommands = true
@@ -680,7 +492,7 @@ func parseApprovalsConfigYAML(raw string) (parsedVaultApprovals, error) {
 			case "rules":
 				if v == "" {
 					sectionMode = "rules"
-				} else if arr, isArr := parseYAMLInlineBracketList(v); isArr && len(arr) == 0 {
+				} else if arr, isArr := yamlmini.ParseInlineList(v); isArr && len(arr) == 0 {
 					// `rules: []` leaves built-in rules untouched unless overridden
 				} else {
 					return out, fmt.Errorf("config.yaml:%d: approvals.rules must be a list of rule objects", lineIdx+1)
@@ -2086,11 +1898,6 @@ func isSafeOwnedRepoGitForgeSubcommand(pol PolicyConfig, forgeRule *Rule, evalLi
 		}
 	}
 	return matchedAnyForge
-}
-
-// EvaluateCommand checks checkLine against the resolved PolicyConfig and session autonomy context.
-func EvaluateCommand(pol PolicyConfig, checkLine string, isAutoOrTainted bool, workDir string) EvalDecision {
-	return EvaluateCommandForSession(pol, checkLine, isAutoOrTainted, false, workDir)
 }
 
 // EvaluateCommandForSession checks checkLine against the resolved PolicyConfig and session autonomy

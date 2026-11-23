@@ -28,8 +28,8 @@ By piggybacking on Antigravity's built-in **Remote Control (`antigravity.google`
   - **Investments:** Overnight 10-K/10-Q/8-K filing alerts and thesis impact summaries with page citations.
   - **Side Projects:** Repo CI status, open PR checks, and background branch progress.
 - **Silent All Day:** Every 30 minutes, `hq daemon` runs 0-token Go pre-checks. If nothing crosses your urgency threshold, zero LLM sessions are spawned and your phone stays quiet.
-- **On-the-Go Delegation & Approvals:** Start or resume any `agy-hq` conversation from your phone's browser, invoke `/thesis-check` or `/swe-pulse`, and tap native **Approve / Proceed** buttons on staged actions.
-- **Phase 2 Chat Mirroring:** When enabled, `hq`'s `ChannelAdapter` mirrors briefs and interactive approval cards to Google Chat or Telegram.
+- **On-the-Go Delegation & Approvals:** Start or resume any `agy-hq` conversation from your phone's browser, invoke opt-in starter skills (e.g., `/thesis-check` or `/swe-pulse` once installed via `hq skill add`), and tap native **Approve / Proceed** buttons on staged actions.
+- **Chat & Channel Bridges:** Enable direct Google Chat (`hq gchat`) or any vendor-neutral `hq-channel-bridge/v1` companion pack (`hq channel`) to mirror interrupts, desk replies, and 1-tap approval callbacks.
 
 ### Touchpoint 2: At Your Desk (`Antigravity App` + Right-Hand `HQ Console`)
 - **Left Conversation Sidebar:** Every scheduled and event-triggered run appears in your normal Antigravity history. Always pin your `[HQ] Front Desk` conversation to the sidebar so it stays anchored at the very top.
@@ -41,11 +41,11 @@ By piggybacking on Antigravity's built-in **Remote Control (`antigravity.google`
 
 ### Touchpoint 3: Zero-Prompt Drop Folder (`local/inbox/`)
 Drag any bank CSV, PDF receipt, W-2, 10-K, or notes file into `local/inbox/`:
-- `hq daemon` detects the file via `fsnotify` or 15-second polling, matches it against `local/triggers.yaml` (or passes it to a general triage prompt if unmatched), and automatically dispatches the task.
+- `hq daemon` detects the file via its 15-second Go ticker, matches it against `local/triggers.yaml` (or passes it to a general triage prompt if unmatched), and automatically dispatches the task.
 
 ### Touchpoint 4: Nightly "Sleep-Time" Consolidation (11:30 PM)
 While you sleep, the automated `sleep-consolidate` workflow runs 100% silently in the background (zero Front Desk chat messages), auditing memory against ground-truth session transcripts:
-- Applies incremental delta updates to `local/MEMORY.md` (`<= 80` line Roadmap Index) and `local/memory/facts.jsonl`.
+- Applies incremental delta updates to `local/MEMORY.md` (`<= 40-line` / `2,200-byte` Active Priorities index) and `local/memory/facts.jsonl`.
 - Distills deep operational and architectural knowledge into Topic Wiki pages (`local/memory/topics/*.md`).
 - Mines friction traces and stages verified recursive self-improvement (`./bin/hq rsi`) proposals for 1-tap approval.
 - Commits the private `local/` Vault to git, rolling all findings cleanly into the 7:30 AM Morning Brief (`/morning-brief`).

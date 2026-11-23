@@ -36,53 +36,53 @@ This audit inspects all relevant prior RFCs and six core codebase subsystems to 
 
 ### 3.1 Extension Manifest & Binary Trust Registry (`internal/extension/`)
 
-- **`PackComponents` Schema ([`internal/extension/pack.go`](../../internal/extension/pack.go#L120-L142)):**
+- **`PackComponents` Schema ([`internal/extension/pack.go`](../../internal/extension/pack.go)):**
   - `LoadPackManifest` decodes `<pack>/hq-extension.json` with `json.NewDecoder.DisallowUnknownFields()` (`L174`), ensuring `<pack>/plugin.json` remains 100% untouched for `agy plugin validate --strict` (`L205–215`).
   - Adding `channel_bridges` to `PackComponents` fits naturally alongside `connectors` and `brief_extensions`, with `EnablePack` (`L474–495`) enforcing unqualified ID collision checks across enabled packs (disambiguated via `winner_overrides` in `<vault>/extensions.json`).
-- **SHA-256 Pinning & TOCTOU-Safe Execution ([`internal/extension/trust.go`](../../internal/extension/trust.go#L304-L411)):**
+- **SHA-256 Pinning & TOCTOU-Safe Execution ([`internal/extension/trust.go`](../../internal/extension/trust.go)):**
   - `BuildTrustBundle` (`L564–705`) hashes `hq-extension.json` (`ManifestSHA256`) and pins external binary paths via `pinBinaryRef` (`L459–494`).
   - At execution time, `VerifyTrustedBinary` (`L304`) reads the resolved binary with `store.OpenReadNoFollow`, verifies its SHA-256 against `<vault>/private/trust.json` in constant time, and stages an immutable `0500` copy under `<vault>/private/exec-cache/<sha256>/<basename>` (`stageVerifiedExecCache`, `L313–370`).
-  - **Audit Takeaway:** Reusing `VerifyTrustedBinary` + `connector.RunSubprocess` ([`internal/connector/exec.go`](../../internal/connector/exec.go#L271-L357)) gives `channel_bridges` TOCTOU-proof binary execution, process-group timeout kills (`Setpgid: true`), `SanitizeStderr` `<plugin-card>` stripping, and unconditional `ANTIGRAVITY_CSRF_TOKEN` / `ANTIGRAVITY_LS_ADDRESS` scrubbing out of the box.
+  - **Audit Takeaway:** Reusing `VerifyTrustedBinary` + `connector.RunSubprocess` ([`internal/connector/exec.go`](../../internal/connector/exec.go)) gives `channel_bridges` TOCTOU-proof binary execution, process-group timeout kills (`Setpgid: true`), `SanitizeStderr` `<plugin-card>` stripping, and unconditional `ANTIGRAVITY_CSRF_TOKEN` / `ANTIGRAVITY_LS_ADDRESS` scrubbing out of the box.
 
 ### 3.2 Front Desk Lease Lifecycle & Rotation Paths (`internal/kernel/kernel.go`, `cmd/hq/main.go`)
 
 Inspection of all callers of `SetFrontDesk` and `ReleaseFrontDesk` identifies **four distinct lease transitions** on `<vault>/memory/front_desk.json`:
 
 1. **Initial Claim (`"" -> new_cid`):**
-   - Triggered on Turn 1 of a fresh Vault via `SessionStart` (`hooks.go`) or `HandleStop` bootstrap fallback ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go#L2030-L2035)), or manually via `hq claim-desk --conv=<new_cid>` ([`cmd/hq/main.go`](../../cmd/hq/main.go#L810-L867)).
+   - Triggered on Turn 1 of a fresh Vault via `SessionStart` (`hooks.go`) or `HandleStop` bootstrap fallback ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go)), or manually via `hq claim-desk --conv=<new_cid>` ([`cmd/hq/main.go`](../../cmd/hq/main.go)).
 2. **Shift Handover Rotation (`old_cid -> new_cid`):**
-   - `hq claim-desk --conv=<new_cid>` (`cmd/hq/main.go:834–855`) archives the outgoing shift as `headquarter-front-desk-<short>` (`Status: "completed"`) in `tasks.json`, removes `hq_console.md` from `prev.ArtifactDir` ([`internal/kernel/kernel.go`](../../internal/kernel/kernel.go#L1737-L1742)), and writes the new `ConversationID` to `front_desk.json`.
+   - `hq claim-desk --conv=<new_cid>` (`cmd/hq/main.go:834–855`) archives the outgoing shift as `headquarter-front-desk-<short>` (`Status: "completed"`) in `tasks.json`, removes `hq_console.md` from `prev.ArtifactDir` ([`internal/kernel/front_desk.go`](../../internal/kernel/front_desk.go)), and writes the new `ConversationID` to `front_desk.json`.
 3. **Explicit Lease Vacation (`old_cid -> ""`):**
-   - `hq release-desk` (`cmd/hq/main.go:868–879` -> [`ReleaseFrontDesk`](../../internal/kernel/kernel.go#L2452-L2468)) deletes `front_desk.json` and writes `<vault>/memory/.vacated`.
+   - `hq release-desk` (`cmd/hq/main.go:868–879` -> [`ReleaseFrontDesk`](../../internal/kernel/kernel.go)) deletes `front_desk.json` and writes `<vault>/memory/.vacated`.
 4. **Shift Demotion via Task Adoption (`old_cid -> ""`, followed later by `"" -> new_cid`):**
    - `hq adopt --conv=<old_cid> --task=<slug>` (`cmd/hq/main.go:902–923`) calls `ReleaseFrontDesk` and converts `old_cid` into an active `[Task:<scope>]` coding/research conversation!
 
 **Two Concrete Code Findings:**
 - **Finding `R1` (Demotion Split-Brain Hazard):** During Path 4 (`hq adopt`), `front_desk.json` transitions `old_cid -> ""` *before* a replacement Front Desk conversation exists. If an external sidecar only rebinds on non-empty `new_cid` (ignoring `old_cid -> ""`), any mobile chat message sent before a new Front Desk opens is injected directly into the demoted `[Task:<scope>]` coding session! `bind-desk` must therefore model `lease_state: "active" | "vacated"` explicitly.
-- **Finding `R2` (Non-Atomic Lease Writes):** `saveFrontDeskLease` ([`internal/kernel/kernel.go`](../../internal/kernel/kernel.go#L1701-L1710)) currently uses `os.WriteFile(frontDeskPath(vaultDir), data, 0o644)` in place rather than `store.WriteAtomic`. Polling `front_desk.json` every `15s` from `hq daemon` risks observing a truncated file mid-write unless `saveFrontDeskLease` switches to `store.WriteAtomic`.
+- **Finding `R2` (Non-Atomic Lease Writes):** `saveFrontDeskLease` ([`internal/kernel/front_desk.go`](../../internal/kernel/front_desk.go)) currently uses `os.WriteFile(frontDeskPath(vaultDir), data, 0o644)` in place rather than `store.WriteAtomic`. Polling `front_desk.json` every `15s` from `hq daemon` risks observing a truncated file mid-write unless `saveFrontDeskLease` switches to `store.WriteAtomic`.
 
 ### 3.3 Daemon Tickers & Event/Outbox Dispatch (`cmd/hq/main.go`, `internal/kernel/events_dispatch.go`)
 
-- **Cross-Process Convergence via `fastTicker` ([`cmd/hq/main.go`](../../cmd/hq/main.go#L1741-L1793)):**
+- **Cross-Process Convergence via `fastTicker` ([`cmd/hq/main.go`](../../cmd/hq/main.go)):**
   - `hq daemon` runs four loop arms: `wakeCh` (in-process channel inside the daemon process), `fastTicker` (`15s`), `cronTicker` (`30s`), and `hbTicker` (`30m`) (`internal/kernel/daemon.go` holds service management and trigger config loaders, while the live select loop resides in `cmd/hq/main.go:1742–1793`).
   - Because CLI commands (`hq claim-desk`, `hq release-desk`, `hq adopt`, `hq outbox add`, `hq complete`) execute in separate short-lived OS processes, they do not signal in-process `wakeCh`. `fastTicker` (`15s`) is therefore the primary cross-process convergence point (`<= 15s` worst-case rotation and notification latency).
-- **Coupling Hazard in `DispatchOutboxToFrontDesk` ([`internal/kernel/events_dispatch.go`](../../internal/kernel/events_dispatch.go#L481-L495)):**
+- **Coupling Hazard in `DispatchOutboxToFrontDesk` ([`internal/kernel/events_dispatch.go`](../../internal/kernel/events_dispatch.go)):**
   - Today, `DispatchOutboxToFrontDesk` exits immediately (`return 0, nil`) if `GetFrontDesk` returns `!ok || fd.ConversationID == ""`.
-  - When `fd.ConversationID` is present, `outbox.DispatchPendingInterrupts` ([`internal/outbox/dispatcher.go`](../../internal/outbox/dispatcher.go#L105-L225)) runs a 3-phase lock-safe pipeline under `store.RankOutbox` (`60`) and transitions each item to `StatusDelivered` once `DeliverMessageToSession` succeeds.
+  - When `fd.ConversationID` is present, `outbox.DispatchPendingInterrupts` ([`internal/outbox/dispatcher.go`](../../internal/outbox/dispatcher.go)) runs a 3-phase lock-safe pipeline under `store.RankOutbox` (`60`) and transitions each item to `StatusDelivered` once `DeliverMessageToSession` succeeds.
   - **Finding `R3` (Independent Retry Cursor Requirement):** Coupling external channel delivery synchronously inside `DispatchPendingInterrupts`'s `deliverFn` would cause a transient external chat outage (`HTTP 429` / `503`) to fail `deliverFn`, reverting `OutboxItem` to `StatusPending` and **re-injecting duplicate `🔔 Proactive Alert` cards into `[HQ] Front Desk` up to 5 times** (wasting LLM tokens on repeated Front Desk wakeups). Conversely, ignoring bridge errors after `StatusDelivered` would drop urgent alerts permanently on transient network blips. Channel bridges therefore require their own **per-bridge bounded retry queue** keyed by deterministic `idempotency_key` (`outbox:<item.ID>`), decoupled from `OutboxItem.Status`.
 
 ### 3.4 Outbox Formatting, Quiet Hours & Anti-Cue Scrubbing (`internal/outbox/`)
 
-- **`InQuietHours` & Critical Breaches ([`internal/outbox/outbox.go`](../../internal/outbox/outbox.go#L246-L271), [`dispatcher.go`](../../internal/outbox/dispatcher.go#L143-L145)):**
+- **`InQuietHours` & Critical Breaches ([`internal/outbox/outbox.go`](../../internal/outbox/outbox.go), [`dispatcher.go`](../../internal/outbox/dispatcher.go)):**
   - `LoadAttentionConfig` parses `attention.quiet_hours` (`start`, `end`, `tz`/`timezone`, `allow_critical_breach`).
   - Tainted items (`it.Tainted == true`) have `Force = false` and `Critical = false` enforced mechanically in `EvaluateDelivery` (`outbox.go:470–474`), guaranteeing untrusted external inputs can never pierce quiet hours as fake critical breaches.
-- **`SanitizeAntiCue` ([`internal/outbox/dispatcher.go`](../../internal/outbox/dispatcher.go#L24-L47)):**
+- **`SanitizeAntiCue` ([`internal/outbox/dispatcher.go`](../../internal/outbox/dispatcher.go)):**
   - Strips control characters (`< 0x20` except `\n`, `\t`), neutralizes `</hq_system_notification>` fence tags, redacts imperative command cues (`run hq approve`, `execute hq propose`, etc.) and prompt-injection phrases (`ignore previous instructions`), and truncates safely on UTF-8 rune boundaries.
   - **Finding `R4` (Link-Unfurl Beacon Vector on Tainted Summaries):** Many external chat clients automatically fetch URL previews (leaking recipient IP/metadata or triggering tracking beacons if an attacker embedded a URL inside a summarized external message). For notifications with `tainted_origin: true`, `internal/channels/` should additionally defang `http://` / `https://` schemes (`hxxp://` / `hxxps://`) alongside `SanitizeAntiCue`.
 
 ### 3.5 Human-Presence Approval Verification (`internal/approvals/presence.go`)
 
-- **Transcript-Verified Capability Minting ([`internal/approvals/presence.go`](../../internal/approvals/presence.go#L261-L407)):**
+- **Transcript-Verified Capability Minting ([`internal/approvals/presence.go`](../../internal/approvals/presence.go)):**
   - When an agent calls `ask_question` referencing `<propID>`, `PreToolUse` (`hooks.go:900–903`) calls `RecordAsk`, generating a 6-character `NonceCode` in `<vault>/private/approval_asks/<propID>.json` (`0600`, `24h` TTL) and injecting `(Recommended) Approve (<propID> · sha256:<short> · code:<NonceCode>)` into `ask_question` options.
   - When `hq approve <propID> --sha256=<prefix>` runs, `PreToolUse` (`hooks.go:1392`) calls `VerifyAskAndMintCap`, which scans the tail of `transcript.jsonl` strictly for steps matching:
     ```go
@@ -100,12 +100,12 @@ Inspection of all callers of `SetFrontDesk` and `ReleaseFrontDesk` identifies **
 
 ### 3.6 Credential Vault Guards, Quarantine Isolation & Lock Hierarchy (`internal/hooks/`, `internal/sandbox/`, `internal/store/`)
 
-- **All-Session `private/` Guard ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go#L646), `L1276–1510`):**
+- **All-Session `private/` Guard ([`internal/hooks/hooks.go`](../../internal/hooks/hooks.go), `L1276–1510`):**
   - `protectedPrivateSubs` (`L1276–1279`) and `reLocalCredentialShell` (`L646`) block `read_file`, `write_file`, `edit_file`, `grep_search`, `find_by_name`, and `run_command` access across **all** sessions (including untainted Front Desk and coding tasks) for listed subdirectories under `<vault>/private/`, while `private/ledger/` remains readable by untainted finance skills (`ci/harness.go:656–665`).
-  - Adding `"channels"` and `"approval_bridge_caps"` to `protectedPrivateSubs` and `reLocalCredentialShell` (and blocking `hq channel inbound|callback|apply-config` plus `/api/channels/*` in `PreToolUse`) makes destination configs and button capability hashes mechanically invisible to every LLM session, while [`internal/sandbox/sandbox.go`](../../internal/sandbox/sandbox.go#L250-L270) already masks the entire `<vault>/private` directory via `--tmpfs` (`bwrap`) / Seatbelt `(deny file-read* file-write*)`.
+  - Adding `"channels"` and `"approval_bridge_caps"` to `protectedPrivateSubs` and `reLocalCredentialShell` (and blocking `hq channel inbound|callback|apply-config` plus `/api/channels/*` in `PreToolUse`) makes destination configs and button capability hashes mechanically invisible to every LLM session, while [`internal/sandbox/sandbox.go`](../../internal/sandbox/sandbox.go) already masks the entire `<vault>/private` directory via `--tmpfs` (`bwrap`) / Seatbelt `(deny file-read* file-write*)`.
   - Similarly, adding `filepath.Join(canonVault, "memory", "channels")` to the `write_file`/`edit_file`/shell integrity list (`hooks.go:1525–1549`) prevents LLMs from mutating bridge cursor/thread state or forging `channels.jsonl` audit records.
 - **Lock Ordering (`internal/store/store.go`):**
-  - Current lock ranks ([`internal/store/store.go`](../../internal/store/store.go#L23-L32)): `RankExtensions (10) < RankTriggerCur (20) < RankWatcher (30) < RankTimers (35) < RankEvents (40) < RankGoals (50) < RankOutbox (60) < RankTaint (70)`.
+  - Current lock ranks ([`internal/store/store.go`](../../internal/store/store.go)): `RankExtensions (10) < RankTriggerCur (20) < RankWatcher (30) < RankTimers (35) < RankEvents (40) < RankGoals (50) < RankOutbox (60) < RankTaint (70)`.
   - Because `extension.VerifyTrustedBinary` can emit a mismatch notice via `outbox.Add` (`RankOutbox = 60`, `trust.go:224`), `internal/channels/` must (a) assign `RankChannels = 65` (`RankOutbox < RankChannels < RankTaint`), and (b) **never hold `RankChannels` across `VerifyTrustedBinary` or `connector.RunSubprocess`**, using the same 3-phase claim -> unlocked exec -> commit pattern as `outbox.DispatchPendingInterrupts`.
 
 ---

@@ -355,7 +355,7 @@ func ExecuteNudge(ctx context.Context, vaultDir, convID, reqID, nudgeID string, 
 			}
 		} else {
 			item := QueuedNudge{
-				ID:         "nudge-" + randomHexToken(6),
+				ID:         "nudge-" + store.RandomHex(6),
 				PolicyID:   polSpec.ID,
 				NudgeID:    nudgeSpec.ID,
 				CallerID:   stored.CallerID,

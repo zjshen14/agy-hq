@@ -124,11 +124,9 @@ func TestGitWorktreeProviderLifecycle(t *testing.T) {
 		t.Fatalf("Create(share_from) = %+v, %v", sibling, err)
 	}
 
-	// The binding key synthesized from a task matches LedgerKey(provider, workspace ID).
-	task := ActiveTask{TaskSlug: "ledger-fix", WorktreeDir: wtDir}
-	bindings := task.AllWorkspaceBindings()
-	if len(bindings) != 1 || bindings[0].Key != workspace.LedgerKey(workspace.CoreGitProviderID, res.Info.WorkspaceID) {
-		t.Fatalf("binding key %v does not match provider workspace ID %q", bindings, res.Info.WorkspaceID)
+	// The canonical ledger key matches LedgerKey(provider, workspace ID).
+	if gotKey := workspace.LedgerKey(workspace.CoreGitProviderID, workspace.CanonicalPath(wtDir)); gotKey != workspace.LedgerKey(workspace.CoreGitProviderID, res.Info.WorkspaceID) {
+		t.Fatalf("ledger key %q does not match provider workspace ID %q", gotKey, res.Info.WorkspaceID)
 	}
 
 	commitFileInGitDir(t, wtDir, "feature.txt", "work\n", "feature work")
@@ -218,35 +216,6 @@ func TestGitWorktreeProviderLifecycle(t *testing.T) {
 	}
 	if _, err := (gitWorktreeProvider{}).Status(ctx, root); workspace.ErrorCode(err) != workspace.CodeUnavailable {
 		t.Fatalf("unbound provider Status = %v, want CodeUnavailable", err)
-	}
-}
-
-func TestAllWorkspaceBindingsSynthesizesGitThenProviderBindings(t *testing.T) {
-	vaultDir := t.TempDir()
-	primary := filepath.Join(vaultDir, "worktrees", "repo-a-task")
-	secondary := filepath.Join(vaultDir, "worktrees", "repo-b-task")
-	provider := workspace.Binding{Key: "acme-monorepo/client:ledger-fix", Provider: "acme-monorepo/client", Root: "/srv/ws/user/ledger-fix", WorkDir: "/srv/ws/user/ledger-fix/src", Role: workspace.RolePrimary}
-	task := ActiveTask{
-		TaskSlug:     "ledger-fix",
-		WorktreeDir:  primary,
-		WorktreeDirs: []string{secondary, primary + "/"},
-		Workspaces:   []workspace.Binding{provider, provider, {Provider: "acme-monorepo/client"}},
-	}
-	got := task.AllWorkspaceBindings()
-	if len(got) != 3 {
-		t.Fatalf("len(bindings) = %d, want 3: %+v", len(got), got)
-	}
-	if got[0].Role != workspace.RolePrimary || got[0].Provider != workspace.CoreGitProviderID || got[0].Key != workspace.CoreGitProviderID+":"+workspace.CanonicalPath(primary) || got[0].WorkDir != got[0].Root {
-		t.Fatalf("unexpected primary git binding: %+v", got[0])
-	}
-	if got[1].Role != workspace.RoleSecondary || got[1].Root != workspace.CanonicalPath(secondary) {
-		t.Fatalf("unexpected secondary git binding: %+v", got[1])
-	}
-	if got[2] != provider {
-		t.Fatalf("provider binding not appended last: %+v", got[2])
-	}
-	if (ActiveTask{}).AllWorkspaceBindings() != nil {
-		t.Fatal("expected nil bindings for a task without workspaces")
 	}
 }
 

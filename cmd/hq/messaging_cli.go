@@ -101,8 +101,8 @@ func runProposeCLI(rootDir, vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
-		fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, shortPrefix(prop.SHA256, 12))
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 		return
 	}
 	var meta map[string]string
@@ -189,11 +189,11 @@ func runProposeCLI(rootDir, vaultDir string, args []string) {
 		os.Exit(1)
 	}
 	_ = webui.SyncMarkdownConsole(vaultDir)
-	fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, prop.SHA256[:12])
+	fmt.Printf("Staged proposal %s (sha256: %s)\n", prop.ID, shortPrefix(prop.SHA256, 12))
 	if len(prop.RiskFlags) > 0 {
 		fmt.Printf("  ⚠️ Contextual PII Warning: %s\n", strings.Join(prop.RiskFlags, ", "))
 	}
-	fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+	fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 	fmt.Printf("  Next: Present a markdown blockquote preview + ask_question referencing %s (or approve in :4242 Web Console).\n", prop.ID)
 
 }
@@ -499,12 +499,12 @@ func runGmailCLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Staged Gmail forward proposal %s (message: %s, to: %s, attachments: %d, sha256: %s)\n",
-			prop.ID, plan.MessageID, plan.To, len(plan.AttachmentFiles), prop.SHA256[:12])
+			prop.ID, plan.MessageID, plan.To, len(plan.AttachmentFiles), shortPrefix(prop.SHA256, 12))
 		fmt.Printf("  Body file: %s\n", plan.BodyFile)
 		for i, attPath := range plan.AttachmentFiles {
 			fmt.Printf("  Attachment %d: %s\n", i+1, attPath)
 		}
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown gmail subcommand: %s\n", sub)
@@ -738,9 +738,9 @@ func runGChatCLI(rootDir, vaultDir string, args []string) {
 		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Staged Google Chat proposal %s (draft: %s, space: %s [%s], sha256: %s)\n",
-			prop.ID, spec.DraftID, spec.SpaceName, spec.SpaceID, prop.SHA256[:12])
+			prop.ID, spec.DraftID, spec.SpaceName, spec.SpaceID, shortPrefix(prop.SHA256, 12))
 		fmt.Printf("  %s\n", formatBodyVerificationSummary(spec.Body))
-		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, prop.SHA256[:12])
+		fmt.Printf("  Approve with: %s approve %s --sha256=%s\n", displayHQCmd(rootDir), prop.ID, shortPrefix(prop.SHA256, 12))
 
 	case "send-draft", "send":
 		denyIfCallerTainted(vaultDir, "gchat send-draft")
@@ -821,26 +821,17 @@ func resolveBodyInput(bodyFlag string, bodyStdin bool, bodyFile string, stdin io
 	return bodyFlag, nil
 }
 
-func truncateLinePreview(s string, maxRunes int) string {
-	s = strings.TrimSpace(s)
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
-	}
-	runes := []rune(s)
-	return string(runes[:maxRunes]) + "..."
-}
-
 // formatBodyVerificationSummary returns a concise verification line showing byte/rune counts,
 // literal '$' count, and first/last line previews so callers can verify no shell expansion occurred.
 func formatBodyVerificationSummary(body string) string {
 	dollarCount := strings.Count(body, "$")
 	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
-	first := truncateLinePreview(lines[0], 60)
+	first := truncateDisplay(lines[0], 60)
 	if len(lines) == 1 {
 		return fmt.Sprintf("Body verified: %d bytes, %d runes, %d '$' chars | line: %q",
 			len(body), utf8.RuneCountInString(body), dollarCount, first)
 	}
-	last := truncateLinePreview(lines[len(lines)-1], 60)
+	last := truncateDisplay(lines[len(lines)-1], 60)
 	return fmt.Sprintf("Body verified: %d bytes, %d runes, %d '$' chars | first: %q | last: %q",
 		len(body), utf8.RuneCountInString(body), dollarCount, first, last)
 }

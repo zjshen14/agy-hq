@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/yamlmini"
 )
 
 // Config holds configurable lead times for the RFC-0027 0-token anticipation engine (`pulse:` in config.yaml).
@@ -29,41 +31,28 @@ func DefaultConfig() Config {
 	}
 }
 
-func cleanVal(s string) string {
-	s = strings.TrimSpace(s)
-	if idx := strings.Index(s, " #"); idx >= 0 {
-		s = strings.TrimSpace(s[:idx])
-	}
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
 // ParseConfig parses the top-level `pulse:` block from config.yaml content.
 func ParseConfig(content string) Config {
 	cfg := DefaultConfig()
 	inPulse := false
-	for _, rawLine := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(rawLine)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for _, rawLine := range yamlmini.Lines(content) {
+		clean := yamlmini.StripComment(rawLine)
+		if clean == "" {
 			continue
 		}
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		indent := yamlmini.LeadingIndent(rawLine)
 		if indent == 0 {
-			inPulse = strings.HasPrefix(trimmed, "pulse:")
+			inPulse = strings.HasPrefix(clean, "pulse:")
 			continue
 		}
 		if !inPulse || indent < 2 {
 			continue
 		}
-		idx := strings.Index(trimmed, ":")
-		if idx < 0 {
+		key, rawVal, ok := yamlmini.SplitKV(clean)
+		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(trimmed[:idx])
-		rawVal := strings.TrimSpace(trimmed[idx+1:])
-		val := cleanVal(rawVal)
+		val := yamlmini.UnquoteScalar(rawVal)
 		switch key {
 		case "enabled":
 			cfg.Enabled = strings.EqualFold(val, "true") || val == "1" || strings.EqualFold(val, "yes")
@@ -84,10 +73,18 @@ func ParseConfig(content string) Config {
 				cfg.StaleDraftAge = d
 			}
 		case "countdown_horizons":
-			s := strings.TrimPrefix(strings.TrimSuffix(rawVal, "]"), "[")
+			items, isList := yamlmini.ParseInlineList(rawVal)
+			if !isList {
+				s := strings.TrimPrefix(strings.TrimSuffix(rawVal, "]"), "[")
+				for _, part := range strings.Split(s, ",") {
+					if v := yamlmini.UnquoteScalar(part); v != "" {
+						items = append(items, v)
+					}
+				}
+			}
 			var hs []time.Duration
-			for _, part := range strings.Split(s, ",") {
-				if d, err := time.ParseDuration(cleanVal(part)); err == nil && d > 0 {
+			for _, item := range items {
+				if d, err := time.ParseDuration(item); err == nil && d > 0 {
 					hs = append(hs, d)
 				}
 			}

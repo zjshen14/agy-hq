@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/redact"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -30,23 +33,12 @@ func (v PIIViolation) String() string {
 
 var (
 	reForbiddenPath = regexp.MustCompile(`(?i)^(?:local|vault|bin)/|^hq$|(?:^|/)\.env(?:\..+)?$|\.(?:pem|key|p12|pfx|secret|credentials)$|(?:^|/)client_secret.*\.json$|(?:^|/)token.*\.json$`)
-	reHomeDirPath   = regexp.MustCompile(`(/home/[a-zA-Z0-9._\-]+/|/Users/[a-zA-Z0-9._\-]+/|[cC]:\\[uU]sers\\[a-zA-Z0-9._\-]+\\)`)
+	reHomeDirPath   = redact.HomeDirPathPattern()
 	reEmailLiteral  = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
-	reSSNLiteral    = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
+	reSSNLiteral    = redact.SSNPattern()
 	reGChatSpaceID  = regexp.MustCompile(`(?:^|[^A-Za-z0-9_\-])(spaces/[A-Za-z0-9_\-]{8,})`)
 
-	secretPatterns = []struct {
-		Name    string
-		Pattern *regexp.Regexp
-	}{
-		{"Google OAuth Access Token", regexp.MustCompile(`\bya29\.[0-9A-Za-z_\-]{20,}\b`)},
-		{"Google OAuth Refresh Token", regexp.MustCompile(`\b1//[0-9A-Za-z_\-]{40,}\b`)},
-		{"Google API Key", regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`)},
-		{"GitHub Token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{50,})\b`)},
-		{"OpenAI/Anthropic API Key", regexp.MustCompile(`\bsk-(?:proj-|ant-)?[A-Za-z0-9_\-]{24,}\b`)},
-		{"Slack Token", regexp.MustCompile(`\bxox[baprs]-[0-9A-Za-z\-]{10,}\b`)},
-		{"Private Key PEM Block", regexp.MustCompile(`-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----`)},
-	}
+	secretPatterns = redact.DefaultSecretPatterns()
 
 	allowedHomePrefixes = []string{
 		"/home/runner/",
@@ -159,7 +151,7 @@ func CheckPII(rootDir string, stagedOnly bool) ([]PIIViolation, error) {
 
 	userEmail := strings.ToLower(strings.TrimSpace(gitConfigEmail(rootDir)))
 	runtimeHome := strings.TrimSpace(os.Getenv("HOME"))
-	checkRuntimeHome := runtimeHome != "" && len(runtimeHome) > 5 && !isAllowedHomePrefix(runtimeHome+"/") && !vault.IsTempPath(rootDir)
+	checkRuntimeHome := runtimeHome != "" && len(runtimeHome) > 5 && !isAllowedHomePrefix(runtimeHome+"/") && !hostpaths.IsTempPath(rootDir)
 	denylist := loadLocalPIIDenylist(rootDir)
 
 	if stagedOnly {
@@ -268,10 +260,6 @@ func scanLineForPII(relFile string, lineNum int, line, gitUserEmail, runtimeHome
 	if hasSecretCandidate(line) {
 		for _, sp := range secretPatterns {
 			if sp.Pattern.MatchString(line) {
-				// Skip regex definition lines in pii.go/ci_test.go
-				if strings.HasSuffix(relFile, "internal/ci/pii.go") && strings.Contains(line, "regexp.MustCompile") {
-					continue
-				}
 				out = append(out, PIIViolation{
 					Invariant: "P4-SecretPattern",
 					File:      relFile,
@@ -393,7 +381,7 @@ func loadLocalPIIDenylist(rootDir string) []string {
 	if envVault := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); envVault != "" {
 		candidates = append(candidates, filepath.Join(envVault, "private", "pii-denylist.txt"))
 	}
-	if !vault.IsTempPath(rootDir) {
+	if !hostpaths.IsTempPath(rootDir) {
 		if cfg, err := vault.LoadGlobalConfig(); err == nil && cfg != nil && strings.TrimSpace(cfg.VaultDir) != "" {
 			candidates = append(candidates, filepath.Join(cfg.VaultDir, "private", "pii-denylist.txt"))
 		}
@@ -466,13 +454,8 @@ func AddPIIDenylistTerms(vaultDir string, rawTerms []string) (int, error) {
 	} else {
 		next = prefix + "\n" + strings.Join(toAdd, "\n") + "\n"
 	}
-	tmpPath := denyPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(next), 0o600); err != nil {
-		return 0, fmt.Errorf("write %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, denyPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return 0, fmt.Errorf("rename %s: %w", denyPath, err)
+	if err := store.WriteAtomic(denyPath, []byte(next), 0o600); err != nil {
+		return 0, fmt.Errorf("write %s: %w", denyPath, err)
 	}
 	return len(toAdd), nil
 }
@@ -528,7 +511,7 @@ func CheckPIIHistory(rootDir string) ([]PIIViolation, error) {
 
 	userEmail := strings.ToLower(strings.TrimSpace(gitConfigEmail(rootDir)))
 	runtimeHome := strings.TrimSpace(os.Getenv("HOME"))
-	checkRuntimeHome := runtimeHome != "" && len(runtimeHome) > 5 && !isAllowedHomePrefix(runtimeHome+"/") && !vault.IsTempPath(rootDir)
+	checkRuntimeHome := runtimeHome != "" && len(runtimeHome) > 5 && !isAllowedHomePrefix(runtimeHome+"/") && !hostpaths.IsTempPath(rootDir)
 	denylist := loadLocalPIIDenylist(rootDir)
 
 	curSHA := ""
@@ -804,6 +787,7 @@ func IsAllowedSyntheticEmail(lowerEmail string) bool {
 	return false
 }
 
+// Keep aligned with internal/redact/redact.go's defaultSecretPatterns.
 func hasSecretCandidate(line string) bool {
 	return strings.Contains(line, "ya29.") ||
 		strings.Contains(line, "1//") ||

@@ -11,7 +11,7 @@ find_hq() {
     return 0
   fi
   for cand in \
-    "$SCRIPT_DIR/../../../../bin/hq" \
+    "$SCRIPT_DIR/../../../../../bin/hq" \
     "$SCRIPT_DIR/../../bin/hq" \
     "${HOME_DIR:+$HOME_DIR/.local/bin/hq}" \
     "/opt/homebrew/bin/hq" \

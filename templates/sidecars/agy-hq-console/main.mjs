@@ -214,12 +214,11 @@ const listenPort = process.env.ANTIGRAVITY_SIDECAR_WEB_PORT
 
 const token = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '';
 
-function proxy(req, res, targetPath) {
-  const path = targetPath || req.url;
+function proxy(req, res) {
   const opts = {
     hostname: TARGET_HOST,
     port: TARGET_PORT,
-    path: path,
+    path: req.url,
     method: req.method,
     headers: { ...req.headers, host: `${TARGET_HOST}:${TARGET_PORT}` },
   };

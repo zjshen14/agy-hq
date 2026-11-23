@@ -49,8 +49,8 @@ func currentGitWorktreeAdder() GitWorktreeAdder {
 // gitWorktreeProvider is the built-in core/git-worktree provider (RFC-0025 §4.2). It wraps the existing
 // worktree helpers without changing them and keeps IsManagedWorktreeDir as its own invariant: it only ever
 // reports, inspects, or removes direct children of <vault>/worktrees/. Workspace IDs are canonical absolute
-// worktree paths (bare directory names are accepted as input), so LedgerKey(provider, id) equals the key of the
-// synthesized task binding from ActiveTask.AllWorkspaceBindings.
+// worktree paths (bare directory names are accepted as input), so LedgerKey(provider, id) equals the canonical
+// core/git-worktree ledger key for that worktree.
 type gitWorktreeProvider struct {
 	vaultDir string
 }

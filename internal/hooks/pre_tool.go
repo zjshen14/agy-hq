@@ -20,15 +20,52 @@ import (
 )
 
 var (
-	reLocalCredentialShell = regexp.MustCompile(`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:gmail|gchat|credentials|connectors|channels|delegates|runtime|taint|exec-cache|trust\.json|approval_asks|approval_caps|approval_bridge_caps|pii-denylist\.txt|daemon_token|profile\.md)|memory/(?:channels|delegates_queues|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl|workspaces\.json|\.workspaces\.lock))|workspaces\.json|\.workspaces\.lock|workspaces\.jso\S*|delegates_state\.json|\.delegates\.lock|delegates_audit\.jsonl)(?:[\s"'/]|$)`)
+	protectedPrivateSubs = []string{
+		"gmail", "gchat", "credentials", "connectors", "channels", "delegates", "runtime", "taint", "exec-cache",
+		"trust.json", "approval_asks", "approval_caps", "approval_bridge_caps", "pii-denylist.txt", "daemon_token", "profile.md",
+	}
+	protectedCoreVaultRelTargets = []string{
+		"approvals",
+		filepath.Join("memory", "channels"),
+	}
+	protectedLedgerMemorySubs = []string{
+		"workspaces.json",
+		".workspaces.lock",
+		"delegates_queues",
+		"delegates_state.json",
+		".delegates.lock",
+		"delegates_audit.jsonl",
+	}
+	protectedBareShellPatterns = []string{
+		`workspaces\.json`,
+		`\.workspaces\.lock`,
+		`workspaces\.jso\S*`,
+		`delegates_state\.json`,
+		`\.delegates\.lock`,
+		`delegates_audit\.jsonl`,
+	}
+
+	reLocalCredentialShell = compileLocalCredentialShellRegex()
 	reHeavyBuildTest       = regexp.MustCompile(`(?i)\b(go\s+(?:test|build)|npm\s+(?:test|run\s+build)|pnpm\s+test|pytest|cargo\s+(?:test|build))\b`)
 	reGChatBrowserURL      = regexp.MustCompile(`(?i)(?:chat\.google\.com|mail\.google\.com/chat)`)
 	reHQClaimDesk          = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:go\s+run\s+\./cmd/hq|(?:\S+/)?hq)\s+claim-desk\b`)
 )
 
-var protectedPrivateSubs = []string{
-	"gmail", "gchat", "credentials", "connectors", "channels", "delegates", "runtime", "taint", "exec-cache",
-	"trust.json", "approval_asks", "approval_caps", "approval_bridge_caps", "pii-denylist.txt", "daemon_token", "profile.md",
+func compileLocalCredentialShellRegex() *regexp.Regexp {
+	quoteJoin := func(items []string) string {
+		quoted := make([]string, len(items))
+		for i, item := range items {
+			quoted[i] = regexp.QuoteMeta(item)
+		}
+		return strings.Join(quoted, "|")
+	}
+	memSubs := append([]string{"channels"}, protectedLedgerMemorySubs...)
+	return regexp.MustCompile(fmt.Sprintf(
+		`(?i)(?:^|[\s"'=:/])(?:local/(?:private/(?:%s)|memory/(?:%s))|%s)(?:[\s"'/]|$)`,
+		quoteJoin(protectedPrivateSubs),
+		quoteJoin(memSubs),
+		strings.Join(protectedBareShellPatterns, "|"),
+	))
 }
 
 type preToolSessionCtx struct {
@@ -161,19 +198,14 @@ func hasAutoOrTaintedAncestor(vaultDir, convID string) bool {
 }
 
 func protectedCredentialTargets(canonVault string, extra []string, includeLedgers bool) []string {
-	targets := []string{
-		filepath.Join(canonVault, "approvals"),
-		filepath.Join(canonVault, "memory", "channels"),
+	var targets []string
+	for _, rel := range protectedCoreVaultRelTargets {
+		targets = append(targets, filepath.Join(canonVault, rel))
 	}
 	if includeLedgers {
-		targets = append(targets,
-			filepath.Join(canonVault, "memory", "workspaces.json"),
-			filepath.Join(canonVault, "memory", ".workspaces.lock"),
-			filepath.Join(canonVault, "memory", "delegates_queues"),
-			filepath.Join(canonVault, "memory", "delegates_state.json"),
-			filepath.Join(canonVault, "memory", ".delegates.lock"),
-			filepath.Join(canonVault, "memory", "delegates_audit.jsonl"),
-		)
+		for _, sub := range protectedLedgerMemorySubs {
+			targets = append(targets, filepath.Join(canonVault, "memory", sub))
+		}
 	}
 	for _, sub := range protectedPrivateSubs {
 		targets = append(targets, filepath.Join(canonVault, "private", sub))
@@ -213,18 +245,8 @@ func matchesProtectedShellTarget(vaultDir, canonVault string, extraCred []string
 		if vBase == "" || vBase == "." {
 			continue
 		}
-		if strings.Contains(cmdLine, filepath.Join(vBase, "approvals")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "channels")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "delegates_queues")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "delegates_state.json")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", ".delegates.lock")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "delegates_audit.jsonl")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", "workspaces.json")) ||
-			strings.Contains(cmdLine, filepath.Join(vBase, "memory", ".workspaces.lock")) {
-			return true
-		}
-		for _, sub := range protectedPrivateSubs {
-			if strings.Contains(cmdLine, filepath.Join(vBase, "private", sub)) {
+		for _, target := range protectedCredentialTargets(vBase, nil, true) {
+			if strings.Contains(cmdLine, target) {
 				return true
 			}
 		}
@@ -653,7 +675,6 @@ func handlePreToolProtectedWrites(w io.Writer, vaultDir string, payload ToolCall
 	canonVault := ctx.canonVault()
 	protectedStores := []string{
 		filepath.Join(canonVault, "extensions.json"),
-		filepath.Join(canonVault, "approvals"),
 		filepath.Join(canonVault, "memory", "pending"),
 		filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
 		filepath.Join(canonVault, "memory", "rsi", "rules"),
@@ -663,18 +684,17 @@ func handlePreToolProtectedWrites(w io.Writer, vaultDir string, payload ToolCall
 		filepath.Join(canonVault, "memory", "events_archive.jsonl"),
 		filepath.Join(canonVault, "memory", "timers.json"),
 		filepath.Join(canonVault, "memory", "outbox"),
-		filepath.Join(canonVault, "memory", "channels"),
 		filepath.Join(canonVault, "memory", "watcher"),
 		filepath.Join(canonVault, "memory", "watchers"),
 		filepath.Join(canonVault, "memory", "trigger_cursors.json"),
 		filepath.Join(canonVault, "memory", "front_desk.json"),
 		filepath.Join(canonVault, "memory", "tasks.json"),
-		filepath.Join(canonVault, "memory", "workspaces.json"),
-		filepath.Join(canonVault, "memory", ".workspaces.lock"),
-		filepath.Join(canonVault, "memory", "delegates_queues"),
-		filepath.Join(canonVault, "memory", "delegates_state.json"),
-		filepath.Join(canonVault, "memory", ".delegates.lock"),
-		filepath.Join(canonVault, "memory", "delegates_audit.jsonl"),
+	}
+	for _, rel := range protectedCoreVaultRelTargets {
+		protectedStores = append(protectedStores, filepath.Join(canonVault, rel))
+	}
+	for _, sub := range protectedLedgerMemorySubs {
+		protectedStores = append(protectedStores, filepath.Join(canonVault, "memory", sub))
 	}
 	if matchesAnyPathPrefix(canonPath, protectedStores) {
 		return true, writePreToolDeny(w, "Blocked by agy-hq integrity policy: direct file writes to pending approval proposals, extension state, RSI hypotheses, durable event/timer/outbox/watcher stores, task/workspace ledgers, or intervention audit logs are prohibited.")

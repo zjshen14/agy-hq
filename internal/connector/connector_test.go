@@ -3,6 +3,8 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -512,19 +514,16 @@ func TestLoadReachableDesktopPluginEnvAndSanitizedExtra(t *testing.T) {
 }
 
 func TestClassifyGmailAutomationAndUrgency(t *testing.T) {
-	makeHeaderPart := func(kv ...string) rawMIMEPart {
-		var p rawMIMEPart
+	makeHeaderPart := func(kv ...string) RawMIMEPart {
+		var p RawMIMEPart
 		for i := 0; i+1 < len(kv); i += 2 {
-			p.Headers = append(p.Headers, struct {
-				Name  string `json:"name"`
-				Value string `json:"value"`
-			}{Name: kv[i], Value: kv[i+1]})
+			p.Headers = append(p.Headers, RawMIMEHeader{Name: kv[i], Value: kv[i+1]})
 		}
 		return p
 	}
 
 	// 1. Pure newsletter with List-Unsubscribe + substack host -> isBulkAutomated=true
-	subMsg := rawMailMsg{
+	subMsg := RawMailMessage{
 		Payload: makeHeaderPart("List-Unsubscribe", "<https://example.com/unsubscribe>"),
 	}
 	auto1, sec1, sched1 := classifyGmailAutomationAndUrgency(subMsg, "news@"+"substack.com", "weekly engineering digest", "Read online")
@@ -533,14 +532,14 @@ func TestClassifyGmailAutomationAndUrgency(t *testing.T) {
 	}
 
 	// 2. Transactional no-reply portal without bulk headers (e.g., school schedule notice) -> isBulkAutomated=false, hasSchedule=true
-	schoolMsg := rawMailMsg{}
+	schoolMsg := RawMailMessage{}
 	auto2, sec2, sched2 := classifyGmailAutomationAndUrgency(schoolMsg, "no-reply@example.org", "early dismissal tomorrow at 1pm", "Please pick up students early.")
 	if auto2 || sec2 || !sched2 {
 		t.Fatalf("expected school no-reply notice NOT to be bulk-swallowed and to flag schedule, got auto=%v sec=%v sched=%v", auto2, sec2, sched2)
 	}
 
 	// 3. Brokerage/IPO deadline carrying List-Unsubscribe -> deadline override keeps isBulkAutomated=false!
-	ipoMsg := rawMailMsg{
+	ipoMsg := RawMailMessage{
 		Payload: makeHeaderPart("List-Unsubscribe", "<https://example.com/unsub>", "Precedence", "bulk"),
 	}
 	auto3, _, _ := classifyGmailAutomationAndUrgency(ipoMsg, "no-reply@example.com", "indication of interest closing soon", "Confirm allocation before tonight.")
@@ -549,7 +548,7 @@ func TestClassifyGmailAutomationAndUrgency(t *testing.T) {
 	}
 
 	// 4. Delivery bounce from mailer-daemon -> isBulkAutomated=false, hasSecurity=true
-	bounceMsg := rawMailMsg{
+	bounceMsg := RawMailMessage{
 		Payload: makeHeaderPart("Precedence", "bulk"),
 	}
 	auto4, sec4, _ := classifyGmailAutomationAndUrgency(bounceMsg, "mailer-daemon@example.com", "delivery status notification (failure)", "Address not found")
@@ -703,4 +702,294 @@ func TestRunSubprocessReportsParentDeadlineTimeout(t *testing.T) {
 	if strings.Contains(err.Error(), "after 10s") {
 		t.Fatalf("expected error to report parent context deadline (<1s) rather than spec 10s, got: %v", err)
 	}
+}
+
+func TestParseRawMailAndDecodeBase64URL(t *testing.T) {
+	if got := DecodeBase64URL(""); got != "" {
+		t.Fatalf("DecodeBase64URL(empty) = %q, want empty", got)
+	}
+	if got := DecodeBase64URL("SGVsbG8gd29ybGQ"); got != "Hello world" {
+		t.Fatalf("DecodeBase64URL(unpadded) = %q, want Hello world", got)
+	}
+	if got := DecodeBase64URL("SGVsbG8gd29ybGQ="); got != "Hello world" {
+		t.Fatalf("DecodeBase64URL(padded) = %q, want Hello world", got)
+	}
+	if got := DecodeBase64URL("!!!not-b64!!!"); got != "" {
+		t.Fatalf("DecodeBase64URL(invalid) = %q, want empty", got)
+	}
+
+	rm := RawMailMessage{
+		ID:           " msg-1 ",
+		Snippet:      "Tom &amp; Jerry",
+		InternalDate: "1700000000000",
+		Payload: RawMIMEPart{
+			MimeType: "multipart/mixed",
+			Headers: []RawMIMEHeader{
+				{Name: "From", Value: "alice@example.com"},
+				{Name: "From", Value: "spoof@evil.com"},
+				{Name: "To", Value: "bob@example.com"},
+				{Name: "Subject", Value: "Hello"},
+				{Name: "Date", Value: "Tue, 14 Nov 2023 22:13:20 +0000"},
+			},
+			Parts: []RawMIMEPart{
+				{MimeType: "text/plain", Body: RawMIMEBody{Data: "SGVsbG8gd29ybGQ"}},
+				{MimeType: "text/html", Body: RawMIMEBody{Data: "PGI-SGVsbG88L2I-"}},
+				{MimeType: "application/pdf", Filename: "doc.pdf", Body: RawMIMEBody{AttachmentID: "att-9", Size: 42}},
+			},
+		},
+	}
+	p := ParseRawMail(rm)
+	if p.ID != "msg-1" || p.ThreadID != "msg-1" {
+		t.Fatalf("ID/ThreadID = %q/%q", p.ID, p.ThreadID)
+	}
+	if p.From != "alice@example.com" || p.To != "bob@example.com" || p.Subject != "Hello" {
+		t.Fatalf("unexpected headers: %+v", p)
+	}
+	if p.PlainBody != "Hello world" || p.HTMLBody != "<b>Hello</b>" {
+		t.Fatalf("unexpected bodies: plain=%q html=%q", p.PlainBody, p.HTMLBody)
+	}
+	if p.Snippet != "Tom & Jerry" || p.Timestamp != "2023-11-14T22:13:20Z" {
+		t.Fatalf("unexpected snippet/ts: %q / %q", p.Snippet, p.Timestamp)
+	}
+	if len(p.Attachments) != 1 || p.Attachments[0].AttachmentID != "att-9" {
+		t.Fatalf("unexpected attachments: %+v", p.Attachments)
+	}
+}
+
+func TestMessagingHelpersDraftWatermarkAndTriage(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	for _, badDraft := range []string{"../etc/passwd", ".", "..", ".hidden", "a..b", `a\b`} {
+		if _, err := ValidateDraftID("gmail", badDraft); err == nil {
+			t.Fatalf("expected invalid draft ID %q to fail", badDraft)
+		}
+	}
+	if id, err := ValidateDraftID("gmail", " draft-1234 "); err != nil || id != "draft-1234" {
+		t.Fatalf("ValidateDraftID = %q, %v", id, err)
+	}
+	if err := SaveAccountWatermark(vaultDir, "gmail", AccountWatermark{Account: "../../escaped", SeenMessageIDs: map[string]bool{"m": true}}); err == nil {
+		t.Fatal("expected SaveAccountWatermark with traversal account to fail")
+	}
+	if err := SaveAccountWatermark(vaultDir, "../../escaped", AccountWatermark{Account: "primary"}); err == nil {
+		t.Fatal("expected SaveAccountWatermark with traversal channel to fail")
+	}
+	if _, err := os.Stat(filepath.Join(vaultDir, "memory", "state-escaped.json")); !os.IsNotExist(err) {
+		t.Fatal("traversal watermark file must not be created")
+	}
+	if got := LoadAccountWatermark(vaultDir, "gmail", "../../escaped"); len(got.SeenMessageIDs) != 0 {
+		t.Fatalf("expected empty watermark for invalid alias, got %+v", got)
+	}
+	if _, err := LoadInstance(vaultDir, "../../escaped"); err == nil {
+		t.Fatal("expected LoadInstance to reject traversal connID")
+	}
+
+	if err := VerifyDraftSendPreconditions("gchat", "me@example.com", "me@example.com", "abcdef0123456789", "abc"); err == nil {
+		t.Fatal("expected short hash prefix to fail")
+	}
+	if err := VerifyDraftSendPreconditions("gchat", "me@example.com", "other@example.com", "abcdef0123456789", "abcdef01"); err == nil {
+		t.Fatal("expected account mismatch to fail")
+	}
+	if err := VerifyDraftSendPreconditions("gchat", "me@example.com", "me@example.com", "abcdef0123456789", "deadbeef"); err == nil || !strings.Contains(err.Error(), "bait-and-switch blocked") {
+		t.Fatalf("expected bait-and-switch error, got %v", err)
+	}
+	if err := VerifyDraftSendPreconditions("gchat", "ME@example.com", "me@example.com", "ABCDEF0123456789", "abcdef01"); err != nil {
+		t.Fatalf("expected valid preconditions to pass, got %v", err)
+	}
+
+	wm := LoadAccountWatermark(vaultDir, "gmail", "primary")
+	if wm.Account != "primary" || wm.SeenMessageIDs == nil {
+		t.Fatalf("unexpected empty watermark: %+v", wm)
+	}
+	wm.SeenMessageIDs["m-1"] = true
+	if err := SaveAccountWatermark(vaultDir, "gmail", wm); err != nil {
+		t.Fatalf("SaveAccountWatermark: %v", err)
+	}
+	loaded := LoadAccountWatermark(vaultDir, "gmail", "primary")
+	if !loaded.SeenMessageIDs["m-1"] {
+		t.Fatalf("expected persisted seen message m-1, got %+v", loaded)
+	}
+
+	if err := ValidateTriageBatchID("../bad"); err == nil {
+		t.Fatal("expected invalid batch ID to fail")
+	}
+	err := WriteTriageResults(vaultDir, "gmail", "triage", "Gmail Triage Digest", "batch-1", []string{"item1"}, []TriageDigestEntry{
+		{Urgency: "urgent", Category: "work", TargetID: "th-1", Title: "Urgent", SenderLab: "From", Sender: "alice@example.com", Summary: "Reply soon"},
+		{Urgency: "ignore", Category: "other", TargetID: "th-2", Title: "Noise", Sender: "bob@example.com", Summary: "Skip"},
+	})
+	if err != nil {
+		t.Fatalf("WriteTriageResults: %v", err)
+	}
+	digestBytes, err := os.ReadFile(filepath.Join(vaultDir, "notes", "inbox", "batch-1.md"))
+	if err != nil {
+		t.Fatalf("read triage digest: %v", err)
+	}
+	if !strings.Contains(string(digestBytes), "Urgent") || strings.Contains(string(digestBytes), "Noise") {
+		t.Fatalf("unexpected triage digest:\n%s", string(digestBytes))
+	}
+	if err := WriteTriageResults(vaultDir, "../../escaped", "triage", "Digest", "batch-2", []string{"item1"}, nil); err == nil {
+		t.Fatal("expected WriteTriageResults with traversal channel to fail")
+	}
+}
+
+func TestRefreshableOAuthTokenEdgeCases(t *testing.T) {
+	dir := t.TempDir()
+	writeTok := func(name string, obj any) string {
+		t.Helper()
+		b, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	assertProtocolCode := func(err error, wantCode string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("expected error with ProtocolError code %q, got nil", wantCode)
+		}
+		var pe *ProtocolError
+		if !errors.As(err, &pe) || pe.Code != wantCode {
+			t.Fatalf("expected ProtocolError code %q, got %T (%v)", wantCode, err, err)
+		}
+	}
+
+	// 1. Empty or whitespace-only tokenPath -> auth_expired
+	for _, p := range []string{"", "   \t\n"} {
+		_, err := RefreshableOAuthToken(p)
+		assertProtocolCode(err, "auth_expired")
+	}
+
+	// 2. Valid access_token with surrounding whitespace -> trimmed token
+	pValid := writeTok("valid.json", map[string]any{"access_token": "  ya29.ok \n"})
+	if tok, err := RefreshableOAuthToken(pValid); err != nil || tok != "ya29.ok" {
+		t.Fatalf("RefreshableOAuthToken(valid) = %q, %v; want ya29.ok, nil", tok, err)
+	}
+
+	// 3. Whitespace-only access_token with no refresh_token -> auth_expired (never "", nil)
+	pWS := writeTok("ws.json", map[string]any{"access_token": "   \t"})
+	if tok, err := RefreshableOAuthToken(pWS); err == nil || tok != "" {
+		t.Fatalf("expected error for whitespace access_token, got %q, %v", tok, err)
+	} else {
+		assertProtocolCode(err, "auth_expired")
+	}
+
+	// 4. Whitespace-only refresh credentials must fail locally without HTTP call
+	hitCount := 0
+	noCallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer noCallSrv.Close()
+	pWSRefresh := writeTok("ws-refresh.json", map[string]any{
+		"access_token":  "   ",
+		"refresh_token": "   ",
+		"client_id":     "cid",
+		"client_secret": "csec",
+		"token_uri":     noCallSrv.URL,
+	})
+	if _, err := RefreshableOAuthToken(pWSRefresh); err == nil {
+		t.Fatal("expected whitespace refresh_token to fail locally")
+	} else {
+		assertProtocolCode(err, "auth_expired")
+	}
+	if hitCount != 0 {
+		t.Fatalf("expected 0 HTTP calls for whitespace refresh credentials, got %d", hitCount)
+	}
+
+	// 5. Whitespace-only access_token WITH valid trimmed refresh creds triggers refresh POST
+	var statusMode int
+	var respBody string
+	var gotFormClientID, gotFormSecret, gotFormRefresh string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err == nil {
+			gotFormClientID = r.Form.Get("client_id")
+			gotFormSecret = r.Form.Get("client_secret")
+			gotFormRefresh = r.Form.Get("refresh_token")
+		}
+		w.WriteHeader(statusMode)
+		_, _ = fmt.Fprint(w, respBody)
+	}))
+	defer srv.Close()
+
+	statusMode = http.StatusOK
+	respBody = `{"access_token":"  ya29.refreshed  ","expires_in":3600}`
+	pDoRefresh := writeTok("do-refresh.json", map[string]any{
+		"access_token":  "   ",
+		"refresh_token": " rt-1 ",
+		"client_id":     " cid-1 ",
+		"client_secret": " sec-1 ",
+		"token_uri":     srv.URL,
+	})
+	if tok, err := RefreshableOAuthToken(pDoRefresh); err != nil || tok != "ya29.refreshed" {
+		t.Fatalf("refresh from whitespace access_token = %q, %v; want ya29.refreshed", tok, err)
+	}
+	if gotFormClientID != "cid-1" || gotFormSecret != "sec-1" || gotFormRefresh != "rt-1" {
+		t.Fatalf("expected trimmed form params, got cid=%q sec=%q rt=%q", gotFormClientID, gotFormSecret, gotFormRefresh)
+	}
+
+	// 6. Expiry formats: past RFC3339, within-60s RFC3339, naive ISO8601 UTC, expires_at RFC3339, expires_at numeric epoch (past vs future)
+	pastNaive := time.Now().UTC().Add(-2 * time.Minute).Format("2006-01-02T15:04:05")
+	within60 := time.Now().UTC().Add(30 * time.Second).Format(time.RFC3339)
+	pastEpoch := time.Now().Unix() - 10
+	futureEpoch := time.Now().Unix() + 600
+	for name, tokObj := range map[string]map[string]any{
+		"past-naive": {
+			"access_token": "stale", "refresh_token": "rt", "client_id": "c", "client_secret": "s",
+			"token_uri": srv.URL, "expiry": pastNaive,
+		},
+		"within-60s": {
+			"access_token": "stale", "refresh_token": "rt", "client_id": "c", "client_secret": "s",
+			"token_uri": srv.URL, "expiry": within60,
+		},
+		"expires-at-str": {
+			"access_token": "stale", "refresh_token": "rt", "client_id": "c", "client_secret": "s",
+			"token_uri": srv.URL, "expires_at": time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+		},
+		"expires-at-epoch-past": {
+			"access_token": "stale", "refresh_token": "rt", "client_id": "c", "client_secret": "s",
+			"token_uri": srv.URL, "expires_at": pastEpoch,
+		},
+	} {
+		p := writeTok(name+".json", tokObj)
+		if tok, err := RefreshableOAuthToken(p); err != nil || tok != "ya29.refreshed" {
+			t.Fatalf("%s: got %q, %v; want refreshed token", name, tok, err)
+		}
+	}
+	pFutureEpoch := writeTok("future-epoch.json", map[string]any{
+		"access_token": "ya29.still-fresh",
+		"expires_at":   futureEpoch,
+		"token_uri":    noCallSrv.URL,
+	})
+	if tok, err := RefreshableOAuthToken(pFutureEpoch); err != nil || tok != "ya29.still-fresh" {
+		t.Fatalf("future-epoch: got %q, %v; want ya29.still-fresh", tok, err)
+	}
+
+	// 7. HTTP 200 with whitespace access_token -> auth_expired
+	statusMode = http.StatusOK
+	respBody = `{"access_token":"   "}`
+	if tok, err := RefreshableOAuthToken(pDoRefresh); err == nil || tok != "" {
+		t.Fatalf("expected error for whitespace refreshed access_token, got %q, %v", tok, err)
+	} else {
+		assertProtocolCode(err, "auth_expired")
+	}
+
+	// 8. HTTP 400/401/403 -> auth_expired; HTTP 500 & bad JSON -> transient
+	for _, code := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden} {
+		statusMode = code
+		respBody = `{"error":"invalid_grant"}`
+		_, err := RefreshableOAuthToken(pDoRefresh)
+		assertProtocolCode(err, "auth_expired")
+	}
+	statusMode = http.StatusInternalServerError
+	respBody = `internal error`
+	_, err := RefreshableOAuthToken(pDoRefresh)
+	assertProtocolCode(err, "transient")
+
+	statusMode = http.StatusOK
+	respBody = `{not-json`
+	_, err = RefreshableOAuthToken(pDoRefresh)
+	assertProtocolCode(err, "transient")
 }

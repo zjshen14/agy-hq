@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/routing"
+	"github.com/zjshen14/agy-hq/internal/store"
 )
 
 func resolveSpawnTarget(vaultDir, trigger string) (workDir, projectID string) {
@@ -276,7 +277,7 @@ type SpawnTaskOptions struct {
 }
 
 func recordSpawnErrorQuota(vaultDir, trigger, skill, modelID, rawErr string, isInteractive, trip429 bool, circuitReason string) {
-	errText := truncateRunes(rawErr, 240)
+	errText := store.TruncateRunes(rawErr, 240)
 	_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
 		if !isInteractive && trip429 {
 			st.CircuitOpen = true
@@ -371,7 +372,7 @@ func SpawnTaskWithOptions(vaultDir, trigger, skill, title, prompt, modelID strin
 	if fallbackNote != "" {
 		outcome = fmt.Sprintf("%s [agentapi fallback: %s]", output, fallbackNote)
 	}
-	outcome = truncateRunes(outcome, 240)
+	outcome = store.TruncateRunes(outcome, 240)
 	_ = UpdateQuota(vaultDir, func(st *QuotaState) (bool, error) {
 		st.normalizeSpawnCounters()
 		if isInteractive {

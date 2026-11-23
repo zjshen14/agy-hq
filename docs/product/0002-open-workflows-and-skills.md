@@ -11,7 +11,7 @@ A personal assistant must never refuse or stumble on a new kind of request—suc
 
 Therefore, `agy-hq` operates on a two-tier capability model:
 1. **Default Tier — 100% General-Purpose Agent:** Every conversation has full access to Antigravity's general reasoning, web search, browser automation, terminal sandbox, your `local/USER.md` profile, `local/MEMORY.md`, and your open `local/notes/` and `local/worktrees/` folders.
-2. **Booster Tier — Additive Skills ([`.agents/plugins/agy-hq/skills/*/SKILL.md`](../../.agents/plugins/agy-hq/skills/morning-brief/SKILL.md)):** When a request (or a scheduled/inbox trigger in `local/triggers.yaml`) matches a known workflow, Antigravity progressively loads that `SKILL.md` runbook (`<= 150` lines) to apply domain-specific verification rules and templates.
+2. **Booster Tier — Additive Skills ([Core OS `.agents/plugins/agy-hq/skills/*/SKILL.md`](../../.agents/plugins/agy-hq/skills/morning-brief/SKILL.md) + opt-in Vault skills in `local/skills/*/SKILL.md`):** When a request (or a scheduled/inbox trigger in `local/triggers.yaml`) matches a known workflow, Antigravity progressively loads that `SKILL.md` runbook (`<= 150` lines) to apply domain-specific verification rules and templates.
 
 ---
 
@@ -20,7 +20,7 @@ Therefore, `agy-hq` operates on a two-tier capability model:
 When you ask the agent to do something brand new (e.g., *"Write a technical blog post in my voice and stage a draft"*):
 1. **First Time (Zero Setup):** The agent executes the request immediately in `local/notes/` using your `local/USER.md` preferences and general tools.
 2. **Feedback & Capture:** If you give it feedback (*"Use shorter paragraphs, include a Mermaid diagram, and save drafts to `local/notes/posts/`"*), `hq hook stop` captures the turn in `local/memory/journal/`.
-3. **Nightly Promotion to a Skill:** During the 23:30 `sleep-consolidate` run (or via `./bin/hq rsi`), the agent distills recurring workflows or friction into verified `SKILL.md` deltas staged via `hq propose` for 1-tap approval.
+3. **Nightly Promotion to a Skill:** During the 23:30 `sleep-consolidate` run (or via `./bin/hq rsi`), the agent distills recurring workflows or friction into verified `SKILL.md` deltas staged via `hq rsi propose` (which creates an approval-gated proposal writing Tier-1 personal rules to Vault overlays).
 
 ---
 

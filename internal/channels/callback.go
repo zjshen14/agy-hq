@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -198,7 +197,7 @@ func MintProposalActionTokens(vaultDir, bridgeFQID string, proposalIDs []string,
 
 		cleanSum := outbox.SanitizeAntiCue(prop.Summary, 160)
 		if taintedOrigin {
-			cleanSum = DefangURLs(cleanSum)
+			cleanSum = store.DefangURLs(cleanSum)
 		}
 		actions = append(actions, NotificationAction{
 			ProposalID:           propID,
@@ -243,9 +242,7 @@ func HandleCallback(ctx context.Context, vaultDir string, req CallbackRequest, n
 		return CallbackResult{}, fmt.Errorf("refusing symlinked private/approval_bridge_caps directory")
 	}
 	capPath := filepath.Join(capsDir, tokHash+".json")
-	var rnd [6]byte
-	_, _ = rand.Read(rnd[:])
-	claimedPath := filepath.Join(capsDir, fmt.Sprintf(".claimed-%s-%s.json", tokHash[:16], hex.EncodeToString(rnd[:])))
+	claimedPath := filepath.Join(capsDir, fmt.Sprintf(".claimed-%s-%s.json", tokHash[:16], store.RandomHex(6)))
 	if err := os.Rename(capPath, claimedPath); err != nil {
 		return CallbackResult{}, fmt.Errorf("invalid, expired, or already-consumed callback token")
 	}

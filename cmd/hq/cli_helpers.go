@@ -2,14 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
+	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
@@ -54,10 +59,14 @@ func splitPositionalAndFlags(args []string) ([]string, []string) {
 	return pos, fl
 }
 
-func printJSON(v interface{}) {
-	enc := json.NewEncoder(os.Stdout)
+func writeJSON(w io.Writer, v interface{}) {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+func printJSON(v interface{}) {
+	writeJSON(os.Stdout, v)
 }
 
 func printJSONUnescaped(v interface{}) {
@@ -67,11 +76,138 @@ func printJSONUnescaped(v interface{}) {
 	_ = enc.Encode(v)
 }
 
-func shortPrefix(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+func dieIfErr(context string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", context, err)
+		os.Exit(1)
 	}
-	return s
+}
+
+func fatalf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+
+func newJSONFlagSet(name string) (*flag.FlagSet, *bool) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "Output JSON")
+	return fs, asJSON
+}
+
+func splitCSV(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if s := strings.TrimSpace(part); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func parseKVFlags(dst map[string]string, items []string, strict bool) (map[string]string, error) {
+	if dst == nil {
+		dst = make(map[string]string, len(items))
+	}
+	for _, raw := range items {
+		k, v, ok := strings.Cut(raw, "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
+			if strict {
+				return nil, fmt.Errorf("expected key=value pair, got %q", raw)
+			}
+			continue
+		}
+		dst[k] = v
+	}
+	return dst, nil
+}
+
+type flexibleArgs struct {
+	pos   []string
+	vals  map[string]string
+	bools map[string]bool
+}
+
+func (a flexibleArgs) val(name string) string { return strings.TrimSpace(a.vals[name]) }
+
+// parseFlexibleArgs accepts flags anywhere (before or after positionals) as --name=value, --name value, or
+// -name; bool flags also accept --name=true|false.
+func parseFlexibleArgs(args []string, valueFlags, boolFlags []string) (flexibleArgs, error) {
+	isVal := make(map[string]bool, len(valueFlags))
+	for _, f := range valueFlags {
+		isVal[f] = true
+	}
+	isBool := make(map[string]bool, len(boolFlags))
+	for _, f := range boolFlags {
+		isBool[f] = true
+	}
+	out := flexibleArgs{vals: make(map[string]string), bools: make(map[string]bool)}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			out.pos = append(out.pos, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			out.pos = append(out.pos, a)
+			continue
+		}
+		if strings.HasPrefix(a, "---") {
+			return out, fmt.Errorf("invalid flag %s", a)
+		}
+		var name string
+		if strings.HasPrefix(a, "--") {
+			name = a[2:]
+		} else {
+			name = a[1:]
+		}
+		if name == "" || strings.HasPrefix(name, "-") {
+			return out, fmt.Errorf("invalid flag %s", a)
+		}
+		val, hasVal := "", false
+		if k, v, ok := strings.Cut(name, "="); ok {
+			name, val, hasVal = k, v, true
+		}
+		switch {
+		case isVal[name]:
+			if !hasVal {
+				if i+1 >= len(args) {
+					return out, fmt.Errorf("flag --%s needs a value", name)
+				}
+				i++
+				val = args[i]
+			}
+			out.vals[name] = val
+		case isBool[name]:
+			b := true
+			if hasVal {
+				parsed, err := strconv.ParseBool(val)
+				if err != nil {
+					return out, fmt.Errorf("flag --%s expects true or false", name)
+				}
+				b = parsed
+			}
+			out.bools[name] = b
+		default:
+			return out, fmt.Errorf("unknown flag %s", a)
+		}
+	}
+	return out, nil
+}
+
+func shortPrefix(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for i := 0; i < n; i++ {
+		if s[i] >= utf8.RuneSelf {
+			return store.TruncateRunesWithSuffix(s, n, "")
+		}
+	}
+	return s[:n]
 }
 
 func parseFlexibleDuration(raw string) (time.Duration, error) {
@@ -130,14 +266,7 @@ func denyIfCallerTainted(vaultDir, verb string) {
 }
 
 func truncateDisplay(s string, maxLen int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-3] + "..."
+	return store.TruncateRunes(strings.TrimSpace(s), maxLen)
 }
 
 func resolveTemplateDir(rootDir string) string {
@@ -176,7 +305,7 @@ func resolveDefaultWorkDir(rootDir string) string {
 }
 
 func resolveProposalHQBin(rootDir string) string {
-	if exe, err := os.Executable(); err == nil && vault.IsTempPath(exe) {
+	if exe, err := os.Executable(); err == nil && hostpaths.IsTempPath(exe) {
 		return exe
 	}
 	if vault.IsAgyHQRepo(rootDir) {
