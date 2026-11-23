@@ -60,4 +60,28 @@ func TestRestageExpiredProposalAndThreadLookup(t *testing.T) {
 	if still := FindUnrestagedExpiredOfferForThread(vaultDir, "gchat", "work", "thr-spec-1", 0, expTime.Add(26*time.Hour)); still != nil {
 		t.Fatalf("expected expired offer cleared after restaging, got %+v", still)
 	}
+
+	// DismissExpiredProposal clears an expired proposal without restaging it
+	p2, err := CreateWithOptions(vaultDir, CreateOptions{
+		ActionType:  "messaging",
+		Summary:     "Stale draft to dismiss",
+		Command:     "hq gchat send --to=bob@example.com --body=Hi",
+		CommandArgv: []string{"hq", "gchat", "send", "--to=bob@example.com", "--body=Hi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = ExpireStaleProposals(vaultDir, time.Now().Add(72*time.Hour))
+	if err := DismissExpiredProposal(vaultDir, p2.ID, "No longer needed", time.Now().Add(73*time.Hour)); err != nil {
+		t.Fatalf("DismissExpiredProposal: %v", err)
+	}
+	rem, err := ListExpiredProposals(vaultDir, 0, time.Now().Add(74*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rem {
+		if r.Proposal.ID == p2.ID {
+			t.Fatalf("expected dismissed expired proposal %s to be excluded from ListExpiredProposals", p2.ID)
+		}
+	}
 }

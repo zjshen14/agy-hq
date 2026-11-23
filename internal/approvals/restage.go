@@ -18,7 +18,7 @@ func ListExpiredProposals(vaultDir string, within time.Duration, now time.Time) 
 	}
 	restagedOrResolved := make(map[string]bool)
 	for _, r := range recs {
-		if r.Decision == "restaged" {
+		if r.Decision == "restaged" || r.Decision == "expired_dismissed" || r.Decision == "dismissed" {
 			restagedOrResolved[r.Proposal.ID] = true
 		}
 		if r.Proposal.Metadata != nil {
@@ -161,4 +161,44 @@ func RestageExpiredProposal(vaultDir, expiredID string, now time.Time) (Proposal
 		Output:    "Restaged as " + fresh.ID,
 	})
 	return fresh, nil
+}
+
+// DismissExpiredProposal permanently marks an expired proposal in interventions.jsonl as dismissed
+// so it no longer surfaces in `hq approvals expired`, Morning Brief, or the Live Console.
+func DismissExpiredProposal(vaultDir, expiredID, reason string, now time.Time) error {
+	expiredID = strings.TrimSpace(expiredID)
+	if err := ValidateProposalID(expiredID); err != nil {
+		return err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	recs, err := LoadInterventions(vaultDir)
+	if err != nil {
+		return err
+	}
+	var target *Proposal
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Decision == "expired" && recs[i].Proposal.ID == expiredID {
+			cp := recs[i].Proposal
+			target = &cp
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("expired proposal %q not found in interventions log", expiredID)
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Dismissed by user"
+	}
+	expiredCopy := *target
+	expiredCopy.Status = "dismissed"
+	appendIntervention(vaultDir, InterventionRecord{
+		Timestamp: now.UTC().Format(time.RFC3339),
+		Decision:  "expired_dismissed",
+		Proposal:  expiredCopy,
+		Output:    reason,
+	})
+	return nil
 }

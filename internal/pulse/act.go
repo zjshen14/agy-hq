@@ -122,6 +122,9 @@ func ExecuteDecision(vaultDir, itemID, optID string, now time.Time) (DecisionExe
 		return res, err
 
 	case outbox.ActionDismissHandled:
+		for _, pid := range item.ProposalIDs {
+			_ = approvals.DismissExpiredProposal(vaultDir, pid, "Dismissed via decision card", now)
+		}
 		res.NewStatus = outbox.StatusActedHandled
 		res.Summary = "Marked handled by user"
 		_, err = outbox.RecordDecisionOutcome(vaultDir, item.ID, res.NewStatus, "", "", "", res.Summary, now)
@@ -131,6 +134,9 @@ func ExecuteDecision(vaultDir, itemID, optID string, now time.Time) (DecisionExe
 		reason := opt.Reason
 		if reason == "" {
 			reason = "noisy: user muted similar alerts"
+		}
+		for _, pid := range item.ProposalIDs {
+			_ = approvals.DismissExpiredProposal(vaultDir, pid, reason, now)
 		}
 		res.NewStatus = outbox.StatusDismissed
 		res.Summary = "Dismissed as noisy (recorded for RSI tuning)"

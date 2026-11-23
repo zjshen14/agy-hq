@@ -72,4 +72,43 @@ func TestExecuteDecisionOptionsZeroToken(t *testing.T) {
 	if err != nil || r4.NewStatus != outbox.StatusDismissed {
 		t.Fatalf("dismiss_noisy failed: %+v (%v)", r4, err)
 	}
+
+	// 5. Dismissing a D6 expired-proposal decision card also dismisses the underlying expired proposal in interventions.jsonl
+	prop2, err := approvals.CreateWithOptions(vaultDir, approvals.CreateOptions{
+		ActionType:  "messaging",
+		Summary:     "Stale follow-up to dismiss",
+		Command:     "hq gchat send --to=bob@example.com --body=Hi",
+		CommandArgv: []string{"hq", "gchat", "send", "--to=bob@example.com", "--body=Hi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = approvals.ExpireStaleProposals(vaultDir, time.Now().Add(72*time.Hour))
+	item2, _, err := outbox.Add(vaultDir, outbox.OutboxItem{
+		ID:          "act-exp-dismiss",
+		SourceSkill: "pulse",
+		Scope:       "approvals",
+		Tier:        outbox.TierInterrupt,
+		ProposalIDs: []string{prop2.ID},
+		Title:       "Expired approval",
+		Summary:     "Dismiss me",
+		Decisions: []outbox.DecisionOption{
+			{ID: "handled", Label: "No Longer Needed — Dismiss", Kind: outbox.ActionDismissHandled},
+		},
+	}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExecuteDecision(vaultDir, item2.ID, "handled", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("dismiss expired card: %v", err)
+	}
+	remExp, err := approvals.ListExpiredProposals(vaultDir, 0, time.Now().Add(73*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range remExp {
+		if r.Proposal.ID == prop2.ID {
+			t.Fatalf("expected prop2 %s to be cleared from ListExpiredProposals after dismissing decision card", prop2.ID)
+		}
+	}
 }

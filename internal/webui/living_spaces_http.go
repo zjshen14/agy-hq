@@ -234,4 +234,30 @@ func registerProactiveV3Routes(mux *http.ServeMux, vaultDir, csrfToken string) {
 		state.CSRFToken = csrfToken
 		renderHTML(w, state)
 	})
+
+	mux.HandleFunc("/api/approvals/dismiss-expired", func(w http.ResponseWriter, r *http.Request) {
+		p, ok := decodeCSRFPostAction(w, r, csrfToken)
+		if !ok {
+			return
+		}
+		if err := approvals.DismissExpiredProposal(vaultDir, p.ID, p.Reason, time.Now()); err != nil {
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": err.Error()})
+				return
+			}
+			state := loadState(vaultDir, "Dismiss expired failed: "+err.Error())
+			state.CSRFToken = csrfToken
+			renderHTML(w, state)
+			return
+		}
+		invalidateStateCache(vaultDir)
+		_ = SyncMarkdownConsole(vaultDir)
+		if wantsJSONResponse(r) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "id": p.ID})
+			return
+		}
+		state := loadState(vaultDir, fmt.Sprintf("Dismissed expired proposal %s", p.ID))
+		state.CSRFToken = csrfToken
+		renderHTML(w, state)
+	})
 }

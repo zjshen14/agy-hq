@@ -100,6 +100,8 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			Perspectives: []string{"needs_me"},
 			CopyText:     fmt.Sprintf("hq approvals restage %s", rec.Proposal.ID),
 			CopyLabel:    biText("Copy Re-open (24h)", "复制重开命令"),
+			CopyAltText:  fmt.Sprintf("hq approvals dismiss %s", rec.Proposal.ID),
+			CopyAltLabel: biText("Copy Dismiss", "复制清除命令"),
 		})
 	}
 	for _, dc := range state.ProactiveV3.DecisionCards {

@@ -408,8 +408,29 @@ func runApprovalsCLI(vaultDir string, args []string) {
 		}
 		fmt.Printf("Restaged %s as fresh 24h proposal %s (sha256:%s): %s\n", id, fresh.ID, short, fresh.Summary)
 
+	case "dismiss":
+		id, flagArgs := splitFirstPositionalAndFlags(rest)
+		fs := flag.NewFlagSet("approvals dismiss", flag.ExitOnError)
+		reason := fs.String("reason", "Dismissed by user", "Reason for dismissing expired proposal")
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if strings.TrimSpace(id) == "" {
+			fmt.Fprintln(os.Stderr, "usage: hq approvals dismiss <expired-proposal-id> [--reason=\"...\"] [--json]")
+			os.Exit(1)
+		}
+		if err := approvals.DismissExpiredProposal(vaultDir, id, *reason, now); err != nil {
+			fmt.Fprintf(os.Stderr, "hq approvals dismiss failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			printJSON(map[string]interface{}{"id": id, "status": "expired_dismissed", "reason": *reason})
+			return
+		}
+		fmt.Printf("Dismissed expired proposal %s\n", id)
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown approvals subcommand: %s (expected list, expired, or restage)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown approvals subcommand: %s (expected list, expired, restage, or dismiss)\n", sub)
 		os.Exit(1)
 	}
 }
