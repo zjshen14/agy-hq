@@ -289,6 +289,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 	} else {
 		b.WriteString("- **Active Front Desk:** `VACANT` *(the next new conversation opened in `headquarter` will automatically claim `[HQ] Front Desk`)*\n")
 	}
+	fmt.Fprintf(&b, "- **Daemon & Connector Health:** `%s`\n", kernel.BuildMonitorHealthSummary(vaultDir, time.Now()).FormatLine(time.Now()))
 	circuitBadge := "BUDGET OK"
 	if state.Quota.CircuitOpen {
 		circuitBadge = "CIRCUIT OPEN: " + state.Quota.CircuitReason

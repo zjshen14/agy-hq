@@ -337,6 +337,7 @@ func main() {
 			fmt.Printf("Vault:            %s\n", vaultDir)
 			fmt.Printf("Pending Actions:  %d\n", len(pending))
 			fmt.Printf("Active Worktrees: %d\n", len(wts))
+			fmt.Printf("Monitor Health:   %s\n", kernel.BuildMonitorHealthSummary(vaultDir, time.Now()).FormatLine(time.Now()))
 			if wsSummary, ok := kernel.SummarizeWorkspaces(vaultDir, len(wts)); ok {
 				fmt.Println(wsSummary.StatusLine())
 			}
