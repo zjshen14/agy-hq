@@ -98,10 +98,38 @@ func VerifyDraftSendPreconditions(channel, activeEmail, draftFrom, draftContentH
 
 // AccountWatermark tracks per-account sidecar polling state in <vaultDir>/memory/<channel>/state-<alias>.json.
 type AccountWatermark struct {
-	Account        string          `json:"account"`
-	LastCheckedAt  string          `json:"lastCheckedAt"`
-	LastHistoryID  string          `json:"lastHistoryId,omitempty"`
-	SeenMessageIDs map[string]bool `json:"seenMessageIds"`
+	Account             string          `json:"account"`
+	LastCheckedAt       string          `json:"lastCheckedAt"`
+	LastHistoryID       string          `json:"lastHistoryId,omitempty"`
+	SeenMessageIDs      map[string]bool `json:"seenMessageIds"`
+	LastError           string          `json:"lastError,omitempty"`
+	LastErrorAt         string          `json:"lastErrorAt,omitempty"`
+	ConsecutiveFailures int             `json:"consecutiveFailures,omitempty"`
+}
+
+// RecordPrecheckFailure records a precheck/auth failure while preserving LastCheckedAt
+// as the last successful check timestamp.
+func (st *AccountWatermark) RecordPrecheckFailure(err error, now time.Time) {
+	if err == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	st.LastError = strings.TrimSpace(err.Error())
+	st.LastErrorAt = now.Format(time.RFC3339)
+	st.ConsecutiveFailures++
+}
+
+// RecordPrecheckSuccess updates LastCheckedAt and clears any prior precheck error state.
+func (st *AccountWatermark) RecordPrecheckSuccess(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	st.LastCheckedAt = now.Format(time.RFC3339)
+	st.LastError = ""
+	st.LastErrorAt = ""
+	st.ConsecutiveFailures = 0
 }
 
 func accountWatermarkPath(vaultDir, channel, alias string) string {

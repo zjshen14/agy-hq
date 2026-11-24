@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/extension"
 )
 
@@ -301,5 +302,64 @@ exit 1
 	sendOut, err := VerifyAndSendDraft(vaultDir, "work", spec.DraftID, spec.ContentHash[:12])
 	if err != nil || !strings.Contains(sendOut, "remote-cli-draft-99") {
 		t.Fatalf("VerifyAndSendDraft via connector CLI failed: out=%q err=%v", sendOut, err)
+	}
+}
+
+func TestRunPrecheckAuthFailureAndReconnectRecovery(t *testing.T) {
+	vaultDir := t.TempDir()
+	if _, err := InitOrAddAccountWithOptions(vaultDir, InitAccountOptions{Alias: "primary", Email: "me@gmail.com", SetDefault: true}); err != nil {
+		t.Fatalf("InitOrAddAccountWithOptions: %v", err)
+	}
+	mDir := filepath.Join(vaultDir, "memory", "gmail", "mock")
+	if err := os.MkdirAll(mDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msgFile := filepath.Join(mDir, "messages.json")
+	writeMsgs := func(msgs []MessageSummary) {
+		b, _ := json.Marshal(msgs)
+		if err := os.WriteFile(msgFile, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Healthy precheck records LastCheckedAt and delivers msg-1
+	writeMsgs([]MessageSummary{{ID: "msg-1", ThreadID: "thr-1", Account: "primary", From: "a@example.com", Subject: "Initial"}})
+	batches, status, err := RunPrecheck(vaultDir, "")
+	if err != nil || len(batches) != 1 || !strings.Contains(status, "GMAIL_NEW") {
+		t.Fatalf("healthy precheck failed: batches=%d status=%q err=%v", len(batches), status, err)
+	}
+	wmOK := connector.LoadAccountWatermark(vaultDir, "gmail", "primary")
+	if wmOK.LastCheckedAt == "" || wmOK.ConsecutiveFailures != 0 || wmOK.LastError != "" {
+		t.Fatalf("unexpected healthy watermark: %+v", wmOK)
+	}
+
+	// 2. Simulate auth/read failure (invalid JSON in mock store) -> must return GMAIL_DEGRADED + error, NOT GMAIL_OK
+	if err := os.WriteFile(msgFile, []byte("{corrupt auth error"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	batchesFail, statusFail, errFail := RunPrecheck(vaultDir, "")
+	if errFail == nil || len(batchesFail) != 0 || !strings.Contains(statusFail, "GMAIL_DEGRADED") {
+		t.Fatalf("expected GMAIL_DEGRADED + error, got batches=%d status=%q err=%v", len(batchesFail), statusFail, errFail)
+	}
+	wmFail := connector.LoadAccountWatermark(vaultDir, "gmail", "primary")
+	if wmFail.LastCheckedAt != wmOK.LastCheckedAt {
+		t.Fatalf("LastCheckedAt must be preserved on failure: got %q want %q", wmFail.LastCheckedAt, wmOK.LastCheckedAt)
+	}
+	if wmFail.ConsecutiveFailures != 1 || wmFail.LastError == "" || wmFail.LastErrorAt == "" {
+		t.Fatalf("expected failure metadata persisted in watermark, got %+v", wmFail)
+	}
+
+	// 3. Reconnect recovery: restore feed with missed msg-2 -> picks up msg-2, clears error state
+	writeMsgs([]MessageSummary{
+		{ID: "msg-1", ThreadID: "thr-1", Account: "primary", From: "a@example.com", Subject: "Initial"},
+		{ID: "msg-2", ThreadID: "thr-2", Account: "primary", From: "b@example.com", Subject: "Missed during outage"},
+	})
+	batchesRec, statusRec, errRec := RunPrecheck(vaultDir, "")
+	if errRec != nil || len(batchesRec) != 1 || len(batchesRec[0].Messages) != 1 || batchesRec[0].Messages[0].ID != "msg-2" || !strings.Contains(statusRec, "GMAIL_NEW") {
+		t.Fatalf("recovery precheck failed: batches=%+v status=%q err=%v", batchesRec, statusRec, errRec)
+	}
+	wmRec := connector.LoadAccountWatermark(vaultDir, "gmail", "primary")
+	if wmRec.ConsecutiveFailures != 0 || wmRec.LastError != "" || wmRec.LastErrorAt != "" {
+		t.Fatalf("expected cleared error state after recovery, got %+v", wmRec)
 	}
 }

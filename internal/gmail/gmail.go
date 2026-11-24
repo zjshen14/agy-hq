@@ -998,10 +998,23 @@ func RunPrecheck(vaultDir, accountFilter string) ([]TriageBatch, string, error) 
 
 	var batches []TriageBatch
 	var totalNew int
+	var failedAccounts []string
+	var firstErr error
 	for _, alias := range aliases {
 		cfg := reg.Accounts[alias]
 		msgs, err := SearchMessages(vaultDir, alias, cfg.Query, 20)
 		if err != nil {
+			st := connector.LoadAccountWatermark(vaultDir, "gmail", alias)
+			st.RecordPrecheckFailure(err, time.Now())
+			_ = connector.SaveAccountWatermark(vaultDir, "gmail", st)
+			lastOK := st.LastCheckedAt
+			if lastOK == "" {
+				lastOK = "never"
+			}
+			failedAccounts = append(failedAccounts, fmt.Sprintf("%s: %v (last ok: %s)", alias, err, lastOK))
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		st := connector.LoadAccountWatermark(vaultDir, "gmail", alias)
@@ -1019,7 +1032,7 @@ func RunPrecheck(vaultDir, accountFilter string) ([]TriageBatch, string, error) 
 				threadIDs = append(threadIDs, m.ThreadID)
 			}
 		}
-		st.LastCheckedAt = time.Now().Format(time.RFC3339)
+		st.RecordPrecheckSuccess(time.Now())
 		_ = connector.SaveAccountWatermark(vaultDir, "gmail", st)
 
 		if len(unseen) == 0 {
@@ -1040,7 +1053,14 @@ func RunPrecheck(vaultDir, accountFilter string) ([]TriageBatch, string, error) 
 	}
 
 	if len(batches) == 0 {
+		if len(failedAccounts) > 0 {
+			status := fmt.Sprintf("GMAIL_DEGRADED (%d/%d account(s) failed: %s)", len(failedAccounts), len(aliases), strings.Join(failedAccounts, "; "))
+			return nil, status, fmt.Errorf("gmail precheck failed for %d/%d account(s): %w", len(failedAccounts), len(aliases), firstErr)
+		}
 		return nil, "GMAIL_OK (0 new unread Primary messages; 0 LLM tokens)", nil
+	}
+	if len(failedAccounts) > 0 {
+		return batches, fmt.Sprintf("GMAIL_NEW_PARTIAL (%d new message(s) across %d batch(es); %d account(s) degraded: %s)", totalNew, len(batches), len(failedAccounts), strings.Join(failedAccounts, "; ")), nil
 	}
 	return batches, fmt.Sprintf("GMAIL_NEW (%d new message(s) across %d batch(es))", totalNew, len(batches)), nil
 }

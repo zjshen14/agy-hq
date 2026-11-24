@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/zjshen14/agy-hq/internal/connector"
 	"github.com/zjshen14/agy-hq/internal/gmail"
 )
 
@@ -708,5 +709,53 @@ func TestGChatOAuthRejectsWhitespaceAccessToken(t *testing.T) {
 	}
 	if _, err := VerifyAndSendDraft(vaultDir, "ws", spec.DraftID, spec.ContentHash[:12]); err == nil {
 		t.Fatal("expected VerifyAndSendDraft to fail locally on whitespace send access_token")
+	}
+}
+
+func TestRunPrecheckAuthFailureAndReconnectRecovery(t *testing.T) {
+	vaultDir := t.TempDir()
+	if _, err := InitOrAddAccount(vaultDir, "personal", "user@gmail.com", "", "", "", "primary", "", "", "", true); err != nil {
+		t.Fatalf("InitOrAddAccount: %v", err)
+	}
+	mDir := filepath.Join(vaultDir, "memory", "gchat", "mock")
+	if err := os.MkdirAll(mDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msgFile := filepath.Join(mDir, "messages.json")
+
+	// 1. Healthy precheck
+	_ = os.WriteFile(msgFile, []byte(`[{"id":"m-1","spaceId":"spaces/AAA","spaceName":"DM","threadId":"t-1","account":"personal","sender":"Alice","snippet":"Hi"}]`), 0o644)
+	batches, status, err := RunPrecheck(vaultDir, "")
+	if err != nil || len(batches) != 1 || !strings.Contains(status, "GCHAT_NEW") {
+		t.Fatalf("healthy precheck failed: batches=%d status=%q err=%v", len(batches), status, err)
+	}
+	wmOK := connector.LoadAccountWatermark(vaultDir, "gchat", "personal")
+	if wmOK.LastCheckedAt == "" || wmOK.ConsecutiveFailures != 0 {
+		t.Fatalf("unexpected healthy watermark: %+v", wmOK)
+	}
+
+	// 2. Simulate precheck failure -> GCHAT_DEGRADED + error, preserving LastCheckedAt
+	_ = os.WriteFile(msgFile, []byte(`{bad json`), 0o644)
+	batchesFail, statusFail, errFail := RunPrecheck(vaultDir, "")
+	if errFail == nil || len(batchesFail) != 0 || !strings.Contains(statusFail, "GCHAT_DEGRADED") {
+		t.Fatalf("expected GCHAT_DEGRADED + error, got batches=%d status=%q err=%v", len(batchesFail), statusFail, errFail)
+	}
+	wmFail := connector.LoadAccountWatermark(vaultDir, "gchat", "personal")
+	if wmFail.LastCheckedAt != wmOK.LastCheckedAt || wmFail.ConsecutiveFailures != 1 || wmFail.LastError == "" {
+		t.Fatalf("unexpected failure watermark: %+v", wmFail)
+	}
+
+	// 3. Reconnect recovery picks up missed m-2 and clears error state
+	_ = os.WriteFile(msgFile, []byte(`[
+		{"id":"m-1","spaceId":"spaces/AAA","spaceName":"DM","threadId":"t-1","account":"personal","sender":"Alice","snippet":"Hi"},
+		{"id":"m-2","spaceId":"spaces/AAA","spaceName":"DM","threadId":"t-2","account":"personal","sender":"Bob","snippet":"Missed during outage"}
+	]`), 0o644)
+	batchesRec, statusRec, errRec := RunPrecheck(vaultDir, "")
+	if errRec != nil || len(batchesRec) != 1 || len(batchesRec[0].Messages) != 1 || batchesRec[0].Messages[0].ID != "m-2" || !strings.Contains(statusRec, "GCHAT_NEW") {
+		t.Fatalf("recovery precheck failed: batches=%+v status=%q err=%v", batchesRec, statusRec, errRec)
+	}
+	wmRec := connector.LoadAccountWatermark(vaultDir, "gchat", "personal")
+	if wmRec.ConsecutiveFailures != 0 || wmRec.LastError != "" || wmRec.LastErrorAt != "" {
+		t.Fatalf("expected cleared error state after recovery, got %+v", wmRec)
 	}
 }
