@@ -387,11 +387,22 @@ func RunEvalFixtures() (*FixtureSuiteReport, error) {
 	now := time.Now().UTC()
 	var results []FixtureResult
 
-	// F1: Scoped Fact Isolation & Front Desk <=3 per-topic diversity cap
+	// F1: Scoped Fact Isolation (including adversarial shared-keyword flooding) & Front Desk <=3 per-topic diversity cap
 	{
 		v1 := filepath.Join(tmpDir, "f1")
-		_, _, _ = AddFactWithOptions(v1, AddFactOptions{ID: "f-alpha-1", Topic: "architecture", Statement: "Always run go test -race in repo-alpha", Scopes: []string{"repo:repo-alpha"}, Verified: true, Now: now})
-		_, _, _ = AddFactWithOptions(v1, AddFactOptions{ID: "f-beta-1", Topic: "architecture", Statement: "Use pnpm build in repo-beta", Scopes: []string{"repo:repo-beta"}, Verified: true, Now: now})
+		older := now.Add(-2 * time.Hour)
+		_, _, _ = AddFactWithOptions(v1, AddFactOptions{ID: "f-alpha-1", Topic: "web-package", Statement: "Alpha web package lives under apps/alpha-web and builds via go test -race", Scopes: []string{"repo:repo-alpha"}, Verified: true, Now: older})
+		_, _, _ = AddFactWithOptions(v1, AddFactOptions{ID: "f-beta-1", Topic: "web-package", Statement: "Beta web package lives under services/beta-web and uses pnpm build", Scopes: []string{"repo:repo-beta"}, Verified: true, Now: now})
+		for i := 1; i <= 5; i++ {
+			_, _, _ = AddFactWithOptions(v1, AddFactOptions{
+				ID:        fmt.Sprintf("f-beta-flood-%d", i),
+				Topic:     "web-package",
+				Statement: fmt.Sprintf("Beta web package build folder note %d under services/beta-web", i),
+				Scopes:    []string{"repo:repo-beta"},
+				Verified:  true,
+				Now:       now.Add(time.Duration(i) * time.Minute),
+			})
+		}
 		_, _, _ = AddFactWithOptions(v1, AddFactOptions{ID: "f-global-1", Topic: "comms", Statement: "Reply concisely in active language", Scopes: []string{"global"}, Verified: true, Now: now})
 		for i := 1; i <= 4; i++ {
 			_, _, _ = AddFactWithOptions(v1, AddFactOptions{
@@ -403,18 +414,23 @@ func RunEvalFixtures() (*FixtureSuiteReport, error) {
 				Now:       now,
 			})
 		}
-		active, _, _, _ := LoadFactsStateAt(v1, now)
-		alphaSel := SelectFactsForSession(active, SessionScopeContext{Role: "task", RepoSlug: "repo-alpha", Scopes: []string{"repo:repo-alpha"}}, now, 15, 2500)
+		active, _, _, _ := LoadFactsStateAt(v1, now.Add(10*time.Minute))
+		alphaSel := SelectFactsForSession(active, SessionScopeContext{
+			Role:       "task",
+			RepoSlug:   "repo-alpha",
+			Scopes:     []string{"repo:repo-alpha"},
+			PromptText: "Where is the web package build folder located?",
+		}, now.Add(10*time.Minute), 15, 2500)
 		hasAlpha, hasBeta := false, false
 		for _, f := range alphaSel {
 			if f.ID == "f-alpha-1" {
 				hasAlpha = true
 			}
-			if f.ID == "f-beta-1" {
+			if strings.HasPrefix(f.ID, "f-beta-") {
 				hasBeta = true
 			}
 		}
-		fdSel := SelectFactsForSession(active, SessionScopeContext{Role: "front_desk"}, now, 10, 1800)
+		fdSel := SelectFactsForSession(active, SessionScopeContext{Role: "front_desk"}, now.Add(10*time.Minute), 10, 1800)
 		toolingCnt := 0
 		for _, f := range fdSel {
 			if f.Topic == "tooling" {

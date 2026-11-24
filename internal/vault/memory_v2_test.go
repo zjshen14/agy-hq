@@ -254,3 +254,96 @@ func TestMemoryV2_EntityOverflowAndCascadingForget(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryV2_AdversarialTwoRepoSharedKeywordIsolation(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	older := now.Add(-4 * time.Hour)
+
+	// Older verified repo-alpha fact about its web package
+	_, _, err := AddFactWithOptions(vaultDir, AddFactOptions{
+		ID:        "f-alpha-web",
+		Topic:     "web-package",
+		Statement: "repo-alpha web package lives in apps/alpha-web and deploys via vite",
+		Scopes:    []string{"repo:repo-alpha"},
+		Verified:  true,
+		Now:       older,
+	})
+	if err != nil {
+		t.Fatalf("add alpha fact: %v", err)
+	}
+	// Flood repo-beta with newer verified facts sharing the same "web package" keywords
+	for i := 1; i <= 6; i++ {
+		_, _, err := AddFactWithOptions(vaultDir, AddFactOptions{
+			ID:        fmt.Sprintf("f-beta-web-%d", i),
+			Topic:     "web-package",
+			Statement: fmt.Sprintf("repo-beta web package folder services/beta-web note %d", i),
+			Scopes:    []string{"repo:repo-beta"},
+			Verified:  true,
+			Now:       now.Add(time.Duration(i) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("add beta fact %d: %v", i, err)
+		}
+	}
+	// Newer non-conflicting domain fact sharing prompt keywords must still rank BELOW verified repo-alpha fact
+	_, _, err = AddFactWithOptions(vaultDir, AddFactOptions{
+		ID:        "f-domain-web",
+		Topic:     "web-package",
+		Statement: "General web package folder layout guidelines for frontend apps",
+		Scopes:    []string{"domain:frontend"},
+		Verified:  true,
+		Now:       now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("add domain fact: %v", err)
+	}
+
+	active, _, _, err := LoadFactsStateAt(vaultDir, now.Add(15*time.Minute))
+	if err != nil {
+		t.Fatalf("LoadFactsStateAt: %v", err)
+	}
+	ctx := SessionScopeContext{
+		Role:       "task",
+		RepoSlug:   "repo-alpha",
+		Scopes:     []string{"repo:repo-alpha"},
+		PromptText: "Where is the web package folder in this repo?",
+	}
+	sel := SelectFactsForSession(active, ctx, now.Add(15*time.Minute), 10, 2400)
+	if len(sel) == 0 {
+		t.Fatalf("expected non-empty selection for repo-alpha")
+	}
+	if sel[0].ID != "f-alpha-web" {
+		t.Fatalf("expected verified repo:repo-alpha fact first (ahead of newer domain lexMatched fact), got %s (%+v)", sel[0].ID, sel)
+	}
+	for _, f := range sel {
+		if strings.HasPrefix(f.ID, "f-beta-") {
+			t.Fatalf("cross-repo leak: repo-beta fact %s leaked into repo-alpha session", f.ID)
+		}
+	}
+
+	// Topic pages: conflicting repo-beta topic must be excluded from both FilterTopicsForScope and MatchContextHints
+	topicsDir := filepath.Join(vaultDir, "memory", "topics")
+	_ = os.MkdirAll(topicsDir, 0o700)
+	_ = os.WriteFile(filepath.Join(topicsDir, "web-package-alpha.md"), []byte(
+		"# Alpha Web Package\n> **Summary:** Web package folder structure for repo-alpha.\n> **Scopes:** repo:repo-alpha\n> **Playbook-Owner:** repo:repo-alpha\n\n## Active Playbook\n- Alpha web package lives in apps/alpha-web.\n",
+	), 0o600)
+	_ = os.WriteFile(filepath.Join(topicsDir, "web-package-beta.md"), []byte(
+		"# Beta Web Package\n> **Summary:** Web package folder structure for repo-beta.\n> **Scopes:** repo:repo-beta\n> **Playbook-Owner:** repo:repo-beta\n\n## Active Playbook\n- Beta web package lives in services/beta-web.\n",
+	), 0o600)
+
+	topics, err := LoadTopicIndex(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadTopicIndex: %v", err)
+	}
+	for _, tp := range FilterTopicsForScope(topics, ctx, 5) {
+		if tp.Slug == "web-package-beta" {
+			t.Fatalf("FilterTopicsForScope leaked conflicting repo-beta topic into repo-alpha")
+		}
+	}
+	for _, tp := range MatchContextHints(topics, ctx, 5) {
+		if tp.Slug == "web-package-beta" {
+			t.Fatalf("MatchContextHints leaked conflicting repo-beta topic into repo-alpha")
+		}
+	}
+}

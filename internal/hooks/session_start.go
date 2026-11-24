@@ -379,6 +379,9 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				if len(selectedTopics) >= topicLimit {
 					break
 				}
+				if !isFrontDesk && vault.TopicConflictsWithScope(tp, scopeCtx) {
+					continue
+				}
 				if !seenSlug[tp.Slug] {
 					seenSlug[tp.Slug] = true
 					selectedTopics = append(selectedTopics, tp)

@@ -2754,3 +2754,82 @@ func TestProtectedCredentialTargetsAndShellRegexParity(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleSessionStart_CrossRepoSharedKeywordIsolation(t *testing.T) {
+	vaultDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(vaultDir, "memory", "topics"), 0o700)
+	_ = os.WriteFile(filepath.Join(vaultDir, "USER.md"), []byte("# User\nConcise replies.\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(vaultDir, "MEMORY.md"), []byte("# Active Priorities\n- Maintain repo-alpha.\n"), 0o600)
+
+	// Claim Front Desk on another conversation so our test conversation runs as a scoped Task session
+	if err := kernel.SetFrontDesk(vaultDir, "conv-front-desk-other", ""); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+	alphaConvID := "conv-task-repo-alpha"
+	alphaRepoRoot := filepath.Join(t.TempDir(), "repo-alpha")
+	_ = os.MkdirAll(alphaRepoRoot, 0o755)
+	if err := kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "repo-alpha-web",
+		Title:          "[Task:repo-alpha] Inspect web package",
+		Kind:           "task",
+		Scope:          "repo-alpha",
+		RepoRoot:       alphaRepoRoot,
+		ConversationID: alphaConvID,
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("RegisterTask: %v", err)
+	}
+
+	now := time.Now().UTC()
+	older := now.Add(-3 * time.Hour)
+	_, _, err := vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
+		ID:        "f-alpha-web",
+		Topic:     "web-package",
+		Statement: "Alpha web package path is apps/alpha-web",
+		Scopes:    []string{"repo:repo-alpha"},
+		Verified:  true,
+		Now:       older,
+	})
+	if err != nil {
+		t.Fatalf("add alpha fact: %v", err)
+	}
+	for i := 1; i <= 5; i++ {
+		_, _, err := vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
+			ID:        fmt.Sprintf("f-beta-flood-%d", i),
+			Topic:     "web-package",
+			Statement: fmt.Sprintf("Beta web package path is services/beta-web (note %d)", i),
+			Scopes:    []string{"repo:repo-beta"},
+			Verified:  true,
+			Now:       now.Add(time.Duration(i) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("add beta fact %d: %v", i, err)
+		}
+	}
+
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "topics", "web-package-alpha.md"), []byte(
+		"# Alpha Web Package\n> **Summary:** Alpha web package folder layout.\n> **Scopes:** repo:repo-alpha\n> **Playbook-Owner:** repo:repo-alpha\n\n## Active Playbook\n- Always build alpha web package in apps/alpha-web.\n",
+	), 0o600)
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "topics", "web-package-beta.md"), []byte(
+		"# Beta Web Package\n> **Summary:** Beta web package folder layout.\n> **Scopes:** repo:repo-beta\n> **Playbook-Owner:** repo:repo-beta\n\n## Active Playbook\n- Always build beta web package in services/beta-web.\n",
+	), 0o600)
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"conversationId": alphaConvID,
+		"cwd":            alphaRepoRoot,
+		"lastUserInput":  "Where is the web package path and web-package-beta build folder?",
+	})
+	var out bytes.Buffer
+	if err := HandleSessionStart(bytes.NewReader(payload), &out, vaultDir); err != nil {
+		t.Fatalf("HandleSessionStart: %v", err)
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "apps/alpha-web") {
+		t.Fatalf("expected repo-alpha fact/playbook in SessionStart output, got:\n%s", rendered)
+	}
+	for _, forbidden := range []string{"services/beta-web", "f-beta-flood-", "Beta Web Package", "web-package-beta", "repo:repo-beta"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("cross-repo leak: found forbidden repo-beta string %q in rendered SessionStart output:\n%s", forbidden, rendered)
+		}
+	}
+}

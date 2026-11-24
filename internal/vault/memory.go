@@ -635,6 +635,54 @@ func FormatFactBullet(f Fact) string {
 	return fmt.Sprintf("- [%s]%s %s", f.Topic, meta, f.Statement)
 }
 
+// hasConflictingRepoScope returns true when scopeSet carries one or more active repo:*
+// scopes and itemScopes declares explicit repo:* scope(s) that do not overlap with
+// scopeSet (and does not include "global").
+func hasConflictingRepoScope(itemScopes []string, scopeSet map[string]bool) bool {
+	hasActiveRepo := false
+	for sc := range scopeSet {
+		if strings.HasPrefix(sc, "repo:") {
+			hasActiveRepo = true
+			break
+		}
+	}
+	if !hasActiveRepo {
+		return false
+	}
+	hasItemRepo := false
+	for _, raw := range itemScopes {
+		sc := NormalizeScope(raw)
+		if sc == "global" {
+			return false
+		}
+		if strings.HasPrefix(sc, "repo:") {
+			hasItemRepo = true
+			if scopeSet[sc] {
+				return false
+			}
+		}
+	}
+	return hasItemRepo
+}
+
+func topicAllScopes(tp TopicPage) []string {
+	scopes := make([]string, 0, len(tp.Scopes)+1)
+	scopes = append(scopes, tp.Scopes...)
+	if strings.TrimSpace(tp.PlaybookOwner) != "" {
+		scopes = append(scopes, tp.PlaybookOwner)
+	}
+	return scopes
+}
+
+// TopicConflictsWithScope reports whether tp declares explicit repo:* scopes
+// (via Scopes or PlaybookOwner) that conflict with the active repo:* scope(s) in ctx.
+func TopicConflictsWithScope(tp TopicPage, ctx SessionScopeContext) bool {
+	if ctx.Role == "front_desk" {
+		return false
+	}
+	return hasConflictingRepoScope(topicAllScopes(tp), NormalizeScopeSet(ctx))
+}
+
 // SelectFactsForSession performs deterministic Go physics selection (RFC-0024 §3.3):
 // no ML weights or lexical hit-count auto-demotion; strict scope filtering, 0-token expiry,
 // pinned & imminent-72h elevation, Front Desk per-topic diversity cap, and dual count+byte limits.
@@ -669,6 +717,7 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 		fact         Fact
 		tier         int // lower is higher priority (1..4)
 		scopeMatched bool
+		lexMatched   bool
 		validFrom    string
 		orderIdx     int
 	}
@@ -679,6 +728,10 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 			continue
 		}
 		fScopes := EffectiveFactScopes(f)
+		// Strictly exclude facts declaring conflicting repo:* scope(s) before prompt lexical matching.
+		if ctx.Role != "front_desk" && hasConflictingRepoScope(fScopes, scopeSet) {
+			continue
+		}
 		isGlobal := false
 		scopeMatched := false
 		for _, sc := range fScopes {
@@ -704,9 +757,9 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 		switch {
 		case (scopeMatched && f.Pinned) || (ctx.Role == "front_desk" && isGlobal && f.Pinned) || (imminent && (ctx.Role == "front_desk" || scopeMatched || isGlobal)):
 			tier = 1
-		case (scopeMatched && f.Verified) || (isGlobal && f.Pinned) || lexMatched:
+		case (scopeMatched && f.Verified) || (isGlobal && f.Pinned):
 			tier = 2
-		case f.Verified:
+		case lexMatched || f.Verified:
 			tier = 3
 		default:
 			tier = 4
@@ -715,7 +768,8 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 		candidates = append(candidates, scored{
 			fact:         f,
 			tier:         tier,
-			scopeMatched: scopeMatched || lexMatched,
+			scopeMatched: scopeMatched,
+			lexMatched:   lexMatched,
 			validFrom:    f.ValidFrom,
 			orderIdx:     idx,
 		})
@@ -727,6 +781,9 @@ func SelectFactsForSession(active []Fact, ctx SessionScopeContext, now time.Time
 		}
 		if candidates[i].scopeMatched != candidates[j].scopeMatched {
 			return candidates[i].scopeMatched
+		}
+		if candidates[i].lexMatched != candidates[j].lexMatched {
+			return candidates[i].lexMatched
 		}
 		if candidates[i].validFrom != candidates[j].validFrom {
 			return candidates[i].validFrom > candidates[j].validFrom
@@ -1030,6 +1087,9 @@ func FilterTopicsForScope(topics []TopicPage, ctx SessionScopeContext, maxTopics
 	}
 	var hits []scored
 	for _, tp := range topics {
+		if ctx.Role != "front_desk" && hasConflictingRepoScope(topicAllScopes(tp), scopeSet) {
+			continue
+		}
 		sc := 0
 		if tp.PlaybookOwner != "" && scopeSet[tp.PlaybookOwner] {
 			sc += 10
@@ -1082,6 +1142,9 @@ func MatchContextHints(topics []TopicPage, ctx SessionScopeContext, maxHints int
 	}
 	var out []candidate
 	for _, tp := range topics {
+		if hasConflictingRepoScope(topicAllScopes(tp), scopeSet) {
+			continue
+		}
 		// Exact slug match or >= 2 high-signal tokens
 		score := 0
 		if promptLower != "" && strings.Contains(promptLower, strings.ToLower(tp.Slug)) {
