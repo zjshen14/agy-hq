@@ -693,14 +693,16 @@ func runObsCLI(vaultDir string, args []string) {
 		}
 
 		fmt.Printf("\nBreakdown by %s:\n", strings.ToUpper(rep.GroupBy))
-		fmt.Printf("  %-22s %6s %6s %10s %10s %10s %7s %8s %8s\n",
-			"KEY", "CONVS", "TURNS", "UNCACHED", "CACHE_RD", "GROSS", "CHR%", "QBU", "LATENCY")
+		fmt.Printf("  %-22s %6s %6s %10s %9s %9s %10s %10s %7s %8s %8s\n",
+			"KEY", "CONVS", "TURNS", "UNCACHED", "AVG_UNC", "P50_UNC", "CACHE_RD", "GROSS", "CHR%", "QBU", "LATENCY")
 		for _, b := range rep.Buckets {
-			fmt.Printf("  %-22s %6d %6d %10s %10s %10s %6.1f%% %8.0f %8s\n",
+			fmt.Printf("  %-22s %6d %6d %10s %9s %9s %10s %10s %6.1f%% %8.0f %8s\n",
 				truncateDisplay(b.Key, 22),
 				b.ConvCount,
 				b.Rollup.TurnCount,
 				obs.FormatTokensCompact(b.Rollup.UncachedTokens),
+				obs.FormatTokensCompact(b.AvgUncachedPerRun),
+				obs.FormatTokensCompact(b.P50UncachedPerRun),
 				obs.FormatTokensCompact(b.Rollup.CacheReadTokens),
 				obs.FormatTokensCompact(b.Rollup.GrossTokens),
 				b.Rollup.CacheHitRatio*100.0,
@@ -725,7 +727,7 @@ func runObsCLI(vaultDir string, args []string) {
 	case "top":
 		fs := flag.NewFlagSet("obs top", flag.ExitOnError)
 		sortBy := fs.String("by", "uncached", "Sort metric (uncached, qbu, gross, context, latency)")
-		kind := fs.String("kind", "all", "Filter by kind (all, task, subagent, front_desk)")
+		kind := fs.String("kind", "all", "Filter by kind (all, task, subagent, nested_subagent, front_desk, auto)")
 		treeMode := fs.Bool("tree", false, "Rank by full DAG tree rollup (Self + Descendant Subagents)")
 		turnsMode := fs.Bool("turns", false, "Rank individual expensive turns across all transcripts")
 		limit := fs.Int("limit", 10, "Maximum rows to display")

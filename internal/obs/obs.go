@@ -117,11 +117,15 @@ type ObsIndex struct {
 
 // BucketMetrics represents an aggregated slice (by day, hour, model, tier, kind, or scope).
 type BucketMetrics struct {
-	Key        string      `json:"key"`
-	Label      string      `json:"label,omitempty"`
-	ConvCount  int         `json:"convCount"`
-	Rollup     TokenRollup `json:"rollup"`
-	ShareOfQBU float64     `json:"shareOfQbu"`
+	Key               string      `json:"key"`
+	Label             string      `json:"label,omitempty"`
+	ConvCount         int         `json:"convCount"`
+	Rollup            TokenRollup `json:"rollup"`
+	AvgUncachedPerRun int64       `json:"avgUncachedPerRun,omitempty"`
+	P50UncachedPerRun int64       `json:"p50UncachedPerRun,omitempty"`
+	AvgGrossPerRun    int64       `json:"avgGrossPerRun,omitempty"`
+	P50GrossPerRun    int64       `json:"p50GrossPerRun,omitempty"`
+	ShareOfQBU        float64     `json:"shareOfQbu"`
 }
 
 // ObsSummaryReport is returned by `hq obs [tokens]`.
@@ -882,12 +886,18 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 		}
 	}
 
+	type bucketConvTotals struct {
+		uncached int64
+		gross    int64
+	}
 	bucketMap := make(map[string]*BucketMetrics)
-	bucketConvs := make(map[string]map[string]bool)
+	bucketConvs := make(map[string]map[string]*bucketConvTotals)
 	tierMap := make(map[string]*BucketMetrics)
+	tierConvs := make(map[string]map[string]*bucketConvTotals)
 	kindMap := make(map[string]*BucketMetrics)
+	kindConvs := make(map[string]map[string]*bucketConvTotals)
 
-	addToBucket := func(m map[string]*BucketMetrics, convSet map[string]map[string]bool, key, convID string, turn TurnMetrics) {
+	addToBucket := func(m map[string]*BucketMetrics, convTotals map[string]map[string]*bucketConvTotals, key, convID string, turn TurnMetrics) {
 		if key == "" {
 			key = "unknown"
 		}
@@ -896,17 +906,21 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 			b = &BucketMetrics{Key: key}
 			m[key] = b
 		}
-		if convSet != nil {
-			if convSet[key] == nil {
-				convSet[key] = make(map[string]bool)
-			}
-			if !convSet[key][convID] {
-				convSet[key][convID] = true
-				b.ConvCount++
-			}
-		}
 		tr := RollupTurns([]TurnMetrics{turn}, turn.StepCount, "", "")
 		b.Rollup = AddRollup(b.Rollup, tr)
+		if convTotals != nil {
+			if convTotals[key] == nil {
+				convTotals[key] = make(map[string]*bucketConvTotals)
+			}
+			ct, seen := convTotals[key][convID]
+			if !seen {
+				ct = &bucketConvTotals{}
+				convTotals[key][convID] = ct
+				b.ConvCount++
+			}
+			ct.uncached += tr.UncachedTokens
+			ct.gross += tr.GrossTokens
+		}
 	}
 
 	convsSeen := make(map[string]bool)
@@ -944,17 +958,42 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 				bKey = localDateStr(t.StartedAt, now.Location())
 			}
 			addToBucket(bucketMap, bucketConvs, bKey, cid, t)
-			addToBucket(tierMap, nil, cm.Tier, cid, t)
-			addToBucket(kindMap, nil, cm.Kind, cid, t)
+			addToBucket(tierMap, tierConvs, cm.Tier, cid, t)
+			addToBucket(kindMap, kindConvs, cm.Kind, cid, t)
 		}
 	}
 	rep.ConversationCount = len(convsSeen)
 
-	finalizeSlice := func(m map[string]*BucketMetrics, sortByKeyDesc bool) []BucketMetrics {
+	medianInt64 := func(vals []int64) int64 {
+		n := len(vals)
+		if n == 0 {
+			return 0
+		}
+		sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+		if n%2 == 1 {
+			return vals[n/2]
+		}
+		return (vals[n/2-1] + vals[n/2]) / 2
+	}
+
+	finalizeSlice := func(m map[string]*BucketMetrics, convTotals map[string]map[string]*bucketConvTotals, sortByKeyDesc bool) []BucketMetrics {
 		var out []BucketMetrics
-		for _, v := range m {
+		for key, v := range m {
 			if rep.Totals.QuotaUnits > 0 {
 				v.ShareOfQBU = (v.Rollup.QuotaUnits / rep.Totals.QuotaUnits) * 100.0
+			}
+			if cts := convTotals[key]; len(cts) > 0 {
+				uncVals := make([]int64, 0, len(cts))
+				grossVals := make([]int64, 0, len(cts))
+				for _, ct := range cts {
+					uncVals = append(uncVals, ct.uncached)
+					grossVals = append(grossVals, ct.gross)
+				}
+				n := int64(len(cts))
+				v.AvgUncachedPerRun = v.Rollup.UncachedTokens / n
+				v.P50UncachedPerRun = medianInt64(uncVals)
+				v.AvgGrossPerRun = v.Rollup.GrossTokens / n
+				v.P50GrossPerRun = medianInt64(grossVals)
 			}
 			out = append(out, *v)
 		}
@@ -971,9 +1010,9 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 	}
 
 	isTimeKey := groupBy == "day" || groupBy == "hour"
-	rep.Buckets = finalizeSlice(bucketMap, isTimeKey)
-	rep.ByTier = finalizeSlice(tierMap, false)
-	rep.ByKind = finalizeSlice(kindMap, false)
+	rep.Buckets = finalizeSlice(bucketMap, bucketConvs, isTimeKey)
+	rep.ByTier = finalizeSlice(tierMap, tierConvs, false)
+	rep.ByKind = finalizeSlice(kindMap, kindConvs, false)
 	rep.Anomalies = EvaluateAnomalies(vaultDir, idx, budget, now)
 	return rep, nil
 }

@@ -874,3 +874,72 @@ func TestSummaryCacheInvalidatesOnFrontDeskTranscriptChange(t *testing.T) {
 		t.Fatalf("expected cache miss after InvalidateSummaryCache")
 	}
 }
+
+func TestBuildSummaryReportPerRunMeanAndMedian(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+	// 5 [Auto] runs: 4 routine runs (10k, 20k, 25k, 30k uncached) + 1 heavy nightly run (265k uncached)
+	// Total uncached = 350k -> Mean = 70k, Median (p50) = 25k.
+	runs := []struct {
+		id     string
+		input  int64
+		cache  int64
+		output int64
+	}{
+		{"22222222-2222-4222-8222-222222222201", 8000, 10000, 2000},     // 10k uncached, 20k gross
+		{"22222222-2222-4222-8222-222222222202", 16000, 20000, 4000},    // 20k uncached, 40k gross
+		{"22222222-2222-4222-8222-222222222203", 20000, 25000, 5000},    // 25k uncached, 50k gross
+		{"22222222-2222-4222-8222-222222222204", 24000, 30000, 6000},    // 30k uncached, 60k gross
+		{"22222222-2222-4222-8222-222222222205", 200000, 400000, 65000}, // 265k uncached, 665k gross
+	}
+	for i, r := range runs {
+		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+			TaskSlug:       fmt.Sprintf("auto-run-%d", i+1),
+			Title:          fmt.Sprintf("[Auto] Worker %d", i+1),
+			Kind:           "auto",
+			Scope:          "ops",
+			Tier:           "standard",
+			ConversationID: r.id,
+			Status:         "done",
+		})
+		writeTranscriptFixture(t, brainDir, r.id, []string{
+			`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-24T08:00:00Z","content":"run auto job"}`,
+			fmt.Sprintf(`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-24T08:00:05Z","input_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"content":"done"}`, r.input, r.cache, r.output),
+		})
+	}
+
+	rep, err := BuildSummaryReport(vaultDir, "7d", "kind", now)
+	if err != nil {
+		t.Fatalf("BuildSummaryReport: %v", err)
+	}
+	var autoBucket *BucketMetrics
+	for i := range rep.Buckets {
+		if rep.Buckets[i].Key == "auto" {
+			autoBucket = &rep.Buckets[i]
+			break
+		}
+	}
+	if autoBucket == nil {
+		t.Fatalf("expected 'auto' bucket in %+v", rep.Buckets)
+	}
+	if autoBucket.ConvCount != 5 {
+		t.Fatalf("expected ConvCount=5, got %d", autoBucket.ConvCount)
+	}
+	if autoBucket.AvgUncachedPerRun != 70000 {
+		t.Fatalf("expected AvgUncachedPerRun=70000, got %d", autoBucket.AvgUncachedPerRun)
+	}
+	if autoBucket.P50UncachedPerRun != 25000 {
+		t.Fatalf("expected P50UncachedPerRun=25000, got %d", autoBucket.P50UncachedPerRun)
+	}
+	if autoBucket.AvgGrossPerRun != 167000 {
+		t.Fatalf("expected AvgGrossPerRun=167000, got %d", autoBucket.AvgGrossPerRun)
+	}
+	if autoBucket.P50GrossPerRun != 50000 {
+		t.Fatalf("expected P50GrossPerRun=50000, got %d", autoBucket.P50GrossPerRun)
+	}
+}
