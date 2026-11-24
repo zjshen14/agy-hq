@@ -307,10 +307,16 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 		scopeStr := fs.String("scope", "", "Optional comma-separated scope tags (e.g., global, repo:agy-hq, domain:investing)")
 		expiresStr := fs.String("expires", "", "Optional TTL expiry (YYYY-MM-DD, RFC3339, +14d, +72h)")
 		pinned := fs.Bool("pinned", false, "Pin high-priority fact for guaranteed SessionStart inclusion")
+		supersedesStr := fs.String("supersedes", "", "Optional comma-separated active fact ID(s) to atomically supersede")
+		appendFlag := fs.Bool("append", false, "Explicitly add alongside existing active sibling fact(s) on the same (topic, scopes)")
 		_ = fs.Parse(rest)
 		var scopes []string
 		if strings.TrimSpace(*scopeStr) != "" {
 			scopes = vault.ParseScopeList(*scopeStr)
+		}
+		var supersedes []string
+		if strings.TrimSpace(*supersedesStr) != "" {
+			supersedes = splitCSV(*supersedesStr)
 		}
 		fact, warning, err := vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
 			ID:         *id,
@@ -321,6 +327,8 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			Scopes:     scopes,
 			ExpiresAt:  *expiresStr,
 			Pinned:     *pinned,
+			Supersedes: supersedes,
+			Append:     *appendFlag,
 			Now:        time.Now().UTC(),
 		})
 		if err != nil {

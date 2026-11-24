@@ -60,6 +60,8 @@ type AddFactOptions struct {
 	Scopes     []string
 	ExpiresAt  string
 	Pinned     bool
+	Supersedes []string
+	Append     bool
 	Now        time.Time
 }
 
@@ -375,9 +377,19 @@ func AddFactWithOptions(vaultDir string, opts AddFactOptions) (Fact, string, err
 	}
 	scopes := normalizeScopesList(opts.Scopes)
 
-	warning := ""
+	var warnings []string
 	if expStr == "" && StatementHasCalendarDate(statement) {
-		warning = "note: statement includes a calendar date without --expires; consider setting --expires=<YYYY-MM-DD> so time-bound events auto-expire in 0 tokens"
+		warnings = append(warnings, "note: statement includes a calendar date without --expires; consider setting --expires=<YYYY-MM-DD> so time-bound events auto-expire in 0 tokens")
+	}
+
+	supersedeSet := make(map[string]bool)
+	var supersedeOrder []string
+	for _, rawID := range opts.Supersedes {
+		sid := strings.TrimSpace(rawID)
+		if sid != "" && !supersedeSet[sid] {
+			supersedeSet[sid] = true
+			supersedeOrder = append(supersedeOrder, sid)
+		}
 	}
 
 	var created Fact
@@ -387,7 +399,8 @@ func AddFactWithOptions(vaultDir string, opts AddFactOptions) (Fact, string, err
 			return lErr
 		}
 
-		id := strings.TrimSpace(opts.ID)
+		explicitID := strings.TrimSpace(opts.ID)
+		id := explicitID
 		if id == "" {
 			existingIDs := make(map[string]bool, len(active)+len(expired))
 			for _, f := range active {
@@ -408,22 +421,73 @@ func AddFactWithOptions(vaultDir string, opts AddFactOptions) (Fact, string, err
 			}
 		}
 
+		if supersedeSet[id] {
+			return fmt.Errorf("fact %q cannot supersede itself", id)
+		}
+		if len(supersedeSet) > 0 {
+			activeByID := make(map[string]bool, len(active))
+			for _, f := range active {
+				activeByID[f.ID] = true
+			}
+			for _, sid := range supersedeOrder {
+				if !activeByID[sid] {
+					return fmt.Errorf("supersedes target %q not found among active facts", sid)
+				}
+			}
+		}
+
+		nowRFC3339 := now.Format(time.RFC3339)
 		newFact := Fact{
 			ID:         id,
 			Topic:      topic,
 			Statement:  statement,
 			SourceConv: strings.TrimSpace(opts.SourceConv),
 			Verified:   opts.Verified,
-			ValidFrom:  now.Format(time.RFC3339),
+			ValidFrom:  nowRFC3339,
 			ValidTo:    nil,
 			Scopes:     scopes,
 			ExpiresAt:  expStr,
 			Pinned:     opts.Pinned,
 		}
+		newEffectiveScopes := EffectiveFactScopes(newFact)
+
+		// Advisory write-time sibling conflict check when caller does not specify --id, --supersedes, or --append.
+		if explicitID == "" && len(supersedeSet) == 0 && !opts.Append {
+			var siblings []string
+			for _, f := range active {
+				if strings.EqualFold(strings.TrimSpace(f.Topic), topic) && sameStringSlice(EffectiveFactScopes(f), newEffectiveScopes) {
+					stmt := f.Statement
+					if runes := []rune(stmt); len(runes) > 64 {
+						stmt = string(runes[:61]) + "..."
+					}
+					siblings = append(siblings, fmt.Sprintf("%s (%q)", f.ID, stmt))
+				}
+			}
+			if len(siblings) > 0 {
+				shown := siblings
+				extra := ""
+				if len(shown) > 5 {
+					extra = fmt.Sprintf(" (+%d more)", len(shown)-5)
+					shown = shown[:5]
+				}
+				warnings = append(warnings, fmt.Sprintf(
+					"note: %d active sibling fact(s) already exist for topic=%q scopes=%v: %s%s; pass --supersedes=<id> to atomically replace or --append to add alongside",
+					len(siblings), topic, newEffectiveScopes, strings.Join(shown, ", "), extra,
+				))
+			}
+		}
 
 		var nextActive []Fact
+		var nextExpired []Fact
 		replaced := false
 		for _, f := range active {
+			if supersedeSet[f.ID] {
+				validTo := nowRFC3339
+				f.ValidTo = &validTo
+				f.SupersededBy = id
+				nextExpired = append(nextExpired, f)
+				continue
+			}
 			if f.ID == id {
 				nextActive = append(nextActive, newFact)
 				replaced = true
@@ -434,7 +498,6 @@ func AddFactWithOptions(vaultDir string, opts AddFactOptions) (Fact, string, err
 		if !replaced {
 			nextActive = append(nextActive, newFact)
 		}
-		var nextExpired []Fact
 		for _, f := range expired {
 			if f.ID == id {
 				continue
@@ -450,15 +513,31 @@ func AddFactWithOptions(vaultDir string, opts AddFactOptions) (Fact, string, err
 		created = newFact
 		return nil
 	})
-	return created, warning, err
+	return created, strings.Join(warnings, "; "), err
+}
+
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // PruneFact soft-expires an active fact by setting valid_to = now (and optional superseded_by)
 // under store.RankMemory and writes canonical facts.jsonl atomically (0600).
 func PruneFact(vaultDir, id, supersededBy string) (Fact, error) {
 	id = strings.TrimSpace(id)
+	supersededBy = strings.TrimSpace(supersededBy)
 	if id == "" {
 		return Fact{}, fmt.Errorf("fact id is required")
+	}
+	if supersededBy != "" && supersededBy == id {
+		return Fact{}, fmt.Errorf("fact %q cannot supersede itself", id)
 	}
 	var pruned Fact
 	err := withMemoryLock(vaultDir, func() error {

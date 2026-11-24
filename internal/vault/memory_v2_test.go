@@ -347,3 +347,100 @@ func TestMemoryV2_AdversarialTwoRepoSharedKeywordIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryV2_AtomicSupersedesAndSiblingConflictWarning(t *testing.T) {
+	vaultDir := t.TempDir()
+	now := time.Date(2026, 11, 24, 13, 0, 0, 0, time.UTC)
+
+	// 1. Seed initial active fact on (topic="routing", scopes=["repo:agy-hq"])
+	f1, warn1, err := AddFactWithOptions(vaultDir, AddFactOptions{
+		ID:        "fact-route-v1",
+		Topic:     "routing",
+		Statement: "Default standard model is hydrogen-high",
+		Scopes:    []string{"repo:agy-hq"},
+		Verified:  true,
+		Now:       now,
+	})
+	if err != nil || warn1 != "" {
+		t.Fatalf("initial add failed: err=%v warn=%q", err, warn1)
+	}
+
+	// 2. Adding another fact on the same (topic, scopes) without --id/--supersedes/--append emits sibling conflict warning
+	f2, warn2, err := AddFactWithOptions(vaultDir, AddFactOptions{
+		Topic:     "routing",
+		Statement: "Default standard model is neon-medium",
+		Scopes:    []string{"repo:agy-hq"},
+		Verified:  true,
+		Now:       now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("second add failed: %v", err)
+	}
+	if !strings.Contains(warn2, "active sibling fact(s)") || !strings.Contains(warn2, f1.ID) {
+		t.Fatalf("expected sibling conflict warning listing %s, got %q", f1.ID, warn2)
+	}
+
+	// 3. Passing --append suppresses sibling conflict warning intentionally
+	_, warnAppend, err := AddFactWithOptions(vaultDir, AddFactOptions{
+		Topic:     "routing",
+		Statement: "Deep tier uses carbon-high",
+		Scopes:    []string{"repo:agy-hq"},
+		Verified:  true,
+		Append:    true,
+		Now:       now.Add(2 * time.Minute),
+	})
+	if err != nil || warnAppend != "" {
+		t.Fatalf("append add failed: err=%v warn=%q", err, warnAppend)
+	}
+
+	// 4. Invalid --supersedes target fails atomically without modifying active facts
+	if _, _, err := AddFactWithOptions(vaultDir, AddFactOptions{
+		Topic:      "routing",
+		Statement:  "Should not be written",
+		Scopes:     []string{"repo:agy-hq"},
+		Supersedes: []string{"fact-does-not-exist"},
+		Now:        now.Add(3 * time.Minute),
+	}); err == nil {
+		t.Fatalf("expected error for missing supersedes target")
+	}
+
+	// 5. Atomic --supersedes replaces both f1 and f2 under a single lock with valid_to + superseded_by
+	f3, warn3, err := AddFactWithOptions(vaultDir, AddFactOptions{
+		Topic:      "routing",
+		Statement:  "Unified 3-family routing matrix: hydrogen/neon/carbon",
+		Scopes:     []string{"repo:agy-hq"},
+		Verified:   true,
+		Supersedes: []string{f1.ID, f2.ID},
+		Now:        now.Add(4 * time.Minute),
+	})
+	if err != nil || warn3 != "" {
+		t.Fatalf("atomic supersedes failed: err=%v warn=%q", err, warn3)
+	}
+
+	active, expired, _, err := LoadFactsStateAt(vaultDir, now.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("LoadFactsStateAt: %v", err)
+	}
+	for _, f := range active {
+		if f.ID == f1.ID || f.ID == f2.ID {
+			t.Fatalf("expected %s to be superseded out of active facts", f.ID)
+		}
+	}
+	supFound := 0
+	for _, f := range expired {
+		if f.ID == f1.ID || f.ID == f2.ID {
+			if f.ValidTo == nil || *f.ValidTo == "" || f.SupersededBy != f3.ID {
+				t.Fatalf("expected valid_to and superseded_by=%s on %+v", f3.ID, f)
+			}
+			supFound++
+		}
+	}
+	if supFound != 2 {
+		t.Fatalf("expected 2 superseded facts in expired, got %d", supFound)
+	}
+
+	// 6. PruneFact rejects self-supersession
+	if _, err := PruneFact(vaultDir, f3.ID, f3.ID); err == nil {
+		t.Fatalf("expected PruneFact to reject self-supersession")
+	}
+}
