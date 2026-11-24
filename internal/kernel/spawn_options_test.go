@@ -154,3 +154,66 @@ func TestSpawnTaskWithOptionsAgentAPIFallbackSkipsHook(t *testing.T) {
 		t.Fatalf("agentapi fallback = %q, %v", out, err)
 	}
 }
+
+func TestExtractUUIDAndAgentAPIStderrIsolation(t *testing.T) {
+	const promptUUID = "11111111-2222-4333-8444-555555555555"
+	const createdUUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee99"
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "created conversation line wins over earlier prompt uuid",
+			in:   "echoed prompt from " + promptUUID + "\nCreated conversation " + createdUUID + " (model=gemini-4-neon-medium)",
+			want: createdUUID,
+		},
+		{
+			name: "standalone uuid line wins over earlier uuid",
+			in:   "debug: parent=" + promptUUID + "\n" + createdUUID + "\n",
+			want: createdUUID,
+		},
+		{
+			name: "last uuid fallback",
+			in:   "parent " + promptUUID + " -> child " + createdUUID,
+			want: createdUUID,
+		},
+		{
+			name: "no uuid",
+			in:   "plain output",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		if got := ExtractUUID(tc.in); got != tc.want {
+			t.Errorf("%s: ExtractUUID(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+
+	// Verify agentapi stderr noise containing an earlier UUID does not pollute stdout or fail-return output.
+	vaultDir := filepath.Join(t.TempDir(), "local")
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	script := "#!/bin/sh\necho \"warn: prompt mentions " + promptUUID + "\" >&2\necho \"" + createdUUID + "\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "agentapi"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "")
+	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
+	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
+	t.Setenv("ANTIGRAVITY_SIDECAR_WEB_PORT", "")
+	t.Setenv("ANTIGRAVITY_APP_DATA_DIR", t.TempDir())
+	t.Setenv("HQ_CONFIG_DIR", t.TempDir())
+
+	out, err := SpawnTask(vaultDir, "manual-spawn:stderr-test", "swe-pulse", "[Task:acme] stderr", "parent "+promptUUID, "gemini-4-neon-medium", false)
+	if err != nil {
+		t.Fatalf("SpawnTask failed: %v", err)
+	}
+	if got := ExtractUUID(out); got != createdUUID {
+		t.Fatalf("expected created UUID %s from stdout, got %q (raw=%q)", createdUUID, got, out)
+	}
+}

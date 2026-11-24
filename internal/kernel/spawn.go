@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -341,19 +342,34 @@ func SpawnTaskWithOptions(vaultDir, trigger, skill, title, prompt, modelID strin
 				fallbackNote = fbReason
 				fmt.Fprintf(os.Stderr, "[hq spawn] falling back to agentapi (%s)\n", fbReason)
 			}
-			cmd := exec.Command("agentapi", "new-conversation", "--model="+modelID, "--title="+title, "--", prompt)
-			configureSpawnCommandWithTarget(cmd, vaultDir, trigger, workDir, projectID)
-			outBytes, err := cmd.CombinedOutput()
-			output = strings.TrimSpace(string(outBytes))
+			runAgentAPI := func(m string) (stdoutStr, combinedStr string, runErr error) {
+				cmd := exec.Command("agentapi", "new-conversation", "--model="+m, "--title="+title, "--", prompt)
+				configureSpawnCommandWithTarget(cmd, vaultDir, trigger, workDir, projectID)
+				var stdoutBuf, stderrBuf bytes.Buffer
+				cmd.Stdout = &stdoutBuf
+				cmd.Stderr = &stderrBuf
+				runErr = cmd.Run()
+				stdoutStr = strings.TrimSpace(stdoutBuf.String())
+				stderrStr := strings.TrimSpace(stderrBuf.String())
+				switch {
+				case stdoutStr != "" && stderrStr != "":
+					combinedStr = stdoutStr + "\n" + stderrStr
+				case stdoutStr != "":
+					combinedStr = stdoutStr
+				default:
+					combinedStr = stderrStr
+				}
+				return stdoutStr, combinedStr, runErr
+			}
+			stdoutStr, combinedStr, err := runAgentAPI(modelID)
 			if err != nil {
 				// Quota-aware fallback: if a non-Hydrogen/non-Flash model hit 429, retry once on fallback_on_429 (or routine tier)
-				if isQuotaExhaustedError(output) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
+				if isQuotaExhaustedError(combinedStr) && !strings.Contains(modelID, "flash") && !strings.Contains(modelID, "hydrogen") {
 					fallbackModel := resolveRoutineFallbackModel(vaultDir)
-					fbCmd := exec.Command("agentapi", "new-conversation", "--model="+fallbackModel, "--title="+title, "--", prompt)
-					configureSpawnCommandWithTarget(fbCmd, vaultDir, trigger, workDir, projectID)
-					if fbBytes, fbErr := fbCmd.CombinedOutput(); fbErr == nil {
+					if fbStdout, fbCombined, fbErr := runAgentAPI(fallbackModel); fbErr == nil {
 						modelID = fallbackModel + " (fallback)"
-						output = strings.TrimSpace(string(fbBytes))
+						stdoutStr = fbStdout
+						combinedStr = fbCombined
 						err = nil
 					}
 				}
@@ -361,9 +377,13 @@ func SpawnTaskWithOptions(vaultDir, trigger, skill, title, prompt, modelID strin
 			if err != nil {
 				recordSpawnErrorQuota(
 					vaultDir, trigger, skill, modelID, err.Error(), isInteractive,
-					isQuotaExhaustedError(output), "RESOURCE_EXHAUSTED (429) detected from agentapi",
+					isQuotaExhaustedError(combinedStr), "RESOURCE_EXHAUSTED (429) detected from agentapi",
 				)
-				return output, fmt.Errorf("agentapi error: %w (%s)", err, output)
+				return "", fmt.Errorf("agentapi error: %w (%s)", err, combinedStr)
+			}
+			output = stdoutStr
+			if output == "" {
+				output = combinedStr
 			}
 		}
 	}

@@ -1750,14 +1750,31 @@ func CancelAllSubagentTasks(vaultDir string, reason string) error {
 }
 
 var (
-	reTaxForm   = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
-	reSecFiling = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
-	reUUID      = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	reTaxForm          = regexp.MustCompile(`(?i)(w-?2|1099|1098|k-?1|tax)`)
+	reSecFiling        = regexp.MustCompile(`(?i)(10-[kq]|8-k|earnings)`)
+	reUUID             = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	reCreatedConvUUID  = regexp.MustCompile(`(?i)(?:created\s+conversation|conversation(?:\s+id)?\s*[:=]|cascade(?:\s+id)?\s*[:=])\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+	reStandaloneUUIDLn = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
-// ExtractUUID returns the first UUID v4 found in s (e.g., from agentapi stdout), or "".
+// ExtractUUID extracts the created conversation/cascade UUID from spawn output, or "".
+// It prefers explicit creation/ID lines and standalone UUID lines over arbitrary earlier
+// UUIDs (such as echoed prompt snippets), falling back to the last UUID match when needed.
 func ExtractUUID(s string) string {
-	return strings.ToLower(reUUID.FindString(s))
+	if matches := reCreatedConvUUID.FindAllStringSubmatch(s, -1); len(matches) > 0 {
+		return strings.ToLower(matches[len(matches)-1][1])
+	}
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if reStandaloneUUIDLn.MatchString(trimmed) {
+			return strings.ToLower(trimmed)
+		}
+	}
+	if all := reUUID.FindAllString(s, -1); len(all) > 0 {
+		return strings.ToLower(all[len(all)-1])
+	}
+	return ""
 }
 
 // ResolveModel selects the Antigravity model ID and thinking depth (low/medium/high/xhigh)

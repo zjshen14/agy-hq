@@ -198,3 +198,21 @@ func TestWorkspaceSubagentLeaseInForceBeforeFirstPrompt(t *testing.T) {
 		t.Fatalf("expected the Layer-1 subagent task to hold the lease: %+v ok=%v", e, ok)
 	}
 }
+
+func TestWorkspaceSpawnDoesNotRegisterSpuriousUUIDOnError(t *testing.T) {
+	env := newCLIWorkspaceEnv(t)
+	prevLegacy := spawnTaskFn
+	t.Cleanup(func() { spawnTaskFn = prevLegacy })
+	const spuriousUUID = "123e4567-e89b-42d3-a456-426614174099"
+	spawnTaskFn = func(vaultDir, trigger, skill, title, prompt, modelID string, dryRun bool, force ...bool) (string, error) {
+		return "error referencing prompt uuid " + spuriousUUID, fmt.Errorf("agentapi failed")
+	}
+	var out, errOut bytes.Buffer
+	req := workspaceSpawnRequest{Spec: cliFakeProviderID, TaskSlug: "err-uuid-task", Title: "[Task:err] Err", Prompt: "Do it", Model: "m"}
+	if code := runWorkspaceSpawn(env.vaultDir, req, &out, &errOut); code == 0 {
+		t.Fatalf("expected non-zero exit code on SpawnTask error")
+	}
+	if _, ok := kernel.FindTaskByConversationID(env.vaultDir, spuriousUUID); ok {
+		t.Fatalf("must not register spurious ConversationID %s when SpawnTask fails", spuriousUUID)
+	}
+}

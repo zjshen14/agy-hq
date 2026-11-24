@@ -791,20 +791,19 @@ func runWorkspaceSpawn(vaultDir string, req workspaceSpawnRequest, stdout, stder
 			OnCascadeCreated: linkConversation,
 		})
 	}
-	spawnedID := kernel.ExtractUUID(out)
-	if spawnedID != "" {
-		linkConversation(spawnedID)
-	} else if err != nil {
+	if err != nil {
 		kernel.RemoveUnboundTaskBySlug(vaultDir, slug)
 		if rbErr := kernel.RollbackAcquiredWorkspace(vaultDir, acq, slug); rbErr != nil {
 			fmt.Fprintf(stderr, "warning: workspace rollback incomplete: %v\n", rbErr)
 		}
-	}
-	_ = syncConsoleFn(vaultDir)
-	if err != nil {
+		_ = syncConsoleFn(vaultDir)
 		fmt.Fprintf(stderr, "hq spawn error: %v\n", err)
 		return 1
 	}
+	if spawnedID := kernel.ExtractUUID(out); spawnedID != "" {
+		linkConversation(spawnedID)
+	}
+	_ = syncConsoleFn(vaultDir)
 	fmt.Fprintln(stdout, out)
 	return 0
 }

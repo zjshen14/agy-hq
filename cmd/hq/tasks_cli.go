@@ -490,8 +490,16 @@ func runSpawnCLI(rootDir, vaultDir string, args []string) {
 		Ephemeral:     *ephemeral,
 	})
 	out, err := kernel.SpawnTask(vaultDir, "manual-spawn:"+*taskName, "swe-pulse", title, fullPrompt, resolvedModel, *dryRun, isForced)
-	spawnedID := kernel.ExtractUUID(out)
-	if spawnedID != "" {
+	if err != nil {
+		kernel.RemoveUnboundTaskBySlug(vaultDir, *taskName)
+		if wtDir != "" && !wtExistedBefore {
+			_ = worktree.Remove(vaultDir, wtDir)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
+		os.Exit(1)
+	}
+	if spawnedID := kernel.ExtractUUID(out); spawnedID != "" {
 		_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
 			TaskSlug:       *taskName,
 			Title:          title,
@@ -507,17 +515,8 @@ func runSpawnCLI(rootDir, vaultDir string, args []string) {
 			LastSummary:    *prompt,
 			Status:         "active",
 		})
-	} else if err != nil {
-		kernel.RemoveUnboundTaskBySlug(vaultDir, *taskName)
-		if wtDir != "" && !wtExistedBefore {
-			_ = worktree.Remove(vaultDir, wtDir)
-		}
 	}
 	_ = webui.SyncMarkdownConsole(vaultDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hq spawn error: %v\n", err)
-		os.Exit(1)
-	}
 	fmt.Println(out)
 
 }
