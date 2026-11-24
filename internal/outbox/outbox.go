@@ -66,6 +66,8 @@ type OutboxItem struct {
 	Title                  string            `json:"title"`
 	Summary                string            `json:"summary"`
 	IncidentKey            string            `json:"incidentKey,omitempty"`
+	EntityKey              string            `json:"entityKey,omitempty"`
+	State                  string            `json:"state,omitempty"`
 	AvailableForDispatchAt string            `json:"availableForDispatchAt,omitempty"`
 	CorrelatedFromID       string            `json:"correlatedFromId,omitempty"`
 	CorrelatedCount        int               `json:"correlatedCount,omitempty"`
@@ -507,6 +509,30 @@ func extractTitleTokensAndIDs(title string) (tokens map[string]bool, idSig strin
 	return tokens, strings.Join(ids, "|")
 }
 
+func titlePolarity(tokens map[string]bool) int {
+	hasNeg, hasPos := false, false
+	for tok := range tokens {
+		switch {
+		case tok == "fail" || tok == "failed" || tok == "error" || tok == "down" || tok == "red" ||
+			tok == "broken" || tok == "crash" || tok == "crashed" || tok == "timeout" ||
+			tok == "degraded" || tok == "outage" || tok == "unhealthy" ||
+			strings.HasPrefix(tok, "fail") || strings.HasPrefix(tok, "err"):
+			hasNeg = true
+		case tok == "pass" || tok == "passed" || tok == "green" || tok == "ok" || tok == "fix" ||
+			tok == "fixed" || tok == "healthy" || tok == "cleared" || tok == "restored" ||
+			strings.HasPrefix(tok, "pass") || strings.HasPrefix(tok, "recover") || strings.HasPrefix(tok, "resolv"):
+			hasPos = true
+		}
+	}
+	if hasNeg && !hasPos {
+		return -1
+	}
+	if hasPos && !hasNeg {
+		return 1
+	}
+	return 0
+}
+
 func isNearDuplicateTitle(a, b OutboxItem) bool {
 	if !strings.EqualFold(strings.TrimSpace(a.SourceSkill), strings.TrimSpace(b.SourceSkill)) {
 		return false
@@ -514,10 +540,25 @@ func isNearDuplicateTitle(a, b OutboxItem) bool {
 	if !strings.EqualFold(strings.TrimSpace(a.Scope), strings.TrimSpace(b.Scope)) {
 		return false
 	}
+	ekA, ekB := strings.TrimSpace(a.EntityKey), strings.TrimSpace(b.EntityKey)
+	if ekA != "" && ekB != "" {
+		if !strings.EqualFold(ekA, ekB) {
+			return false
+		}
+		stA, stB := strings.TrimSpace(a.State), strings.TrimSpace(b.State)
+		if stA != "" && stB != "" && !strings.EqualFold(stA, stB) {
+			return false
+		}
+	}
 	tokA, idA := extractTitleTokensAndIDs(a.Title)
 	tokB, idB := extractTitleTokensAndIDs(b.Title)
 	// Distinct numeric/entity IDs (e.g. PR #42 vs PR #43, noisy-1 vs noisy-2) are never duplicates.
 	if idA != idB {
+		return false
+	}
+	// Opposing status polarity (e.g. failing vs passing, down vs recovered) can never match.
+	polA, polB := titlePolarity(tokA), titlePolarity(tokB)
+	if polA != 0 && polB != 0 && polA != polB {
 		return false
 	}
 	if len(tokA) < 2 || len(tokB) < 2 {
@@ -537,7 +578,7 @@ func isNearDuplicateTitle(a, b OutboxItem) bool {
 	if len(union) == 0 {
 		return false
 	}
-	return float64(inter)/float64(len(union)) >= 0.75
+	return float64(inter)/float64(len(union)) >= 0.80
 }
 
 // MatchesScopeSchedule evaluates a schedule expression like "weekdays 09:00-17:30 America/Los_Angeles"
@@ -644,16 +685,59 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 		return item, false
 	}
 
-	// 1. Exact per-topic dedup cooldown, tainted (connector, account, threadKey) dedup, + 12h entity-preserving semantic Jaccard dedup (unless --force)
+	// 1. Structured (SourceSkill, Scope, EntityKey, State) dedupe & ongoing-state downgrade,
+	//    exact per-topic dedup cooldown, tainted (connector, account, threadKey) dedup, + 12h semantic Jaccard dedup (unless --force)
 	if !item.Force && (item.Tier == TierInterrupt || item.Tier == TierBriefRollup || item.Tier == TierIdeasFeed) {
 		key := topicDedupKey(item)
 		semWindow := SemanticDedupWindow
 		if cfg.CooldownPerTopic > semWindow {
 			semWindow = cfg.CooldownPerTopic
 		}
+		entityKey := strings.TrimSpace(item.EntityKey)
+		entityState := strings.TrimSpace(item.State)
+		if entityKey != "" {
+			cooldown := cfg.CooldownPerTopic
+			if cooldown <= 0 {
+				cooldown = SemanticDedupWindow
+			}
+			for i := len(existing) - 1; i >= 0; i-- {
+				prev := existing[i]
+				if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" || prev.DowngradedBy == "thread_cooldown" || prev.DowngradedBy == "entity_state_cooldown" || prev.DowngradedBy == "burst_coalesced" {
+					continue
+				}
+				if !strings.EqualFold(strings.TrimSpace(prev.SourceSkill), strings.TrimSpace(item.SourceSkill)) ||
+					!strings.EqualFold(strings.TrimSpace(prev.Scope), strings.TrimSpace(item.Scope)) ||
+					!strings.EqualFold(strings.TrimSpace(prev.EntityKey), entityKey) {
+					continue
+				}
+				ts, err := time.Parse(time.RFC3339, prev.CreatedAt)
+				if err != nil || now.Sub(ts) < 0 {
+					continue
+				}
+				prevState := strings.TrimSpace(prev.State)
+				if entityState != "" && prevState != "" && !strings.EqualFold(prevState, entityState) {
+					// State transitioned (e.g. failing -> passing): allow immediately without cooldown or ongoing downgrade.
+					break
+				}
+				if strings.EqualFold(prevState, entityState) {
+					if now.Sub(ts) < cooldown {
+						item.DowngradedBy = "entity_state_cooldown"
+						item.Tier = TierSilentLedger
+						item.Status = StatusDelivered
+						return item, true
+					}
+					if item.Tier == TierInterrupt {
+						item.Tier = TierBriefRollup
+						item.DowngradedBy = "ongoing_state"
+					}
+					break
+				}
+			}
+		}
+
 		for i := len(existing) - 1; i >= 0; i-- {
 			prev := existing[i]
-			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" || prev.DowngradedBy == "thread_cooldown" || prev.DowngradedBy == "burst_coalesced" {
+			if prev.DowngradedBy == "topic_cooldown" || prev.DowngradedBy == "semantic_dedup" || prev.DowngradedBy == "thread_cooldown" || prev.DowngradedBy == "entity_state_cooldown" || prev.DowngradedBy == "burst_coalesced" {
 				continue
 			}
 			ts, err := time.Parse(time.RFC3339, prev.CreatedAt)
@@ -670,13 +754,13 @@ func EvaluateDelivery(existing []OutboxItem, cfg AttentionConfig, now time.Time,
 					return item, true
 				}
 			}
-			if cfg.CooldownPerTopic > 0 && topicDedupKey(prev) == key && now.Sub(ts) < cfg.CooldownPerTopic {
+			if entityKey == "" && cfg.CooldownPerTopic > 0 && topicDedupKey(prev) == key && now.Sub(ts) < cfg.CooldownPerTopic {
 				item.DowngradedBy = "topic_cooldown"
 				item.Tier = TierSilentLedger
 				item.Status = StatusDelivered
 				return item, true
 			}
-			if now.Sub(ts) < semWindow && isNearDuplicateTitle(prev, item) {
+			if entityKey == "" && now.Sub(ts) < semWindow && isNearDuplicateTitle(prev, item) {
 				item.DowngradedBy = "semantic_dedup"
 				item.Tier = TierSilentLedger
 				item.Status = StatusDelivered

@@ -42,6 +42,8 @@ func runOutboxCLI(vaultDir string, args []string) {
 		accountFlag := fs.String("account", "", "Optional originating account alias")
 		threadFlag := fs.String("thread", "", "Optional originating thread/item key for per-thread interrupt cooldown")
 		incidentKey := fs.String("incident-key", "", "Optional incident correlation / burst coalescing key")
+		entityKey := fs.String("entity-key", "", "Optional structured entity key for state-aware dedupe (e.g. pr:42:build)")
+		stateFlag := fs.String("state", "", "Optional entity state (e.g. failing, passing) for transition-safe dedupe")
 		decisionsJSON := fs.String("decisions-json", "", "Optional JSON array of DecisionOption buttons (max 4)")
 		proposalIDsRaw := fs.String("proposal-ids", "", "Optional comma-separated proposal IDs linked to this outbox item")
 		critical := fs.Bool("critical", false, "Critical breach override (bypasses quiet-hours hold)")
@@ -70,6 +72,8 @@ func runOutboxCLI(vaultDir string, args []string) {
 			Title:         *title,
 			Summary:       *summary,
 			IncidentKey:   strings.TrimSpace(*incidentKey),
+			EntityKey:     strings.TrimSpace(*entityKey),
+			State:         strings.TrimSpace(*stateFlag),
 			Decisions:     decisions,
 			ProposalIDs:   propIDs,
 			SuggestedSlug: *slug,

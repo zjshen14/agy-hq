@@ -179,6 +179,55 @@ func DefaultEvalFixtures() []EvalFixture {
 			ExpectTier:   TierSilentLedger,
 			ExpectCooled: true,
 		},
+		{
+			Name:       "long-title-ci-build-failing-initial",
+			Timestamp:  "2026-11-16T10:00:00Z",
+			Item:       OutboxItem{ID: "ev-21", SourceSkill: "swe-pulse", Scope: "headquarter", Tier: TierInterrupt, Title: "headquarter repo PR #88 build check failing", Summary: "Build job failed."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "long-title-ci-build-passing-recovery-not-swallowed",
+			Timestamp:  "2026-11-16T11:30:00Z",
+			Item:       OutboxItem{ID: "ev-22", SourceSkill: "swe-pulse", Scope: "headquarter", Tier: TierInterrupt, Title: "headquarter repo PR #88 build check passing", Summary: "Build job recovered."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "distinct-check-lint-vs-unit-same-pr-not-swallowed",
+			Timestamp:  "2026-11-16T12:00:00Z",
+			Item:       OutboxItem{ID: "ev-23", SourceSkill: "swe-pulse", Scope: "headquarter", Tier: TierInterrupt, Title: "headquarter repo PR #88 lint check failing", Summary: "Lint job failed."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "distinct-check-unit-same-pr-not-swallowed",
+			Timestamp:  "2026-11-16T12:30:00Z",
+			Item:       OutboxItem{ID: "ev-24", SourceSkill: "swe-pulse", Scope: "headquarter", Tier: TierInterrupt, Title: "headquarter repo PR #88 unit check failing", Summary: "Unit test job failed."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:       "entity-state-initial-failing-interrupt",
+			Timestamp:  "2026-11-17T10:00:00Z",
+			Item:       OutboxItem{ID: "ev-25", SourceSkill: "swe-pulse", Scope: "headquarter", EntityKey: "pr:99:ci", State: "failing", Tier: TierInterrupt, Title: "PR #99 CI failing", Summary: "Initial failure."},
+			ExpectTier: TierInterrupt,
+		},
+		{
+			Name:         "entity-state-duplicate-within-cooldown-suppressed",
+			Timestamp:    "2026-11-17T11:00:00Z",
+			Item:         OutboxItem{ID: "ev-26", SourceSkill: "swe-pulse", Scope: "headquarter", EntityKey: "pr:99:ci", State: "failing", Tier: TierInterrupt, Title: "PR #99 CI still failing", Summary: "Same state within 4h cooldown."},
+			ExpectTier:   TierSilentLedger,
+			ExpectCooled: true,
+		},
+		{
+			Name:       "entity-state-hour-49-ongoing-downgraded-to-brief-rollup",
+			Timestamp:  "2026-11-19T11:00:00Z",
+			Item:       OutboxItem{ID: "ev-27", SourceSkill: "swe-pulse", Scope: "headquarter", EntityKey: "pr:99:ci", State: "failing", Tier: TierInterrupt, Title: "PR #99 CI still failing at hour 49", Summary: "Unchanged state past cooldown downgrades to brief_rollup."},
+			ExpectTier: TierBriefRollup,
+		},
+		{
+			Name:       "entity-state-recovery-transition-resets-immediately",
+			Timestamp:  "2026-11-19T12:00:00Z",
+			Item:       OutboxItem{ID: "ev-28", SourceSkill: "swe-pulse", Scope: "headquarter", EntityKey: "pr:99:ci", State: "passing", Tier: TierInterrupt, Title: "PR #99 CI passing", Summary: "Recovered to passing."},
+			ExpectTier: TierInterrupt,
+		},
 	}
 }
 
