@@ -2,6 +2,7 @@ package gchat
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/zjshen14/agy-hq/internal/connector"
-	"github.com/zjshen14/agy-hq/internal/gmail"
+	"github.com/zjshen14/agy-hq/internal/taint"
 )
 
 func TestInitAccountAndQuarantineSameSpaceLockdown(t *testing.T) {
@@ -78,7 +79,7 @@ func TestInitAccountAndQuarantineSameSpaceLockdown(t *testing.T) {
 	if strings.Contains(formatted, "IGNORE RULES") {
 		t.Fatalf("hidden prompt injection was not stripped:\n%s", formatted)
 	}
-	if _, tainted := gmail.IsSessionTainted(vaultDir, convID); !tainted {
+	if _, tainted := taint.IsTainted(vaultDir, convID); !tainted {
 		t.Fatalf("expected session %s to be marked tainted", convID)
 	}
 
@@ -118,8 +119,15 @@ func TestCDPTransportAndGmailNotificationBridgeFallback(t *testing.T) {
 	vaultDir := t.TempDir()
 
 	// 1. Configure primary Gmail account with mock `chat-noreply@google.com` notification
-	if _, err := gmail.InitOrAddAccountWithOptions(vaultDir, gmail.InitAccountOptions{Alias: "primary", Email: "user@gmail.com", SetDefault: true}); err != nil {
-		t.Fatalf("gmail init: %v", err)
+	if err := connector.SaveInstance(context.Background(), vaultDir, connector.InstanceConfig{
+		SchemaVersion:  1,
+		Connector:      "gmail",
+		DefaultAccount: "primary",
+		Accounts: map[string]connector.AccountInstance{
+			"primary": {Email: "user@gmail.com"},
+		},
+	}); err != nil {
+		t.Fatalf("gmail connector save: %v", err)
 	}
 	gmailMock := filepath.Join(vaultDir, "memory", "gmail", "mock")
 	_ = os.MkdirAll(gmailMock, 0o755)
@@ -591,8 +599,15 @@ func TestCDPWebSocketNavigationPollingAndLinkExtraction(t *testing.T) {
 func TestReadQuarantinedThread_CDPGuardAndGmailBridge(t *testing.T) {
 	vaultDir := t.TempDir()
 
-	if _, err := gmail.InitOrAddAccountWithOptions(vaultDir, gmail.InitAccountOptions{Alias: "primary", Email: "user@gmail.com", SetDefault: true}); err != nil {
-		t.Fatalf("gmail init: %v", err)
+	if err := connector.SaveInstance(context.Background(), vaultDir, connector.InstanceConfig{
+		SchemaVersion:  1,
+		Connector:      "gmail",
+		DefaultAccount: "primary",
+		Accounts: map[string]connector.AccountInstance{
+			"primary": {Email: "user@gmail.com"},
+		},
+	}); err != nil {
+		t.Fatalf("gmail connector save: %v", err)
 	}
 	gmailMock := filepath.Join(vaultDir, "memory", "gmail", "mock")
 	_ = os.MkdirAll(gmailMock, 0o755)

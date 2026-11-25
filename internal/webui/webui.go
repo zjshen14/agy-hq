@@ -24,7 +24,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/gchat"
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
@@ -602,7 +601,6 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 	}
 
 	isGChat := p.ActionType == "gchat_send" || strings.Contains(p.Command, "gchat") || strings.HasPrefix(draftID, "gchat-draft-")
-	isGmail := p.ActionType == "gmail_send" || strings.Contains(p.Command, "gmail") || strings.HasPrefix(draftID, "draft-")
 
 	var payload string
 	loadedFromDraft := false
@@ -615,15 +613,6 @@ func enrichPendingDraftPayload(vaultDir string, p *approvals.Proposal) {
 			}
 			if p.Metadata["spaceId"] == "" {
 				p.Metadata["spaceId"] = spec.SpaceID
-			}
-		}
-	} else if isGmail && draftID != "" {
-		if spec, err := gmail.GetDraft(vaultDir, account, draftID); err == nil && (spec.Body != "" || spec.Subject != "") {
-			loadedFromDraft = true
-			if spec.Subject != "" && !strings.Contains(spec.Body, spec.Subject) {
-				payload = fmt.Sprintf("Subject: %s\n\n%s", spec.Subject, spec.Body)
-			} else {
-				payload = spec.Body
 			}
 		}
 	}

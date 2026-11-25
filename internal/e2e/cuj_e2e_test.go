@@ -1630,23 +1630,29 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	}
 }
 
-// CUJ-14: Decoupled Gmail Infrastructure (Layer 1) & Product Workflows (Layer 2)
+// CUJ-14: Gmail Connector Lifecycle (Multi-Account Precheck, Quarantined Read & Offer Approval via RFC-0017)
 func TestCUJ14_GmailLayer1AndLayer2Lifecycle(t *testing.T) {
 	env := setupHQEnv(t)
 	if _, err := env.run("", "init"); err != nil {
 		t.Fatalf("hq init failed: %v", err)
 	}
 
-	// 1. Initialize primary Gmail account and add a second Gmail account
-	if out, err := env.run("", "gmail", "init", "--email=primary@gmail.com"); err != nil {
-		t.Fatalf("hq gmail init failed: %v (%s)", err, out)
+	// 1. Configure a multi-account Gmail connector instance (primary + secondary)
+	connDir := filepath.Join(env.vaultDir, "private", "connectors", "gmail")
+	if err := os.MkdirAll(connDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if out, err := env.run("", "gmail", "add-account", "--alias=secondary", "--email=secondary@gmail.com"); err != nil {
-		t.Fatalf("hq gmail add-account failed: %v (%s)", err, out)
-	}
-	acctOut, err := env.run("", "gmail", "accounts")
-	if err != nil || !strings.Contains(acctOut, "primary@gmail.com") || !strings.Contains(acctOut, "secondary@gmail.com") {
-		t.Fatalf("expected both accounts in hq gmail accounts, got:\n%s (%v)", acctOut, err)
+	if err := os.WriteFile(filepath.Join(connDir, "instance.json"), []byte(`{
+  "schema_version": 1,
+  "connector": "gmail",
+  "enabled": true,
+  "default_account": "primary",
+  "accounts": {
+    "primary": {"email": "primary@gmail.com", "enabled": true},
+    "secondary": {"email": "secondary@gmail.com", "enabled": true}
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	// 2. Seed mock messages & thread for primary account
@@ -1680,47 +1686,73 @@ func TestCUJ14_GmailLayer1AndLayer2Lifecycle(t *testing.T) {
   ]
 }`), 0o644)
 
-	// 3. Sidecar precheck: first run detects 1 new unread message, second run is 0-token GMAIL_OK
-	pre1, err := env.run("", "gmail", "precheck")
-	if err != nil || !strings.Contains(pre1, "GMAIL_NEW") {
-		t.Fatalf("expected GMAIL_NEW on first precheck, got:\n%s (%v)", pre1, err)
-	}
-	pre2, err := env.run("", "gmail", "precheck")
-	if err != nil || !strings.Contains(pre2, "GMAIL_OK") {
-		t.Fatalf("expected GMAIL_OK on second precheck, got:\n%s (%v)", pre2, err)
-	}
-
-	// 4. Read quarantined thread, auto-create plain-text draft, stage send proposal, and approve
-	readOut, err := env.run("", "gmail", "read-quarantined", "--thread=t-1", "--conv=conv-triage-e2e")
-	if err != nil || !strings.Contains(readOut, "Does Thursday at 10am PT work?") || strings.Contains(readOut, "STEAL SECRETS") {
-		t.Fatalf("unexpected read-quarantined output:\n%s (%v)", readOut, err)
-	}
-
-	draftOut, err := env.run("", "gmail", "draft", "--thread=t-1", "--to=founder@partner.io", "--subject=Re: Q4 Partnership Check-in", "--body=Thursday at 10am PT works great!", "--conv=conv-triage-e2e")
+	// 3. 0-token watcher precheck: first run enqueues unread threads across both accounts; second run deduplicates in the event inbox
+	mockEnv := []string{"HQ_GMAIL_MOCK_DIR=" + mDir}
+	pre1, err := env.runWithEnv("", mockEnv, "watch", "precheck", "--connector=gmail", "--json")
 	if err != nil {
-		t.Fatalf("hq gmail draft failed: %v (%s)", err, draftOut)
+		t.Fatalf("first watch precheck gmail failed: %v (%s)", err, pre1)
 	}
-	var draftObj struct {
-		DraftID     string `json:"draftId"`
-		ContentHash string `json:"contentHash"`
+	var sum1 struct {
+		Enqueued int `json:"enqueued_total"`
 	}
-	if err := json.Unmarshal([]byte(draftOut), &draftObj); err != nil || draftObj.DraftID == "" {
-		t.Fatalf("failed to parse draft JSON: %v\n%s", err, draftOut)
+	if err := json.Unmarshal([]byte(pre1), &sum1); err != nil || sum1.Enqueued != 2 {
+		t.Fatalf("expected 2 enqueued events across primary+secondary on first precheck, got err=%v out=%s", err, pre1)
+	}
+	evList1, err := events.List(env.vaultDir, "", false, 20)
+	if err != nil || len(evList1) != 2 {
+		t.Fatalf("expected 2 events in inbox after first precheck, got count=%d err=%v", len(evList1), err)
+	}
+	pre2, err := env.runWithEnv("", mockEnv, "watch", "precheck", "--connector=gmail", "--json")
+	if err != nil {
+		t.Fatalf("second watch precheck gmail failed: %v (%s)", err, pre2)
+	}
+	evList2, err := events.List(env.vaultDir, "", false, 20)
+	if err != nil || len(evList2) != 2 {
+		t.Fatalf("expected deduplicated event inbox to remain at 2 events after second precheck, got count=%d err=%v", len(evList2), err)
 	}
 
-	propOut, err := env.run("", "propose", "--type=gmail_send", "--draft="+draftObj.DraftID)
-	if err != nil || !strings.Contains(propOut, "Staged proposal") {
-		t.Fatalf("hq propose --draft failed: %v (%s)", err, propOut)
+	// 4. Lease batch, read quarantined thread (stripping hidden HTML prompt injection), stage offer, and approve
+	batches, _, err := events.LeaseNextBatches(env.vaultDir, time.Now(), events.DefaultLeaseTTL)
+	if err != nil || len(batches) == 0 {
+		t.Fatalf("LeaseNextBatches failed: err=%v count=%d", err, len(batches))
+	}
+	primaryBatch := batches[0]
+	for _, b := range batches {
+		if b.ScopeKey == "connector:gmail:primary" {
+			primaryBatch = b
+			break
+		}
+	}
+
+	triageConv := "conv-triage-e2e"
+	workerEnv := append([]string{
+		"ANTIGRAVITY_CONVERSATION_ID=" + triageConv,
+		"ANTIGRAVITY_CREDENTIAL_SCOPE=scope-cuj14",
+	}, mockEnv...)
+	readOut, err := env.runWithEnv("", workerEnv, "watch", "read", "--connector=gmail", "--account=primary", "--thread=t-1", "--spawn-token="+primaryBatch.SpawnToken)
+	if err != nil || !strings.Contains(readOut, "Does Thursday at 10am PT work?") || strings.Contains(readOut, "STEAL SECRETS") {
+		t.Fatalf("unexpected watch read output:\n%s (%v)", readOut, err)
+	}
+
+	stageOut, err := env.runWithEnv("", workerEnv, "offer", "stage",
+		"--connector=gmail", "--account=primary", "--action=reply", "--thread=t-1",
+		"--to=founder@partner.io", "--subject=Re: Q4 Partnership Check-in",
+		"--body=Thursday at 10am PT works great!", "--summary=Reply to Q4 Partnership Check-in")
+	if err != nil || !strings.Contains(stageOut, "Staged") {
+		t.Fatalf("hq offer stage gmail failed: %v (%s)", err, stageOut)
 	}
 	pending, err := approvals.List(env.vaultDir)
 	if err != nil || len(pending) != 1 {
-		t.Fatalf("expected 1 pending gmail_send proposal, got %d (%v)", len(pending), err)
+		t.Fatalf("expected 1 pending offer proposal, got %d (%v)", len(pending), err)
 	}
 	prop := pending[0]
 
-	appOut, err := env.run("", "approve", prop.ID, "--sha256="+prop.SHA256[:12])
-	if err != nil || !strings.Contains(appOut, "Sent draft "+draftObj.DraftID) {
-		t.Fatalf("hq approve gmail_send failed: %v (%s)", err, appOut)
+	appOut, err := env.runWithEnv("", mockEnv, "approve", prop.ID, "--sha256="+prop.SHA256[:12])
+	if err != nil {
+		t.Fatalf("hq approve gmail offer failed: %v (%s)", err, appOut)
+	}
+	if ackOut, err := env.runWithEnv("", workerEnv, "watch", "ack", "--item=gmail:primary:m-1"); err != nil {
+		t.Fatalf("hq watch ack failed: %v (%s)", err, ackOut)
 	}
 }
 

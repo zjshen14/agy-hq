@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/extension"
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/workspace"
 )
 
@@ -418,7 +418,7 @@ func TestSessionStartWorkspaceSectionsShowIDsEnumsAndCountsOnly(t *testing.T) {
 	if autoMsg := sessionStartMessage(t, vaultDir, "00000000-0000-0000-0000-00000000c0f1"); strings.Contains(autoMsg, "Active Workspaces") || strings.Contains(autoMsg, "Active Task Workspaces") {
 		t.Fatalf("lean [Auto] SessionStart must skip workspace sections:\n%s", autoMsg)
 	}
-	if err := gmail.MarkSessionTainted(vaultDir, wsReaderConv, "gmail:thread:t1"); err != nil {
+	if err := taint.MarkSession(vaultDir, wsReaderConv, "gmail:thread:t1"); err != nil {
 		t.Fatalf("MarkSessionTainted: %v", err)
 	}
 	if taintMsg := sessionStartMessage(t, vaultDir, wsReaderConv); strings.Contains(taintMsg, "Active Workspaces") || strings.Contains(taintMsg, "ledger-fix") {

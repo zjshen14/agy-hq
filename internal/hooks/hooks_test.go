@@ -18,7 +18,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/extension"
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
 	"github.com/zjshen14/agy-hq/internal/taint"
@@ -100,7 +99,7 @@ func TestGmailPreToolUseGuardrailsAndAskOverwrite(t *testing.T) {
 	}
 
 	// 2. Quarantined (tainted) session cannot read local/private/ or run curl, but CAN run ./bin/hq gmail draft
-	_ = gmail.MarkSessionTainted(vaultDir, "conv-tainted", "gmail:thread:t1")
+	_ = taint.MarkSession(vaultDir, "conv-tainted", "gmail:thread:t1")
 
 	out.Reset()
 	privRead, _ := json.Marshal(map[string]interface{}{
@@ -461,7 +460,7 @@ func TestPreToolUseSecurityHardening(t *testing.T) {
 	}
 
 	// 4. Quarantined session escapes (newline command separator, symlink read, invoke_subagent, write_file, call_mcp_tool)
-	_ = gmail.MarkSessionTainted(vaultDir, "conv-q", "gmail:thread:99")
+	_ = taint.MarkSession(vaultDir, "conv-q", "gmail:thread:99")
 	_ = os.MkdirAll(filepath.Join(vaultDir, "notes"), 0o700)
 	symPath := filepath.Join(vaultDir, "notes", "sneaky-link.txt")
 	_ = os.Symlink(filepath.Join(vaultDir, "private", "secret.txt"), symPath)
@@ -1011,7 +1010,7 @@ func TestMacOSTempAncestorSymlinkAndSymlinkEscapeGuards(t *testing.T) {
 
 	// 3. Quarantined session reading artifact dir & repo SKILL.md under ancestor symlink -> ALLOW, escapes -> DENY
 	qConv := "conv-tainted-macos"
-	if err := gmail.MarkSessionTainted(vaultDir, qConv, "gmail:thread:macos"); err != nil {
+	if err := taint.MarkSession(vaultDir, qConv, "gmail:thread:macos"); err != nil {
 		t.Fatal(err)
 	}
 	if got := runPreTool(qConv, artDeskAlias, "read_file", filepath.Join(artDeskAlias, "summary.md")); !strings.Contains(got, `"decision":"allow"`) {
@@ -1054,7 +1053,7 @@ func TestTwoTierRSI_SessionStartGeneralOverlayAndPreToolUseGuards(t *testing.T) 
 	}
 
 	// 2. Tainted SessionStart MUST NOT inject personal general.md rules
-	_ = gmail.MarkSessionTainted(vaultDir, "conv-tainted-gen", "gmail:thread:t1")
+	_ = taint.MarkSession(vaultDir, "conv-tainted-gen", "gmail:thread:t1")
 	out.Reset()
 	if err := HandleSessionStart(strings.NewReader(`{"conversationId":"conv-tainted-gen"}`), &out, vaultDir); err != nil {
 		t.Fatalf("HandleSessionStart tainted failed: %v", err)

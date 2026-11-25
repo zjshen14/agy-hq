@@ -221,10 +221,6 @@ agy-hq/                                # LAYER 1: Open-Source Agent OS (Tracked 
 | | `./bin/hq gchat read-quarantined --space=...` | Read Chat messages in sandboxed quarantine (taints session against egress) |
 | | `./bin/hq gchat draft / send-draft / precheck / triage / triage-result` | Draft management, pure-Go unread precheck, and quarantined triage |
 | | `./bin/hq gchat login / logout / restore-session / launch-chrome` | Guided Chrome login (`--remote` / `--reset`) and CDP session management |
-| **Gmail Primitives** | `./bin/hq gmail init / add-account / accounts / status / list` | Configure Gmail accounts, inspect status, or list messages without LLM exposure |
-| | `./bin/hq gmail search / read --thread=<id> / read-quarantined` | Search threads or read email in quarantined plain-text format |
-| | `./bin/hq gmail draft / send-draft / forward` | Create, send, or forward draft emails for staged review |
-| | `./bin/hq gmail precheck / triage / triage-result / attachment-quarantine` | Run pure-Go unread sidecar precheck, batch triage, and attachment quarantine |
 | **Memory & RSI Engine** | `./bin/hq memory status / topics / entities / search` | Inspect 4-layer memory hierarchy, Wiki pages, Entity Dossiers, and BM25 search |
 | | `./bin/hq memory lookup / add-entity / profile <get\|set\|unset>` | On-demand dossier lookup (`< 5ms`) and private household profile autofill |
 | | `./bin/hq memory forget "<query>" [--block-pii]` | Cascading 4-layer surgical scrub across facts, `MEMORY.md`, topics, entities, and notes |

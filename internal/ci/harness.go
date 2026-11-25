@@ -11,11 +11,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/rsi"
+	"github.com/zjshen14/agy-hq/internal/taint"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/version"
 	"github.com/zjshen14/agy-hq/internal/workspace"
@@ -533,7 +533,7 @@ func checkGateH2PreToolUseMatrix(rootDir string) (bool, string) {
 	}
 
 	// 3. Quarantined (tainted) session matrix: deny-by-default tools + deny direct draft/propose, allow offer stage / outbox add / watch read|ack
-	_ = gmail.MarkSessionTainted(vaultDir, "conv-tainted", "gmail:thread:t1")
+	_ = taint.MarkSession(vaultDir, "conv-tainted", "gmail:thread:t1")
 	taintedDenied := []map[string]interface{}{
 		{"name": "search_web", "args": map[string]interface{}{"query": "leak"}},
 		{"name": "grep_search", "args": map[string]interface{}{"SearchPath": vaultDir, "Query": "secret"}},

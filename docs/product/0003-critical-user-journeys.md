@@ -22,7 +22,7 @@
 | **CUJ-11** | Subagent Lifecycle & Task Board Tracking | `hq hook pre-tool`, `invoke_subagent`, `manage_subagents` | `TestCUJ11_SubagentLifecycleAndTaskboardTracking` |
 | **CUJ-12** | Automated Trigger Scheduling & Background Daemon | `hq daemon`, `hq heartbeat`, `local/triggers.yaml` | `TestCUJ12_AutomatedTriggerSchedulingAndDaemon` |
 | **CUJ-13** | Front Desk Init Hardening & Trigger Arming | `hq init`, `hq hook session-start`, `hq hook pre-tool` | `TestCUJ13_FrontDeskInitHardeningAndTriggerArming` |
-| **CUJ-14** | Decoupled Native Gmail Infrastructure & Workflows | `hq gmail`, `local/memory/gmail/` | `TestCUJ14_GmailLayer1AndLayer2Lifecycle` |
+| **CUJ-14** | Gmail Connector Lifecycle (Watcher, Quarantine & Offers) | `hq watch`, `hq offer`, `templates/connectors/gmail/` | `TestCUJ14_GmailLayer1AndLayer2Lifecycle` |
 | **CUJ-15** | 4-Layer Memory Engine & Dreaming Verification | `hq memory`, `local/memory/topics/`, `local/memory/facts.jsonl` | `TestCUJ15_MemoryEngineUpgradeAndDreamingVerification` |
 | **CUJ-16A** | Google Chat Integration, Quarantine Lockdown & Approval-Bound Send | `hq gchat`, `local/memory/gchat/` | `TestCUJ16_GoogleChatQuarantineAndApproval` |
 | **CUJ-16B** | Scalable Task Board, Per-Tier Visibility & Cold Archive Recall | `hq tasks`, `local/memory/tasks.json` | `TestCUJ16_TaskBoardTieredConsoleAndColdArchive` |
@@ -174,11 +174,11 @@
 
 ---
 
-## CUJ-14: Decoupled Native Gmail Infrastructure & Workflows
-1. **Multi-Account Registry (`hq gmail init` / `add-account` / `accounts`):** Stores account configurations and OAuth token references securely in `local/config.yaml` / `local/memory/gmail/`.
-2. **Safe Inspection & Quarantined Reader:** `hq gmail search` lists messages in raw JSON without LLM exposure; `hq gmail read-quarantined` extracts headers and strips HTML/scripts into safe plain text.
-3. **Staged Sending via Approval Proposals:** `hq gmail draft` creates or updates draft messages; sending live emails requires staging via `hq propose --type=gmail_send` with SHA-256 confirmation before `hq gmail send-draft` can execute.
-4. **Batch Triage & Attachment Quarantine:** Supports pure-Go sidecar unread prechecks (`hq gmail precheck`), batch triage result recording (`hq gmail triage-result`), and quarantined attachment sandboxing with auto-routing (`hq gmail attachment-quarantine`).
+## CUJ-14: Gmail Connector Lifecycle (Watcher, Quarantine & Offers)
+1. **Multi-Account Connector Instance (`private/connectors/gmail/instance.json`):** Stores account configurations (`primary`, `secondary`, etc.) backed by the official Antigravity `gmail` plugin CLI or read-only OAuth tokens via `templates/connectors/gmail/connector.json`.
+2. **0-Token Watcher Precheck (`hq watch precheck --connector=gmail`):** Polls unread threads in pure Go without LLM exposure and deduplicates previously seen messages.
+3. **Quarantined Thread Read (`hq watch read --connector=gmail`):** Strips hidden HTML/scripts into sanitized, nonce-delimited plain text and marks the reading session tainted.
+4. **Approval-Bound Reply Offers (`hq offer stage --connector=gmail` → `hq approve`):** Enforces participant locks and SHA-256 verification before executing outbound drafts or replies via the connector.
 
 ---
 

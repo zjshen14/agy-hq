@@ -421,9 +421,6 @@ func main() {
 	case "subagent":
 		runSubagentCLI(rootDir, vaultDir, os.Args[2:])
 
-	case "gmail":
-		runGmailCLI(rootDir, vaultDir, os.Args[2:])
-
 	case "gchat":
 		runGChatCLI(rootDir, vaultDir, os.Args[2:])
 
@@ -554,7 +551,6 @@ Commands:
   reject <id> [--reason=...]          Reject a pending proposal
   worktree <add|list|attach|remove|prune>  Manage isolated git worktrees & prune merged orphans in <vault>/worktrees/
   workspace <providers|list|create|adopt|status|handoff|unbind|remove|own|prune>  Manage pluggable provider workspaces (RFC-0025)
-  gmail <init|status|list|read|draft|forward|triage>  Layer 1 Gmail primitives & sidecar precheck
   gchat <init|spaces|search|read|draft|triage> Layer 1 Google Chat primitives & sidecar precheck
   spawn --task=<slug> --prompt="..."  Spawn a dedicated Task Conversation in an isolated worktree
   subagent --role="..." --model=...   Spawn a nested child subagent under the current conversation

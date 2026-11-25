@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/connector"
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/store"
 	"github.com/zjshen14/agy-hq/internal/taint"
 )
@@ -338,9 +337,9 @@ func FormatQuarantinedThread(td ThreadDetail) string {
 	for i, m := range td.Messages {
 		body := strings.TrimSpace(m.PlainText)
 		if body == "" && m.FormattedText != "" {
-			body = gmail.SanitizeHTMLToText(m.FormattedText)
+			body = store.SanitizeHTMLToText(m.FormattedText)
 		} else {
-			body = gmail.SanitizeHTMLToText(body)
+			body = store.SanitizeHTMLToText(body)
 		}
 		body = strings.ReplaceAll(body, fmt.Sprintf("</untrusted_gchat_%s>", nonce), "[stripped-tag]")
 		if len(body) > 4096 {
@@ -867,7 +866,7 @@ func ReadQuarantinedThread(vaultDir, accountAlias, spaceID, threadID, convID str
 			spaceID = resolvedID
 		}
 	}
-	if err := gmail.MarkSessionTainted(vaultDir, convID, "gchat:space:"+spaceID); err != nil {
+	if err := taint.MarkSession(vaultDir, convID, "gchat:space:"+spaceID); err != nil {
 		return ThreadDetail{}, "", fmt.Errorf("persist provenance taint before read: %w", err)
 	}
 
@@ -954,7 +953,7 @@ func CreateOrUpdateDraft(vaultDir, accountAlias, draftID, spaceID, spaceName, th
 	}
 
 	knownName, hasAccess := loadSpaceAccess(vaultDir, cfg.Alias, spaceID)
-	if _, tainted := gmail.IsSessionTainted(vaultDir, convID); tainted {
+	if _, tainted := taint.IsTainted(vaultDir, convID); tainted {
 		if !hasAccess {
 			return DraftSpec{}, fmt.Errorf("quarantined session cannot create a draft for space %q (only spaces read via read-quarantined may be replied to)", spaceID)
 		}
@@ -1605,33 +1604,66 @@ func parseSenderFromChatNotification(fromHeader, subject string) string {
 	return "Google Chat Notification"
 }
 
+func allowDesktopScopeForGmailBridge(vaultDir string) bool {
+	return strings.TrimSpace(os.Getenv("ANTIGRAVITY_CREDENTIAL_SCOPE")) != "" || connector.HasActiveDesktopPluginScope(vaultDir)
+}
+
+func pollGmailBridge(vaultDir, gmailAlias, query string, maxResults int) ([]connector.NormalizedItem, error) {
+	if maxResults <= 0 {
+		maxResults = 20
+	}
+	rc, err := connector.Resolve(vaultDir, "gmail")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := connector.Execute(context.Background(), vaultDir, connector.ProtocolRequest{
+		ProtocolVersion: connector.ProtocolVersionV1,
+		Op:              "poll",
+		Connector:       rc.FQID,
+		Account:         gmailAlias,
+		MaxItems:        maxResults,
+		Params:          map[string]string{"query": resolveGmailBridgeQuery(query)},
+	}, allowDesktopScopeForGmailBridge(vaultDir))
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Items) > maxResults {
+		return resp.Items[:maxResults], nil
+	}
+	return resp.Items, nil
+}
+
 func listSpacesViaGmailBridge(vaultDir string, cfg AccountConfig, query string, maxResults int) ([]SpaceSummary, error) {
 	gmailAlias := cfg.GmailFallbackAlias
 	if gmailAlias == "" {
 		gmailAlias = "primary"
 	}
-	msgs, err := gmail.SearchMessages(vaultDir, gmailAlias, resolveGmailBridgeQuery(query), maxResults)
+	items, err := pollGmailBridge(vaultDir, gmailAlias, query, maxResults)
 	if err != nil {
 		return nil, err
 	}
 	seen := make(map[string]bool)
 	var spaces []SpaceSummary
-	for _, m := range msgs {
-		spaceID := "spaces/gmail-chat-" + m.ThreadID
+	for _, m := range items {
+		threadID := strings.TrimSpace(m.ThreadKey)
+		if threadID == "" {
+			threadID = m.ItemID
+		}
+		spaceID := "spaces/gmail-chat-" + threadID
 		if seen[spaceID] {
 			continue
 		}
 		seen[spaceID] = true
-		displayName := strings.TrimSpace(m.Subject)
+		displayName := strings.TrimSpace(m.SubjectOrRoom)
 		if displayName == "" {
-			displayName = parseSenderFromChatNotification(m.From, m.Subject)
+			displayName = parseSenderFromChatNotification(m.Sender, m.SubjectOrRoom)
 		}
 		spaces = append(spaces, SpaceSummary{
 			SpaceID:        spaceID,
 			Account:        cfg.Alias,
 			DisplayName:    displayName,
 			SpaceType:      "DIRECT_MESSAGE",
-			LastActiveTime: m.Date,
+			LastActiveTime: m.Timestamp,
 			UnreadCount:    1,
 			Source:         "gmail-bridge",
 		})
@@ -1644,25 +1676,29 @@ func searchMessagesViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, q
 	if gmailAlias == "" {
 		gmailAlias = "primary"
 	}
-	msgs, err := gmail.SearchMessages(vaultDir, gmailAlias, resolveGmailBridgeQuery(query), maxResults)
+	items, err := pollGmailBridge(vaultDir, gmailAlias, query, maxResults)
 	if err != nil {
 		return nil, err
 	}
 	var out []MessageSummary
-	for _, m := range msgs {
-		sID := "spaces/gmail-chat-" + m.ThreadID
-		if spaceID != "" && !strings.EqualFold(spaceID, sID) && !strings.EqualFold(spaceID, m.ThreadID) {
+	for _, m := range items {
+		threadID := strings.TrimSpace(m.ThreadKey)
+		if threadID == "" {
+			threadID = m.ItemID
+		}
+		sID := "spaces/gmail-chat-" + threadID
+		if spaceID != "" && !strings.EqualFold(spaceID, sID) && !strings.EqualFold(spaceID, threadID) {
 			continue
 		}
 		out = append(out, MessageSummary{
-			ID:         "gchat-notif-" + m.ID,
+			ID:         "gchat-notif-" + m.ItemID,
 			SpaceID:    sID,
-			SpaceName:  m.Subject,
-			ThreadID:   m.ThreadID,
+			SpaceName:  m.SubjectOrRoom,
+			ThreadID:   threadID,
 			Account:    cfg.Alias,
-			Sender:     parseSenderFromChatNotification(m.From, m.Subject),
-			CreateTime: m.Date,
-			Snippet:    m.Snippet,
+			Sender:     parseSenderFromChatNotification(m.Sender, m.SubjectOrRoom),
+			CreateTime: m.Timestamp,
+			Snippet:    m.Body,
 			Source:     "gmail-bridge",
 		})
 	}
@@ -1683,29 +1719,31 @@ func readThreadViaGmailBridge(vaultDir string, cfg AccountConfig, spaceID, threa
 	if strings.HasPrefix(gmailThreadID, "spaces/") {
 		return ThreadDetail{}, fmt.Errorf("gmail-bridge cannot read native Google Chat space %q (use transport=cdp or oauth)", spaceID)
 	}
-	gtd, _, err := gmail.ReadQuarantinedThread(vaultDir, gmailAlias, gmailThreadID, convID)
+	if convID != "" {
+		if err := taint.MarkSession(vaultDir, convID, "gmail:thread:"+gmailThreadID); err != nil {
+			return ThreadDetail{}, err
+		}
+	}
+	qt, err := connector.ReadQuarantined(context.Background(), vaultDir, "gmail", gmailAlias, gmailThreadID, allowDesktopScopeForGmailBridge(vaultDir))
 	if err != nil {
 		return ThreadDetail{}, err
 	}
 	td := ThreadDetail{
-		SpaceID:      "spaces/gmail-chat-" + gtd.ThreadID,
-		SpaceName:    gtd.Subject,
-		ThreadID:     gtd.ThreadID,
+		SpaceID:      "spaces/gmail-chat-" + qt.ThreadKey,
+		SpaceName:    qt.SubjectOrRoom,
+		ThreadID:     qt.ThreadKey,
 		Account:      cfg.Alias,
-		Participants: gtd.Participants,
+		Participants: qt.AuthenticatedParticipants,
 		Source:       "gmail-bridge",
 	}
-	for _, gm := range gtd.Messages {
-		body := gm.PlainBody
-		if body == "" {
-			body = gmail.SanitizeHTMLToText(gm.HTMLBody)
-		}
+	for _, gm := range qt.Messages {
+		body := store.SanitizeHTMLToText(gm.Body)
 		td.Messages = append(td.Messages, MessageDetail{
-			ID:         "gchat-notif-" + gm.ID,
+			ID:         "gchat-notif-" + gm.ItemID,
 			SpaceID:    td.SpaceID,
 			ThreadID:   td.ThreadID,
-			Sender:     parseSenderFromChatNotification(gm.From, gm.Subject),
-			CreateTime: gm.Date,
+			Sender:     parseSenderFromChatNotification(gm.Sender, qt.SubjectOrRoom),
+			CreateTime: gm.Timestamp,
 			PlainText:  body,
 		})
 	}

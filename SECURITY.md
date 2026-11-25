@@ -33,7 +33,7 @@ Vulnerabilities in any of the following deterministic Go microkernel boundaries 
 
 1. **Two-Layer Vault Isolation (`internal/vault/`, `internal/ci/pii.go`):**
    - Bypass of `.gitignore` or `hq ci check-pii` Invariants `P1`–`P6` allowing files from `local/` or `vault/` (or credentials/PII) to be committed to the Layer 1 root repository.
-2. **Quarantined Reader & Universal Credential Vault Isolation (`internal/hooks/`, `internal/taint/`, `internal/authz/`, `internal/watcher/`, `internal/gmail/`, `internal/gchat/`):**
+2. **Quarantined Reader & Universal Credential Vault Isolation (`internal/hooks/`, `internal/taint/`, `internal/authz/`, `internal/watcher/`, `internal/connector/`, `internal/gchat/`):**
    - Bypass of the Universal Credential Vault Guard allowing *any* session (tainted or untainted) to read, write, or shell-inspect `local/private/{gmail,gchat,credentials,pii-denylist.txt}` (including via symlinked paths).
    - Bypass of `local/private/taint/` fail-closed `O_EXCL` taint lockdown (or legacy `tainted_sessions.json` 1-release fallback) after `hq gmail read`, `hq gchat read-quarantined`, or `hq watch read` (e.g., enabling `search_web`, `write_file`, `edit_file`, `invoke_subagent`, `schedule`, or `call_mcp_tool`, reading symlink-resolved `local/private/**`, or injecting newline-chained shell commands from a tainted session).
 3. **SHA-256 Approval-Bound Outbound Execution, TTL & Contextual-PII Guards (`internal/approvals/`, `PreToolUse`):**

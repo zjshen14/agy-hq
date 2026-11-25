@@ -1,11 +1,47 @@
 package store
 
 import (
+	"html"
 	"regexp"
 	"strings"
 )
 
-var reHTTPOrHTTPSScheme = regexp.MustCompile(`(?i)https?://`)
+var (
+	reHTTPOrHTTPSScheme = regexp.MustCompile(`(?i)https?://`)
+	reScriptBlock       = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	reStyleBlock        = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	reHeadBlock         = regexp.MustCompile(`(?is)<head\b[^>]*>.*?</head>`)
+	reHTMLComment       = regexp.MustCompile(`(?is)<!--.*?-->`)
+	reHiddenTag         = regexp.MustCompile(`(?is)<[a-z0-9]+\b[^>]*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?\b|font-size\s*:\s*0(?:px|pt|em|rem)?\b|\bhidden\b)[^>]*>.*?</[a-z0-9]+>`)
+	reImgTag            = regexp.MustCompile(`(?is)<img\b[^>]*>`)
+	reBlockEndTag       = regexp.MustCompile(`(?i)</?(?:br|p|div|li|tr|h[1-6]|blockquote)\b[^>]*>`)
+	reAnyHTMLTag        = regexp.MustCompile(`(?s)<[^>]+>`)
+	reMultiBlank        = regexp.MustCompile(`\n{3,}`)
+)
+
+// SanitizeHTMLToText strips scripts, styles, hidden prompt-injection spans, and tracking pixels,
+// defangs external URLs, and returns clean visible plain text.
+func SanitizeHTMLToText(rawHTML string) string {
+	s := reScriptBlock.ReplaceAllString(rawHTML, "")
+	s = reStyleBlock.ReplaceAllString(s, "")
+	s = reHeadBlock.ReplaceAllString(s, "")
+	s = reHTMLComment.ReplaceAllString(s, "")
+	// Apply hidden-tag removal twice to catch simple nested blocks
+	s = reHiddenTag.ReplaceAllString(s, "")
+	s = reHiddenTag.ReplaceAllString(s, "")
+	s = reImgTag.ReplaceAllString(s, "[image stripped]")
+	s = reBlockEndTag.ReplaceAllString(s, "\n")
+	s = reAnyHTMLTag.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	s = DefangURLs(s)
+	lines := strings.Split(s, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		cleaned = append(cleaned, strings.TrimSpace(line))
+	}
+	res := strings.TrimSpace(strings.Join(cleaned, "\n"))
+	return reMultiBlank.ReplaceAllString(res, "\n\n")
+}
 
 func isASCIIAlphaNum(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')

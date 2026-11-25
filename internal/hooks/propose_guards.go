@@ -10,7 +10,6 @@ import (
 	"github.com/zjshen14/agy-hq/internal/approvals"
 	"github.com/zjshen14/agy-hq/internal/authz"
 	"github.com/zjshen14/agy-hq/internal/gchat"
-	"github.com/zjshen14/agy-hq/internal/gmail"
 	"github.com/zjshen14/agy-hq/internal/obs"
 )
 
@@ -508,20 +507,6 @@ func buildCanonicalProposalQuestion(vaultDir string, prop approvals.Proposal, co
 			}
 			if spec.SpaceID != "" {
 				spaceID = spec.SpaceID
-			}
-		}
-	} else if prop.ActionType == "gmail_send" && meta["draftId"] != "" {
-		if spec, dErr := gmail.GetDraft(vaultDir, meta["account"], meta["draftId"]); dErr == nil {
-			bodyPreview = spec.Body
-			hashShort = spec.ContentHash
-			if spec.From != "" {
-				fromVal = spec.From
-			}
-			if spec.To != "" {
-				toVal = spec.To
-			}
-			if spec.Subject != "" {
-				subjVal = spec.Subject
 			}
 		}
 	}
