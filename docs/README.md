@@ -105,4 +105,4 @@ Welcome to the engineering and product documentation for **`agy-hq` (Headquarter
 - [20 — Git-Worktree Coupling Audit, Non-Git Workspace Requirements & Pluggable Workspace Provider Design Space](research/20_pluggable_workspace_providers_audit.md)
 - [21 — Unified Session Authorization Spectrum, Live Quarantine Hardening & Declarative Scoped Delegates Audit](research/21_declarative_scoped_delegates_audit.md)
 - [22 — Meta Muse (`muse.ai`) Proactive Actions, Temporal Anticipation & Living Interactive Spaces: Live Product Audit & Gap Analysis Against `agy-hq`](research/22_muse_proactive_actions_and_living_artifacts_audit.md)
-- [24 — 2026 Recursive Self-Improvement (RSI) Frontier (`@omarsar0` Survey) & 17-Day Production Audit of `agy-hq`'s RSI Engine](research/24_rsi_2026_frontier_and_vault_eval_audit.md)
+- [24 — The 2026 Recursive Self-Improvement (RSI) Research Frontier (570+ Paper Holistic Audit) & 17-Day `agy-hq` Production Evidence](research/24_rsi_2026_frontier_and_vault_eval_audit.md)

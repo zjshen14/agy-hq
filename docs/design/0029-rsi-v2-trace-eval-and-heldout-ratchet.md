@@ -1,6 +1,6 @@
 # RFC-0029: RSI Engine v2 — Trace-Grounded Synthesis, Anchored Drawback Verifier & Held-Out Ratchet
 
-- **Status:** Draft (Phase 1 — Awaiting Review; zero production code modified)
+- **Status:** Draft v1 (Paused — Pending Holistic POV Alignment from [Research 24 Revision 2](../research/24_rsi_2026_frontier_and_vault_eval_audit.md); zero production code modified)
 - **Created:** 2026-11-25
 - **Author:** `[Task:rsi] Deep Research on @omarsar0 RSI Post` (`gemini-4-carbon-high`)
 - **Builds On:** [RFC-0010 (Bounded Agent RSI)](./0010-agent-recursive-self-improvement.md), [RFC-0019 (Two-Tier RSI & Vault Overlays)](./0019-two-tier-rsi-vault-overlay.md), [RFC-0024 (Memory Engine v2 & Eval)](./0024-memory-v2-prediction-and-eval.md), [RFC-0026 (Scoped Delegates & Taint v2)](./0026-declarative-scoped-delegates.md), [RFC-0027 (1-Tap Proactive Decisions)](./0027-muse-proactive-actions.md)
