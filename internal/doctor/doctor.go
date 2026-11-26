@@ -162,19 +162,23 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		if artDir != "" {
 			artPath := filepath.Join(artDir, "hq_console.md")
 			metaPath := filepath.Join(artDir, "hq_console.md.metadata.json")
+			livePath := filepath.Join(artDir, "hq_console_live.html")
+			liveMeta := filepath.Join(artDir, "hq_console_live.html.metadata.json")
 			_, errArt := os.Stat(artPath)
 			_, errMeta := os.Stat(metaPath)
-			if errArt == nil && errMeta == nil {
+			_, errLive := os.Stat(livePath)
+			_, errLiveMeta := os.Stat(liveMeta)
+			if errArt == nil && errMeta == nil && errLive == nil && errLiveMeta == nil {
 				results = append(results, CheckResult{
 					Name:   "Front Desk Console Artifact",
 					Status: "PASS",
-					Detail: fmt.Sprintf("Synced hq_console.md at %s (pinned=%v)", artDir, fd.ConsolePinned),
+					Detail: fmt.Sprintf("Synced hq_console.md & hq_console_live.html at %s (mdPinned=%v, livePinned=%v)", artDir, fd.ConsolePinned, fd.LiveConsolePinned),
 				})
 			} else {
 				results = append(results, CheckResult{
 					Name:   "Front Desk Console Artifact",
 					Status: "WARN",
-					Detail: fmt.Sprintf("Missing hq_console.md artifact in %s; run './bin/hq console'", artDir),
+					Detail: fmt.Sprintf("Missing console artifact(s) in %s; run './bin/hq console'", artDir),
 				})
 			}
 		}

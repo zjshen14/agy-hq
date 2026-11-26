@@ -78,6 +78,7 @@ type DashboardState struct {
 	ProactiveV3    ProactiveV3State               `json:"proactiveV3,omitempty"`
 	FlashResult    string                         `json:"flashResult,omitempty"`
 	CSRFToken      string                         `json:"-"`
+	StaticMode     bool                           `json:"-"`
 	TaskSelection  kernel.ConsoleTaskSelection    `json:"-"`
 	Layer1Count    int                            `json:"-"`
 	ColdTaskCount  int                            `json:"-"`

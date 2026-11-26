@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="hq-csrf-token" content="{{.CSRFToken}}">
+{{if not .StaticMode}}<meta name="hq-csrf-token" content="{{.CSRFToken}}">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<title>agy-hq Console</title>
-<script src="/preload.js"></script>
-<style>
+{{end}}<title>agy-hq Console</title>
+{{if not .StaticMode}}<script src="/preload.js"></script>
+{{end}}<style>
   :root {
     --bg: var(--background, #0b0f19);
     --card: var(--card-bg, #111625);
@@ -229,7 +229,7 @@
   a:hover { text-decoration: underline; }
 </style>
 </head>
-<body>
+<body{{if .StaticMode}} data-static-mode="1"{{end}}>
 <header>
   <div class="brand">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="24" height="24" style="flex-shrink:0">
@@ -253,9 +253,14 @@
     <h1>agy-hq Console</h1>
   </div>
   <div class="header-actions">
+    {{if .StaticMode}}
+    <span class="live-pill" style="background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.35);color:#38bdf8">SNAPSHOT</span>
+    <span class="muted" id="last-updated">Synced {{.UpdatedAt}} · Tap action buttons to copy CLI command</span>
+    {{else}}
     <span class="live-pill"><span class="live-dot"></span>LIVE</span>
     <span class="muted" id="last-updated">Updated {{.UpdatedAt}}</span>
     <button type="button" class="btn btn-secondary" onclick="refreshState()" style="padding:4px 8px;font-size:11px">🔄 Refresh</button>
+    {{end}}
   </div>
 </header>
 
@@ -969,11 +974,61 @@ async function archiveTask(slug) {
   }
 }
 
+const IS_STATIC = document.body && document.body.getAttribute('data-static-mode') === '1';
+
+function buildStaticActionCommand(btn, act, id) {
+  const slug = btn.getAttribute('data-slug') || '';
+  if (act === 'approve' && id) {
+    return 'hq approve ' + id + ' --sha256=' + (btn.getAttribute('data-sha') || '');
+  }
+  if (act === 'reject' && id) return 'hq reject ' + id + ' --dismiss';
+  if (act === 'complete-task' && slug) return 'hq complete ' + slug;
+  if (act === 'archive-task' && slug) return 'hq archive ' + slug;
+  if (act === 'idea-action' && id) return 'hq ideas ' + (btn.getAttribute('data-idea-op') || 'promote') + ' ' + id;
+  if (act === 'space-override' && id) return 'hq spaces ' + (btn.getAttribute('data-mode') || 'auto') + ' ' + id;
+  if (act === 'trigger-action' && id) return 'hq triggers ' + (btn.getAttribute('data-trigger-op') || 'status') + ' ' + id;
+  if (act === 'outbox-act' && id) return 'hq outbox act ' + id + ' --option=' + (btn.getAttribute('data-opt') || '');
+  if (act === 'restage-proposal' && id) return 'hq approvals restage ' + id;
+  if (act === 'dismiss-expired' && id) return 'hq approvals dismiss-expired ' + id;
+  return '';
+}
+
+function copyCommandText(cmd) {
+  if (!cmd) return;
+  const done = () => showFlash('Copied command (paste in chat): ' + cmd, false);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(done).catch(() => fallbackCopyText(cmd, done));
+    return;
+  }
+  fallbackCopyText(cmd, done);
+}
+
+function fallbackCopyText(text, onDone) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    onDone();
+  } catch (e) {
+    showFlash('Run in chat: ' + text, false);
+  }
+}
+
 document.addEventListener('click', function(ev) {
   const btn = ev.target && ev.target.closest ? ev.target.closest('[data-hq-action]') : null;
   if (!btn) return;
   const act = btn.getAttribute('data-hq-action') || '';
   const id = btn.getAttribute('data-id') || '';
+  if (IS_STATIC) {
+    const cmd = buildStaticActionCommand(btn, act, id);
+    if (cmd) copyCommandText(cmd);
+    return;
+  }
   if (act === 'approve') {
     approveProposal(id, btn.getAttribute('data-sha') || '');
   } else if (act === 'reject') {
@@ -1582,14 +1637,16 @@ function scheduleNextRefresh() {
   }, 5000);
 }
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    refreshState();
-  }
-});
+if (!IS_STATIC) {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      refreshState();
+    }
+  });
 
-// Non-overlapping background state refresh when Console UI is visible
-scheduleNextRefresh();
+  // Non-overlapping background state refresh when Console UI is visible
+  scheduleNextRefresh();
+}
 </script>
 </body>
 </html>
