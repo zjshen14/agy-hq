@@ -1,7 +1,7 @@
 # RFC-0029: RSI Engine v2 — Impact-Weighted Multi-Signal Mining, Compiled Skills, Anchored Safety Gating & Held-Out Ratchet
 
-- **Status:** Draft v2 (Phase 1 — Aligned Holistic POV; awaiting final review before Phase 2 coding)
-- **Created:** 2026-11-25 (Rev 2 — incorporates 570-paper holistic frontier + full impact-weighted 17-day Vault audit)
+- **Status:** Final Draft (Phase 1 — All 6 Design Decisions Locked via `/grill-me`; awaiting Phase 2 go-ahead)
+- **Created:** 2026-11-25 (Rev 2.1 — incorporates locked `/grill-me` decisions Q1–Q6)
 - **Author:** `[Task:rsi] Deep Research on @omarsar0 RSI Post` (`DeepInvestigator` + `gemini-4-neon-high`)
 - **Builds On:** [RFC-0010 (Bounded Agent RSI)](./0010-agent-recursive-self-improvement.md), [RFC-0019 (Two-Tier RSI & Vault Overlays)](./0019-two-tier-rsi-vault-overlay.md), [RFC-0024 (Memory Engine v2 & Eval)](./0024-memory-v2-prediction-and-eval.md), [RFC-0026 (Scoped Delegates & Taint v2)](./0026-declarative-scoped-delegates.md), [RFC-0027 (1-Tap Proactive Decisions)](./0027-muse-proactive-actions.md)
 - **Research:** [24 — The 2026 RSI Research Frontier (570+ Paper Holistic Audit) & 17-Day `agy-hq` Production Evidence](../research/24_rsi_2026_frontier_and_vault_eval_audit.md)
@@ -60,18 +60,17 @@
    - **1:1 Parallel Tool Pairing & Delta Watermarks (`D1`, `D2`):** Pair each tool result strictly to its matching `ToolCall`, walk journals via `vault.WalkJournals` ([RFC-0024](./0024-memory-v2-prediction-and-eval.md)), and skip steps `< je.StepStartIdx` (eliminating `50.0%` duplicate inflation).
    - **Step-Local Skill Attribution & Noise Filter (`D10`):** Infer `SkillOrPkg` from the failing step's command/file path *first* (never letting `"gchat"` in a Front Desk summary swallow `go test` or `hq --help`), filter normal dev TDD (`go test`/`go build`/`hq ci pre-push`), `grep` exit-1 no-match, and empty-reason rejections, and wire `taint.IsTainted` ([RFC-0017b](./0017b-provenance-taint-and-offer-gateway.md), [RFC-0026](./0026-declarative-scoped-delegates.md)) + `hq watch read` (`D3`).
 2. **Impact Weighting & 2 New Signal Streams:**
-   - Join each cluster against `internal/obs` to compute **`ImpactScore = DistinctConvs × MeanWastedTokens`** (falling back to `DistinctConvs × WastedSteps` when token metrics are absent), requiring `DistinctConvs >= 2` for automated mechanical rules (*Winner's Curse* guard).
+   - Join each cluster against `internal/obs` to compute **`ImpactScore = DistinctConvs × MeanWastedTokens`** (falling back to `DistinctConvs × WastedSteps` when token metrics are absent), requiring **`DistinctConvs >= 2`** for skill rules (**`>= 3`** for always-on `general.md`) before automated mechanical synthesis (*Winner's Curse* guard).
    - **Stream 2 (Recurring Clean-Exit High-Cost Runs):** Flag repeated skill/task slugs exceeding step or token budgets across $\ge 2$ conversations—even with `0` tool errors—as **Compilation / Routing** candidates (*FlashScript* / *SkillCache*).
-   - **Stream 3 (Human Corrections — *WASP-Mem*):** Add `hq rsi record-correction --skill=<slug> --conv=<id> --summary="..." --diagnosis="..."` invoked during `/sleep-consolidate` when transcript review finds explicit user pushback or rework.
+   - **Stream 3 (Human Corrections — Hybrid Fast Capture + Optional Instant 1-Tap Staging):** Add `hq rsi record-correction --skill=<slug> --conv=<id> --summary="..." --diagnosis="..."`. Mid-chat workflow corrections silently record the observation (zero nagging); when the user explicitly asks to make a workflow rule permanent right now (or invokes `/learn`), the agent runs `verify` and surfaces a 1-tap `ask_question` approval **in the same turn**; ambient corrections batch into nightly `/sleep-consolidate` $\rightarrow$ Morning Brief.
 
 ---
 
 ### 4.2 4-Substrate Router & Trace-Grounded Synthesis (`Phase 2B` — `internal/rsi/mutator.go`)
 
-1. **Right-Sized Target Classification (`TargetSubstrate`):**
-   - **`ring1_cli_triage`** (owned `hq` subcommand/flag/hook bugs): Emit an actionable triage summary in `hq rsi status` / Morning Brief (or Tier-2 `--upstream` worktree patch) instead of a `SKILL.md` workaround.
-   - **`compile_script_or_route`** (`A3`/`A4` or recurring multi-step workflows): Recommend a `<vault>/skills/<slug>/scripts/` helper or `<vault>/config.yaml` tier adjustment—never prose rule bloat.
-   - **`ring2_skill_or_overlay`** (external connector quirks like `gmail`/`gcalendar`/`xurl`, noisy proactive triggers, or recurring workflow corrections): Eligible for sparse, model-scoped `ACEDeltaOp` synthesis.
+1. **Right-Sized Target Classification (`TargetSubstrate`, Strict Human-Gated Everywhere):**
+   - **`ring1_cli_triage`** (owned `hq` subcommand/flag/hook bugs) & **`compile_script_or_route`** (`A3`/`A4` or recurring multi-step workflows): Never write speculative code/scripts overnight and never dump prose workarounds into `SKILL.md`. Instead, surface an actionable Morning Brief card with [RFC-0027](./0027-muse-proactive-actions.md) 1-tap buttons: **`[Spawn CLI Fix Worktree]`** / **`[Spawn Script Compile Task]`** (launching a dedicated sidebar task via `hq spawn` pre-loaded with the exact `hq rsi context` trace packet) or **`[Dismiss / Tombstone]`**.
+   - **`ring2_skill_or_overlay`** (external connector quirks like `gmail`/`gcalendar`/`xurl`, noisy proactive triggers, or recurring workflow corrections): Eligible for sparse, model-scoped `ACEDeltaOp` synthesis under tightened active caps (**`<= 5` per overlay**, **`<= 5` in `general.md`**, **`<= 20` global active rules** — protecting lighter models per *VaG* & IBM `2611.26361`).
    - **`ring3_memory`** (factual/env discoveries & user preferences): Handled by Memory v2 ([RFC-0024](./0024-memory-v2-prediction-and-eval.md)) `facts.jsonl` / `topics/<slug>.md`, never duplicated in `SKILL.md`.
 2. **Two-Speed Trace Synthesis (`hq rsi context` + Strict Fast-Path):**
    - Pure-Go 0-token templates fire **only** on `FrictionProactiveNoise` ([RFC-0027](./0027-muse-proactive-actions.md)) or clean single-line same-binary CLI flag repairs (`argv[0]` matches, zero heredocs, zero prose, `len <= 140`).
@@ -85,20 +84,21 @@
    - **Critic 1 — Structural & Semantic Drawback Detectors (`drawbacks.go`):** Reject empty/`< 24`-char guidance, heredocs (`<<`), multi-line script dumps, conversational status prefixes (`"Dispatched "`, `"Worker "`), and near-duplicate rules (token Jaccard $\ge 0.70$ against active rules or tombstones). Ship **`internal/rsi/testdata/anchors.json`** ($\ge 12$ human-graded good/bad rules + security probes) requiring **`100%` pass/fail agreement in `go test`** (*Who Verifies the Verifier?*).
    - **Critic 2 — Security & Indirect Prompt Injection Harmlessness (`tcb.go`):** Hard-block security-downgrade flags (`curl -k`, `--insecure`, `GIT_SSL_NO_VERIFY`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `StrictHostKeyChecking=no`, `ssl._create_unverified_context`, `--no-verify`, `chmod 777`) AND rules instructing the agent to obey commands/actions embedded inside external untrusted emails, chats, or web pages (*Evolve-IPI* `2610.39122`). Keep Ring-0 safety rules strictly frozen (*Masked Erosion* `2610.38392`).
    - **Critic 3 — Real Tier-2 Counterfactuals & PII Guard:** Execute real `go test -run <ReplayTestName>` (`FAIL` on unpatched `HEAD`, `PASS` on candidate) in Tier-2 worktrees (`Gate 2A`) and run full `ci.CheckPII` (`P1`–`P6`) + `go vet` (`Gate 3`).
-2. **Held-Out Compute-Normalized Ratchet (`hq rsi eval [--since=14d] [--json]`):**
-   - Deterministically partitions untainted conversations (`SHA-256(convId) mod 2`) into **Selection (`50%`)** vs. **Held-Out (`50%`)** splits (*Winner's Curse*, *HDA*), reporting: (1) Held-out friction rate (wasted steps per 100 tool calls, pre vs. post `AppliedAt`), (2) Compute-normalized tokens/turn per skill (`internal/obs`), (3) **Directional regret** (*GUARD*: newly regressed skills flagged immediately), and (4) Proposal precision, orphan count & anchor agreement.
+2. **Held-Out Compute-Normalized Ratchet (`hq rsi eval [--since=14d] [--json]` — `100%` 0-Token Deterministic Go):**
+   - Both `hq rsi verify` and `hq rsi eval` stay strictly **0-token pure Go** (`< 100ms`, CI-deterministic; live LLM attack probes deferred to a future opt-in benchmark if ever needed).
+   - `hq rsi eval` deterministically partitions untainted conversations (`SHA-256(convId) mod 2`) into **Selection (`50%`)** vs. **Held-Out (`50%`)** splits (*Winner's Curse*, *HDA*), reporting: (1) Held-out friction rate (wasted steps per 100 tool calls, pre vs. post `AppliedAt`), (2) Compute-normalized tokens/turn per skill (`internal/obs`), (3) **Directional regret** (*GUARD*: newly regressed skills flagged immediately), and (4) Proposal precision, orphan count & anchor agreement.
 
 ---
 
 ### 4.4 Single-Source `SIM` Archive, Causal Canaries & 1-Tap Staging (`Phase 2D` — `proposer.go`)
 
 1. **Single-Source `SIM` Archive (`archive.jsonl`):**
-   - Make `archive.jsonl` the single canonical store for `ruleId`, `helpfulCount`, `harmfulCount`, `sessionsObserved`, `modelScope`, `editRationale`, `predictedOutcome`, and terminal statuses (`canary`, `promoted`, `reverted`, `rejected`, `expired`).
-   - **Fix `D9` (Ghost Canary / *PAST-Bench* Pathway Disconnect):** `updateCanaryRecords` verifies the exact `<!-- rsi:rule id="..." -->` block **still exists on disk** before incrementing `helpfulCount`; deleted/migrated files transition cleanly to `status: "archived"`.
-   - **Fix `D7` & `D11a`:** Join `Ablate` and `Promote` against `archive.jsonl` (zero per-turn Markdown churn), wire `hq rsi ablate --model=<active>` into `/sleep-consolidate` Stage 4, and change `findTierCPromotionCandidates` (`helpful >= 5`) to emit a **Compilation Advisory** rather than a destructive `deprecate_skill_rule` diff (never deleting a proven rule until its compiled script/CLI passes tests).
+   - Make `archive.jsonl` the single canonical store for `ruleId`, `origin` (`auto_mined` vs. `user_correction`), `helpfulCount`, `harmfulCount`, `sessionsObserved`, `baselineErrorRate`, `baselineMeanTokens`, `modelScope`, `editRationale`, `predictedOutcome`, and terminal statuses (`canary`, `promoted`, `reverted`, `rejected`, `expired`, `archived`).
+   - **Fix `D9` (Causal Canary & *GUARD* Directional Regret):** `updateCanaryRecords` verifies the exact `<!-- rsi:rule id="..." -->` block **still exists on disk** before crediting `helpfulCount` on a clean target-skill run (or any untainted clean turn for `general.md`); deleted/migrated files transition cleanly to `status: "archived"`. If target friction recurs $\ge 2\times$ **or** the target skill's post-apply error/token rate regresses **$> 25\%$** vs. its pre-apply baseline, `miner.go` automatically stages a **1-tap revert proposal**.
+   - **Fix `D7` & `D11a` (Safe Ablation & Negative-Guardrail Protection):** Join `Ablate` and `Promote` against `archive.jsonl` (zero per-turn Markdown churn), wire `hq rsi ablate --model=<active>` into `/sleep-consolidate` Stage 4, **exempt explicit `origin: "user_correction"` rules from 30-day zero-hit ablation** (preventing the Negative Guardrail Paradox; only superseded by model upgrade or manual reject), and change `findTierCPromotionCandidates` (`helpful >= 5`) to emit a non-destructive **Compilation Advisory** with a 1-tap `[Spawn Script Compile Task]` button instead of deleting proven rules.
    - **Negative-Result Tombstones:** Proposal rejection (`hq reject`) or canary revert writes a tombstone to `archive.jsonl` so rejected patterns are never re-proposed (*No Second Run*).
 2. **Closed-Loop Nightly Batching & Backlog Cleanup:**
-   - Add **`hq rsi stage-nightly [--max=2]`** (verify + stage top $\le 2$ candidates with [RFC-0027](./0027-muse-proactive-actions.md) 1-tap Morning Brief buttons) and **`hq rsi compact`** (auto-expiring `> 7d` orphaned `draft`/`verified` files so pre-v2 backlog clears cleanly).
+   - Add **`hq rsi stage-nightly [--max=2]`** (verify + stage at most `2` top-ROI candidates with [RFC-0027](./0027-muse-proactive-actions.md) 1-tap Morning Brief buttons) and 1-time **`hq rsi compact`** (archiving all `66` pre-v2 legacy drafts, ghost canaries, and future `> 7d` orphaned drafts so Morning Brief starts clean).
 
 ---
 
