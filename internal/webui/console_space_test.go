@@ -26,6 +26,15 @@ func TestSyncConsoleLiveArtifactUnifiedTemplateAndCSPSandbox(t *testing.T) {
 	if _, err := approvals.CreateWithMetadata(vaultDir, "messaging", "Send Q4 summary", "hq gchat send --to=ops", "", "fd-console-1", nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := living.Save(vaultDir, living.SpaceDoc{
+		Slug:  "uk-trip-test",
+		Title: living.Text("UK Trip Test"),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := living.Build(vaultDir, "uk-trip-test"); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := outbox.Add(vaultDir, outbox.OutboxItem{
 		ID:          "dec-console-1",
 		Tier:        outbox.TierInterrupt,
@@ -71,10 +80,25 @@ func TestSyncConsoleLiveArtifactUnifiedTemplateAndCSPSandbox(t *testing.T) {
 			t.Fatalf("expected %q in unified hq_console_live.html", want)
 		}
 	}
-	for _, banned := range []string{"/preload.js", "/favicon.svg", "QBU", "Compute Share", "/ 256k"} {
+	for _, banned := range []string{"/preload.js", "/favicon.svg", `href="/living-spaces/uk-trip-test"`, "QBU", "Compute Share", "/ 256k"} {
 		if strings.Contains(liveHTML, banned) {
 			t.Fatalf("expected zero %q in offline static hq_console_live.html", banned)
 		}
+	}
+	for _, wantSpace := range []string{`space_uk-trip-test.html`, `data-hq-action="space-refresh"`, `data-hq-action="space-export"`} {
+		if !strings.Contains(liveHTML, wantSpace) {
+			t.Fatalf("expected %q for custom Living Space in static hq_console_live.html", wantSpace)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(artDir, "space_uk-trip-test.html")); err != nil {
+		t.Fatalf("expected custom Living Space auto-synced to Front Desk artifact dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(artDir, "space_uk-trip-test.html.metadata.json")); err != nil {
+		t.Fatalf("expected custom Living Space metadata in Front Desk artifact dir: %v", err)
+	}
+	mdBytes, _ := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	if !strings.Contains(string(mdBytes), "space_uk-trip-test.html") {
+		t.Fatalf("expected CONSOLE.md to include mobile Artifact link for custom Living Space")
 	}
 
 	// Verify bootstrap JSON in static HTML parses cleanly (no double-encoding)

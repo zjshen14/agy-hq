@@ -118,6 +118,9 @@ func SyncConsoleLiveArtifact(vaultDir string, state DashboardState, unchangedBod
 		_, errMeta = os.Stat(artMeta)
 	}
 	if unchangedBody && errIdx == nil && (artDir == "" || (errArt == nil && errMeta == nil)) {
+		if artDir != "" {
+			syncUserLivingSpaceArtifacts(vaultDir, artDir, state.ProactiveV3.LivingSpaces)
+		}
 		return nil
 	}
 
@@ -142,8 +145,49 @@ func SyncConsoleLiveArtifact(vaultDir string, state DashboardState, unchangedBod
 		metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 		_ = store.WriteAtomic(artHTML, rawHTML, 0o644)
 		_ = store.WriteAtomic(artMeta, metaBytes, 0o644)
+		syncUserLivingSpaceArtifacts(vaultDir, artDir, state.ProactiveV3.LivingSpaces)
 	}
 	return nil
+}
+
+// syncUserLivingSpaceArtifacts mirrors custom Living Spaces into Front Desk's ArtifactDir as
+// `space_<slug>.html` (+ `.metadata.json`) when missing or updated so Mobile Remote Control users
+// can open every Living Space directly in the Artifact Pane without needing localhost:4242.
+func syncUserLivingSpaceArtifacts(vaultDir, artDir string, spaces []living.SpaceSummary) {
+	if artDir == "" || len(spaces) == 0 {
+		return
+	}
+	for _, ls := range spaces {
+		if ls.Slug == "" || ls.Slug == ConsoleLivingSpaceSlug {
+			continue
+		}
+		srcHTML := filepath.Join(living.SpaceDir(vaultDir, ls.Slug), "index.html")
+		raw, err := os.ReadFile(srcHTML)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		dstHTML := filepath.Join(artDir, "space_"+ls.Slug+".html")
+		dstMeta := dstHTML + ".metadata.json"
+		if prev, rErr := os.ReadFile(dstHTML); rErr == nil && bytes.Equal(prev, raw) {
+			if _, mErr := os.Stat(dstMeta); mErr == nil {
+				continue
+			}
+		}
+		_ = os.MkdirAll(artDir, 0o755)
+		title := strings.TrimSpace(ls.Title)
+		if title == "" {
+			title = ls.Slug
+		}
+		meta := map[string]interface{}{
+			"summary":         fmt.Sprintf("Living Space: %s (Mobile & Artifact Pane ready)", title),
+			"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
+			"requestFeedback": false,
+			"userFacing":      true,
+		}
+		metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+		_ = store.WriteAtomic(dstHTML, raw, 0o644)
+		_ = store.WriteAtomic(dstMeta, metaBytes, 0o644)
+	}
 }
 
 func computeObsStateStamp(vaultDir string) int64 {

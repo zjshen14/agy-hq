@@ -140,8 +140,14 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			if ls.GoalSlug != "" {
 				goalNote = fmt.Sprintf(" · goal `%s`", ls.GoalSlug)
 			}
-			fmt.Fprintf(&b, "- **[%s](http://127.0.0.1:4242/living-spaces/%s)** (`%s`%s · updated `%s`)\n",
-				ls.Title, ls.Slug, ls.Slug, goalNote, ls.UpdatedAt)
+			if state.hasFrontDesk && strings.TrimSpace(state.frontDesk.ArtifactDir) != "" {
+				artSpace := filepath.ToSlash(filepath.Join(strings.TrimSpace(state.frontDesk.ArtifactDir), "space_"+ls.Slug+".html"))
+				fmt.Fprintf(&b, "- **%s** ([📱 Artifact](file://%s) · [🌐 :4242](http://127.0.0.1:4242/living-spaces/%s)) (`%s`%s · updated `%s`)\n",
+					ls.Title, artSpace, ls.Slug, ls.Slug, goalNote, ls.UpdatedAt)
+			} else {
+				fmt.Fprintf(&b, "- **[%s](http://127.0.0.1:4242/living-spaces/%s)** (`%s`%s · updated `%s`)\n",
+					ls.Title, ls.Slug, ls.Slug, goalNote, ls.UpdatedAt)
+			}
 		}
 		b.WriteString("\n---\n\n")
 	}

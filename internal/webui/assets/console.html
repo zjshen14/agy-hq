@@ -543,17 +543,27 @@
 
   <div id="living-spaces-section">
   {{if .ProactiveV3.LivingSpaces}}
+    {{$isStatic := .StaticMode}}
     <h2>Living Spaces ({{len .ProactiveV3.LivingSpaces}})</h2>
     <div id="living-spaces-list">
       {{range .ProactiveV3.LivingSpaces}}
       <div class="card">
         <div class="meta-row">
+          {{if $isStatic}}
+          <strong>🧩 {{.Title}}</strong>
+          {{else}}
           <strong><a href="/living-spaces/{{.Slug}}" target="_blank">🧩 {{.Title}}</a></strong>
+          {{end}}
           <span class="badge badge-info">{{.Slug}}</span>
         </div>
-        <div class="muted" style="margin:4px 0">Updated {{.UpdatedAt}}{{if .GoalSlug}} · Goal: <code>{{.GoalSlug}}</code>{{end}}</div>
+        <div class="muted" style="margin:4px 0">Updated {{.UpdatedAt}}{{if .GoalSlug}} · Goal: <code>{{.GoalSlug}}</code>{{end}}{{if $isStatic}} · Artifact: <code>space_{{.Slug}}.html</code>{{end}}</div>
         <div class="actions">
+          {{if $isStatic}}
+          <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-refresh" data-slug="{{.Slug}}">📋 Copy Refresh Cmd</button>
+          <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-export" data-slug="{{.Slug}}">📋 Copy Export Cmd</button>
+          {{else}}
           <a class="btn btn-secondary" style="font-size:11px;padding:4px 8px" href="/living-spaces/{{.Slug}}" target="_blank">Open Sandboxed Space ↗</a>
+          {{end}}
         </div>
       </div>
       {{end}}
@@ -990,6 +1000,8 @@ function buildStaticActionCommand(btn, act, id) {
   if (act === 'outbox-act' && id) return 'hq outbox act ' + id + ' --option=' + (btn.getAttribute('data-opt') || '');
   if (act === 'restage-proposal' && id) return 'hq approvals restage ' + id;
   if (act === 'dismiss-expired' && id) return 'hq approvals dismiss-expired ' + id;
+  if (act === 'space-refresh' && slug) return 'hq space refresh ' + slug;
+  if (act === 'space-export' && slug) return 'hq space export-artifact ' + slug;
   return '';
 }
 
