@@ -151,6 +151,25 @@
   .badge-pass { background: var(--ok-glow); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
   .badge-info { background: var(--accent-glow); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
   .badge-danger { background: var(--danger-glow); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+  .badge-violet { background: rgba(167, 139, 250, 0.16); color: #c4b5fd; border: 1px solid rgba(167, 139, 250, 0.35); }
+
+  .mem-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 10px; }
+  .mem-search {
+    flex: 1 1 220px; min-width: 180px; background: var(--card-alt); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px; font-size: 12px;
+    font-family: var(--font); outline: none;
+  }
+  .mem-search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+  .mem-filter-pills { display: flex; flex-wrap: wrap; gap: 5px; }
+  .mem-filter-btn {
+    background: var(--card); border: 1px solid var(--border); color: var(--muted);
+    padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  .mem-filter-btn:hover { color: var(--text); border-color: rgba(56, 189, 248, 0.4); }
+  .mem-filter-btn.active { background: rgba(56, 189, 248, 0.16); border-color: var(--accent); color: #e0f2fe; }
+  .mem-priority-line { padding: 3px 0; border-bottom: 1px dashed rgba(30, 41, 59, 0.7); font-size: 12px; color: #cbd5e1; }
+  .mem-priority-line:last-child { border-bottom: none; }
+  .mem-badges { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 
   .preview-box { margin: 8px 0; }
   .preview-title {
@@ -306,6 +325,9 @@
   </button>
   <button type="button" class="tab-btn {{if eq $defTab "work"}}active{{end}}" role="tab" data-tab="work">
     Work <span class="tab-count" id="tab-badge-work">{{len .Tasks}}</span>
+  </button>
+  <button type="button" class="tab-btn" role="tab" data-tab="memory">
+    Memory <span class="tab-count {{if or .Memory.OverBudget (gt (len .Memory.HealthWarnings) 0)}}warn{{end}}" id="tab-badge-memory">{{.Memory.ActiveFactCount}}</span>
   </button>
   <button type="button" class="tab-btn" role="tab" data-tab="tokens">
     Tokens <span class="tab-count {{if gt .Observability.TotalAnomalies 0}}warn{{end}}" id="tab-badge-tokens">{{fmtTokens .Observability.TodayUncachedTokens}}</span>
@@ -572,7 +594,175 @@
   </div>
 </section>
 
-<!-- ==================== TAB 3: TOKENS ==================== -->
+<!-- ==================== TAB 3: MEMORY ==================== -->
+<section class="tab-panel" id="panel-memory">
+  <h2>
+    <span>Memory Vault &amp; Knowledge Index</span>
+    <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 9px" data-hq-action="memory-compact">🧹 Compact Facts</button>
+  </h2>
+
+  <div class="card" id="mem-health-card">
+    <div class="kpi-grid" id="mem-kpi-grid">
+      <div class="kpi-tile {{if .Memory.OverBudget}}tone-danger{{else}}tone-ok{{end}}" id="mem-kpi-budget-tile">
+        <div class="kpi-label">MEMORY.md Budget</div>
+        <div class="kpi-val" id="mem-kpi-lines">{{.Memory.MemoryLines}} / {{.Memory.MemoryMaxLines}} lines</div>
+        <div class="kpi-sub" id="mem-kpi-bytes">{{.Memory.MemoryBytes}} / {{.Memory.MemoryMaxBytes}} B (~{{.Memory.EstimatedTokens}} tok)</div>
+      </div>
+      <div class="kpi-tile {{if gt .Memory.ExpiringSoonCount 0}}tone-warn{{end}}" id="mem-kpi-facts-tile">
+        <div class="kpi-label">Verified Facts</div>
+        <div class="kpi-val" id="mem-kpi-facts">{{.Memory.ActiveFactCount}}</div>
+        <div class="kpi-sub" id="mem-kpi-facts-sub">{{.Memory.ExpiringSoonCount}} expiring ≤72h · {{.Memory.ExpiredFactCount}} expired</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Topic Wiki &amp; Playbooks</div>
+        <div class="kpi-val" id="mem-kpi-topics">{{.Memory.TopicCount}}</div>
+        <div class="kpi-sub" id="mem-kpi-topics-sub">{{.Memory.PlaybookCount}} active playbooks · {{.Memory.EntityCount}} dossiers</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Nightly Consolidation</div>
+        <div class="kpi-val" id="mem-kpi-dream" style="font-size:13px">{{if .Memory.LastDreamAt}}{{.Memory.LastDreamAt}}{{else}}Not run yet{{end}}</div>
+        <div class="kpi-sub" id="mem-kpi-profile">{{.Memory.ProfileFieldCount}} private profile fields (CLI-only)</div>
+      </div>
+    </div>
+    <div class="meta-row" style="margin-top:6px">
+      <span class="muted" id="mem-budget-label"><strong>Index Budget Utilization:</strong> {{printf "%.0f" .Memory.BudgetFillPct}}% of dual line/byte cap</span>
+      <span id="mem-budget-badge" class="badge {{if .Memory.OverBudget}}badge-danger{{else if gt .Memory.BudgetFillPct 85.0}}badge-warn{{else}}badge-pass{{end}}">{{if .Memory.OverBudget}}OVER BUDGET{{else if gt .Memory.BudgetFillPct 85.0}}NEAR CAP{{else}}HEALTHY{{end}}</span>
+    </div>
+    <div class="progress-bar">
+      <div id="mem-budget-bar" class="progress-fill {{if .Memory.OverBudget}}danger{{else if gt .Memory.BudgetFillPct 85.0}}warn{{end}}" style="width: {{printf "%.1f" (pctClamp .Memory.BudgetFillPct)}}%;"></div>
+    </div>
+    <div id="mem-warnings">
+      {{if .Memory.HealthWarnings}}
+      <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">
+        {{range .Memory.HealthWarnings}}
+        <div style="margin:3px 0"><span class="badge badge-warn">⚠️ {{.}}</span></div>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+  </div>
+
+  <div id="mem-priorities-section">
+    <h2>Active Priorities (<code>MEMORY.md</code>)</h2>
+    <div class="card" id="mem-priorities-card">
+      {{if .Memory.ActivePriorities}}
+        {{range .Memory.ActivePriorities}}
+        <div class="mem-priority-line">{{.}}</div>
+        {{end}}
+      {{else}}
+        <div class="muted">No active priorities recorded in MEMORY.md yet.</div>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="mem-toolbar">
+    <input type="search" id="mem-search" class="mem-search" placeholder="Search facts, topics, playbooks, or dossiers…" aria-label="Search memory">
+    <div class="mem-filter-pills" role="group" aria-label="Memory Scope Filter">
+      <button type="button" class="mem-filter-btn active" data-mem-filter="all">All</button>
+      <button type="button" class="mem-filter-btn" data-mem-filter="global">Global</button>
+      <button type="button" class="mem-filter-btn" data-mem-filter="repo">Repo</button>
+      <button type="button" class="mem-filter-btn" data-mem-filter="domain">Domain</button>
+      <button type="button" class="mem-filter-btn" data-mem-filter="pinned">📌 Pinned</button>
+      <button type="button" class="mem-filter-btn" data-mem-filter="expiring">⏰ Expiring ≤72h</button>
+    </div>
+  </div>
+  <div class="muted" id="mem-filter-summary" style="margin-bottom:8px;font-size:11px"></div>
+
+  <h2>
+    <span>Verified Facts (<span id="mem-facts-count">{{len .Memory.Facts}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Scoped Bi-Temporal Preferences &amp; Decisions</span>
+  </h2>
+  <div id="mem-facts-list">
+    {{if .Memory.Facts}}
+      {{range .Memory.Facts}}
+      <div class="card" id="fact-{{.ID}}">
+        <div class="meta-row">
+          <div class="mem-badges">
+            <span class="badge badge-info">{{.Topic}}</span>
+            {{range .Scopes}}<span class="badge" style="background:rgba(148,163,184,0.14);color:#cbd5e1;border:1px solid var(--border)">{{.}}</span>{{end}}
+            {{if .Pinned}}<span class="badge badge-violet">📌 pinned</span>{{end}}
+            {{if .Verified}}<span class="badge badge-pass">✓ verified</span>{{end}}
+            {{if .ExpiresAt}}<span class="badge {{if .ExpiringSoon}}badge-warn{{else}}badge-info{{end}}">⏰ {{.ExpiresAt}}</span>{{end}}
+          </div>
+          <button type="button" class="btn btn-reject" style="font-size:11px;padding:3px 8px" data-hq-action="memory-prune-fact" data-id="{{.ID}}">Prune</button>
+        </div>
+        <div style="margin-top:6px;color:var(--text)">{{.Statement}}</div>
+        <div class="muted" style="margin-top:4px;font-size:11px">ID: <code>{{.ID}}</code>{{if .ValidFrom}} · Valid from: <code>{{.ValidFrom}}</code>{{end}}</div>
+      </div>
+      {{end}}
+    {{else}}
+      <div class="card muted">No active verified facts recorded yet.</div>
+    {{end}}
+  </div>
+
+  <h2>
+    <span>Topic Wiki &amp; Active Playbooks (<span id="mem-topics-count">{{len .Memory.Topics}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Click any topic to expand its summary &amp; playbook</span>
+  </h2>
+  <div id="mem-topics-list">
+    {{if .Memory.Topics}}
+      {{range .Memory.Topics}}
+      <details class="tree-item" data-mem-topic="{{.Slug}}">
+        <summary>
+          <span class="mem-badges">
+            <strong>📘 {{.Title}}</strong>
+            <span class="badge badge-info">{{.Slug}}</span>
+            {{if .ActivePlaybook}}<span class="badge badge-violet">📋 Playbook</span>{{end}}
+            {{range .Scopes}}<span class="badge" style="background:rgba(148,163,184,0.14);color:#cbd5e1;border:1px solid var(--border)">{{.}}</span>{{end}}
+          </span>
+          <span class="muted mono">{{.LineCount}}L · {{.ByteSize}}B</span>
+        </summary>
+        <div class="tree-kids">
+          {{if .Summary}}<div style="color:#cbd5e1">{{.Summary}}</div>{{end}}
+          {{if .PlaybookOwner}}<div class="muted">Playbook owner: <code>{{.PlaybookOwner}}</code></div>{{end}}
+          {{if .ActivePlaybook}}<blockquote class="preview-quote" style="margin-top:4px">{{.ActivePlaybook}}</blockquote>{{end}}
+          {{if .BrokenLinks}}<div style="margin-top:4px"><span class="badge badge-warn">Broken links: {{range $i, $l := .BrokenLinks}}{{if $i}}, {{end}}{{$l}}{{end}}</span></div>{{end}}
+        </div>
+      </details>
+      {{end}}
+    {{else}}
+      <div class="card muted">No knowledge wiki topic pages yet.</div>
+    {{end}}
+  </div>
+
+  <h2>
+    <span>Contact &amp; Channel Dossiers (<span id="mem-entities-count">{{len .Memory.Entities}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">On-Demand Entity Lookup · 0 SessionStart Tokens</span>
+  </h2>
+  <div id="mem-entities-list">
+    {{if .Memory.Entities}}
+      {{range .Memory.Entities}}
+      <details class="tree-item" data-mem-entity="{{.Slug}}">
+        <summary>
+          <span class="mem-badges">
+            <strong>👤 {{.Name}}</strong>
+            <span class="badge badge-info">{{.Kind}}</span>
+          </span>
+          <span class="muted mono">{{.Slug}}</span>
+        </summary>
+        <div class="tree-kids">
+          {{if .Context}}<div style="color:#cbd5e1">{{.Context}}</div>{{end}}
+          {{if .Emails}}<div class="muted">Emails: {{range $i, $v := .Emails}}{{if $i}}, {{end}}<code>{{$v}}</code>{{end}}</div>{{end}}
+          {{if .Handles}}<div class="muted">Handles: {{range $i, $v := .Handles}}{{if $i}}, {{end}}<code>{{$v}}</code>{{end}}</div>{{end}}
+          {{if .Spaces}}<div class="muted">Spaces: {{range $i, $v := .Spaces}}{{if $i}}, {{end}}<code>{{$v}}</code>{{end}}</div>{{end}}
+          {{range .Notes}}<div class="muted" style="color:#cbd5e1">• {{.}}</div>{{end}}
+        </div>
+      </details>
+      {{end}}
+    {{else}}
+      <div class="card muted">No entity dossiers stored yet.</div>
+    {{end}}
+  </div>
+
+  <div class="card" id="mem-private-note" style="margin-top:14px;border-style:dashed">
+    <div class="meta-row">
+      <span><strong>🔒 Private Household Profile Boundary</strong> — <span id="mem-private-count">{{.Memory.ProfileFieldCount}}</span> field(s) across <span id="mem-private-sections">{{.Memory.ProfileSectionCount}}</span> section(s) kept strictly local in <code>private/</code> (never rendered in Console HTML/JSON).</span>
+      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="memory-profile-cmd">📋 Copy CLI</button>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== TAB 4: TOKENS ==================== -->
 <section class="tab-panel" id="panel-tokens">
   <h2>
     <span>Token Usage, Prefix Cache &amp; Context Window</span>
@@ -819,6 +1009,8 @@
 const CSRF_TOKEN = ((document.querySelector('meta[name="hq-csrf-token"]') || {}).content) || '';
 let latestState = null;
 let activeTokenWindow = 'today';
+let memSearchQuery = '';
+let memScopeFilter = 'all';
 
 function hqFetch(url, options) {
   options = options || {};
@@ -919,6 +1111,25 @@ function activateTab(tabId, persist) {
       }
     });
   });
+
+  const memSearchEl = document.getElementById('mem-search');
+  if (memSearchEl) {
+    memSearchEl.addEventListener('input', () => {
+      memSearchQuery = (memSearchEl.value || '').trim().toLowerCase();
+      if (latestState && latestState.memory) {
+        renderMemoryTab(latestState.memory);
+      }
+    });
+  }
+  document.querySelectorAll('.mem-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      memScopeFilter = btn.getAttribute('data-mem-filter') || 'all';
+      document.querySelectorAll('.mem-filter-btn').forEach(x => x.classList.toggle('active', x === btn));
+      if (latestState && latestState.memory) {
+        renderMemoryTab(latestState.memory);
+      }
+    });
+  });
 })();
 
 async function approveProposal(id, sha) {
@@ -1002,6 +1213,9 @@ function buildStaticActionCommand(btn, act, id) {
   if (act === 'dismiss-expired' && id) return 'hq approvals dismiss-expired ' + id;
   if (act === 'space-refresh' && slug) return 'hq space refresh ' + slug;
   if (act === 'space-export' && slug) return 'hq space export-artifact ' + slug;
+  if (act === 'memory-prune-fact' && id) return 'hq memory prune-fact ' + id;
+  if (act === 'memory-compact') return 'hq memory compact';
+  if (act === 'memory-profile-cmd') return 'hq memory profile get';
   return '';
 }
 
@@ -1093,6 +1307,21 @@ document.addEventListener('click', function(ev) {
       headers: postHeaders(),
       body: JSON.stringify({ id: id, csrf_token: CSRF_TOKEN })
     }).then(r => r.json()).then(d => { showFlash(d.ok ? ('Dismissed expired ' + id) : (d.error || 'Dismiss failed'), !d.ok); refreshState(); });
+  } else if (act === 'memory-prune-fact' && id) {
+    if (!confirm('Soft-expire verified fact ' + id + ' from active memory?')) return;
+    hqFetch('/api/memory/prune-fact', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ id: id, csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash(d.message || ('Pruned ' + id), !d.ok); refreshState(); });
+  } else if (act === 'memory-compact') {
+    hqFetch('/api/memory/compact-facts', {
+      method: 'POST',
+      headers: postHeaders(),
+      body: JSON.stringify({ csrf_token: CSRF_TOKEN })
+    }).then(r => r.json()).then(d => { showFlash(d.message || 'Compacted facts', !d.ok); refreshState(); });
+  } else if (act === 'memory-profile-cmd') {
+    copyCommandText('hq memory profile get');
   }
 });
 
@@ -1359,6 +1588,220 @@ function renderTokensTab(obs) {
   }
 }
 
+function matchesMemoryScope(scopes, filter, extra) {
+  if (filter === 'all') return true;
+  if (filter === 'pinned') return !!(extra && extra.pinned);
+  if (filter === 'expiring') return !!(extra && extra.expiringSoon);
+  const list = scopes || [];
+  for (const s of list) {
+    const low = String(s || '').toLowerCase();
+    if (filter === 'global' && low === 'global') return true;
+    if (filter === 'repo' && low.startsWith('repo:')) return true;
+    if (filter === 'domain' && low.startsWith('domain:')) return true;
+  }
+  return false;
+}
+
+function renderMemoryTab(mem) {
+  if (!mem) return;
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+
+  // Tab badge
+  const tbMem = document.getElementById('tab-badge-memory');
+  const warnCount = (mem.healthWarnings || []).length;
+  if (tbMem) {
+    tbMem.textContent = mem.activeFactCount || 0;
+    tbMem.className = 'tab-count' + ((mem.overBudget || warnCount > 0) ? ' warn' : '');
+  }
+
+  // Health KPIs & budget bar
+  const bTile = document.getElementById('mem-kpi-budget-tile');
+  if (bTile) bTile.className = 'kpi-tile ' + (mem.overBudget ? 'tone-danger' : 'tone-ok');
+  const fTile = document.getElementById('mem-kpi-facts-tile');
+  if (fTile) fTile.className = 'kpi-tile' + ((mem.expiringSoonCount || 0) > 0 ? ' tone-warn' : '');
+  setText('mem-kpi-lines', (mem.memoryLines || 0) + ' / ' + (mem.memoryMaxLines || 40) + ' lines');
+  setText('mem-kpi-bytes', (mem.memoryBytes || 0) + ' / ' + (mem.memoryMaxBytes || 2200) + ' B (~' + (mem.estimatedTokens || 0) + ' tok)');
+  setText('mem-kpi-facts', mem.activeFactCount || 0);
+  setText('mem-kpi-facts-sub', (mem.expiringSoonCount || 0) + ' expiring \u226472h · ' + (mem.expiredFactCount || 0) + ' expired');
+  setText('mem-kpi-topics', mem.topicCount || 0);
+  setText('mem-kpi-topics-sub', (mem.playbookCount || 0) + ' active playbooks · ' + (mem.entityCount || 0) + ' dossiers');
+  setText('mem-kpi-dream', mem.lastDreamAt || 'Not run yet');
+  setText('mem-kpi-profile', (mem.profileFieldCount || 0) + ' private profile fields (CLI-only)');
+  setText('mem-private-count', mem.profileFieldCount || 0);
+  setText('mem-private-sections', mem.profileSectionCount || 0);
+
+  const fillPct = clampPct(mem.budgetFillPct || 0);
+  const bLbl = document.getElementById('mem-budget-label');
+  if (bLbl) bLbl.innerHTML = '<strong>Index Budget Utilization:</strong> ' + Math.round(fillPct) + '% of dual line/byte cap';
+  const bBadge = document.getElementById('mem-budget-badge');
+  if (bBadge) {
+    if (mem.overBudget) { bBadge.textContent = 'OVER BUDGET'; bBadge.className = 'badge badge-danger'; }
+    else if (fillPct > 85) { bBadge.textContent = 'NEAR CAP'; bBadge.className = 'badge badge-warn'; }
+    else { bBadge.textContent = 'HEALTHY'; bBadge.className = 'badge badge-pass'; }
+  }
+  const bBar = document.getElementById('mem-budget-bar');
+  if (bBar) {
+    bBar.style.width = fillPct.toFixed(1) + '%';
+    bBar.className = 'progress-fill' + (mem.overBudget ? ' danger' : (fillPct > 85 ? ' warn' : ''));
+  }
+
+  const warnBox = document.getElementById('mem-warnings');
+  if (warnBox) {
+    const warns = mem.healthWarnings || [];
+    if (warns.length > 0) {
+      let wHtml = '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">';
+      for (const w of warns) {
+        wHtml += '<div style="margin:3px 0"><span class="badge badge-warn">⚠️ ' + escapeHTML(w) + '</span></div>';
+      }
+      warnBox.innerHTML = wHtml + '</div>';
+    } else {
+      warnBox.innerHTML = '';
+    }
+  }
+
+  // Active Priorities (MEMORY.md)
+  const prioCard = document.getElementById('mem-priorities-card');
+  if (prioCard) {
+    const prios = mem.activePriorities || [];
+    if (prios.length > 0) {
+      let pHtml = '';
+      for (const line of prios) {
+        pHtml += '<div class="mem-priority-line">' + escapeHTML(line) + '</div>';
+      }
+      prioCard.innerHTML = pHtml;
+    } else {
+      prioCard.innerHTML = '<div class="muted">No active priorities recorded in MEMORY.md yet.</div>';
+    }
+  }
+
+  const q = memSearchQuery;
+  const f = memScopeFilter;
+
+  // Filtered Facts
+  const allFacts = mem.facts || [];
+  const filteredFacts = allFacts.filter(item => {
+    if (!matchesMemoryScope(item.scopes, f, item)) return false;
+    if (!q) return true;
+    const hay = (item.id + ' ' + item.topic + ' ' + item.statement + ' ' + (item.scopes || []).join(' ')).toLowerCase();
+    return hay.includes(q);
+  });
+  setText('mem-facts-count', filteredFacts.length + (filteredFacts.length !== allFacts.length ? (' / ' + allFacts.length) : ''));
+  const factsList = document.getElementById('mem-facts-list');
+  if (factsList) {
+    if (filteredFacts.length === 0) {
+      factsList.innerHTML = '<div class="card muted">' + (allFacts.length === 0 ? 'No active verified facts recorded yet.' : 'No facts match the current search/filter.') + '</div>';
+    } else {
+      let html = '';
+      for (const item of filteredFacts) {
+        let badges = '<span class="badge badge-info">' + escapeHTML(item.topic) + '</span>';
+        for (const sc of (item.scopes || [])) {
+          badges += '<span class="badge" style="background:rgba(148,163,184,0.14);color:#cbd5e1;border:1px solid var(--border)">' + escapeHTML(sc) + '</span>';
+        }
+        if (item.pinned) badges += '<span class="badge badge-violet">📌 pinned</span>';
+        if (item.verified) badges += '<span class="badge badge-pass">✓ verified</span>';
+        if (item.expiresAt) {
+          badges += '<span class="badge ' + (item.expiringSoon ? 'badge-warn' : 'badge-info') + '">⏰ ' + escapeHTML(item.expiresAt) + '</span>';
+        }
+        html += '<div class="card" id="fact-' + escapeHTML(item.id) + '">' +
+          '<div class="meta-row"><div class="mem-badges">' + badges + '</div>' +
+          '<button type="button" class="btn btn-reject" style="font-size:11px;padding:3px 8px" data-hq-action="memory-prune-fact" data-id="' + escapeHTML(item.id) + '">Prune</button></div>' +
+          '<div style="margin-top:6px;color:var(--text)">' + escapeHTML(item.statement) + '</div>' +
+          '<div class="muted" style="margin-top:4px;font-size:11px">ID: <code>' + escapeHTML(item.id) + '</code>' +
+          (item.validFrom ? (' · Valid from: <code>' + escapeHTML(item.validFrom) + '</code>') : '') +
+          '</div></div>';
+      }
+      factsList.innerHTML = html;
+    }
+  }
+
+  // Filtered Topics (preserving open <details> state across 5s refreshes)
+  const allTopics = mem.topics || [];
+  const filteredTopics = allTopics.filter(tp => {
+    if (f === 'pinned' || f === 'expiring') return false;
+    if (!matchesMemoryScope(tp.scopes, f, null)) return false;
+    if (!q) return true;
+    const hay = (tp.slug + ' ' + tp.title + ' ' + (tp.summary || '') + ' ' + (tp.playbookOwner || '') + ' ' + (tp.activePlaybook || '') + ' ' + (tp.scopes || []).join(' ')).toLowerCase();
+    return hay.includes(q);
+  });
+  setText('mem-topics-count', filteredTopics.length + (filteredTopics.length !== allTopics.length ? (' / ' + allTopics.length) : ''));
+  const topicsList = document.getElementById('mem-topics-list');
+  if (topicsList) {
+    const openTopics = new Set();
+    topicsList.querySelectorAll('details[open][data-mem-topic]').forEach(d => openTopics.add(d.getAttribute('data-mem-topic')));
+    if (filteredTopics.length === 0) {
+      topicsList.innerHTML = '<div class="card muted">' + (allTopics.length === 0 ? 'No knowledge wiki topic pages yet.' : 'No topic pages match the current search/filter.') + '</div>';
+    } else {
+      let tHtml = '';
+      for (const tp of filteredTopics) {
+        const openAttr = openTopics.has(tp.slug) ? ' open' : '';
+        let badges = '<strong>📘 ' + escapeHTML(tp.title) + '</strong> <span class="badge badge-info">' + escapeHTML(tp.slug) + '</span>';
+        if (tp.activePlaybook) badges += ' <span class="badge badge-violet">📋 Playbook</span>';
+        for (const sc of (tp.scopes || [])) {
+          badges += ' <span class="badge" style="background:rgba(148,163,184,0.14);color:#cbd5e1;border:1px solid var(--border)">' + escapeHTML(sc) + '</span>';
+        }
+        let body = '';
+        if (tp.summary) body += '<div style="color:#cbd5e1">' + escapeHTML(tp.summary) + '</div>';
+        if (tp.playbookOwner) body += '<div class="muted">Playbook owner: <code>' + escapeHTML(tp.playbookOwner) + '</code></div>';
+        if (tp.activePlaybook) body += '<blockquote class="preview-quote" style="margin-top:4px">' + escapeHTML(tp.activePlaybook) + '</blockquote>';
+        if (tp.brokenLinks && tp.brokenLinks.length > 0) {
+          body += '<div style="margin-top:4px"><span class="badge badge-warn">Broken links: ' + escapeHTML(tp.brokenLinks.join(', ')) + '</span></div>';
+        }
+        tHtml += '<details class="tree-item" data-mem-topic="' + escapeHTML(tp.slug) + '"' + openAttr + '>' +
+          '<summary><span class="mem-badges">' + badges + '</span><span class="muted mono">' + (tp.lineCount || 0) + 'L · ' + (tp.byteSize || 0) + 'B</span></summary>' +
+          '<div class="tree-kids">' + (body || '<div class="muted">No summary details.</div>') + '</div></details>';
+      }
+      topicsList.innerHTML = tHtml;
+    }
+  }
+
+  // Filtered Entities (preserving open <details> state across 5s refreshes)
+  const allEntities = mem.entities || [];
+  const filteredEntities = allEntities.filter(ent => {
+    if (f !== 'all') return false;
+    if (!q) return true;
+    const hay = (ent.slug + ' ' + ent.name + ' ' + ent.kind + ' ' + (ent.context || '') + ' ' +
+      (ent.emails || []).join(' ') + ' ' + (ent.handles || []).join(' ') + ' ' +
+      (ent.spaces || []).join(' ') + ' ' + (ent.notes || []).join(' ')).toLowerCase();
+    return hay.includes(q);
+  });
+  setText('mem-entities-count', filteredEntities.length + (filteredEntities.length !== allEntities.length ? (' / ' + allEntities.length) : ''));
+  const entList = document.getElementById('mem-entities-list');
+  if (entList) {
+    const openEnts = new Set();
+    entList.querySelectorAll('details[open][data-mem-entity]').forEach(d => openEnts.add(d.getAttribute('data-mem-entity')));
+    if (filteredEntities.length === 0) {
+      entList.innerHTML = '<div class="card muted">' + (allEntities.length === 0 ? 'No entity dossiers stored yet.' : 'No dossiers match the current search/filter.') + '</div>';
+    } else {
+      let eHtml = '';
+      for (const ent of filteredEntities) {
+        const openAttr = openEnts.has(ent.slug) ? ' open' : '';
+        let body = '';
+        if (ent.context) body += '<div style="color:#cbd5e1">' + escapeHTML(ent.context) + '</div>';
+        if (ent.emails && ent.emails.length > 0) body += '<div class="muted">Emails: ' + ent.emails.map(v => '<code>' + escapeHTML(v) + '</code>').join(', ') + '</div>';
+        if (ent.handles && ent.handles.length > 0) body += '<div class="muted">Handles: ' + ent.handles.map(v => '<code>' + escapeHTML(v) + '</code>').join(', ') + '</div>';
+        if (ent.spaces && ent.spaces.length > 0) body += '<div class="muted">Spaces: ' + ent.spaces.map(v => '<code>' + escapeHTML(v) + '</code>').join(', ') + '</div>';
+        for (const n of (ent.notes || [])) {
+          body += '<div class="muted" style="color:#cbd5e1">• ' + escapeHTML(n) + '</div>';
+        }
+        eHtml += '<details class="tree-item" data-mem-entity="' + escapeHTML(ent.slug) + '"' + openAttr + '>' +
+          '<summary><span class="mem-badges"><strong>👤 ' + escapeHTML(ent.name) + '</strong> <span class="badge badge-info">' + escapeHTML(ent.kind) + '</span></span>' +
+          '<span class="muted mono">' + escapeHTML(ent.slug) + '</span></summary>' +
+          '<div class="tree-kids">' + (body || '<div class="muted">No notes stored.</div>') + '</div></details>';
+      }
+      entList.innerHTML = eHtml;
+    }
+  }
+
+  const filterSum = document.getElementById('mem-filter-summary');
+  if (filterSum) {
+    if (q || f !== 'all') {
+      filterSum.textContent = 'Showing ' + filteredFacts.length + ' fact(s), ' + filteredTopics.length + ' topic(s), and ' + filteredEntities.length + ' dossier(s)' + (q ? (' matching "' + q + '"') : '') + (f !== 'all' ? (' [filter: ' + f + ']') : '') + '.';
+    } else {
+      filterSum.textContent = '';
+    }
+  }
+}
+
 function renderAllFromState(state) {
   if (!state) return;
   latestState = state;
@@ -1523,7 +1966,12 @@ function renderAllFromState(state) {
     }
   }
 
-  // 3. Tokens Tab
+  // 3. Memory Tab
+  if (state.memory) {
+    renderMemoryTab(state.memory);
+  }
+
+  // 4. Tokens Tab
   renderTokensTab(obs);
 
   // 4. Ops: Quota & Schedules & Health
@@ -1609,6 +2057,9 @@ function renderAllFromState(state) {
       latestState = JSON.parse(el.textContent);
       if (latestState && latestState.observability) {
         renderTokensTab(latestState.observability);
+      }
+      if (latestState && latestState.memory) {
+        renderMemoryTab(latestState.memory);
       }
     }
   } catch (err) {

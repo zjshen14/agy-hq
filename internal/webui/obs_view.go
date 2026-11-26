@@ -70,6 +70,7 @@ func StateBootstrapJSON(state DashboardState) template.JS {
 		obsCopy.TaskBadges = nil
 		payload = map[string]interface{}{
 			"observability": obsCopy,
+			"memory":        state.Memory,
 		}
 	} else {
 		cp := state
@@ -137,7 +138,7 @@ func SyncConsoleLiveArtifact(vaultDir string, state DashboardState, unchangedBod
 	if artDir != "" {
 		_ = os.MkdirAll(artDir, 0o755)
 		meta := map[string]interface{}{
-			"summary":         "Live Interactive [HQ] Console (Mobile & Artifact Pane) — Needs Me, Work, Tokens, and Ops",
+			"summary":         "Live Interactive [HQ] Console (Mobile & Artifact Pane) — Needs Me, Work, Memory, Tokens, and Ops",
 			"updatedAt":       time.Now().UTC().Format(time.RFC3339Nano),
 			"requestFeedback": false,
 			"userFacing":      true,

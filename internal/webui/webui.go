@@ -62,6 +62,7 @@ type DashboardState struct {
 	UpdatedAt      string                         `json:"updatedAt"`
 	Quota          kernel.QuotaState              `json:"quota"`
 	Observability  obs.DashboardSummary           `json:"observability"`
+	Memory         MemoryDashboardSummary         `json:"memory,omitempty"`
 	Pending        []approvals.Proposal           `json:"pending"`
 	Schedules      []ScheduleSummaryRow           `json:"schedules,omitempty"`
 	ActiveSpaces   []ConsoleSpace                 `json:"activeSpaces,omitempty"`
@@ -542,6 +543,7 @@ func NewHandler(vaultDir string) http.Handler {
 		_, _ = w.Write([]byte(faviconSVG))
 	})
 	registerProactiveV3Routes(mux, vaultDir, csrfToken)
+	registerMemoryRoutes(mux, vaultDir, csrfToken)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		state := loadStateCached(vaultDir)
@@ -673,7 +675,7 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	statAt(12, filepath.Join(mem, "channels"))
 	statAt(13, filepath.Join(vaultDir, "private", "channels"))
 	statAt(14, filepath.Join(mem, "workspaces.json"))
-	fp[15] = computeObsStateStamp(vaultDir)
+	fp[15] = computeObsStateStamp(vaultDir) ^ computeMemoryStateStamp(vaultDir)
 	return fp
 }
 
@@ -817,6 +819,7 @@ func loadStateWithObsMaxAge(vaultDir, flashMsg string, obsCacheMaxAge time.Durat
 		UpdatedAt:      now.Format("15:04:05"),
 		Quota:          quota,
 		Observability:  obsSum,
+		Memory:         BuildMemoryDashboard(vaultDir, now),
 		Pending:        pending,
 		Schedules:      schedules,
 		ActiveSpaces:   activeSpaces,
