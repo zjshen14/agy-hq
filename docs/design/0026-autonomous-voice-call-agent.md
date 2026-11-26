@@ -19,10 +19,10 @@ As established in [Research 21](../research/21_autonomous_voice_call_agent_audit
 
 ### Architectural Goals
 
-1. **Hold-Waiter & Screened Warm Handoff First (`hold_and_bridge`), Bounded Autonomy Second (`autonomous_low_stakes`):** Optimize Phase 2A/2B around rock-solid IVR navigation, redial/callback handling, 60–120m hold endurance, and screened **`Press-1` Mobile PSTN Warm Transfer**, then unlock end-to-end autonomous dialogue strictly for approved low-stakes commercial calls in Phase 2C.
-2. **3-Stage Hierarchical Hold Gatekeeper (`< $0.06` AI Spend per 90m Hold):** Combine `Stage 0` pure-Go DSP + repeating-audio loop fingerprinting (`0` tokens), `Stage 1` burst transcription (`gemini-3.5-transcribe-live`) + 5-way utterance classification, and `Stage 2` on-demand `gemini-3.8-live` activation with a `4.0s` RAM pre-roll buffer and zero hold-music context bloat.
-3. **1-Tap Cryptographic Pre-Call Approval (`hq call propose` + `ask_question`):** Gate every call via `mode: always` ([RFC-0021](./0021-customizable-approval-policy-and-ux.md)) over a SHA-256-pinned `CallPlan` binding destination E.164, counterparty policy mode, opening disclosure, `max_duration` (enforced at the carrier switch via `time_limit_secs`), `max_cost_usd`, `max_redials`, and symbolic Vault verification handles.
-4. **Counterparty Policy Enforcement & 3-Tier Sovereign Vault PII Broker:** Mechanically enforce `hold_and_bridge_only` for `gov_irs_agency` and `bank_brokerage` profiles, lock `ssn`/`ein`/`itin`/`agi`/`cvv`/`otp` permanently to `human_takeover_only`, inject `dtmf_only` fields out-of-band without LLM exposure, scrub `spoken_redacted` fields before disk/SSE writes, and **hard-pause all AI audio capture/transcription the instant the human user takes over**.
+1. **Autonomous-First, Escalate-on-Block (`autonomous_with_escalation` Default):** When a live representative picks up, the agent transparently discloses its automated-assistant identity, **describes the user's issue, resolves the call end-to-end within approved `CallPlan` guardrails, and reports back asynchronously**—escalating via Screened **`Press-1` Warm Handoff** *only* when the representative hits a hard statutory/identity/approval wall (e.g., IRS `26 U.S.C. § 6103` account lookup, Tier-3 secrets, or unapproved fees). `hold_and_bridge_only` remains available (and default for `bank_brokerage` fraud-sensitive queues).
+2. **Option 1 Confirmed (`GEMINI_API_KEY` Direct Live API) + 3-Stage Hold Gatekeeper (`< $0.06` AI Spend per 90m Hold):** Antigravity subscription quotas cover turn-based text models only (`agy models`), not Gemini Live WebSockets. `agy-hq` uses direct pay-as-you-go Gemini Developer API (Paid Tier zero-training): `Stage 0` pure-Go DSP + repeating-audio loop fingerprinting (`0` tokens), `Stage 1` `gemini-3.5-transcribe-live` (`TEXT`-only burst classifier), and `Stage 2` on-demand `gemini-3.8-live` (or `gemini-3.8-live-extended-thinking` for complex issues) with a `4.0s` RAM pre-roll buffer and zero hold-music context bloat.
+3. **Pluggable Dual-Transport Layer (`Telnyx` / `Twilio` Cloud PSTN + Optional Local `macos_continuity`):** Ship zero-dependency pure-Go cloud PSTN drivers (`telnyx`, `twilio`) for headless Linux/SSH hosts and away-from-home mobility, while exposing an `hq-connector-protocol/v1` voice transport seam for an optional `~300 LoC` Swift **`macos_continuity`** companion driver (`$0/min` via local MacBook + nearby iPhone SIM using `AudioHardwareCreateProcessTap` + BlackHole + `AXUIElement` keypad).
+4. **1-Tap Cryptographic Pre-Call Approval (`hq call propose` + `ask_question`) & 3-Tier Sovereign Vault PII Broker:** Gate every call via `mode: always` ([RFC-0021](./0021-customizable-approval-policy-and-ux.md)) over a SHA-256-pinned `CallPlan`, permanently lock `ssn`/`ein`/`itin`/`agi`/`cvv`/`otp` to `human_takeover_only`, inject `dtmf_only` fields out-of-band without LLM exposure, scrub `spoken_redacted` fields in real time, and **hard-pause all AI capture/transcription the instant the user joins**.
 5. **100% Pure-Stdlib Ring-0 Sovereignty & Post-RFC-0025 CI Hygiene (`Gates H4-A & H5`):** Implement `internal/voice` in pure Go stdlib (`0` external dependencies in [`go.mod`](../../go.mod)), decompose CLI/hook/WebUI additions into dedicated files respecting all [`internal/ci/slop.go`](../../internal/ci/slop.go) monolith LOC ratchets (`H5-F`), and guard `<vault>/memory/calls.json` under `store.RankCalls = 68` (`H5-C`).
 
 ### Explicit Non-Goals
@@ -86,8 +86,8 @@ stateDiagram-v2
     DIALING --> IVR_NAV: Call Answered (Silent Listen + DTMF First on gov/bank)
     IVR_NAV --> IVR_NAV: send_dtmf / send_vault_dtmf (1,600ms menu patience)
     IVR_NAV --> HOLD_STAGE0_DSP: Queue Transfer / Hold Music Detected (Close Stage 2 WSS)
-    IVR_NAV --> LIVE_HUMAN_STALL: Direct Human Pickup (hold_and_bridge)
-    IVR_NAV --> AUTONOMOUS_DIALOGUE: Direct Human Pickup (autonomous_low_stakes)
+    IVR_NAV --> AUTONOMOUS_DIALOGUE: Direct Human Pickup (autonomous_with_escalation default)
+    IVR_NAV --> LIVE_HUMAN_STALL: Direct Human Pickup (hold_and_bridge_only opt-in)
 
     HOLD_STAGE0_DSP --> HOLD_STAGE0_DSP: Music / Silence / Cached Shimmer Hash (0 Tokens)
     HOLD_STAGE0_DSP --> HOLD_STAGE1_CLASSIFY: Novel Speech Cadence (> 350ms)
@@ -95,12 +95,12 @@ stateDiagram-v2
     HOLD_STAGE1_CLASSIFY --> CALLBACK_SCHEDULED: QUEUE_CALLBACK_OFFER Accepted (Hangup & Track WaitingOn)
     HOLD_STAGE1_CLASSIFY --> REDIAL_BACKOFF: COURTESY_DISCONNECT (Cooldown Retry if Approved)
     HOLD_STAGE1_CLASSIFY --> IVR_NAV: IVR_PROMPT (Wake Stage 2 WSS + Flush 4.0s Pre-Roll)
-    HOLD_STAGE1_CLASSIFY --> LIVE_HUMAN_STALL: LIVE_HUMAN_PICKUP (hold_and_bridge)
-    HOLD_STAGE1_CLASSIFY --> AUTONOMOUS_DIALOGUE: LIVE_HUMAN_PICKUP (autonomous_low_stakes)
+    HOLD_STAGE1_CLASSIFY --> AUTONOMOUS_DIALOGUE: LIVE_HUMAN_PICKUP (Explain Issue & Resolve)
+    HOLD_STAGE1_CLASSIFY --> LIVE_HUMAN_STALL: LIVE_HUMAN_PICKUP (hold_and_bridge_only)
 
     AUTONOMOUS_DIALOGUE --> HOLD_STAGE0_DSP: Placed Back on Hold (Close Stage 2 WSS)
-    AUTONOMOUS_DIALOGUE --> LIVE_HUMAN_STALL: Unexpected Question / Tier-3 Secret Requested
-    AUTONOMOUS_DIALOGUE --> ENDED: Objective Resolved (complete_call)
+    AUTONOMOUS_DIALOGUE --> LIVE_HUMAN_STALL: Blocked (IRS 6103 Auth / Tier-3 Secret / Unapproved Fee)
+    AUTONOMOUS_DIALOGUE --> ENDED: Issue Resolved Autonomously (complete_call -> Report Back)
 
     LIVE_HUMAN_STALL --> SCREENED_BRIDGE_RINGING: Stage 2 Polite Stall + TierInterrupt + Dial Mobile
     SCREENED_BRIDGE_RINGING --> HUMAN_HANDOVER_1TO1: User Presses '1' (Kill AI Capture & Drop AI Leg)
@@ -135,6 +135,7 @@ Initialized interactively via `hq call init` and protected from LLM reads across
       "models": {
         "stage1_transcribe": "gemini-3.5-transcribe-live",
         "stage2_dialogue": "gemini-3.8-live",
+        "stage2_complex_dialogue": "gemini-3.8-live-extended-thinking",
         "voice_name": "Puck"
       },
       "ingress": {
@@ -176,7 +177,7 @@ Managed via interactive TTY `hq call profile set <slug>` (reading secret values 
   "slug": "irs-individual",
   "vendor_name": "Internal Revenue Service (Individual Accounts)",
   "counterparty_class": "gov_irs_agency",
-  "enforced_policy_ceiling": "hold_and_bridge_only",
+  "default_policy_mode": "autonomous_with_escalation",
   "known_numbers": ["+18008291040"],
   "fields": {
     "callback_mobile": {
@@ -195,12 +196,12 @@ Managed via interactive TTY `hq call profile set <slug>` (reading secret values 
 
 #### Counterparty Class Matrix (Enforced in Ring 0)
 
-| `counterparty_class` | Allowed `policy_mode` Values | IVR Behavior | Live Representative Behavior | Non-Downgradable `human_takeover_only` Keys |
+| `counterparty_class` | Default `policy_mode` | IVR Behavior | Live Representative Behavior | Non-Downgradable `human_takeover_only` Keys |
 | :--- | :--- | :--- | :--- | :--- |
-| **`gov_irs_agency`** | `hold_and_bridge_only` *(locked)* | Silent listen + keypad DTMF first; minimal neutral topic words (*"account notice"*) only if speech-IVR forces it | Capture rep name/badge ID $\rightarrow$ 1-sentence hold-assistant handoff notice $\rightarrow$ immediate Screened Warm Bridge | `ssn`, `ein`, `itin`, `dob`, `agi`, `pin`, `caf_number` |
-| **`bank_brokerage`** | `hold_and_bridge_only` *(locked)* | **Silent listen + keypad `dtmf_only` exclusively** (`0` synthetic TTS injected during IVR to avoid `Pindrop` flags) | Immediate Screened Warm Bridge + polite stall | `ssn`, `ein`, `dob`, `account_number` (spoken), `card_number`, `cvv`, `otp_code`, `wire_pin` |
-| **`healthcare_insurance`** | `hold_and_bridge_only` *(default)*, `autonomous_low_stakes` *(scheduling only)* | DTMF + spoken menu routing | Scheduling/hours allowed if `autonomous_low_stakes`; clinical/claims escalates to Warm Bridge | `ssn`, `card_number`, `cvv`, `otp_code`, `clinical_notes` |
-| **`routine_commercial`** | `hold_and_bridge`, `autonomous_low_stakes` | Full DTMF + speech IVR navigation | Resolves bounded task within `CallPlan.Constraints`, or bridges user on unexpected commitments | `ssn`, `ein`, `card_number`, `cvv`, `bank_account`, `otp_code` |
+| **`gov_irs_agency`** | `autonomous_with_escalation` *(or `hold_and_bridge_only`)* | Silent listen + keypad DTMF first; minimal neutral topic words only if speech-IVR forces it | Transparent AI intro $\rightarrow$ **explains the tax issue and resolves procedural/general questions autonomously**; if CSR requires taxpayer `§ 6103` authentication to open the account, stalls politely and triggers Screened Warm Bridge with brief | `ssn`, `ein`, `itin`, `dob`, `agi`, `pin`, `caf_number` |
+| **`bank_brokerage`** | `hold_and_bridge_only` *(fraud-safe default; `autonomous_with_escalation` opt-in for non-account inquiries)* | **Silent listen + keypad `dtmf_only` exclusively** (`0` synthetic TTS during bank IVRs to avoid `Pindrop` spoofing flags) | Immediate Screened Warm Bridge (default) or general-policy inquiry without account auth | `ssn`, `ein`, `dob`, `account_number` (spoken), `card_number`, `cvv`, `otp_code`, `wire_pin` |
+| **`healthcare_insurance`** | `autonomous_with_escalation` | DTMF + spoken menu routing | Resolves scheduling, billing, and benefits inquiries autonomously; escalates on clinical PHI or patient-only auth | `ssn`, `card_number`, `cvv`, `otp_code`, `clinical_notes` |
+| **`routine_commercial`** | `autonomous_with_escalation` | Full DTMF + speech IVR navigation | Resolves full issue end-to-end within `CallPlan` constraints and reports back; escalates only on unapproved fees, cancellations, or Tier-3 secrets | `ssn`, `ein`, `card_number`, `cvv`, `bank_account`, `otp_code` |
 
 - **Agent-Safe Metadata Listing (`hq call profile list`):** Outputs only `{slug, vendor_name, counterparty_class, enforced_policy_ceiling, known_numbers, field_names_and_tiers}`—**never** secret field `value` strings.
 
@@ -231,8 +232,9 @@ Register `phone_call` (`mode: always`) in [`internal/approvals/policy.go`](../..
 hq call propose \
   --to="+18008291040" \
   --profile="irs-individual" \
-  --policy-mode="hold_and_bridge_only" \
-  --purpose="Reach IRS Individual Accounts representative regarding CP2000 notice and bridge Alice Chen onto the line" \
+  --policy-mode="autonomous_with_escalation" \
+  --model="gemini-3.8-live-extended-thinking" \
+  --purpose="Describe the CP2000 notice discrepancy to the IRS representative, get exact response instructions/fax/campus address, and resolve end-to-end; escalate via screened bridge ONLY if the rep requires direct taxpayer verification to access the account" \
   --ivr-goal="Select English -> Individual tax account / notice inquiry -> Hold for live representative" \
   --allow-queue-callback=true \
   --verify-fields="callback_mobile" \
@@ -244,8 +246,8 @@ hq call propose \
 
 `hq call propose` runs five deterministic Ring-0 validations before writing `<vault>/private/calls/plans/call-plan-<hex>.json` (`0600`) and staging `Proposal` (`ActionType: "phone_call_dial"`):
 1. **Destination Firewall (`internal/voice/firewall.go`):** Requires strict E.164 (`^\+[1-9][0-9]{6,14}$`); unconditionally hard-blocks emergency/public-safety codes (`911`, `988`, `112`, `999`, `000`, `933`, `[2-8]11` and `+1`-prefixed variants), NANP premium-rate (`+1900*`, `+1976*`, `NPA-976`), UK `+449*`/`+4470*`, and all 20 Caribbean/Atlantic Wangiri revenue-share NPAs (`242`, `246`, `264`, `268`, `284`, `345`, `441`, `473`, `649`, `658`, `664`, `721`, `758`, `767`, `784`, `809`, `829`, `849`, `868`, `869`, `876`) unless overridden in `instance.json`.
-2. **Counterparty Policy & Secret Tier Check:** Rejects `autonomous_low_stakes` when `counterparty_class` is `gov_irs_agency` or `bank_brokerage` (or when `--to` matches built-in IRS/SSA/Treasury toll-free numbers even without a profile!), and rejects any `human_takeover_only` field in `--verify-fields`.
-3. **Self-Call Bridge Precheck:** When `policy_mode` involves human bridge, verifies `bridge_caller_id_e164 != ""` and `bridge_caller_id_e164 != user_mobile_e164`.
+2. **Counterparty Secret-Tier & Disclosure Check:** Rejects any `human_takeover_only` field (`ssn`, `ein`, `itin`, `agi`, `card_number`, `cvv`, `otp_code`) in `--verify-fields`, enforces upfront automated-assistant disclosure, and warns/flags if `autonomous_with_escalation` is selected on a `bank_brokerage` profile.
+3. **Self-Call Bridge Precheck:** When using cloud PSTN with mobile warm takeover, verifies `bridge_caller_id_e164 != ""` and `bridge_caller_id_e164 != user_mobile_e164`.
 4. **Recipient Local Calling-Hours Check (`08:00–21:00`):** Evaluates geographic NPA timezone window (exempting `800/888/877/866/855/844/833` 24/7 toll-free numbers unless known hours are configured).
 5. **Duration & Daily Budget Guard:** Verifies `max_duration <= hard_ceiling_duration_secs` and `today_voice_spend_usd + max_cost_usd <= daily_budget_usd`.
 
@@ -255,8 +257,8 @@ Before calling `ask_question`, the agent renders the markdown blockquote preview
 
 > **📞 Outbound Phone Call Proposal (`prop-1795218400-c4d8e2f1a9b0` · `sha256:4a7c91e0b2d8`)**
 > - **Target & Counterparty Class:** `+18008291040` (*Internal Revenue Service — `gov_irs_agency`*)
-> - **Policy Mode:** `hold_and_bridge_only` *(AI navigates IVR & waits on hold; bridges user immediately upon CSR pickup; 0 identity auth by AI)*
-> - **Caller ID & Bridge:** Outbound `+16505550142` (`telnyx`) · Screened Warm Bridge `+14155550190` $\rightarrow$ `***-***-0142` (`Press 1` gate)
+> - **Policy Mode & Model:** `autonomous_with_escalation` via `gemini-3.8-live-extended-thinking` *(AI describes issue and resolves end-to-end; escalates to you ONLY if rep requires direct `§ 6103` taxpayer verification or Tier-3 secret)*
+> - **Caller ID & Bridge:** Outbound `+16505550142` (`telnyx`) · Fallback Warm Bridge `+14155550190` $\rightarrow$ `***-***-0142` (`Press 1` gate)
 > - **IVR & Queue Plan:** English $\rightarrow$ Individual account/notice queue · `allow_queue_callback: true` (`callback_mobile` [`dtmf_only`]) · `max_redials: 3`
 > - **Recording & Hard Caps:** `record: none` (`0` audio files saved; capture auto-killed on user handover) · `max_duration: 120m0s` · `max_cost: $2.00`
 
@@ -315,10 +317,10 @@ When Stage 2 wakes for `IVR_NAV`, `LIVE_HUMAN_STALL`, or `AUTONOMOUS_DIALOGUE`:
 - **Closed 6-Tool Sandbox (`behavior: "NON_BLOCKING"`):**
   1. `send_dtmf(digits: string)` — validates `^[0-9*#wW]{1,16}$` and dispatches carrier out-of-band DTMF.
   2. `send_vault_dtmf(field_name: string, suffix?: string)` — verifies `field_name` is in `CallPlan.AllowedVerifyFields` (`dtmf_only` or `spoken_redacted`), reads `<vault>/private/calls/profiles/<slug>.json` in Go, sends carrier DTMF, and logs `[REDACTED:DTMF:<field_name>]`.
-  3. `read_allowed_verify_field(field_name: string)` — disabled completely in `hold_and_bridge_only`; in `autonomous_low_stakes`, returns only approved `spoken_redacted` fields and arms the real-time transcript scrubber.
+  3. `read_allowed_verify_field(field_name: string)` — disabled in `hold_and_bridge_only`; in `autonomous_with_escalation`, returns only `CallPlan`-approved `spoken_redacted` fields (never Tier-3 `human_takeover_only` secrets) and arms the real-time Aho-Corasick + spoken-digit scrubber.
   4. `enter_hold_wait(reason: string)` — checkpoints breadcrumb text, closes Stage 2 WSS, and arms Stage 0 hold gatekeeper.
-  5. `request_human_takeover(reason: string, rep_name_or_badge?: string)` — **zero phone-number parameter** (eliminating toll-fraud redirect injection); triggers Screened Warm Bridge to pinned `user_mobile_e164`.
-  6. `complete_call(outcome_status: string, summary: string, reference_number?: string)` — polite closing + carrier hangup.
+  5. `request_human_takeover(reason: string, summary_for_user: string, rep_name_or_badge?: string)` — **zero phone-number parameter** (eliminating toll-fraud redirect injection); triggers Screened Warm Bridge to pinned `user_mobile_e164` and speaks `summary_for_user` in the private `Press-1` whisper prompt so the user joins with full context of what was already explained.
+  6. `complete_call(outcome_status: string, summary: string, reference_number?: string)` — polite closing + carrier hangup + asynchronous post-call report.
 
 ---
 
@@ -390,23 +392,27 @@ When the call terminates:
 
 Per [RFC-0011](./0011-ci-pipeline-and-regression-harness.md) and Gate `H5-E` ([`docs/product/0003-critical-user-journeys.md`](../product/0003-critical-user-journeys.md) parity), Phase 2 adds **`CUJ-42` (`TestCUJ42_AutonomousVoiceCallHoldGatekeeperAndWarmHandover`)** running 100% offline in `< 600ms`:
 1. Spins up local `httptest.Server` mocks for Telnyx Call Control v2, Twilio Voice/Conference, `gemini-3.5-transcribe-live` (`Stage 1`), and `gemini-3.8-live` (`Stage 2`).
-2. Verifies `PreToolUse` denies direct `hq call dial-plan` and `curl https://api.telnyx.com/v2/calls`, while `hq call propose` rejects `911`, `+19005550199`, `+18095550199`, downgrading `ssn` from `human_takeover_only`, and `autonomous_low_stakes` on `gov_irs_agency`.
-3. Replays a scripted IRS long-hold call: `SIP 486 Busy` (`1` redial) $\rightarrow$ `IVR_NAV` (`send_vault_dtmf(callback_mobile)`) $\rightarrow$ `HOLD_STAGE0_DSP` (`Stage 2` WSS verified closed; synthetic music + repeated comfort-loop frames verified `0` Stage 2 tokens & `1` Stage 1 transcription cached on repeat `#2`) $\rightarrow$ `LIVE_HUMAN_PICKUP` (*"IRS, Agent Miller, ID 1004821"*) $\rightarrow$ `SCREENED_BRIDGE_RINGING` (simulates voicemail non-DTMF leg rejected, followed by human `dtmf='1'` accepted) $\rightarrow$ verifies AI transcription hard-stops before simulated post-handover speech $\rightarrow$ verifies `0` occurrences of secret digits across `calls.json`, `summary.json`, `CONSOLE.md`, and SSE streams.
+2. Verifies `PreToolUse` denies direct `hq call dial-plan` and `curl https://api.telnyx.com/v2/calls`, while `hq call propose` rejects `911`, `+19005550199`, `+18095550199`, and downgrading `ssn` from `human_takeover_only`.
+3. Replays two scripted calls: (a) an autonomous commercial/procedural call completing end-to-end via `complete_call` with `0` user interruption and full spoken-digit redaction; and (b) an IRS long-hold call (`SIP 486 Busy` redial $\rightarrow$ `IVR_NAV` $\rightarrow$ `HOLD_STAGE0_DSP` with `Stage 2` WSS closed & comfort-loop cached $\rightarrow$ `AUTONOMOUS_DIALOGUE` explaining the notice $\rightarrow$ CSR demands taxpayer `§ 6103` verification $\rightarrow$ `request_human_takeover` $\rightarrow$ `SCREENED_BRIDGE_RINGING` rejecting voicemail & accepting `dtmf='1'` $\rightarrow$ AI capture hard-stopped before post-handover speech $\rightarrow$ `0` secret leaks across `calls.json`, `summary.json`, `CONSOLE.md`, and SSE streams).
 
-### 8.2 Phased Build Plan (Post-RFC Approval — `hold_and_bridge` MVP First)
+### 8.2 Phased Build Plan (Post-RFC Approval — `Autonomous-First` + `Option 1` Gemini Live)
 
 | Phase | Scope | Concrete Deliverables |
 | :--- | :--- | :--- |
-| **Phase 2A: Ring-0 Firewall, `CallPlan` Approval & `hold_and_bridge` Core** | Approved outbound call, out-of-band DTMF IVR navigation, redial/callback handling, and Screened `Press-1` Mobile Warm Bridge on Telnyx + Gemini | `internal/voice/{firewall,plan,store,ws,dsp,carrier_telnyx,model_gemini,supervisor}.go`, `phone_call` rule in [`internal/approvals/policy.go`](../../internal/approvals/policy.go), `RankCalls = 68` in [`internal/store/store.go`](../../internal/store/store.go), `"calls.json"` in [`internal/ci/slop.go`](../../internal/ci/slop.go), `Ring0ProtectedPaths` in [`internal/rsi/tcb.go`](../../internal/rsi/tcb.go), `cmd/hq/call_cli.go`. |
-| **Phase 2B: 3-Stage Long-Hold Gatekeeper, Live Drawer & Channel Push** | Survive 60–120m holds at `< $0.06` AI cost + multi-channel pickup alerts | `internal/voice/hold_gatekeeper.go` (`Stage 0` DSP + shimmer hash + `Stage 1` `gemini-3.5-transcribe-live`), `internal/webui/calls.go` (`:4242` SSE Live Call Drawer + AuxPane parity), `internal/hooks/voice_surfaces.go`, [RFC-0023](./0023-front-desk-channel-bridge.md) `TierInterrupt` pickup fan-out. |
-| **Phase 2C: Twilio Co-Primary Driver & Opt-In `autonomous_low_stakes` Mode** | Full Twilio `<Conference>` parity + bounded autonomous routine errands | `internal/voice/carrier_twilio.go`, `read_allowed_verify_field` + real-time spoken-digit Aho-Corasick scrubber, Vault skill `local/skills/phone-call/SKILL.md` (or companion pack skill), `hq-connector-protocol/v1` hook for optional `hq-voice-sip`. |
+| **Phase 2A: Ring-0 Firewall, `CallPlan` Approval & Autonomous-First Core (`Option 1`)** | Approved outbound call, out-of-band DTMF IVR navigation, `gemini-3.8-live` / `gemini-3.8-live-extended-thinking` autonomous issue resolution, real-time Aho-Corasick scrubber, and on-demand Screened `Press-1` Warm Bridge | `internal/voice/{firewall,plan,store,ws,dsp,model_gemini,supervisor}.go`, primary transport driver (`carrier_telnyx.go` or `carrier_twilio.go` per user choice), `phone_call` rule in [`internal/approvals/policy.go`](../../internal/approvals/policy.go), `RankCalls = 68` in [`internal/store/store.go`](../../internal/store/store.go), `"calls.json"` in [`internal/ci/slop.go`](../../internal/ci/slop.go), `Ring0ProtectedPaths` in [`internal/rsi/tcb.go`](../../internal/rsi/tcb.go), `cmd/hq/call_cli.go`. |
+| **Phase 2B: 3-Stage Long-Hold Gatekeeper, Live Drawer & Channel Push** | Survive 60–120m holds at `< $0.06` AI cost + multi-channel escalation alerts | `internal/voice/hold_gatekeeper.go` (`Stage 0` DSP + shimmer hash + `Stage 1` `gemini-3.5-transcribe-live`), `internal/webui/calls.go` (`:4242` SSE Live Call Drawer + AuxPane parity), `internal/hooks/voice_surfaces.go`, [RFC-0023](./0023-front-desk-channel-bridge.md) `TierInterrupt` escalation fan-out. |
+| **Phase 2C: Secondary Cloud Driver + Optional Local `macos_continuity` Swift Companion Pack** | Co-primary `Twilio`/`Telnyx` parity + `$0/min` local MacBook/iPhone SIM transport over `hq-connector-protocol/v1` | Secondary carrier driver, optional `hq-voice-macos-continuity` Swift companion (`AudioHardwareCreateProcessTap` + BlackHole + `AXUIElement` keypad), and `phone-call/SKILL.md`. |
 | **Phase 2D: `CUJ-42` E2E Regression Gate, `hq obs` Voice Cost & `hq doctor`** | Full CI lock-in & operational readiness | `TestCUJ42_AutonomousVoiceCallHoldGatekeeperAndWarmHandover` + [`docs/product/0003-critical-user-journeys.md`](../product/0003-critical-user-journeys.md) sync (`Gate H5-E`), `hq obs` voice spend fields & daily circuit breaker, `hq doctor` tunnel & caller-ID checks. |
 
 ---
 
-## 9. Open Design Questions for Review
+## 9. Decisions Locked & Remaining Open Questions for Phase 2A
 
-1. **Carrier Priority in Phase 2A (`Telnyx` First vs. `Telnyx + Twilio` Together):** Telnyx Call Control v2 cuts 100-minute hold carrier costs nearly in half (`~$1.07` vs. `~$1.91` on Twilio) and supports zero-drop out-of-band `POST /actions/send_dtmf` plus native `16kHz` PCM. Should Phase 2A ship **Telnyx first** (with Twilio in Phase 2C), or do you already have an active **Twilio** account you prefer to use on Day 1?
-2. **Default Long-Hold Ingress (`Named cloudflared / Tailscale Funnel` vs. `Cloudflare Worker Edge Relay`):** For 90–120 minute holds, unauthenticated `cloudflared` Quick Tunnels can occasionally rotate edge connections, whereas a **Tailscale Funnel** or **Named Cloudflare Tunnel** (coupled with our conference stream auto-reattach) stays rock-solid for hours. Which ingress path matches your workstation/homelab setup best?
-3. **Automated Queue Callback Policy Default (`allow_queue_callback`):** When an IRS or airline queue offers *"Press 1 to receive a callback without losing your place in line"*, should `hq call propose` default `allow_queue_callback` to **`true`** (entering your verified mobile so the agency calls your phone directly and saves `~$1.00` of hold minutes), or **`false`** (preferring `hq` to stay on the line and bridge you via `Press 1` screening)?
-4. **Skill Packaging Boundary ([RFC-0019](./0019-two-tier-rsi-vault-overlay.md) & `Gate H1`):** Should the agent workflow skill (`phone-call/SKILL.md`) ship seeded into `<vault>/skills/phone-call/` on `hq call init` (preserving the 6-starter-template token budget in `templates/skills/`), or be added as a 7th global starter skill in `vault.StarterSkillSlugs`?
+**Locked in Review:**
+- **Voice Model Stack (`Option 1`):** Direct Gemini Developer API (`GEMINI_API_KEY`, Paid Tier zero-training) using `gemini-3.5-transcribe-live` (Stage 1) and `gemini-3.8-live` / `gemini-3.8-live-extended-thinking` (Stage 2).
+- **Default Call Mode:** **`autonomous_with_escalation`** (explain issue & resolve end-to-end without interrupting the user; escalate via `Press-1` screened warm handoff only when blocked).
+
+**Remaining Open Questions Before Coding Phase 2A:**
+1. **First Transport Driver to Ship in Phase 2A:** Should Phase 2A start with **Telnyx** (`~$1.07`/100m call, headless, away-from-home bridge, cleanest DTMF), **Twilio** (if you already have an active account), or **MacBook `macos_continuity`** (`$0/min` via your iPhone SIM when at your desk)?
+2. **Default Long-Hold Ingress (for Cloud PSTN):** **Tailscale Funnel** vs. **Named Cloudflare Tunnel** vs. **Cloudflare Worker Edge Relay**?
+3. **Automated Queue Callback Default (`--allow-queue-callback`):** Default to **`true`** (accept *"Press 1 for callback"* to your verified mobile) or **`false`** (stay on the line so the agent handles the rep first)?
