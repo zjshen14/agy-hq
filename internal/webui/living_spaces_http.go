@@ -58,7 +58,7 @@ func enrichProactiveV3State(vaultDir string, state *DashboardState, now time.Tim
 		RecentActivity:   kernel.LoadRecentActivity(vaultDir, 10),
 	}
 	for i := range state.Schedules {
-		if !state.Schedules[i].Enabled || strings.TrimSpace(state.Schedules[i].Cron) == "" {
+		if !state.Schedules[i].Enabled || state.Schedules[i].Stale || strings.TrimSpace(state.Schedules[i].Cron) == "" {
 			continue
 		}
 		if nextAt, err := timers.NextCronOccurrence(state.Schedules[i].Cron, now); err == nil {

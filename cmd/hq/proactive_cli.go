@@ -1386,23 +1386,38 @@ func runTriggersCLI(vaultDir string, args []string) {
 		}
 		if len(cfg.Schedules) == 0 {
 			fmt.Println("No declarative schedules configured.")
-			return
+		} else {
+			for _, s := range cfg.Schedules {
+				state := "enabled"
+				if !s.IsEnabled() {
+					state = "PAUSED"
+				}
+				tier := s.Tier
+				if tier == "" {
+					tier = "-"
+				}
+				src := s.Source
+				if src == "" {
+					src = "core"
+				}
+				fmt.Printf("- [%s] %-24s  mode=%-17s  tier=%-12s  cron=%q  source=%s\n",
+					state, s.FQID(), s.EffectiveMode(), tier, s.Cron, src)
+			}
 		}
-		for _, s := range cfg.Schedules {
-			state := "enabled"
-			if !s.IsEnabled() {
-				state = "PAUSED"
+		if fd, ok := kernel.GetFrontDesk(vaultDir); ok && len(fd.AdHocCrons) > 0 {
+			for _, ac := range fd.AdHocCrons {
+				label := kernel.ShortTaskID(ac.TaskID)
+				if label == "" {
+					label = "ad-hoc-cron"
+				}
+				state := "chat cron"
+				extra := ""
+				if stale, reason := kernel.EvaluateChatCronStaleness(ac.Cron, ac.ArmedAt, now); stale {
+					state = "STALE"
+					extra = "  (" + reason + ")"
+				}
+				fmt.Printf("- [%s] %-24s  cron=%q  armedAt=%s%s\n", state, label, ac.Cron, ac.ArmedAt, extra)
 			}
-			tier := s.Tier
-			if tier == "" {
-				tier = "-"
-			}
-			src := s.Source
-			if src == "" {
-				src = "core"
-			}
-			fmt.Printf("- [%s] %-24s  mode=%-17s  tier=%-12s  cron=%q  source=%s\n",
-				state, s.FQID(), s.EffectiveMode(), tier, s.Cron, src)
 		}
 
 	case "pause", "resume":
@@ -1496,8 +1511,49 @@ func runTriggersCLI(vaultDir string, args []string) {
 			fmt.Println(act)
 		}
 
+	case "remove", "delete", "dismiss":
+		var ids []string
+		var flagArgs []string
+		for _, a := range rest {
+			if strings.HasPrefix(a, "-") {
+				flagArgs = append(flagArgs, a)
+			} else if trimmed := strings.TrimSpace(a); trimmed != "" {
+				ids = append(ids, trimmed)
+			}
+		}
+		fs := flag.NewFlagSet("triggers "+sub, flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "Output JSON")
+		_ = fs.Parse(flagArgs)
+		if len(ids) == 0 {
+			fmt.Fprintf(os.Stderr, "usage: hq triggers %s <task-id|schedule-id>... [--json]\n", sub)
+			os.Exit(1)
+		}
+		var removed []kernel.RemovedFrontDeskTrigger
+		for _, id := range ids {
+			res, err := kernel.RemoveFrontDeskTrigger(vaultDir, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hq triggers %s failed: %v\n", sub, err)
+				os.Exit(1)
+			}
+			removed = append(removed, res)
+		}
+		_ = webui.SyncMarkdownConsole(vaultDir)
+		if *asJSON {
+			printJSON(map[string]interface{}{
+				"removed": removed,
+			})
+			return
+		}
+		for _, r := range removed {
+			if r.TaskID != "" && r.TaskID != r.ID {
+				fmt.Printf("Removed %s %s (%s) from Front Desk\n", r.Kind, r.ID, r.TaskID)
+			} else {
+				fmt.Printf("Removed %s %s from Front Desk\n", r.Kind, r.ID)
+			}
+		}
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown triggers subcommand %q (expected list, pause, resume, fire)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown triggers subcommand %q (expected list, pause, resume, fire, remove)\n", sub)
 		os.Exit(1)
 	}
 }

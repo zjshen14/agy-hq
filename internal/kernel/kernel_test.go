@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1696,5 +1697,138 @@ func TestQuotaErrorDetectionIgnoresWorkspacePath429AndBudget(t *testing.T) {
 	}
 	if qs := LoadQuota(vaultDir); qs.CircuitOpen {
 		t.Fatalf("expected QuotaState.CircuitOpen=false for non-quota error containing 429/budget in workspace path, got %+v", qs)
+	}
+}
+
+func TestEvaluateChatCronStaleness(t *testing.T) {
+	loc := time.FixedZone("PST", -8*3600)
+	now := time.Date(2026, 11, 26, 6, 52, 0, 0, loc)
+
+	// 1. Overdue weekly cron (task-1320: armed Nov 12, first due Nov 16, second due Nov 23, now Nov 26) -> stale
+	if stale, reason := EvaluateChatCronStaleness("30 6 * * 1", "2026-11-12T07:54:01Z", now); !stale || !strings.Contains(reason, "overdue") {
+		t.Fatalf("expected weekly overdue cron to be stale, got stale=%v reason=%q", stale, reason)
+	}
+
+	// 2. Overdue weekday cron (task-2658: armed Nov 16, now Nov 26) -> stale
+	if stale, reason := EvaluateChatCronStaleness("0 11,16 * * 1-5", "2026-11-16T01:03:58Z", now); !stale || !strings.Contains(reason, "overdue") {
+		t.Fatalf("expected weekday overdue cron to be stale, got stale=%v reason=%q", stale, reason)
+	}
+
+	// 3. Fresh weekly cron before first occurrence -> NOT stale
+	earlyNow := time.Date(2026, 11, 14, 10, 0, 0, 0, loc)
+	if stale, reason := EvaluateChatCronStaleness("30 6 * * 1", "2026-11-12T07:54:01Z", earlyNow); stale {
+		t.Fatalf("expected weekly cron before first occurrence not stale, got reason=%q", reason)
+	}
+
+	// 4. Weekly cron within 1-cadence grace after first due (Nov 18, first due Nov 16, second due Nov 23) -> NOT stale
+	withinGrace := time.Date(2026, 11, 18, 10, 0, 0, 0, loc)
+	if stale, reason := EvaluateChatCronStaleness("30 6 * * 1", "2026-11-12T07:54:01Z", withinGrace); stale {
+		t.Fatalf("expected weekly cron within cadence grace not stale, got reason=%q", reason)
+	}
+
+	// 5. High-frequency cron respects 1h minimum grace, then turns stale
+	armedAt := now.Add(-30 * time.Minute).UTC().Format(time.RFC3339)
+	if stale, reason := EvaluateChatCronStaleness("*/5 * * * *", armedAt, now); stale {
+		t.Fatalf("expected 30m-old 5m cron within 1h min grace not stale, got reason=%q", reason)
+	}
+	armedOld := now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	if stale, reason := EvaluateChatCronStaleness("*/5 * * * *", armedOld, now); !stale || reason == "" {
+		t.Fatalf("expected 2h-old 5m cron to be stale, got stale=%v reason=%q", stale, reason)
+	}
+
+	// 6. Empty or invalid timestamps do not panic or falsely mark stale
+	if stale, _ := EvaluateChatCronStaleness("30 6 * * 1", "", now); stale {
+		t.Fatalf("expected empty timestamp not stale")
+	}
+	if stale, _ := EvaluateChatCronStaleness("30 6 * * 1", "not-a-time", now); stale {
+		t.Fatalf("expected invalid timestamp not stale")
+	}
+}
+
+func TestRemoveFrontDeskTrigger(t *testing.T) {
+	vaultDir := t.TempDir()
+	// Must error without creating a Front Desk lease when none exists.
+	if _, err := RemoveFrontDeskTrigger(vaultDir, "task-1320"); err == nil {
+		t.Fatalf("expected error when no Front Desk lease exists")
+	}
+	if _, ok := GetFrontDesk(vaultDir); ok {
+		t.Fatalf("RemoveFrontDeskTrigger must never create or claim a Front Desk lease")
+	}
+
+	fdConv := "fd-conv-remove-test"
+	if err := saveFrontDeskLease(vaultDir, FrontDeskLease{
+		ConversationID: fdConv,
+		ArmedTriggers: map[string]ArmedTrigger{
+			"morning-brief": {
+				ID:      "morning-brief",
+				TaskID:  fdConv + "/task-334",
+				Cron:    "30 7 * * *",
+				Skill:   "morning-brief",
+				ArmedAt: "2026-11-08T18:33:28Z",
+			},
+		},
+		AdHocCrons: []AdHocCron{
+			{
+				TaskID:  fdConv + "/task-1320",
+				Cron:    "30 6 * * 1",
+				Summary: "[Auto] NVDA Watch",
+				ArmedAt: "2026-11-12T07:54:01Z",
+			},
+			{
+				TaskID:  fdConv + "/task-2658",
+				Cron:    "0 11,16 * * 1-5",
+				Summary: "[Auto] Clarity Watch",
+				ArmedAt: "2026-11-16T01:03:58Z",
+			},
+		},
+		UpdatedAt: "2026-11-26T06:00:00Z",
+	}); err != nil {
+		t.Fatalf("saveFrontDeskLease: %v", err)
+	}
+
+	// 1. Remove by short task ID
+	r1, err := RemoveFrontDeskTrigger(vaultDir, "task-1320")
+	if err != nil {
+		t.Fatalf("RemoveFrontDeskTrigger(task-1320): %v", err)
+	}
+	if r1.ID != "task-1320" || r1.TaskID != fdConv+"/task-1320" || r1.Kind != "conversation_cron" {
+		t.Fatalf("unexpected removed record r1: %+v", r1)
+	}
+
+	// 2. Remove by full task ID
+	r2, err := RemoveFrontDeskTrigger(vaultDir, fdConv+"/task-2658")
+	if err != nil {
+		t.Fatalf("RemoveFrontDeskTrigger(full task-2658): %v", err)
+	}
+	if r2.ID != "task-2658" || r2.TaskID != fdConv+"/task-2658" || r2.Kind != "conversation_cron" {
+		t.Fatalf("unexpected removed record r2: %+v", r2)
+	}
+
+	// 3. Remove armed trigger by schedule key
+	r3, err := RemoveFrontDeskTrigger(vaultDir, "morning-brief")
+	if err != nil {
+		t.Fatalf("RemoveFrontDeskTrigger(morning-brief): %v", err)
+	}
+	if r3.ID != "morning-brief" || r3.TaskID != fdConv+"/task-334" || r3.Kind != "armed_trigger" {
+		t.Fatalf("unexpected removed record r3: %+v", r3)
+	}
+
+	// 4. Verify front_desk.json state & killedTaskIds
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok {
+		t.Fatalf("expected Front Desk lease to still exist")
+	}
+	if len(fd.AdHocCrons) != 0 || len(fd.ArmedTriggers) != 0 {
+		t.Fatalf("expected empty AdHocCrons and ArmedTriggers, got adHoc=%+v armed=%+v", fd.AdHocCrons, fd.ArmedTriggers)
+	}
+	for _, wantKilled := range []string{fdConv + "/task-1320", fdConv + "/task-2658", fdConv + "/task-334"} {
+		if !slices.Contains(fd.KilledTaskIDs, wantKilled) {
+			t.Fatalf("expected %q in KilledTaskIDs (%+v) to prevent transcript resurrection", wantKilled, fd.KilledTaskIDs)
+		}
+	}
+
+	// 5. Removing unknown ID returns an error
+	if _, err := RemoveFrontDeskTrigger(vaultDir, "task-nonexistent"); err == nil {
+		t.Fatalf("expected error removing unknown trigger ID")
 	}
 }

@@ -534,7 +534,7 @@ Commands:
   outbox <add|list|act|eval>        4-tier attention outbox, quiet-hours DND & signal-to-noise eval
   events <enqueue|list|inspect|retry|drop|dispatch|token>  Durable crash-safe Event Inbox & webhook token
   timers <set|list|cancel>            Durable one-shot Follow-Up & recurring Schedule timers
-  triggers <list|pause|resume|fire>   Inspect, pause, resume, or fire declarative schedules
+  triggers <list|pause|resume|fire|remove>   Inspect, pause, resume, fire, or remove schedules/chat crons
   dispatch resolve <skill>            Resolve active core, Vault skill, or RSI overlay rules
   extension <list|lint|enable|disable|refresh|trust|doctor>  Manage companion extension packs & trust hashes
   channel <list|status|test|pause|resume|audit|configure>  Manage Front Desk channel bridges & SHA-256 audit log

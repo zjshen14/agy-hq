@@ -43,6 +43,8 @@ type ScheduleSummaryRow struct {
 	FQID            string `json:"fqid,omitempty"`
 	Kind            string `json:"kind"` // "daemon" or "conversation_cron"
 	Enabled         bool   `json:"enabled"`
+	Stale           bool   `json:"stale,omitempty"`
+	StaleReason     string `json:"staleReason,omitempty"`
 	Cron            string `json:"cron"`
 	Runner          string `json:"runner"`
 	Skill           string `json:"skill,omitempty"`
@@ -521,6 +523,7 @@ func NewHandler(vaultDir string) http.Handler {
 	handleCSRFPost("/api/triggers/action", false, func(p postActionPayload) (bool, string, *string) {
 		now := time.Now()
 		var err error
+		msg := fmt.Sprintf("Schedule %s: %s", p.ID, p.Action)
 		switch p.Action {
 		case "pause":
 			_, _, err = extension.SetSchedulePaused(context.Background(), vaultDir, p.ID, true, p.Reason, "", now)
@@ -528,10 +531,15 @@ func NewHandler(vaultDir string) http.Handler {
 			_, _, err = extension.SetSchedulePaused(context.Background(), vaultDir, p.ID, false, p.Reason, "", now)
 		case "fire":
 			_, err = kernel.FireScheduleOnce(vaultDir, p.ID, false, false, now)
+		case "remove", "delete", "dismiss":
+			var res kernel.RemovedFrontDeskTrigger
+			res, err = kernel.RemoveFrontDeskTrigger(vaultDir, p.ID)
+			if err == nil {
+				msg = fmt.Sprintf("Removed chat cron %s", res.ID)
+			}
 		default:
 			err = fmt.Errorf("unsupported trigger action %q", p.Action)
 		}
-		msg := fmt.Sprintf("Schedule %s: %s", p.ID, p.Action)
 		if err != nil {
 			msg = fmt.Sprintf("Error updating schedule %s: %v", p.ID, err)
 		}
@@ -917,18 +925,19 @@ func buildScheduleSummaries(vaultDir string, allTasks []kernel.ActiveTask, fd ke
 	}
 
 	if hasFD {
+		now := time.Now()
 		for _, ac := range fd.AdHocCrons {
-			label := ac.TaskID
-			if idx := strings.LastIndex(label, "/"); idx >= 0 {
-				label = label[idx+1:]
-			}
+			label := kernel.ShortTaskID(ac.TaskID)
 			if label == "" {
 				label = "ad-hoc-cron"
 			}
+			stale, staleReason := kernel.EvaluateChatCronStaleness(ac.Cron, ac.ArmedAt, now)
 			rows = append(rows, ScheduleSummaryRow{
 				ID:            label,
 				Kind:          "conversation_cron",
 				Enabled:       true,
+				Stale:         stale,
+				StaleReason:   staleReason,
 				Cron:          ac.Cron,
 				Runner:        "Antigravity schedule ([HQ] Front Desk)",
 				Summary:       ac.Summary,

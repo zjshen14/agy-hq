@@ -14,6 +14,7 @@ import (
 
 	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/timers"
 )
 
 // ArmedTrigger tracks a proactive schedule from local/triggers.yaml that has been armed
@@ -958,6 +959,192 @@ func ClearArmedTrigger(vaultDir, scheduleID string) error {
 	}
 	fd.UpdatedAt = time.Now().Format(time.RFC3339)
 	return saveFrontDeskLease(vaultDir, fd)
+}
+
+// ShortTaskID returns the trailing segment of a conversation-scoped task ID (e.g. "conv/task-1320" -> "task-1320").
+func ShortTaskID(taskID string) string {
+	trimmed := strings.TrimSpace(taskID)
+	if idx := strings.LastIndex(trimmed, "/"); idx >= 0 {
+		return trimmed[idx+1:]
+	}
+	return trimmed
+}
+
+func formatOverdueDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	case d >= 24*time.Hour:
+		h := int(d.Hours()) % 24
+		if h == 0 {
+			return "1d"
+		}
+		return fmt.Sprintf("1d %dh", h)
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		m := int(d.Minutes())
+		if m < 1 {
+			m = 1
+		}
+		return fmt.Sprintf("%dm", m)
+	}
+}
+
+// EvaluateChatCronStaleness inspects a native Antigravity schedule chat cron's expression and
+// last recorded ArmedAt/LastCheckedAt timestamp against now. A chat cron is considered stale
+// once its first scheduled occurrence after lastCheckedAt has passed by more than one cadence
+// interval (clamped to [1h, 7d]), indicating the in-memory runtime timer was likely dropped.
+func EvaluateChatCronStaleness(cronExpr, lastCheckedAt string, now time.Time) (bool, string) {
+	ts := strings.TrimSpace(lastCheckedAt)
+	if ts == "" {
+		return false, ""
+	}
+	refTime, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		refTime, err = time.Parse(time.RFC3339, ts)
+		if err != nil {
+			return false, ""
+		}
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	refLocal := refTime.In(now.Location())
+	firstDue, err := timers.NextCronOccurrence(cronExpr, refLocal)
+	if err != nil {
+		age := now.Sub(refTime)
+		if age > 48*time.Hour {
+			return true, fmt.Sprintf("overdue %s (unparseable cron %q)", formatOverdueDuration(age), strings.TrimSpace(cronExpr))
+		}
+		return false, ""
+	}
+	if now.Before(firstDue) {
+		return false, ""
+	}
+	cadence := 24 * time.Hour
+	if secondDue, err2 := timers.NextCronOccurrence(cronExpr, firstDue.In(now.Location())); err2 == nil && secondDue.After(firstDue) {
+		cadence = secondDue.Sub(firstDue)
+	}
+	grace := cadence
+	if grace < time.Hour {
+		grace = time.Hour
+	}
+	if grace > 7*24*time.Hour {
+		grace = 7 * 24 * time.Hour
+	}
+	staleAfter := firstDue.Add(grace)
+	if now.Before(staleAfter) {
+		return false, ""
+	}
+	overdue := now.Sub(firstDue)
+	return true, fmt.Sprintf("overdue %s since %s — likely dropped on restart", formatOverdueDuration(overdue), firstDue.In(now.Location()).Format("2006-01-02"))
+}
+
+// RemovedFrontDeskTrigger describes a chat cron or armed trigger removed from front_desk.json.
+type RemovedFrontDeskTrigger struct {
+	ID     string `json:"id"`
+	TaskID string `json:"taskId,omitempty"`
+	Kind   string `json:"kind"` // "conversation_cron" or "armed_trigger"
+}
+
+func appendUniqueKilledTaskID(list []string, taskID string) []string {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return list
+	}
+	for _, existing := range list {
+		if existing == taskID {
+			return list
+		}
+	}
+	return append(list, taskID)
+}
+
+// RemoveFrontDeskTrigger removes an obsolete ad-hoc chat cron or armed trigger from the active
+// Front Desk lease (front_desk.json) and records its TaskID in killedTaskIds so transcript
+// reconciliation never resurrects it. Never claims or replaces the Front Desk lease.
+func RemoveFrontDeskTrigger(vaultDir, targetID string) (RemovedFrontDeskTrigger, error) {
+	target := strings.Trim(strings.TrimSpace(targetID), "\"")
+	if target == "" {
+		return RemovedFrontDeskTrigger{}, fmt.Errorf("trigger or task ID is required")
+	}
+	fd, ok := GetFrontDesk(vaultDir)
+	if !ok {
+		return RemovedFrontDeskTrigger{}, fmt.Errorf("no active Front Desk lease found")
+	}
+
+	var removed RemovedFrontDeskTrigger
+	matched := false
+
+	// 1. Check adHocCrons by full TaskID, short TaskID (e.g. task-1320), or fallback adhoc slug.
+	if len(fd.AdHocCrons) > 0 {
+		kept := make([]AdHocCron, 0, len(fd.AdHocCrons))
+		for _, ac := range fd.AdHocCrons {
+			short := ShortTaskID(ac.TaskID)
+			fallbackSlug := "adhoc-" + slugify(ac.Cron)
+			isMatch := (ac.TaskID != "" && (ac.TaskID == target || short == target)) ||
+				(ac.TaskID == "" && (target == fallbackSlug || target == "ad-hoc-cron"))
+			if isMatch {
+				if !matched {
+					idLabel := short
+					if idLabel == "" {
+						idLabel = target
+					}
+					removed = RemovedFrontDeskTrigger{
+						ID:     idLabel,
+						TaskID: ac.TaskID,
+						Kind:   "conversation_cron",
+					}
+					matched = true
+				}
+				fd.KilledTaskIDs = appendUniqueKilledTaskID(fd.KilledTaskIDs, ac.TaskID)
+				continue
+			}
+			kept = append(kept, ac)
+		}
+		fd.AdHocCrons = kept
+	}
+
+	// 2. Check armedTriggers by schedule key, FQID, bare ID, full TaskID, or short TaskID.
+	if len(fd.ArmedTriggers) > 0 {
+		fqid := ScheduleTrigger{ID: target}.FQID()
+		bare := strings.TrimPrefix(fqid, "core/")
+		for key, at := range fd.ArmedTriggers {
+			short := ShortTaskID(at.TaskID)
+			isMatch := key == target || key == fqid || key == bare ||
+				at.ID == target || at.ID == bare ||
+				(at.TaskID != "" && (at.TaskID == target || short == target))
+			if isMatch {
+				if !matched {
+					removed = RemovedFrontDeskTrigger{
+						ID:     key,
+						TaskID: at.TaskID,
+						Kind:   "armed_trigger",
+					}
+					matched = true
+				}
+				fd.KilledTaskIDs = appendUniqueKilledTaskID(fd.KilledTaskIDs, at.TaskID)
+				delete(fd.ArmedTriggers, key)
+			}
+		}
+	}
+
+	if !matched {
+		return RemovedFrontDeskTrigger{}, fmt.Errorf("chat cron or armed trigger %q not found in Front Desk", target)
+	}
+
+	fd.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := saveFrontDeskLease(vaultDir, fd); err != nil {
+		return RemovedFrontDeskTrigger{}, err
+	}
+	fdReconcileMu.Lock()
+	delete(fdReconcileCache, filepath.Clean(vaultDir))
+	fdReconcileMu.Unlock()
+	return removed, nil
 }
 
 // ReleaseFrontDesk clears local/memory/front_desk.json so the next new conversation

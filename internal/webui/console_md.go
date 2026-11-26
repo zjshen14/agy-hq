@@ -363,6 +363,8 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			stateIcon := "🟢"
 			if !sc.Enabled {
 				stateIcon = "⏸️"
+			} else if sc.Stale {
+				stateIcon = "⚠️"
 			} else if sc.LastError != "" || (sc.LastStatus != "" && sc.LastStatus != "ok" && strings.Contains(sc.LastStatus, "error")) {
 				stateIcon = "⚠️"
 			} else if sc.LastStatus != "" && sc.LastStatus != "ok" {
@@ -390,6 +392,14 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 					shortID = shortID[:8]
 				}
 				actParts = append(actParts, fmt.Sprintf("[`%s`](conversation://%s)", shortID, sc.LatestConvID))
+			}
+			if sc.Stale {
+				staleClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.StaleReason), " "), "|", "\\|")
+				if staleClean != "" {
+					actParts = append(actParts, "⚠️ stale ("+staleClean+")")
+				} else {
+					actParts = append(actParts, "⚠️ stale")
+				}
 			}
 			if sc.LastError != "" {
 				errClean := strings.ReplaceAll(strings.Join(strings.Fields(sc.LastError), " "), "|", "\\|")

@@ -449,7 +449,7 @@
   {{end}}
   </div>
 
-  <h2>Proactive Ideas Feed (<span id="ideas-count">{{len .Ideas}}</span>)</h2>
+  <h2><span>Proactive Ideas Feed (<span id="ideas-count">{{len .Ideas}}</span>)</span></h2>
   <div id="ideas-list">
   {{if .Ideas}}
     {{range .Ideas}}
@@ -643,7 +643,7 @@
   </div>
 
   <div id="mem-priorities-section">
-    <h2>Active Priorities (<code>MEMORY.md</code>)</h2>
+    <h2><span>Active Priorities (<code>MEMORY.md</code>)</span></h2>
     <div class="card" id="mem-priorities-card">
       {{if .Memory.ActivePriorities}}
         {{range .Memory.ActivePriorities}}
@@ -924,7 +924,7 @@
     <div class="card" id="sched-{{.ID}}">
       <div class="meta-row">
         <strong>{{if eq .Kind "daemon"}}⚙️ {{.ID}}{{else}}🕒 {{.ID}}{{end}}</strong>
-        <span class="badge {{if .Enabled}}badge-pass{{else}}badge-warn{{end}}">{{if .Enabled}}{{if eq .Kind "daemon"}}daemon{{else}}chat cron{{end}}{{else}}paused{{end}}</span>
+        <span class="badge {{if not .Enabled}}badge-warn{{else if .Stale}}badge-warn{{else}}badge-pass{{end}}">{{if not .Enabled}}paused{{else if .Stale}}stale{{else if eq .Kind "daemon"}}daemon{{else}}chat cron{{end}}</span>
       </div>
       <div class="muted" style="margin:4px 0">
         Cron: <code>{{.Cron}}</code> · Runner: <code>{{.Runner}}</code>{{if .Skill}} · Skill: <code>/{{.Skill}}</code>{{end}}{{if .LatestConvID}} · Latest: <a href="conversation://{{.LatestConvID}}">{{.LatestConvID}}</a>{{end}}
@@ -935,6 +935,7 @@
         {{if .LastCheckedAt}}Last checked: <code>{{.LastCheckedAt}}</code>{{end}}{{if .LastTriggeredAt}} · Last fired: <code>{{.LastTriggeredAt}}</code>{{end}}{{if .SkipsCount}} · 0-token skips: <code>{{.SkipsCount}}</code>{{end}}{{if and .LastStatus (ne .LastStatus "ok")}} · Status: <code style="color:#fcd34d">{{.LastStatus}}</code>{{end}}
       </div>
       {{end}}
+      {{if and .Stale .StaleReason}}<div class="muted" style="font-size:11px;color:#fcd34d">⚠️ {{.StaleReason}}</div>{{end}}
       {{if .LastError}}<div class="muted" style="font-size:11px;color:#fca5a5">Last error: {{.LastError}}</div>{{end}}
       {{if eq .Kind "daemon"}}
       <div class="actions">
@@ -944,6 +945,10 @@
         <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="resume">Resume</button>
         {{end}}
         <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="fire">Run Now</button>
+      </div>
+      {{else}}
+      <div class="actions">
+        <button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="remove">Remove</button>
       </div>
       {{end}}
     </div>
@@ -976,7 +981,7 @@
   {{end}}
   </div>
 
-  <h2>Today's Turn Journal (<span id="journal-count">{{len .TodayTurns}}</span>)</h2>
+  <h2><span>Today's Turn Journal (<span id="journal-count">{{len .TodayTurns}}</span>)</span></h2>
   <div id="journal-list">
   {{if .TodayTurns}}
     {{range .TodayTurns}}
@@ -2002,8 +2007,8 @@ function renderAllFromState(state) {
       let shtml = '';
       for (const s of schedules) {
         const icon = s.kind === 'daemon' ? '⚙️ ' : '🕒 ';
-        const badgeCls = s.enabled ? 'badge-pass' : 'badge-warn';
-        const badgeTxt = s.enabled ? (s.kind === 'daemon' ? 'daemon' : 'chat cron') : 'paused';
+        const badgeCls = (!s.enabled || s.stale) ? 'badge-warn' : 'badge-pass';
+        const badgeTxt = !s.enabled ? 'paused' : (s.stale ? 'stale' : (s.kind === 'daemon' ? 'daemon' : 'chat cron'));
         let meta = 'Cron: <code>' + escapeHTML(s.cron) + '</code> · Runner: <code>' + escapeHTML(s.runner) + '</code>';
         if (s.skill) meta += ' · Skill: <code>/' + escapeHTML(s.skill) + '</code>';
         if (s.latestConvId) meta += ' · Latest: <a href="conversation://' + escapeHTML(s.latestConvId) + '">' + escapeHTML(s.latestConvId) + '</a>';
@@ -2015,6 +2020,9 @@ function renderAllFromState(state) {
           if (s.skipsCount) parts.push('0-token skips: <code>' + escapeHTML(s.skipsCount) + '</code>');
           telemetry = '<div class="muted" style="font-size:11px">' + parts.join(' · ') + '</div>';
         }
+        const staleHtml = (s.stale && s.staleReason)
+          ? '<div class="muted" style="font-size:11px;color:#fcd34d">⚠️ ' + escapeHTML(s.staleReason) + '</div>'
+          : '';
         let actions = '';
         if (s.kind === 'daemon') {
           actions = '<div class="actions">' +
@@ -2023,12 +2031,17 @@ function renderAllFromState(state) {
               : '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="resume">Resume</button>') +
             '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="fire">Run Now</button>' +
             '</div>';
+        } else {
+          actions = '<div class="actions">' +
+            '<button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="remove">Remove</button>' +
+            '</div>';
         }
         shtml += '<div class="card" id="sched-' + escapeHTML(s.id) + '">' +
           '<div class="meta-row"><strong>' + icon + escapeHTML(s.id) + '</strong><span class="badge ' + badgeCls + '">' + badgeTxt + '</span></div>' +
           '<div class="muted" style="margin:4px 0">' + meta + '</div>' +
           (s.summary ? '<div class="muted" style="margin:4px 0;color:#cbd5e1">' + escapeHTML(s.summary) + '</div>' : '') +
           telemetry +
+          staleHtml +
           (s.lastError ? '<div class="muted" style="font-size:11px;color:#fca5a5">Last error: ' + escapeHTML(s.lastError) + '</div>' : '') +
           actions + '</div>';
       }

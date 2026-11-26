@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -597,5 +598,126 @@ func TestSyncMarkdownConsolePostCheckpointWatermark(t *testing.T) {
 	}
 	if !strings.Contains(string(raw3), "- **Front Desk Context Watermark:** `42k / 512k` (`OK` · Compactions: `1`") {
 		t.Fatalf("expected 42k OK watermark after recovery, got:\n%s", string(raw3))
+	}
+}
+
+func TestConsoleHTMLHeadingsWrapMixedFlexContent(t *testing.T) {
+	// h2 uses `display: flex; justify-content: space-between;`.
+	// Any <h2> containing both direct non-whitespace text AND inline child elements (<span>, <code>, etc.)
+	// will have those text nodes and child elements stretched apart across the full width.
+	reH2 := regexp.MustCompile(`(?s)<h2>(.*?)</h2>`)
+	matches := reH2.FindAllStringSubmatch(consoleHTML, -1)
+	if len(matches) == 0 {
+		t.Fatalf("expected at least one <h2> in consoleHTML")
+	}
+	for _, m := range matches {
+		inner := strings.TrimSpace(m[1])
+		if inner == "" {
+			continue
+		}
+		// If inner contains an HTML tag, it must start with an element (e.g. <span>...</span>) rather than raw text.
+		if strings.Contains(inner, "<") && !strings.HasPrefix(inner, "<") {
+			t.Errorf("<h2> mixes raw text and inline child element under flex space-between (wrap in <span>): <h2>%s</h2>", inner)
+		}
+	}
+	for _, want := range []string{
+		`<h2><span>Today's Turn Journal (<span id="journal-count">{{len .TodayTurns}}</span>)</span></h2>`,
+		`<h2><span>Proactive Ideas Feed (<span id="ideas-count">{{len .Ideas}}</span>)</span></h2>`,
+		`<h2><span>Active Priorities (<code>MEMORY.md</code>)</span></h2>`,
+	} {
+		if !strings.Contains(consoleHTML, want) {
+			t.Errorf("expected wrapped heading %q in consoleHTML", want)
+		}
+	}
+}
+
+func TestWebUIStaleChatCronBadgeAndRemoveAction(t *testing.T) {
+	vaultDir := t.TempDir()
+	memDir := filepath.Join(vaultDir, "memory")
+	if err := os.MkdirAll(memDir, 0o700); err != nil {
+		t.Fatalf("mkdir memory: %v", err)
+	}
+	now := time.Now()
+	staleArmedAt := now.Add(-14 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	freshArmedAt := now.Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	fdConv := "fd-stale-cron-test"
+	fdJSON := fmt.Sprintf(`{
+  "conversationId": %q,
+  "adHocCrons": [
+    {"taskId": %q, "cron": "0 11,16 * * 1-5", "summary": "[Auto] Overdue Watch", "armedAt": %q},
+    {"taskId": %q, "cron": "30 6 * * 1", "summary": "[Auto] Fresh Watch", "armedAt": %q}
+  ],
+  "updatedAt": %q
+}`, fdConv, fdConv+"/task-1320", staleArmedAt, fdConv+"/task-9999", freshArmedAt, now.Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(memDir, "front_desk.json"), []byte(fdJSON), 0o600); err != nil {
+		t.Fatalf("write front_desk.json: %v", err)
+	}
+
+	h := NewHandler(vaultDir)
+	reqRoot := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/", nil)
+	recRoot := httptest.NewRecorder()
+	h.ServeHTTP(recRoot, reqRoot)
+	if recRoot.Code != http.StatusOK {
+		t.Fatalf("GET / failed: %d", recRoot.Code)
+	}
+	html := recRoot.Body.String()
+	csrf := extractTestCSRFToken(t, html)
+
+	if !strings.Contains(html, `<span class="badge badge-warn">stale</span>`) {
+		t.Fatalf("expected warning stale badge in SSR HTML for overdue chat cron")
+	}
+	if !strings.Contains(html, `<span class="badge badge-pass">chat cron</span>`) {
+		t.Fatalf("expected green chat cron badge in SSR HTML for fresh chat cron")
+	}
+	if !strings.Contains(html, `data-id="task-1320" data-trigger-op="remove">Remove</button>`) {
+		t.Fatalf("expected Remove button for task-1320 in SSR HTML")
+	}
+
+	// Verify /api/state reflects stale vs fresh accurately
+	reqState := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/api/state", nil)
+	recState := httptest.NewRecorder()
+	h.ServeHTTP(recState, reqState)
+	var st DashboardState
+	if err := json.Unmarshal(recState.Body.Bytes(), &st); err != nil {
+		t.Fatalf("unmarshal /api/state: %v", err)
+	}
+	var gotStale, gotFresh *ScheduleSummaryRow
+	for i := range st.Schedules {
+		switch st.Schedules[i].ID {
+		case "task-1320":
+			gotStale = &st.Schedules[i]
+		case "task-9999":
+			gotFresh = &st.Schedules[i]
+		}
+	}
+	if gotStale == nil || !gotStale.Stale || gotStale.StaleReason == "" || gotStale.NextRunHuman != "" {
+		t.Fatalf("expected task-1320 stale with reason and empty NextRunHuman, got: %+v", gotStale)
+	}
+	if gotFresh == nil || gotFresh.Stale {
+		t.Fatalf("expected task-9999 fresh (not stale), got: %+v", gotFresh)
+	}
+
+	// Verify CONSOLE.md renders stale warning icon and label
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole: %v", err)
+	}
+	mdBytes, _ := os.ReadFile(filepath.Join(vaultDir, "CONSOLE.md"))
+	if !strings.Contains(string(mdBytes), "⚠️ **`task-1320`**") || !strings.Contains(string(mdBytes), "⚠️ stale") {
+		t.Fatalf("expected stale warning in CONSOLE.md, got:\n%s", string(mdBytes))
+	}
+
+	// Verify POST /api/triggers/action remove deletes task-1320 cleanly and leaves task-9999 intact
+	reqRem := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4242/api/triggers/action", strings.NewReader(`{"id":"task-1320","action":"remove"}`))
+	reqRem.Header.Set("Content-Type", "application/json")
+	reqRem.Header.Set("X-HQ-CSRF-Token", csrf)
+	recRem := httptest.NewRecorder()
+	h.ServeHTTP(recRem, reqRem)
+	if recRem.Code != http.StatusOK || !strings.Contains(recRem.Body.String(), `"ok":true`) {
+		t.Fatalf("POST /api/triggers/action remove failed (%d): %s", recRem.Code, recRem.Body.String())
+	}
+
+	fdAfter, ok := kernel.GetFrontDesk(vaultDir)
+	if !ok || len(fdAfter.AdHocCrons) != 1 || fdAfter.AdHocCrons[0].TaskID != fdConv+"/task-9999" {
+		t.Fatalf("expected only task-9999 remaining in AdHocCrons, got: %+v", fdAfter.AdHocCrons)
 	}
 }
