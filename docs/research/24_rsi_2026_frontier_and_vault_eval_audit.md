@@ -1,15 +1,15 @@
 # 24 — The 2026 Recursive Self-Improvement (RSI) Research Frontier (570+ Paper Holistic Audit) & 17-Day `agy-hq` Production Evidence
 
-- **Date:** 2026-11-25 (Revision 2 — Holistic Landscape Expansion)
-- **Author:** `[Task:rsi] Deep Research on @omarsar0 RSI Post` (`DeepInvestigator` + Primary arXiv/Index Verification)
-- **Status:** Complete / Phase 1 Holistic Research Memo *(Pausing for User POV Alignment Before Revising RFC-0029)*
+- **Date:** 2026-11-25 (Revision 3 — Holistic Landscape + Full Impact-Weighted Live Audit)
+- **Author:** `[Task:rsi] Deep Research on @omarsar0 RSI Post` (`DeepInvestigator` + Primary arXiv/Index & Full-Vault Verification)
+- **Status:** Complete / Phase 1 Holistic Research Memo *(Paired with [RFC-0029 Rev 2](../design/0029-rsi-v2-trace-eval-and-heldout-ratchet.md))*
 - **Related Documents:**
   - [RFC-0010: Bounded Agent Recursive Self-Improvement (RSI)](../design/0010-agent-recursive-self-improvement.md)
   - [RFC-0019: OS vs. User-Space Skill Boundary, Vault Skills (`local/skills/`) & Two-Tier RSI Overlays](../design/0019-two-tier-rsi-vault-overlay.md)
   - [RFC-0024: Memory Engine v2 — Orthogonal Single-Source Vault Architecture & Deterministic Memory Eval](../design/0024-memory-v2-prediction-and-eval.md)
   - [RFC-0026: Unified Session Authorization Lattice & Declarative Scoped Delegates](../design/0026-declarative-scoped-delegates.md)
   - [RFC-0027: Smarter Proactive Actions — Looking Ahead, 1-Tap Decisions & Interactive Spaces](../design/0027-muse-proactive-actions.md)
-  - [RFC-0029: RSI Engine v2 (Draft v1 — Pending Holistic POV Revision)](../design/0029-rsi-v2-trace-eval-and-heldout-ratchet.md)
+  - [RFC-0029: RSI Engine v2 — Impact-Weighted Multi-Signal Mining, Compiled Skills, Anchored Safety Gating & Held-Out Ratchet](../design/0029-rsi-v2-trace-eval-and-heldout-ratchet.md)
   - [07 — Agent Recursive Self-Improvement (RSI): Literature Survey & Safety Invariants](07_agent_recursive_self_improvement.md)
   - [15 — Two-Tier Recursive Self-Improvement, OS vs. User-Space Skill Boundary & Personal Vault Skill Overlay Audit](15_two_tier_rsi_vault_overlay.md)
   - [19 — Anthropic's *"The Components of Agent Memory"* & 12-Day Production Vault Telemetry Audit](19_anthropic_memory_components_and_vault_audit.md)
@@ -28,9 +28,15 @@ On November 24, 2026, Elvis Saravia (`@omarsar0`, DAIR.AI) published the X Artic
 - **When Memory & Rules Backfire:** *More Memory, Worse Agents* (`arXiv:2610.27406`, error reproduction), *How Much Should an Agent Remember?* (`arXiv:2611.26361`, IBM production lessons showing optimal rule count depends on model strength), *When Should Agents Remember? / FGSE* (`arXiv:2611.14326`), *WASP-Mem* (`arXiv:2611.04003`, `1` round of human diagnosis beats `4` rounds of self-judgment by `+7.0–10.9%`), *SoMem* (`arXiv:2611.11929`), and *PAST-Bench* (`arXiv:2608.04003`, Pathway Disconnect).
 - **Statistical Resolution, Regret Gating & Failure Detection:** *The Resolution Hypothesis* (`arXiv:2611.23068`, >10M LLM calls), *TRUST* (`arXiv:2611.10787`, cuts bad-update rate `45.59% -> 2.78%`), *GUARD* (`arXiv:2611.23476`, `-54.5%` tokens, `0.000` memory pollution), *SIM* (`arXiv:2611.18856`), *SkillPlumber* (`arXiv:2611.25429`), and *Blind to What They Can Fix* (`arXiv:2611.29807`).
 
-**Cross-checked against 100% of `agy-hq`'s live 17-day Vault telemetry (`2,590` observations across untainted + tainted runs):**
-- **`98.7%` (`2,557/2,590`)** occur in only 1 conversation, and **`50.0%` (`>= 1,206/2,413`)** of error/pretool records are pure re-scan duplicates (`D2`).
-- Among ALL **`20` untainted recurring (`>= 2` conversations)** observations: **`60%` (`12/20`)** are deterministic **CLI/hook bugs** (`--help` exit codes, missing `hq proposals` aliases, `env --` exit 127), **`25%` (`5/20`)** are **60–82-step monolithic turns** (`A3`/`A4` burn), **`10%` (`2/20`)** are normal **dev TDD/CI false positives** (`go test`, `hq ci pre-push`), **`5%` (`1/20`)** is explicit user policy (already in `AGENTS.md`), and **`0%` (`0/20`)** are missing Markdown `SKILL.md` prompt rules! *(All `13/13` tainted recurring observations are likewise deterministic CLI/hook bugs.)*
+**Cross-checked against 100% of `agy-hq`'s live 17-day Vault telemetry (`2,590` raw observations $\rightarrow$ `1,274` deduplicated friction instances, `1,888` total wasted steps):**
+- **Fingerprint Fragmentation (`D12`):** `55.9%` (`1,448/2,590`) of raw observations start `errorExcerpt` with `Created At: ... Completed At: ...` timestamps, and shell commands embed unique thread/proposal/worktree IDs—shattering true recurring clusters into fake `N=1` shards so only `33` raw rows appeared recurring!
+- **Impact-Weighted Full-Population Breakdown (All `1,274` Deduped Instances, `1,888` Wasted Steps):**
+  - **`25.4%` (`480` wasted steps, `160` instances, `157` convs):** **Monolithic runaway turns & tier misrouting (`A3`/`A4`)**—the #1 mechanical drain.
+  - **`24.6%` (`465` wasted steps, `350` instances):** **Normal-work non-error noise** (`go test`/CI TDD, file exploration, `grep` exit-1 no-match, `edit_file` target miss, empty rejections) that should carry `0` RSI weight.
+  - **`20.4%` (`385` wasted steps, `302` instances):** **Tool, CLI & External Connector friction**—including **`90` external connector CLI failures across `50` convs** (`gmail`, `gcalendar`, `gdrive`, `xurl`, completely hidden before normalization!), `109` `hq` CLI flag/help errors (`70` convs), `38` `env --` hook bugs (`21` convs), and `65` `git`/`gh` errors (`34` convs).
+  - **`11.3%` (`213` wasted steps, `213` instances):** **`PreToolUse` guardrail denials** (including `83` non-standard blocks across `48` convs).
+  - **`17.8%` (`337` wasted steps, `245` instances):** Uncategorized `run_command`/`read_file` errors, **ad-hoc `python3`/`node` inline script failures (`44` inst, `30` convs)**, and **Browser/MCP errors (`32` inst, `15` convs)**.
+  - **Unmeasured "Dark Matter" (`0%` weight today):** Conversational user corrections (highest-leverage human diagnosis per *WASP-Mem*), clean-exit `F4` content quality gaps, draft edits (`0` captured), and recurring clean-exit multi-step workflows ripe for *FlashScript*/*SkillCache* compilation.
 
 Every arXiv ID cited in this document (**83+ papers**) has been programmatically verified against `export.arxiv.org`.
 
@@ -208,26 +214,27 @@ If 2025 asked *"can agents self-improve?"*, late 2026 uncovered **six concrete w
 4. **Taint Provenance Exclusion (`RFC-0017b` / `RFC-0026`) + `SoMem`-Aligned Memory v2 (`RFC-0024`):** Anticipates `Evolve-IPI` (`2610.39122`) and `Trusting Trust` (`2609.17817`) by quarantining untrusted external reads away from durable memory/RSI, and already mirrors `SoMem`'s *"Model Owns Meaning, Code Owns Consistency"*.
 5. **Existing Infrastructure Already Built (But Under-Wired):** `model_scope` tagging + `hq rsi ablate --model=<id>` (`proposer.go:332-398`) and `findTierCPromotionCandidates` (`mutator.go:747-791`) already exist in code, along with dual-repo snapshots and the 75% quota circuit breaker.
 
-### 3.2 Complete 17-Day Live Production Audit (`2026-11-08` – `2026-11-25`)
+### 3.2 Complete 17-Day Live Production Audit (`2026-11-08` – `2026-11-25`, Full Population Weighted)
 
-Auditing **all `2,590` observations** (`2.74 MB`), `70` hypotheses (`39` `draft`, `27` `verified`, `3` `proposed`, `1` `approved`), and `archive.jsonl` in the live Vault (sanitized, aggregate-only) produces an eye-opening empirical picture:
+Auditing **all `2,590` raw observations** (`2.74 MB`), `70` hypotheses (`39` `draft`, `27` `verified`, `3` `proposed`, `1` `approved`), and `archive.jsonl` in the live Vault (sanitized, aggregate-only) reveals **two compounding measurement distortions** followed by the true impact-weighted distribution:
 
-1. **Funnel Collapse & 50% Duplicate Inflation:**
-   - `2,413` `error_recovery_chain` (`1,865`) + `pretool_friction` (`548`) rows collapse to **`1,134` unique `(conversationID, errorExcerpt[:90])` pairs**—meaning **`>= 1,206` rows (`50.0%`)** are pure re-scan duplicates caused by `miner.go` ignoring `StepStartIdx`.
-   - `98.7%` (`2,557/2,590`) occurred in **only 1 conversation** (`312` normal missing-file exploration, `239` normal `edit_file` target misses, `180` normal dev `go test`/compile errors, `26/30` empty-reason proposal rejections).
-   - `548` `pretool_friction` rows are dominated by true-positive safety/Front-Desk guardrails (`249` Front Desk cap, `61` outbound approval gates, `58` taint quarantine, `6` private credential guards, `174` timestamp-truncated `"other"` excerpts).
-   - `draft_edited` (`PRELUDE`): **`0`** observations. `proactive_noise`: **`0`** observations. Active `<!-- rsi:rule -->` blocks on disk: **`0`**.
+1. **Two Measurement Distortions Exposed:**
+   - **`50.0%` Duplicate Inflation (`D2`):** `2,413` `error_recovery_chain + pretool_friction` rows collapse to `1,134` unique `(convID, errorExcerpt[:90])` pairs once `StepStartIdx` re-scans are removed (`1,274` total unique instances across all categories).
+   - **`55.9%` Fingerprint Fragmentation (`D12`):** `1,448 / 2,590` rows begin `errorExcerpt` with second-granularity `Created At: ... Completed At: ...` timestamps, and raw shell commands embed unique thread/proposal/UUID tokens. That made `98.7%` of raw rows appear as `N=1` (leaving only `33` exact-match recurring rows) and completely hid major recurring external CLI, MCP, and script failure clusters!
 
-2. **Exact Classification of ALL `33` Recurring (`distinctConvs >= 2`) Observations (`20` Untainted + `13` Tainted):**
+2. **True Impact-Weighted Distribution Across ALL `1,274` Deduplicated Instances (`1,888` Wasted Steps):**
 
-| Target Substrate Bucket | Untainted (`N=20`) | Tainted (`N=13`) | Concrete Recurring Friction Patterns Observed |
-| :--- | :---: | :---: | :--- |
-| **A. Deterministic CLI / Hook / Infra Fixes** *(Ring-1 Go code)* | **12 (`60%`)** | **13 (`100%`)** | • `PreToolUse` `env: '--'` exit-127 rewrite on `hq watch precheck`/`read` (`22+` convs across variants)<br>• `--help` exiting `1` or parsed as positional arg (`hq --help`, `hq help`, `hq gchat --help`, `hq gmail --help`, `hq memory --help`, `prune-fact --help`, `verify-transcript --help`)<br>• Missing aliases (`hq proposals`, `hq proposals list`, `hq propose list`, `hq watch ack --all`)<br>• `hq rsi mine` stdout truncation & CDP tab-missing error |
-| **B. Monolithic Turn Compilation & Tier Routing** *(`SkillCache` / `FlashScript` / `HarnessPro`)* | **5 (`25%`)** | **0** | • `A3 RunawayTurnBurn` (`60–82` steps, `1.57M–2.45M` gross tokens) on `sleep-consolidate`, `morning-brief`, & recurring inbox/filing watchdogs (`3–4` convs each)<br>• `A4 TierMisroutingBurn` on `sleep-consolidate` (`3` convs) |
-| **C. Normal Dev TDD / CI False Positives** *(Filter out)* | **2 (`10%`)** | **0** | • `hq ci pre-push` failing before `gofmt` (`8` convs, misattributed to `gchat`)<br>• `go test ./...` failing during feature dev (`3` convs, misattributed to `gchat`) |
-| **D. Explicit User Policy / `SKILL.md` Prompt Rules** *(Ring-2)* | **1 (`5%`)** | **0** | • `1` explicit `user_feedback` (`workflow_delegation`, already in `AGENTS.md`)<br>• **Recurring non-CLI `SKILL.md` prompt-rule gaps: `0 / 33` (`0%`)!** |
+| Normalized Friction Cluster | Instances | % Inst | Wasted Steps | % Wasted | Convs | Actionable Interpretation |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **1. Monolithic Turns & Tier Burn (`A3` + `A4`)** | `160` | `12.6%` | **`480`** | **`25.4%`** | `157` | **#1 mechanical drain** (`81x` `general`, `46x` `swe-pulse`, `6x` `sleep-consolidate`, plus watchdogs). Target for workflow compilation & tier routing. |
+| **2. Normal-Work Non-Error Noise** *(Filter to `0`)* | `350` | `27.5%` | **`465`** | **`24.6%`** | — | `go test`/build TDD (`131`), normal file exploration (`71`), `grep` exit-1 no-match (`77`), `edit_file` target miss (`40`), empty rejections (`22`). |
+| **3. Tool, CLI & External Connector Friction** | `302` | `23.7%` | **`385`** | **`20.4%`** | — | **`90` external connector CLI failures across `50` convs** (`gmail readonly message`, `gmail` bad flags, `gcalendar --from`)—genuine external-tool playbook/script gaps! Plus `109` `hq` CLI help/flag gaps (`70` convs), `38` `env --` hook bugs (`21` convs), `65` `git`/`gh` errors (`34` convs). |
+| **4. Guardrail / Hook Denials (`PreToolUse`)** | `213` | `16.7%` | **`213`** | **`11.3%`** | — | `83` non-standard blocks (`48` convs: transcript reads, `hq approve` cap misses, `hq spawn` heredocs), `61` taint (`41` convs), `39` Front Desk, `24` outbound gates, `6` credential guards. |
+| **5. Ad-Hoc Scripts, Browser/MCP & Other Tools** | `245` | `19.2%` | **`337`** | **`17.8%`** | — | Includes `44` inline `python3`/`node` failures (`30` convs) and `32` Chrome DevTools/MCP errors (`15` convs)—previously invisible due to `D12`. |
+| **6. Explicit User Feedback Captured** | `4` | `0.3%` | **`8`** | **`0.4%`** | `3` | Severely under-instrumented (`draft_edited = 0`, `proactive_noise = 0`, conversational user corrections = `0` captured). |
+| **7. Unmeasured "Dark Matter"** *(New Signal)* | — | — | — | **`0%` today** | — | **Conversational user corrections**, **clean-exit `F4` quality gaps**, and **recurring clean-exit multi-step workflows** (where *FlashScript*/*SkillCache* deliver `10–70×` token wins). |
 
-### 3.3 Eleven Concrete Implementation Defects Identified (`D1`–`D11`)
+### 3.3 Twelve Concrete Implementation Defects Identified (`D1`–`D12`)
 
 | ID | File / Line | Defect Description |
 | :-: | :--- | :--- |
@@ -242,19 +249,24 @@ Auditing **all `2,590` observations** (`2.74 MB`), `70` hypotheses (`39` `draft`
 | **`D9`** | `proposer.go:123-132` | **Ghost-Canary Bug (Pathway Disconnect):** `updateCanaryRecords` checks `strings.Contains(tf, sk)` on a deleted pre-RFC-0019 file path and keeps incrementing `HelpfulCount` (`13/15`) toward `"promoted"` for a rule that does **not exist on disk**! |
 | **`D10`** | `miner.go:139-141` | **Greedy Skill Misattribution:** `inferSkillOrPkg` checks `strings.Contains(lower, "gchat")` across the whole turn prompt+summary before checking the failing command, attributing `go test ./...`, `hq ci pre-push`, and `hq --help` to `skill=gchat`. |
 | **`D11`** | `mutator.go:761-784` & `miner.go:860-873` | **Dormant Rule-Destruction Hazard & Timestamp Truncation:** Once `D7` is fixed, `findTierCPromotionCandidates` stages `deprecate_skill_rule` to **delete** proven rules (`helpful >= 5`) without generating any replacement Go check/script! Separately, `firstLineExcerpt(..., 180)` spends 180 chars on `Created At: ... Completed At: ...` timestamps, truncating actual `PreToolUse` denial reasons on `174` rows. |
+| **`D12`** | `miner.go:116-119, 255-262` | **Un-Normalized Fingerprint Fragmentation (`55.9%` of Rows):** `computeFingerprint` hashes raw timestamps (`Created At: ...`), UUIDs, thread/proposal IDs, and worktree paths verbatim—shattering recurring external connector (`90` inst / `50` convs), MCP (`32` inst), and script (`44` inst) failure clusters into fake `N=1` shards while leaving `grep` exit-1 / dev TDD un-filtered. |
 
 ---
 
-## 4. Emerging Strategic Framing (Questions Before Forming Final `agy-hq` POV)
+## 4. Aligned Strategic Point of View (`4` Balanced Signal Streams $\rightarrow$ `4` Right-Sized Substrates)
 
-Both the 570-paper 2026 frontier and `agy-hq`'s 17-day live telemetry point away from *"build a better Markdown bullet factory"* and toward a **4-Substrate Evidence-First RSI Architecture**:
+Combining the 570-paper 2026 frontier with our full impact-weighted Vault audit yields a coherent, evidence-grounded Point of View for [RFC-0029 Rev 2](../design/0029-rsi-v2-trace-eval-and-heldout-ratchet.md):
 
-1. **Substrate 1 — Deterministic CLI & Hook Hardening (`60%` of live recurring friction; `AutoHarness`, `Blind to What They Can Fix`):** Route recurring CLI/flag/exit-code friction directly to **upstream issue/PR triage** (or local helper scripts) instead of spending prompt tokens on permanent `SKILL.md` workarounds.
-2. **Substrate 2 — Recurring Workflow Compilation & Cost-Tier Tuning (`25%` of live friction; `FlashScript`, `SkillCompiler`, `SkillCache`, `EfficientSkill`, `HarnessPro`):** Compile recurring 60–82-step watchdog/brief/dreaming loops into deterministic 0-token CLI bundles/scripts + model-tier routing overrides, and fix `findTierCPromotionCandidates` (`D11`) so proven rules are *never* deprecated without a verified compiled replacement.
-3. **Substrate 3 — Evidence-Linked Memory with First-Class `Update` (`SoMem`, `PAST-Bench`, `WASP-Mem`, `Anti-Persistence`):** Preserve `RFC-0024`'s clean separation (*"Model Owns Meaning, Code Owns Consistency"*), prioritizing falsification-gated state updates (`FGSE`) and human-diagnosed failure summaries (`WASP-Mem`) over automatic unverified abstraction persistence (`More Memory, Worse Agents`).
-4. **Substrate 4 — Ultra-Sparse, Pre-Commit-Gated Personal Rules (`Safe Personal RSI`, `Evolve-IPI`, `Masked Erosion`, `VaG`, `GUARD`, `SIM`, `TRUST`, `Who Verifies the Verifier?`):** Treat personal `SKILL.md`/overlay rules as a **rare, high-bar, model-scoped last resort**—strictly gated by Ring-0 frozen safety invariants, `Evolve-IPI` taint/authorization probes, 3 pre-commit critics + human-anchored drawback fixtures, directional regret (`GUARD`), causal on-disk existence + activation tracking (fixing `D9`), and `SIM`-grade rationale/tombstone memory.
-
-> **Next Step:** Align with the user on this 4-substrate Point of View before revising [RFC-0029](../design/0029-rsi-v2-trace-eval-and-heldout-ratchet.md) or entering Phase 2 implementation.
+1. **Ingest & Impact-Weight 4 Balanced Signal Streams (Ending Tool-Crash Tunnel Vision):**
+   - **Stream 1 — Normalized Mechanical Friction:** Strip timestamps/IDs/paths before fingerprinting (`D12`), exclude normal dev TDD & `grep` exit-1 noise (`24.6%`), and rank by `distinct_convs × token_cost` (via `internal/obs`) across `hq` CLI, external connectors (`gmail`/`gcalendar`/`gdrive`/`xurl`), `PreToolUse`, MCP, and inline scripts.
+   - **Stream 2 — Recurring High-Cost / Multi-Step Workflows (`A3`/`A4` + Clean Repeats):** Capture both `A3` runaway turns (`25.4%` of wasted steps) and recurring clean-exit multi-step workflows that never throw errors yet burn unnecessary tokens.
+   - **Stream 3 — Human Corrections & Implicit Feedback (*WASP-Mem*, *PRELUDE*, *RFC-0027*):** Elevate conversational user corrections (captured during interactive turns or nightly `/sleep-consolidate` transcript inspection), draft edit-diffs, and noisy-alert dismissals as first-class human diagnosis inputs.
+   - **Stream 4 — Memory Updates & Safety Regression Probes (*SoMem*, *PAST-Bench*, *Safe Personal RSI*, *Evolve-IPI*):** Track state superseding hygiene and run executable safety/IPI regression checks on every proposed instruction change.
+2. **Route Each Cluster to Its Right-Sized Substrate (No Longer a Prose-Bullet Factory):**
+   - **Owned `hq`/Hook Bugs** $\rightarrow$ Ring-1 Go/Hook fix triage (not permanent prompt workarounds).
+   - **Recurring High-Cost Workflows** $\rightarrow$ Deterministic script/CLI compilation (`<vault>/skills/<slug>/scripts/` or `hq` bundle — *FlashScript*/*SkillCompiler*) or `<vault>/config.yaml` model-tier routing (*HarnessPro*/*Harness Ceiling F4*).
+   - **External Connector/Tool Quirks & User Workflows** $\rightarrow$ Sparse, trace-grounded Ring-2 skill/overlay rules (`hq rsi context` — *Meta-Harness*) or Ring-3 scoped topic playbooks (*SoMem*/*RFC-0024*).
+   - **Safety, Evaluation & Lifecycle Ratchet:** Gate every Ring-2/Ring-1 update behind 3 pre-commit critics (*VaG* + *Safe Personal RSI* + *Evolve-IPI* + *Trusting Trust* + *Masked Erosion* frozen Ring-0), human-anchored drawback fixtures (*Who Verifies the Verifier?*), `50/50` held-out compute-normalized `hq rsi eval` (*Winner's Curse*/*HDA*/*GUARD*), causal on-disk canary tracking (`D9`), `SIM` rationale/tombstones, and safe script-first `Tier B -> C` promotion (`D11a`).
 
 ---
 
