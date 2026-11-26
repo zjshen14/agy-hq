@@ -2308,7 +2308,17 @@ func TestCUJ17_AgentRSIMiningVerificationAndApproval(t *testing.T) {
 		t.Fatalf("expected PreToolUse to block direct hq rsi apply, got:\n%s", hookApplyOut)
 	}
 
-	// 5. Stage 4 (`hq rsi propose <id>`) -> PreToolUse canonical `ask_question` overwrite -> `hq approve <propId>`
+	// 5. Stage 4 (`hq rsi probes` -> `hq rsi record-probe` -> `hq rsi propose <id>`) -> PreToolUse canonical `ask_question` overwrite -> `hq approve <propId>`
+	// External-facing gchat target requires a diff-SHA-bound behavioral safety probe before proposing (RFC-0029 Q5).
+	if failPropOut, pErr := env.run("", "rsi", "propose", targetHypID, "--conv=conv-main"); pErr == nil {
+		t.Fatalf("expected hq rsi propose to require behavioral safety probe for gchat before recording verdict, got:\n%s", failPropOut)
+	}
+	if probeOut, pErr := env.run("", "rsi", "probes", targetHypID, "--json"); pErr != nil || !strings.Contains(probeOut, "P1_indirect_email_injection") {
+		t.Fatalf("hq rsi probes failed: %v\n%s", pErr, probeOut)
+	}
+	if recOut, pErr := env.run("", "rsi", "record-probe", targetHypID, "--passed=true", "--summary=All 6 probes passed"); pErr != nil || !strings.Contains(recOut, "passed=true") {
+		t.Fatalf("hq rsi record-probe failed: %v\n%s", pErr, recOut)
+	}
 	propOut, err := env.run("", "rsi", "propose", targetHypID, "--conv=conv-main")
 	if err != nil || !strings.Contains(propOut, "Staged RSI proposal") {
 		t.Fatalf("hq rsi propose failed: %v\n%s", err, propOut)
@@ -2333,7 +2343,7 @@ func TestCUJ17_AgentRSIMiningVerificationAndApproval(t *testing.T) {
 	}
 
 	// Verify SKILL.md in isolatedRoot was updated (+1 active rsi:rule block over baseline) and canary archive was recorded
-	expectedRulesStr := fmt.Sprintf("%d active rsi:rule block(s)", beforeRules+1)
+	expectedRulesStr := fmt.Sprintf("%d/%d global active rsi:rule block(s)", beforeRules+1, rsi.MaxGlobalActiveRules)
 	statusOut, err := env.run("", "rsi", "status")
 	if err != nil || !strings.Contains(statusOut, "1 active canary") || !strings.Contains(statusOut, expectedRulesStr) {
 		t.Fatalf("expected 1 active canary and %s in hq rsi status, got:\n%s (%v)", expectedRulesStr, statusOut, err)
@@ -5111,9 +5121,9 @@ func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
 	assertCleanRoot("after hq init + hq skill add + custom skill")
 
 	// 3. Seed untainted friction transcripts across:
-	//    (A) Core OS skill (`morning-brief`) -> Tier 1B overlay (`local/memory/rsi/rules/morning-brief.md`)
+	//    (A) Core OS skill (`morning-brief`) -> Tier 1B overlay (`local/memory/rsi/rules/morning-brief.md`, high-risk probe gated)
 	//    (B) Vault skill (`ledger-ingest`) -> Tier 1A direct update (`local/skills/ledger-ingest/SKILL.md`)
-	//    (C) Generic unmatched session friction -> Tier 1B `general` (`local/memory/rsi/rules/general.md`, NEVER swe-pulse!)
+	//    (C) Generic unmatched core CLI error (`./bin/hq status --bad-opt`) -> Ring-1 CLI advisory (retired `general.md` is NEVER created!)
 	writeFrictionRun := func(prefix, userPrompt, badCmd, goodCmd, okMsg string) {
 		txFile := filepath.Join(t.TempDir(), prefix+".jsonl")
 		lines := []string{
@@ -5143,8 +5153,8 @@ func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
 		t.Fatalf("hq rsi hypothesize --force failed: %v (%s)", err, out)
 	}
 	hyps, err := rsi.ListHypotheses(env.vaultDir)
-	if err != nil || len(hyps) < 3 {
-		t.Fatalf("expected at least 3 hypotheses (morning-brief, ledger-ingest, general), got %d (%v)", len(hyps), err)
+	if err != nil || len(hyps) < 2 {
+		t.Fatalf("expected at least 2 named-skill hypotheses (morning-brief, ledger-ingest), got %d (%v)", len(hyps), err)
 	}
 
 	seenTargets := make(map[string]bool)
@@ -5156,8 +5166,14 @@ func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
 		if h.DeltaOp != nil && len(h.TargetFiles) > 0 && strings.HasSuffix(h.TargetFiles[0], "morning-brief.md") {
 			mbRuleID = h.DeltaOp.RuleID
 		}
-		if out, err := env.run("", "rsi", "verify", h.ID); err != nil {
-			t.Fatalf("hq rsi verify %s failed: %v (%s)", h.ID, err, out)
+		verOut, err := env.run("", "rsi", "verify", h.ID)
+		if err != nil {
+			t.Fatalf("hq rsi verify %s failed: %v (%s)", h.ID, err, verOut)
+		}
+		if strings.Contains(verOut, "Live Safety Probe Required:       YES") {
+			if recOut, rErr := env.run("", "rsi", "record-probe", h.ID, "--passed=true", "--summary=Safe"); rErr != nil {
+				t.Fatalf("hq rsi record-probe %s failed: %v (%s)", h.ID, rErr, recOut)
+			}
 		}
 		if out, err := env.run("", "rsi", "propose", h.ID, "--conv=conv-35"); err != nil {
 			t.Fatalf("hq rsi propose %s failed: %v (%s)", h.ID, err, out)
@@ -5166,16 +5182,18 @@ func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
 	for _, wantTarget := range []string{
 		"local/memory/rsi/rules/morning-brief.md",
 		"local/skills/ledger-ingest/SKILL.md",
-		"local/memory/rsi/rules/general.md",
 	} {
 		if !seenTargets[wantTarget] {
 			t.Fatalf("expected synthesized hypothesis targeting %q, got targets=%v", wantTarget, seenTargets)
 		}
 	}
+	if seenTargets["local/memory/rsi/rules/general.md"] {
+		t.Fatalf("expected retired general.md NOT to be synthesized, got targets=%v", seenTargets)
+	}
 
 	pendingProps, err := approvals.List(env.vaultDir)
-	if err != nil || len(pendingProps) < 3 {
-		t.Fatalf("expected >= 3 pending RSI approvals, got %d (%v)", len(pendingProps), err)
+	if err != nil || len(pendingProps) < 2 {
+		t.Fatalf("expected >= 2 pending RSI approvals, got %d (%v)", len(pendingProps), err)
 	}
 	for _, prop := range pendingProps {
 		askIn := fmt.Sprintf(`{"conversationId":"conv-35","toolCall":{"name":"ask_question","args":{"questions":[{"question":"Approve %s?","options":["Approve","Reject"]}]}}}`, prop.ID)
@@ -5190,13 +5208,15 @@ func TestCUJ35_TwoTierRSIVaultSkillsAndOverlays(t *testing.T) {
 	// 4. Verify Vault files updated + `hq dispatch resolve --skill=morning-brief --json` composes inline overlay + quarantine immunity + 0 dirty root files
 	for _, p := range []string{
 		filepath.Join(env.vaultDir, "memory", "rsi", "rules", "morning-brief.md"),
-		filepath.Join(env.vaultDir, "memory", "rsi", "rules", "general.md"),
 		filepath.Join(env.vaultDir, "skills", "ledger-ingest", "SKILL.md"),
 	} {
 		b, rErr := os.ReadFile(p)
 		if rErr != nil || !strings.Contains(string(b), "<!-- rsi:rule id=") {
 			t.Fatalf("expected applied rsi:rule in %s, err=%v content=%s", p, rErr, string(b))
 		}
+	}
+	if _, err := os.Stat(filepath.Join(env.vaultDir, "memory", "rsi", "rules", "general.md")); err == nil {
+		t.Fatalf("expected retired general.md NOT to exist on disk")
 	}
 
 	dispMB, err := env.run("", "dispatch", "resolve", "--skill=morning-brief", "--json")

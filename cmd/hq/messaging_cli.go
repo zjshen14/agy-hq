@@ -220,12 +220,24 @@ func runRejectCLI(vaultDir string, args []string) {
 	dismiss := fs.Bool("dismiss", false, "Suppress LLM resumption event even when a custom --reason is provided")
 	noResume := fs.Bool("no-resume", false, "Alias for --dismiss: suppress LLM resumption event")
 	_ = fs.Parse(rejectFlagArgs)
+	var rejectedRSIID string
+	if pending, lErr := approvals.List(vaultDir); lErr == nil {
+		for _, p := range pending {
+			if p.ID == id && p.Metadata != nil {
+				rejectedRSIID = strings.TrimSpace(p.Metadata["rsiId"])
+				break
+			}
+		}
+	}
 	if err := approvals.RejectProposalWithOptions(vaultDir, id, approvals.RejectOptions{
 		Reason:         *reason,
 		SuppressResume: *dismiss || *noResume,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "hq reject error: %v\n", err)
 		os.Exit(1)
+	}
+	if rejectedRSIID != "" && !*dismiss && !*noResume {
+		_ = rsi.RecordTombstone(vaultDir, rejectedRSIID, *reason)
 	}
 	_ = webui.SyncMarkdownConsole(vaultDir)
 	fmt.Printf("Rejected proposal %s\n", id)

@@ -9,6 +9,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/outbox"
+	"github.com/zjshen14/agy-hq/internal/rsi"
 )
 
 // DecisionExecResult summarizes the 0-token execution of a DecisionOption on an OutboxItem.
@@ -76,11 +77,23 @@ func ExecuteDecision(vaultDir, itemID, optID string, now time.Time) (DecisionExe
 		if reason == "" {
 			reason = "Rejected via decision card"
 		}
+		var rejectedRSIID string
+		if pending, lErr := approvals.List(vaultDir); lErr == nil {
+			for _, p := range pending {
+				if p.ID == opt.ProposalID && p.Metadata != nil {
+					rejectedRSIID = strings.TrimSpace(p.Metadata["rsiId"])
+					break
+				}
+			}
+		}
 		if rErr := approvals.RejectProposalWithOptions(vaultDir, opt.ProposalID, approvals.RejectOptions{
 			Reason:         reason,
 			SuppressResume: true,
 		}); rErr != nil {
 			return res, rErr
+		}
+		if rejectedRSIID != "" {
+			_ = rsi.RecordTombstone(vaultDir, rejectedRSIID, reason)
 		}
 		res.NewStatus = outbox.StatusDismissed
 		res.Summary = fmt.Sprintf("Rejected proposal %s", opt.ProposalID)

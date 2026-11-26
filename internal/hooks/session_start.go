@@ -431,17 +431,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 		}
 	}
 
-	rsiLimit := 5
-	if leanAuto {
-		rsiLimit = 2
-	}
-	if genRules := extension.LoadGeneralOverlayRules(vaultDir, rsiLimit); len(genRules) > 0 {
-		rsiBlock := "## Learned Personal RSI Rules (`general`)\n" + strings.Join(genRules, "\n\n")
-		if leanAuto {
-			rsiBlock = trimBytesPreservingLines(rsiBlock, 550)
-		}
-		zone1Sections = append(zone1Sections, rsiBlock)
-	}
+	// RFC-0029: Always-on `general.md` RSI overlay retired to eliminate 3rd Zone-1 slot and
+	// catch-all context/IPI blast radius; Ring-2 overlays apply strictly to named skills.
 
 	// Zone 2: Role-Scoped Dynamic Tail
 	if !leanAuto {

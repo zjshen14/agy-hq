@@ -1043,16 +1043,16 @@ func TestTwoTierRSI_SessionStartGeneralOverlayAndPreToolUseGuards(t *testing.T) 
 		"<!-- /rsi:rule -->",
 	}, "\n")), 0o644)
 
-	// 1. Untainted SessionStart includes general.md learned rules
+	// 1. Untainted SessionStart does NOT inject retired general.md overlay rules (RFC-0029 single-owner cleanup)
 	var out bytes.Buffer
 	if err := HandleSessionStart(strings.NewReader(`{"conversationId":"conv-clean-gen"}`), &out, vaultDir); err != nil {
 		t.Fatalf("HandleSessionStart untainted failed: %v", err)
 	}
-	if !strings.Contains(out.String(), "rsi-gen-hook-1") || !strings.Contains(out.String(), "Learned Personal RSI Rules") {
-		t.Fatalf("expected untainted SessionStart to inject general.md rules, got:\n%s", out.String())
+	if strings.Contains(out.String(), "rsi-gen-hook-1") || strings.Contains(out.String(), "Learned Personal RSI Rules") {
+		t.Fatalf("expected untainted SessionStart NOT to inject retired general.md rules, got:\n%s", out.String())
 	}
 
-	// 2. Tainted SessionStart MUST NOT inject personal general.md rules
+	// 2. Tainted SessionStart MUST NOT inject general.md rules either
 	_ = taint.MarkSession(vaultDir, "conv-tainted-gen", "gmail:thread:t1")
 	out.Reset()
 	if err := HandleSessionStart(strings.NewReader(`{"conversationId":"conv-tainted-gen"}`), &out, vaultDir); err != nil {
@@ -1062,21 +1062,26 @@ func TestTwoTierRSI_SessionStartGeneralOverlayAndPreToolUseGuards(t *testing.T) 
 		t.Fatalf("expected tainted SessionStart NOT to inject general.md rules, got:\n%s", out.String())
 	}
 
-	// 3. Direct write_file/edit_file to <vault>/memory/rsi/rules/*.md is blocked in ALL sessions
-	rulePath := filepath.Join(rulesDir, "morning-brief.md")
-	writeReq, _ := json.Marshal(map[string]interface{}{
-		"conversationId": "conv-clean-gen",
-		"toolCall": map[string]interface{}{
-			"name": "write_file",
-			"args": map[string]interface{}{"Path": rulePath, "Content": "# bypass"},
-		},
-	})
-	out.Reset()
-	if err := HandlePreToolUse(bytes.NewReader(writeReq), &out, vaultDir); err != nil {
-		t.Fatalf("HandlePreToolUse write_file: %v", err)
-	}
-	if !strings.Contains(out.String(), `"decision":"deny"`) {
-		t.Fatalf("expected PreToolUse to block direct write to memory/rsi/rules, got: %s", out.String())
+	// 3. Direct write_file/edit_file to <vault>/memory/rsi/** (rules, observations, baselines) is blocked in ALL sessions
+	for _, protectedPath := range []string{
+		filepath.Join(rulesDir, "morning-brief.md"),
+		filepath.Join(vaultDir, "memory", "rsi", "observations.jsonl"),
+		filepath.Join(vaultDir, "memory", "rsi", "skill_baselines.json"),
+	} {
+		writeReq, _ := json.Marshal(map[string]interface{}{
+			"conversationId": "conv-clean-gen",
+			"toolCall": map[string]interface{}{
+				"name": "write_file",
+				"args": map[string]interface{}{"Path": protectedPath, "Content": "# bypass"},
+			},
+		})
+		out.Reset()
+		if err := HandlePreToolUse(bytes.NewReader(writeReq), &out, vaultDir); err != nil {
+			t.Fatalf("HandlePreToolUse write_file %s: %v", protectedPath, err)
+		}
+		if !strings.Contains(out.String(), `"decision":"deny"`) {
+			t.Fatalf("expected PreToolUse to block direct write to %s, got: %s", protectedPath, out.String())
+		}
 	}
 
 	// 4. Canonical ask_question formats `rsi_overlay` proposals cleanly

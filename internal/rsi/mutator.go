@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/extension"
+	"github.com/zjshen14/agy-hq/internal/redact"
+	"github.com/zjshen14/agy-hq/internal/store"
+	"github.com/zjshen14/agy-hq/internal/taint"
+	"github.com/zjshen14/agy-hq/internal/transcript"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -27,9 +30,15 @@ const (
 )
 
 // NonOverridableQuarantineSkills cannot be overridden or mutated via personal RSI overlays.
-var NonOverridableQuarantineSkills = map[string]bool{
-	"inbox-triage":              true,
-	"quarantined-digest-reader": true,
+// Single canonical source of truth in internal/extension.
+var NonOverridableQuarantineSkills = extension.NonOverridableCoreSkills
+
+// ParsedRSIRule aliases the canonical parser struct in internal/extension.
+type ParsedRSIRule = extension.ParsedRSIRule
+
+// ParseRSIRules delegates to internal/extension.ParseRSIRules (single canonical parser).
+func ParseRSIRules(skillFile, content string) []ParsedRSIRule {
+	return extension.ParseRSIRules(skillFile, content)
 }
 
 func (r MutationRing) Label() string {
@@ -65,6 +74,9 @@ type RSIHypothesis struct {
 	FaultLayer         AttributionFaultLayer `json:"faultLayer"`
 	Title              string                `json:"title"`
 	RootCause          string                `json:"rootCause"`
+	EditRationale      string                `json:"editRationale,omitempty"`
+	PredictedOutcome   string                `json:"predictedOutcome,omitempty"`
+	Origin             string                `json:"origin,omitempty"` // "auto_mined" | "user_correction" | "ablation" | "revert"
 	TargetFiles        []string              `json:"targetFiles"`
 	DeltaOp            *ACEDeltaOp           `json:"deltaOp,omitempty"`
 	ProposedDiff       string                `json:"proposedDiff"`
@@ -72,11 +84,55 @@ type RSIHypothesis struct {
 	ReplayTestName     string                `json:"replayTestName,omitempty"`
 	ExpectedSavedSteps int                   `json:"expectedSavedSteps"`
 	Verification       *VerificationReport   `json:"verification,omitempty"`
-	Status             string                `json:"status"`                // "draft", "verified", "failed", "proposed", "approved", "rejected"
+	SafetyProbePassed  bool                  `json:"safetyProbePassed,omitempty"`
+	SafetyProbeDiffSHA string                `json:"safetyProbeDiffSha256,omitempty"`
+	SafetyProbeSummary string                `json:"safetyProbeSummary,omitempty"`
+	Status             string                `json:"status"`                // "draft", "verified", "failed", "proposed", "approved", "rejected", "archived"
 	Tier               string                `json:"tier,omitempty"`        // "personal" (Tier 1 default) or "upstream" (Tier 2)
 	WorktreeDir        string                `json:"worktreeDir,omitempty"` // Isolated worktree path for Tier 2 upstream hypotheses
 	Branch             string                `json:"branch,omitempty"`      // Git branch hq/rsi-<id> for Tier 2 upstream hypotheses
 	CreatedAt          string                `json:"createdAt"`
+}
+
+// RSIAdvisory represents a non-destructive actionable recommendation (Ring-1 CLI fix,
+// workflow script compilation, or LATM Tier B->C graduation) surfaced as a 1-tap spawn card.
+type RSIAdvisory struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"` // "ring1_cli_triage" | "compile_script_or_route" | "tier_c_graduation"
+	SkillOrPkg  string `json:"skillOrPkg"`
+	Title       string `json:"title"`
+	Summary     string `json:"summary"`
+	ImpactScore int64  `json:"impactScore"`
+	SpawnPrompt string `json:"spawnPrompt"`
+	ObsID       string `json:"observationId,omitempty"`
+	RuleID      string `json:"ruleId,omitempty"`
+}
+
+// ObservationContext is the bounded, PII-scrubbed, taint-verified evidence packet returned by
+// `hq rsi context <obs-id> --json` for grounded semantic synthesis (0 extra files on disk).
+type ObservationContext struct {
+	Observation        FrictionEvent `json:"observation"`
+	TargetSkill        string        `json:"targetSkill"`
+	TargetFile         string        `json:"targetFile,omitempty"`
+	CurrentTargetText  string        `json:"currentTargetText,omitempty"`
+	TranscriptExcerpts []string      `json:"transcriptExcerpts,omitempty"`
+	PriorTombstones    []string      `json:"priorTombstones,omitempty"`
+	ActiveRuleCount    int           `json:"activeRuleCount"`
+	MaxRulesForTarget  int           `json:"maxRulesForTarget"`
+}
+
+// HypothesisInput is the structured JSON schema accepted by `hq rsi hypothesize --from-json`.
+type HypothesisInput struct {
+	ObservationID    string `json:"observationId"`
+	SkillSlug        string `json:"skillSlug"`
+	RuleID           string `json:"ruleId,omitempty"`
+	Title            string `json:"title"`
+	RootCause        string `json:"rootCause"`
+	EditRationale    string `json:"editRationale"`
+	PredictedOutcome string `json:"predictedOutcome"`
+	RuleText         string `json:"ruleText"`
+	ModelScope       string `json:"modelScope,omitempty"`
+	Origin           string `json:"origin,omitempty"`
 }
 
 // HypothesesDir returns local/memory/rsi/hypotheses.
@@ -84,12 +140,10 @@ func HypothesesDir(vaultDir string) string {
 	return filepath.Join(vaultDir, "memory", "rsi", "hypotheses")
 }
 
-// SaveHypothesis writes an RSIHypothesis to local/memory/rsi/hypotheses/<id>.json.
+// SaveHypothesis atomically writes an RSIHypothesis to local/memory/rsi/hypotheses/<id>.json
+// under store.RankMemory with 0600 permissions.
 func SaveHypothesis(vaultDir string, h *RSIHypothesis) error {
 	dir := HypothesesDir(vaultDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	if h.DiffSHA256 == "" && h.ProposedDiff != "" {
 		sum := sha256.Sum256([]byte(h.ProposedDiff))
 		h.DiffSHA256 = hex.EncodeToString(sum[:])
@@ -98,7 +152,13 @@ func SaveHypothesis(vaultDir string, h *RSIHypothesis) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, h.ID+".json"), b, 0o644)
+	b = append(b, '\n')
+	return withRSILock(vaultDir, func() error {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return store.WriteAtomic(filepath.Join(dir, h.ID+".json"), b, 0o600)
+	})
 }
 
 // LoadHypothesis loads a single RSIHypothesis by ID from local/memory/rsi/hypotheses/<id>.json.
@@ -138,8 +198,8 @@ func ListHypotheses(vaultDir string) ([]RSIHypothesis, error) {
 	return out, nil
 }
 
-// CheckQuotaCircuitBreaker checks local/memory/quota_state.json and returns an error if rolling 5h/daily
-// usage exceeds 75% (unless force is true).
+// CheckQuotaCircuitBreaker checks local/memory/quota_state.json and returns false if rolling 5h/daily
+// usage exceeds 75%.
 func CheckQuotaCircuitBreaker(vaultDir string) (bool, string) {
 	quotaFile := filepath.Join(vaultDir, "memory", "quota_state.json")
 	b, err := os.ReadFile(quotaFile)
@@ -221,9 +281,6 @@ func ResolveHypothesisTargetPath(rootDir, vaultDir string, h *RSIHypothesis, tf 
 // OverlaySkeleton returns the minimal markdown header for a new personal RSI overlay rule file.
 func OverlaySkeleton(skillSlug string) string {
 	slug := strings.TrimSpace(skillSlug)
-	if slug == "" {
-		slug = "general"
-	}
 	return fmt.Sprintf("# Personal RSI Overlay: %s\n", slug)
 }
 
@@ -238,19 +295,22 @@ func EnsureOverlaySkeletonContent(absPath, relTarget string) (string, error) {
 	slash := filepath.ToSlash(relTarget)
 	if strings.HasPrefix(slash, "local/memory/rsi/rules/") {
 		slug := strings.TrimSuffix(filepath.Base(slash), ".md")
+		if slug == "" || slug == "general" {
+			return "", fmt.Errorf("general.md overlay is retired; specify a named skill slug")
+		}
 		return OverlaySkeleton(slug), nil
 	}
 	return "", os.ErrNotExist
 }
 
-// ResolveTier1Target selects the Tier 1 personal mutation path for skillSlug inside vaultDir:
+// ResolveTier1Target selects the Tier 1 personal mutation path for a named skillSlug inside vaultDir:
 // - Tier 1A: local/skills/<slug>/SKILL.md when installed in Vault user space (and not a Core OS skill)
-// - Tier 1B: local/memory/rsi/rules/<slug>.md for Core OS skills, "general", or uninstalled templates
-// Quarantine skills (inbox-triage, quarantined-digest-reader) are unconditionally rejected.
+// - Tier 1B: local/memory/rsi/rules/<slug>.md for Core OS skills or plugin skills without a Vault SKILL.md
+// Quarantine skills and the retired "general" / internal/* catch-all are unconditionally rejected.
 func ResolveTier1Target(vaultDir, skillSlug string) (relTarget string, absTarget string, isOverlay bool, err error) {
 	slug := strings.TrimSpace(skillSlug)
-	if slug == "" || strings.HasPrefix(slug, "internal/") {
-		slug = "general"
+	if slug == "" || slug == "general" || strings.HasPrefix(slug, "internal/") {
+		return "", "", false, fmt.Errorf("general.md overlay is retired; RSI rules must target a named skill slug (got %q; store cross-cutting preferences in Ring-3 memory)", skillSlug)
 	}
 	if NonOverridableQuarantineSkills[slug] {
 		return "", "", false, fmt.Errorf("quarantine skill %q is non-overridable", slug)
@@ -293,7 +353,7 @@ func ResolveSkillFile(rootDir, skillSlug string, vaultDir ...string) (string, st
 	return relPlugin, absPlugin
 }
 
-// DiscoverAllSkillFiles returns all SKILL.md and overlay rule markdown paths across rootDir and optional vaultDir.
+// DiscoverAllSkillFiles returns all SKILL.md and named overlay rule markdown paths across rootDir and optional vaultDir.
 func DiscoverAllSkillFiles(rootDir string, vaultDir ...string) []string {
 	var paths []string
 	seen := make(map[string]bool)
@@ -314,7 +374,7 @@ func DiscoverAllSkillFiles(rootDir string, vaultDir ...string) []string {
 		rulesDir := filepath.Join(v, "memory", "rsi", "rules")
 		if rEntries, rErr := os.ReadDir(rulesDir); rErr == nil {
 			for _, re := range rEntries {
-				if !re.IsDir() && strings.HasSuffix(re.Name(), ".md") {
+				if !re.IsDir() && strings.HasSuffix(re.Name(), ".md") && re.Name() != "general.md" {
 					addFile(filepath.Join(rulesDir, re.Name()))
 				}
 			}
@@ -346,7 +406,7 @@ func DiscoverAllSkillFiles(rootDir string, vaultDir ...string) []string {
 const LearnedRulesHeading = "## Learned Operational Rules (RSI Managed)"
 
 // ApplyACEDelta applies an ACEDeltaOp (add_skill_rule, patch_skill_rule, deprecate_skill_rule)
-// to a SKILL.md document without wholesale rewrites.
+// to a SKILL.md or overlay document without wholesale rewrites.
 func ApplyACEDelta(skillContent string, op ACEDeltaOp) (string, error) {
 	if strings.TrimSpace(op.RuleID) == "" {
 		return "", fmt.Errorf("ACE delta ruleId is required")
@@ -415,7 +475,6 @@ func replaceOrRemoveRSIRuleBlock(content, ruleID, replacement string) (string, b
 				out = append(out, strings.Split(replacement, "\n")...)
 			}
 			i++
-			// Skip contiguous bullet/continuation lines belonging to this rule
 			for i < len(lines) {
 				trimmed := strings.TrimSpace(lines[i])
 				if trimmed == "" || strings.HasPrefix(trimmed, "<!-- rsi:rule") || strings.HasPrefix(trimmed, "## ") {
@@ -474,8 +533,51 @@ type HypothesizeOptions struct {
 	Upstream bool
 }
 
+func activeTombstoneFingerprints(vaultDir string) map[string]bool {
+	out := make(map[string]bool)
+	recs, err := LoadArchive(vaultDir)
+	if err != nil {
+		return out
+	}
+	for _, r := range recs {
+		if r.Status == "rejected" || r.Status == "reverted" {
+			for _, fp := range r.SourceFingerprints {
+				if fp != "" {
+					out[fp] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// isCleanSingleLineFlagRepair returns true only when cmdPat and recovery share the same leading binary,
+// recovery is a concise single-line shell invocation (<= 140 chars), and contains no heredocs or chat prose.
+func isCleanSingleLineFlagRepair(cmdPat, recovery string) bool {
+	c := strings.TrimSpace(cmdPat)
+	r := strings.TrimSpace(recovery)
+	if c == "" || r == "" || len(r) > 140 || strings.Contains(r, "\n") || strings.Contains(r, "<<") {
+		return false
+	}
+	lowerR := strings.ToLower(r)
+	for _, bad := range []string{"dispatched ", "worker ", "launched ", "subagent ", "i will ", "let me "} {
+		if strings.HasPrefix(lowerR, bad) {
+			return false
+		}
+	}
+	cf := strings.Fields(c)
+	rf := strings.Fields(r)
+	if len(cf) == 0 || len(rf) == 0 {
+		return false
+	}
+	return filepath.Base(cf[0]) == filepath.Base(rf[0]) && c != r
+}
+
 // HypothesizeWithOptions synthesizes either Tier 1 personal Vault mutations (default)
 // or Tier 2 upstream contributor PR mutations in an isolated git worktree (`--upstream`).
+// Per RFC-0029, 0-token Go template synthesis is restricted strictly to high-precision
+// categories (proactive noise, user corrections, draft edits, or clean single-line CLI flag repairs)
+// on named skills with distinctConvs >= 2 (or >= 1 for explicit user corrections).
 func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts HypothesizeOptions) ([]RSIHypothesis, error) {
 	if ok, reason := CheckQuotaCircuitBreaker(vaultDir); !ok && !opts.Force {
 		return nil, fmt.Errorf("%s", reason)
@@ -488,6 +590,7 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 	if err != nil {
 		return nil, err
 	}
+	tombstones := activeTombstoneFingerprints(vaultDir)
 
 	now := time.Now().UTC()
 	today := now.Format("20060102")
@@ -505,16 +608,48 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 		if targetObsID == "" && ev.Tainted {
 			continue
 		}
-
-		expectedSaved := ev.OccurrenceCount * ev.WastedSteps
-		highPriority := ev.Category == FrictionUserIntervention || ev.Category == FrictionDraftEdited
-		if !opts.Force && targetObsID == "" && !highPriority && expectedSaved < 4 {
+		if !opts.Force && tombstones[ev.Fingerprint] {
+			if targetObsID != "" {
+				return created, fmt.Errorf("observation %s matches a rejected/reverted RSI tombstone (pass --force to override)", ev.ID)
+			}
 			continue
 		}
 
+		// Require Ring-2 substrate unless explicitly forced/targeted
+		if targetObsID == "" && !opts.Force && ev.TargetSubstrate != "" && ev.TargetSubstrate != "ring2_skill_or_overlay" {
+			continue
+		}
+
+		isUserCorrection := ev.Origin == "user_correction" || ev.Category == FrictionUserIntervention || ev.Category == FrictionDraftEdited
+		distinctConvs := len(ev.ConversationIDs)
+		if distinctConvs == 0 && ev.OccurrenceCount > 0 {
+			distinctConvs = ev.OccurrenceCount
+		}
+		if !opts.Force && targetObsID == "" {
+			if isUserCorrection {
+				if distinctConvs < 1 {
+					continue
+				}
+			} else if ev.Category == FrictionProactiveNoise {
+				// Proactive noise already has high statistical thresholds (>=4..5 resolved items)
+			} else {
+				if distinctConvs < 2 {
+					continue
+				}
+				// For error_recovery_chain, require clean single-line CLI flag repair for 0-token Go template;
+				// noisy/complex traces should use `hq rsi context` + `hq rsi hypothesize --from-json`.
+				if ev.Category == FrictionErrorRecovery && !isCleanSingleLineFlagRepair(ev.CommandPattern, ev.RecoveryAction) {
+					continue
+				}
+			}
+		}
+
 		skillSlug := strings.TrimSpace(ev.SkillOrPkg)
-		if strings.HasPrefix(skillSlug, "internal/") || skillSlug == "" {
-			skillSlug = "general"
+		if skillSlug == "" || skillSlug == "general" || strings.HasPrefix(skillSlug, "internal/") {
+			if targetObsID != "" {
+				return created, fmt.Errorf("observation %s has unattributable skill %q; general.md overlay is retired (use Ring-3 memory or specify a named skill via --from-json)", ev.ID, skillSlug)
+			}
+			continue
 		}
 		if NonOverridableQuarantineSkills[skillSlug] {
 			if targetObsID != "" {
@@ -533,7 +668,7 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 		if opts.Upstream {
 			tier = "upstream"
 			relUp, _ := ResolveSkillFile(rootDir, skillSlug)
-			if strings.HasPrefix(relUp, "local/") || skillSlug == "general" {
+			if strings.HasPrefix(relUp, "local/") {
 				if targetObsID != "" {
 					return created, fmt.Errorf("skill %q has no tracked upstream Core or starter template SKILL.md target", skillSlug)
 				}
@@ -578,12 +713,16 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 		if modelScope == "" {
 			modelScope = "all"
 		}
+		origin := ev.Origin
+		if origin == "" {
+			origin = "auto_mined"
+		}
 
 		guidance := sanitizePIIForTrackedSkill(rootDir, ev.RecoveryAction)
 		cleanExcerpt := sanitizePIIForTrackedSkill(rootDir, ev.ErrorExcerpt)
 		cleanCmdPat := sanitizePIIForTrackedSkill(rootDir, ev.CommandPattern)
 		if strings.TrimSpace(guidance) == "" {
-			guidance = fmt.Sprintf("Avoid repeating `%s` error (%s); verify flags and pre-conditions before invoking `%s`.", cleanCmdPat, cleanExcerpt, ev.ToolName)
+			guidance = fmt.Sprintf("Verify exact flags and pre-conditions for `%s` before invoking `%s` to prevent `%s`.", cleanCmdPat, ev.ToolName, cleanExcerpt)
 		}
 		if skillSlug == "thesis-check" || skillSlug == "filing-diff" {
 			if !strings.Contains(strings.ToLower(guidance), "kill criteria") && !strings.Contains(strings.ToLower(guidance), "falsif") {
@@ -591,12 +730,17 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 			}
 		}
 
+		originAttr := ""
+		if origin == "user_correction" {
+			originAttr = ` origin="user_correction"`
+		}
 		ruleBlock := fmt.Sprintf(
-			"<!-- rsi:rule id=%q source=%q model_scope=%q added=%q helpful=\"0\" harmful=\"0\" -->\n- **[Learned Rule · %s]:** When using `%s` in `%s`, %s *(Observed %dx; prevents: %s)*",
+			"<!-- rsi:rule id=%q source=%q model_scope=%q added=%q helpful=\"0\" harmful=\"0\"%s -->\n- **[Learned Rule · %s]:** When using `%s` in `%s`, %s *(Observed %dx; prevents: %s)*",
 			ruleID,
 			ev.ID,
 			modelScope,
 			now.Format("2006-01-02"),
+			originAttr,
 			ev.FaultLayer,
 			ev.ToolName,
 			skillSlug,
@@ -621,6 +765,10 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 		sum := sha256.Sum256([]byte(diff))
 		diffSHA := hex.EncodeToString(sum[:])
 
+		expectedSaved := ev.OccurrenceCount * ev.WastedSteps
+		if expectedSaved <= 0 {
+			expectedSaved = 2
+		}
 		hID := fmt.Sprintf("rsi-%s-%s", today, ev.Fingerprint[:6])
 		hyp := RSIHypothesis{
 			ID:                 hID,
@@ -630,6 +778,9 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 			FaultLayer:         ev.FaultLayer,
 			Title:              fmt.Sprintf("Add learned %s rule %s (%s)", skillSlug, ruleID, ev.Category),
 			RootCause:          fmt.Sprintf("Ground-truth telemetry recorded %d occurrence(s) of %s in %s (%s)", ev.OccurrenceCount, ev.Category, skillSlug, ev.ErrorExcerpt),
+			EditRationale:      fmt.Sprintf("Targeted %s rule directly addresses observed %s failure pattern.", skillSlug, ev.Category),
+			PredictedOutcome:   fmt.Sprintf("Eliminate recurring %s failures in %s without regressing adjacent runs.", ev.Category, skillSlug),
+			Origin:             origin,
 			TargetFiles:        []string{relTarget},
 			DeltaOp:            delta,
 			ProposedDiff:       diff,
@@ -654,20 +805,352 @@ func HypothesizeWithOptions(rootDir, vaultDir string, targetObsID string, opts H
 		_ = SaveObservations(vaultDir, observations)
 	}
 
-	// Check for LATM Tier B -> Tier C Skill-to-Code Promotion candidates (helpful >= 5)
-	if !opts.Upstream {
-		if promos := findTierCPromotionCandidates(rootDir, vaultDir, today, now); len(promos) > 0 {
-			created = append(created, promos...)
-		}
-	}
-
 	return created, nil
 }
 
-var (
-	reRSIRuleComment = regexp.MustCompile(`<!--\s*rsi:rule\s+([^>]+)-->`)
-	reRuleKV         = regexp.MustCompile(`(\w+)="([^"]*)"`)
-)
+// HypothesizeFromJSON builds and saves a structured Ring-2 RSIHypothesis from LLM-authored JSON input
+// (`hq rsi hypothesize --from-json`), validating target safety and formatting the canonical ACE rule block.
+func HypothesizeFromJSON(rootDir, vaultDir string, spec HypothesisInput) (*RSIHypothesis, error) {
+	skillSlug := strings.TrimSpace(spec.SkillSlug)
+	ruleText := strings.TrimSpace(spec.RuleText)
+	if skillSlug == "" || skillSlug == "general" {
+		return nil, fmt.Errorf("skillSlug must be a named skill (general.md is retired)")
+	}
+	if ruleText == "" {
+		return nil, fmt.Errorf("ruleText is required")
+	}
+
+	var matchedObs *FrictionEvent
+	observations, _ := LoadObservations(vaultDir)
+	for i := range observations {
+		if spec.ObservationID != "" && (observations[i].ID == spec.ObservationID || observations[i].Fingerprint == spec.ObservationID) {
+			if observations[i].Tainted {
+				return nil, fmt.Errorf("cannot synthesize hypothesis from tainted observation %s", observations[i].ID)
+			}
+			matchedObs = &observations[i]
+			break
+		}
+	}
+
+	relTarget, absTarget, _, err := ResolveTier1Target(vaultDir, skillSlug)
+	if err != nil {
+		return nil, err
+	}
+	beforeContent, err := EnsureOverlaySkeletonContent(absTarget, relTarget)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	today := now.Format("20060102")
+	fpToken := ""
+	var obsIDs, fps []string
+	fault := FaultWorkerACIOrSkill
+	origin := strings.TrimSpace(spec.Origin)
+	expectedSaved := 2
+
+	if matchedObs != nil {
+		fpToken = matchedObs.Fingerprint
+		if len(fpToken) > 6 {
+			fpToken = fpToken[:6]
+		}
+		obsIDs = []string{matchedObs.ID}
+		fps = []string{matchedObs.Fingerprint}
+		fault = matchedObs.FaultLayer
+		if origin == "" {
+			origin = matchedObs.Origin
+		}
+		if s := matchedObs.OccurrenceCount * matchedObs.WastedSteps; s > expectedSaved {
+			expectedSaved = s
+		}
+	} else {
+		sum := sha256.Sum256([]byte(skillSlug + "|" + ruleText))
+		fpToken = hex.EncodeToString(sum[:])[:6]
+		if spec.ObservationID != "" {
+			obsIDs = []string{spec.ObservationID}
+		}
+		fps = []string{hex.EncodeToString(sum[:])[:16]}
+	}
+	if origin == "" {
+		origin = "auto_mined"
+	}
+
+	ruleID := strings.TrimSpace(spec.RuleID)
+	if ruleID == "" {
+		ruleID = fmt.Sprintf("rsi-rule-%s-%s", skillSlug, fpToken)
+	}
+	modelScope := strings.TrimSpace(spec.ModelScope)
+	if modelScope == "" {
+		modelScope = "all"
+	}
+	srcAttr := "semantic"
+	if len(obsIDs) > 0 {
+		srcAttr = obsIDs[0]
+	}
+	originAttr := ""
+	if origin == "user_correction" {
+		originAttr = ` origin="user_correction"`
+	}
+
+	cleanRule := sanitizePIIForTrackedSkill(rootDir, ruleText)
+	if !strings.HasPrefix(cleanRule, "- ") {
+		cleanRule = "- " + cleanRule
+	}
+	ruleBlock := fmt.Sprintf(
+		"<!-- rsi:rule id=%q source=%q model_scope=%q added=%q helpful=\"0\" harmful=\"0\"%s -->\n%s",
+		ruleID, srcAttr, modelScope, now.Format("2006-01-02"), originAttr, cleanRule,
+	)
+
+	delta := &ACEDeltaOp{
+		Op:         "add_skill_rule",
+		RuleID:     ruleID,
+		Section:    LearnedRulesHeading,
+		Content:    ruleBlock,
+		ModelScope: modelScope,
+	}
+	afterContent, err := ApplyACEDelta(beforeContent, *delta)
+	if err != nil {
+		return nil, err
+	}
+	diff := BuildUnifiedDiff(relTarget, beforeContent, afterContent)
+	sum := sha256.Sum256([]byte(diff))
+	diffSHA := hex.EncodeToString(sum[:])
+
+	title := strings.TrimSpace(spec.Title)
+	if title == "" {
+		title = fmt.Sprintf("Add learned %s rule %s", skillSlug, ruleID)
+	}
+	rootCause := strings.TrimSpace(spec.RootCause)
+	if rootCause == "" && matchedObs != nil {
+		rootCause = matchedObs.ErrorExcerpt
+	}
+
+	h := &RSIHypothesis{
+		ID:                 fmt.Sprintf("rsi-%s-%s", today, fpToken),
+		ObservationIDs:     obsIDs,
+		SourceFingerprints: fps,
+		Ring:               Ring2SkillTrigger,
+		FaultLayer:         fault,
+		Title:              title,
+		RootCause:          rootCause,
+		EditRationale:      strings.TrimSpace(spec.EditRationale),
+		PredictedOutcome:   strings.TrimSpace(spec.PredictedOutcome),
+		Origin:             origin,
+		TargetFiles:        []string{relTarget},
+		DeltaOp:            delta,
+		ProposedDiff:       diff,
+		DiffSHA256:         diffSHA,
+		ExpectedSavedSteps: expectedSaved,
+		Status:             "draft",
+		Tier:               "personal",
+		CreatedAt:          now.Format(time.RFC3339),
+	}
+	if err := SaveHypothesis(vaultDir, h); err != nil {
+		return nil, err
+	}
+	if matchedObs != nil {
+		matchedObs.Status = "hypothesized"
+		_ = SaveObservations(vaultDir, observations)
+	}
+	return h, nil
+}
+
+// BuildObservationContext constructs a bounded, PII-scrubbed, taint-verified evidence packet
+// for semantic synthesis (`hq rsi context <obs-id> --json`) without writing any extra files.
+func BuildObservationContext(rootDir, vaultDir, obsID string) (*ObservationContext, error) {
+	obsList, err := LoadObservations(vaultDir)
+	if err != nil {
+		return nil, err
+	}
+	var target *FrictionEvent
+	for i := range obsList {
+		if obsList[i].ID == obsID || obsList[i].Fingerprint == obsID {
+			ev := obsList[i]
+			target = &ev
+			break
+		}
+	}
+	if target == nil {
+		return nil, fmt.Errorf("observation %q not found", obsID)
+	}
+	if target.Tainted {
+		return nil, fmt.Errorf("refusing context packet for tainted observation %s", target.ID)
+	}
+
+	ctx := &ObservationContext{
+		Observation:       *target,
+		TargetSkill:       target.SkillOrPkg,
+		MaxRulesForTarget: MaxRulesPerOverlay,
+	}
+
+	if rel, abs, isOverlay, tErr := ResolveTier1Target(vaultDir, target.SkillOrPkg); tErr == nil {
+		ctx.TargetFile = rel
+		if !isOverlay {
+			ctx.MaxRulesForTarget = MaxActiveRSIRules
+		}
+		if b, rErr := os.ReadFile(abs); rErr == nil {
+			content := string(b)
+			ctx.ActiveRuleCount = len(ParseRSIRules(rel, content))
+			if len(content) > 4000 {
+				content = content[:4000] + "\n... (truncated)"
+			}
+			ctx.CurrentTargetText = redact.ScrubForUntrustedOutput(vaultDir, content)
+		}
+	}
+
+	// Collect up to 2 untainted ±5-step transcript excerpts matching target.ConversationIDs
+	convSet := make(map[string]bool, len(target.ConversationIDs))
+	for _, cid := range target.ConversationIDs {
+		convSet[cid] = true
+	}
+	seenConv := make(map[string]bool)
+	_ = vault.WalkJournals(vaultDir, time.Time{}, false, func(_ string, rec vault.JournalRecord) bool {
+		if len(ctx.TranscriptExcerpts) >= 2 {
+			return false
+		}
+		if !convSet[rec.ConversationID] || seenConv[rec.ConversationID] || rec.TranscriptPath == "" {
+			return true
+		}
+		if rec.TaintedSession {
+			return true
+		}
+		if _, tainted := taint.IsTainted(vaultDir, rec.ConversationID); tainted {
+			return true
+		}
+		steps, trTainted, pErr := transcript.ParseSteps(rec.TranscriptPath, rec.StepStartIdx)
+		if pErr != nil || trTainted || len(steps) == 0 {
+			return true
+		}
+		seenConv[rec.ConversationID] = true
+		failIdx := -1
+		for i, s := range steps {
+			if s.IsError || s.IsDenial {
+				failIdx = i
+				break
+			}
+		}
+		if failIdx < 0 {
+			failIdx = 0
+		}
+		lo := failIdx - 5
+		if lo < 0 {
+			lo = 0
+		}
+		hi := failIdx + 5
+		if hi >= len(steps) {
+			hi = len(steps) - 1
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("[conv=%s steps=%d..%d]\n", rec.ConversationID, steps[lo].StepIndex, steps[hi].StepIndex))
+		for k := lo; k <= hi; k++ {
+			st := steps[k]
+			tag := st.Type
+			if st.IsDenial {
+				tag = "PRETOOL_DENY"
+			} else if st.IsError {
+				tag = "ERROR"
+			}
+			line := st.CmdLine
+			if line == "" {
+				line = transcript.FirstLineExcerpt(st.Content, 160)
+			}
+			sb.WriteString(fmt.Sprintf("  step %d (%s/%s): %s\n", st.StepIndex, tag, st.ToolName, sanitizePIIForTrackedSkill(rootDir, redact.ScrubForUntrustedOutput(vaultDir, line))))
+		}
+		ctx.TranscriptExcerpts = append(ctx.TranscriptExcerpts, strings.TrimSpace(sb.String()))
+		return true
+	})
+
+	// Attach prior rejection/revert tombstones for the same skill so synthesis never repeats rejected edits
+	if arch, aErr := LoadArchive(vaultDir); aErr == nil {
+		for _, r := range arch {
+			if r.Status != "rejected" && r.Status != "reverted" {
+				continue
+			}
+			if target.SkillOrPkg != "" && strings.Contains(strings.ToLower(strings.Join(r.TargetFiles, " ")+" "+r.Title), strings.ToLower(target.SkillOrPkg)) {
+				msg := fmt.Sprintf("[%s] %s", r.Status, r.Title)
+				if r.RejectionReason != "" {
+					msg += " (" + r.RejectionReason + ")"
+				}
+				ctx.PriorTombstones = append(ctx.PriorTombstones, msg)
+			}
+		}
+	}
+
+	return ctx, nil
+}
+
+// ListAdvisories returns non-destructive actionable advisories for Ring-1 CLI bugs,
+// high-cost workflow script compilation, and LATM Tier B->C graduations (helpful >= 5).
+func ListAdvisories(rootDir, vaultDir string) []RSIAdvisory {
+	var out []RSIAdvisory
+	tombstones := activeTombstoneFingerprints(vaultDir)
+
+	if obsList, err := LoadObservations(vaultDir); err == nil {
+		for _, ev := range obsList {
+			if ev.Status != "open" || ev.Tainted || tombstones[ev.Fingerprint] {
+				continue
+			}
+			distinctConvs := len(ev.ConversationIDs)
+			if distinctConvs < 2 && ev.OccurrenceCount < 2 {
+				continue
+			}
+			switch ev.TargetSubstrate {
+			case "ring1_cli_triage":
+				out = append(out, RSIAdvisory{
+					ID:          "adv-cli-" + ev.Fingerprint[:6],
+					Kind:        "ring1_cli_triage",
+					SkillOrPkg:  ev.SkillOrPkg,
+					Title:       fmt.Sprintf("Fix recurring CLI friction in %s (%dx)", ev.SkillOrPkg, ev.OccurrenceCount),
+					Summary:     fmt.Sprintf("%s (impact=%d, %d convs)", ev.ErrorExcerpt, ev.ImpactScore, distinctConvs),
+					ImpactScore: ev.ImpactScore,
+					ObsID:       ev.ID,
+					SpawnPrompt: fmt.Sprintf("Investigate and fix recurring CLI observation %s (`hq rsi context %s --json`): %s", ev.ID, ev.ID, ev.ErrorExcerpt),
+				})
+			case "compile_script_or_route":
+				out = append(out, RSIAdvisory{
+					ID:          "adv-compile-" + ev.Fingerprint[:6],
+					Kind:        "compile_script_or_route",
+					SkillOrPkg:  ev.SkillOrPkg,
+					Title:       fmt.Sprintf("Compile high-cost %s workflow (%dx)", ev.SkillOrPkg, ev.OccurrenceCount),
+					Summary:     fmt.Sprintf("%s (impact=%d, %d convs)", ev.ErrorExcerpt, ev.ImpactScore, distinctConvs),
+					ImpactScore: ev.ImpactScore,
+					ObsID:       ev.ID,
+					SpawnPrompt: fmt.Sprintf("Audit observation %s (`hq rsi context %s --json`) and compile the repetitive multi-step workflow into a deterministic script or tight skill route.", ev.ID, ev.ID),
+				})
+			}
+		}
+	}
+
+	// Non-destructive LATM Tier B->C graduation advisories from archive.jsonl (replaces destructive D11a deprecation).
+	if arch, err := LoadArchive(vaultDir); err == nil {
+		for _, r := range arch {
+			if (r.Status == "promoted" || r.Status == "canary") && r.HelpfulCount >= 5 && r.HarmfulCount == 0 {
+				ruleID := r.RuleID
+				if ruleID == "" {
+					ruleID = r.ID
+				}
+				out = append(out, RSIAdvisory{
+					ID:          "adv-grad-" + sanitizeBranchToken(ruleID),
+					Kind:        "tier_c_graduation",
+					SkillOrPkg:  strings.Join(r.TargetFiles, ","),
+					Title:       fmt.Sprintf("Graduate proven RSI rule %s (helpful=%d) to deterministic Go check", ruleID, r.HelpfulCount),
+					Summary:     fmt.Sprintf("Rule %s achieved %d verified helpful activations with 0 regressions; consider compiling into deterministic Go.", ruleID, r.HelpfulCount),
+					ImpactScore: int64(r.HelpfulCount * 200),
+					RuleID:      ruleID,
+					SpawnPrompt: fmt.Sprintf("Implement a deterministic Go check for proven RSI rule %s (%s), add unit tests, and then deprecate the markdown rule cleanly.", ruleID, r.Title),
+				})
+			}
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ImpactScore != out[j].ImpactScore {
+			return out[i].ImpactScore > out[j].ImpactScore
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
 
 func sanitizePIIForTrackedSkill(rootDir, s string) string {
 	if rootDir != "" && len(rootDir) > 5 {
@@ -686,48 +1169,6 @@ func sanitizePIIForTrackedSkill(rootDir, s string) string {
 	return s
 }
 
-// ParsedRSIRule represents a parsed `<!-- rsi:rule ... -->` metadata block in a SKILL.md file.
-type ParsedRSIRule struct {
-	ID         string
-	Source     string
-	ModelScope string
-	Added      string
-	Helpful    int
-	Harmful    int
-	SkillFile  string
-}
-
-// ParseRSIRules extracts all `<!-- rsi:rule ... -->` blocks from a SKILL.md string.
-func ParseRSIRules(skillFile, content string) []ParsedRSIRule {
-	matches := reRSIRuleComment.FindAllStringSubmatch(content, -1)
-	var out []ParsedRSIRule
-	for _, m := range matches {
-		attrs := m[1]
-		kvs := reRuleKV.FindAllStringSubmatch(attrs, -1)
-		r := ParsedRSIRule{SkillFile: skillFile}
-		for _, kv := range kvs {
-			switch kv[1] {
-			case "id":
-				r.ID = kv[2]
-			case "source":
-				r.Source = kv[2]
-			case "model_scope":
-				r.ModelScope = kv[2]
-			case "added":
-				r.Added = kv[2]
-			case "helpful":
-				r.Helpful, _ = strconv.Atoi(kv[2])
-			case "harmful":
-				r.Harmful, _ = strconv.Atoi(kv[2])
-			}
-		}
-		if r.ID != "" {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
 func targetRelativePath(rootDir, vaultDir, absPath string) string {
 	if vaultDir != "" {
 		cleanV := filepath.Clean(vaultDir)
@@ -742,50 +1183,4 @@ func targetRelativePath(rootDir, vaultDir, absPath string) string {
 		}
 	}
 	return filepath.ToSlash(absPath)
-}
-
-func findTierCPromotionCandidates(rootDir, vaultDir, today string, now time.Time) []RSIHypothesis {
-	var promos []RSIHypothesis
-	for _, absPath := range DiscoverAllSkillFiles("", vaultDir) {
-		b, err := os.ReadFile(absPath)
-		if err != nil {
-			continue
-		}
-		rel := targetRelativePath(rootDir, vaultDir, absPath)
-		for _, r := range ParseRSIRules(rel, string(b)) {
-			if r.Helpful >= 5 && r.Harmful == 0 {
-				hID := fmt.Sprintf("rsi-%s-promote-%s", today, r.ID)
-				if _, err := LoadHypothesis(vaultDir, hID); err == nil {
-					continue
-				}
-				after, err := ApplyACEDelta(string(b), ACEDeltaOp{
-					Op:     "deprecate_skill_rule",
-					RuleID: r.ID,
-				})
-				if err != nil {
-					continue
-				}
-				diff := BuildUnifiedDiff(rel, string(b), after)
-				sum := sha256.Sum256([]byte(diff))
-				hyp := RSIHypothesis{
-					ID:                 hID,
-					ObservationIDs:     []string{r.Source},
-					Ring:               Ring2SkillTrigger,
-					FaultLayer:         FaultWorkerACIOrSkill,
-					Title:              fmt.Sprintf("[LATM Tier B->C Promotion] Graduate proven skill rule %s (helpful=%d) to deterministic Go check", r.ID, r.Helpful),
-					RootCause:          fmt.Sprintf("Skill rule %s has been verified helpful %d times with 0 regressions; ready to graduate to 0-token Go code and reclaim SKILL.md token budget", r.ID, r.Helpful),
-					TargetFiles:        []string{rel},
-					DeltaOp:            &ACEDeltaOp{Op: "deprecate_skill_rule", RuleID: r.ID, Section: LearnedRulesHeading},
-					ProposedDiff:       diff,
-					DiffSHA256:         hex.EncodeToString(sum[:]),
-					ExpectedSavedSteps: r.Helpful * 2,
-					Status:             "draft",
-					CreatedAt:          now.Format(time.RFC3339),
-				}
-				_ = SaveHypothesis(vaultDir, &hyp)
-				promos = append(promos, hyp)
-			}
-		}
-	}
-	return promos
 }

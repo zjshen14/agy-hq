@@ -5,42 +5,47 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/redact"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 const (
-	MaxSkillMarkdownLines  = 150
-	MaxActiveRSIRules      = 30
-	MaxGlobalSkills        = 25
-	MaxRing1NonTestLines   = 250
-	MaxRulesPerOverlay     = 10
-	MaxOverlayLines        = 50
-	MaxGeneralOverlayRules = 5
-	MaxGlobalActiveRules   = 50
+	MaxSkillMarkdownLines = 150
+	MaxActiveRSIRules     = 30
+	MaxGlobalSkills       = 25
+	MaxRing1NonTestLines  = 250
+	MaxRulesPerOverlay    = 5
+	MaxOverlayLines       = 50
+	MaxGlobalActiveRules  = 20
 )
 
 // VerificationReport records the results of Stage 3's 4-Gate Sandboxed Verification Harness.
 type VerificationReport struct {
-	Gate1TCBPassed        bool   `json:"gate1TcbPassed"`
-	Gate1Detail           string `json:"gate1Detail"`
-	Gate2ReproPassed      bool   `json:"gate2ReproPassed"`
-	Gate2Detail           string `json:"gate2Detail"`
-	Gate3TestSuitePassed  bool   `json:"gate3TestSuitePassed"`
-	Gate3Detail           string `json:"gate3Detail"`
-	Gate4BudgetPassed     bool   `json:"gate4BudgetPassed"`
-	Gate4Detail           string `json:"gate4Detail"`
-	AllPassed             bool   `json:"allPassed"`
-	VerifiedAt            string `json:"verifiedAt"`
-	VerifiedDiffSHA256    string `json:"verifiedDiffSha256"`
-	CounterfactualBasline string `json:"counterfactualBaseline,omitempty"` // "FAIL_AS_EXPECTED" or "VACUOUS_PASS"
+	Gate1TCBPassed          bool   `json:"gate1TcbPassed"`
+	Gate1Detail             string `json:"gate1Detail"`
+	Gate2ReproPassed        bool   `json:"gate2ReproPassed"`
+	Gate2Detail             string `json:"gate2Detail"`
+	Gate3TestSuitePassed    bool   `json:"gate3TestSuitePassed"`
+	Gate3Detail             string `json:"gate3Detail"`
+	Gate4BudgetPassed       bool   `json:"gate4BudgetPassed"`
+	Gate4Detail             string `json:"gate4Detail"`
+	AllPassed               bool   `json:"allPassed"`
+	RequiresLiveSafetyProbe bool   `json:"requiresLiveSafetyProbe,omitempty"`
+	SafetyProbeReason       string `json:"safetyProbeReason,omitempty"`
+	VerifiedAt              string `json:"verifiedAt"`
+	VerifiedDiffSHA256      string `json:"verifiedDiffSha256"`
+	CounterfactualBasline   string `json:"counterfactualBaseline,omitempty"` // "FAIL_AS_EXPECTED" or "VACUOUS_PASS"
 }
 
-// Verify runs the 4-Gate Sandboxed Verification Harness on an RSIHypothesis and persists the report.
+// Verify runs the 4-Gate Sandboxed Verification Harness (0-token, deterministic) on an RSIHypothesis
+// and persists the report. High-risk external-facing skill mutations are flagged with
+// RequiresLiveSafetyProbe=true so Propose enforces a diff-SHA-bound behavioral probe before staging.
 func Verify(rootDir, vaultDir, rsiID string) (*RSIHypothesis, error) {
 	h, err := LoadHypothesis(vaultDir, rsiID)
 	if err != nil {
@@ -58,24 +63,24 @@ func Verify(rootDir, vaultDir, rsiID string) (*RSIHypothesis, error) {
 		VerifiedDiffSHA256: h.DiffSHA256,
 	}
 
-	// Gate 1: Static Trusted Computing Base, Taint Isolation & Anti-Goodharting AST Check
+	// Gate 1: Static Trusted Computing Base, Taint Isolation, Critic 2 (Security Downgrade / Evolve-IPI) & AST Check
 	rep.Gate1TCBPassed, rep.Gate1Detail = CheckTCBAndAntiGoodhart(rootDir, vaultDir, h, observations)
 
-	// Gate 2: Counterfactual Failure Reproduction (2A for Ring 1 Code, 2B for Ring 2 Skill/Trigger)
+	// Gate 2: Counterfactual Reproduction (2A for Ring 1 Code, 2B for Ring 2 Skill + Critic 1 Drawback Detectors)
 	if rep.Gate1TCBPassed {
 		rep.Gate2ReproPassed, rep.Gate2Detail, rep.CounterfactualBasline = runGate2Counterfactual(rootDir, vaultDir, h, observations)
 	} else {
 		rep.Gate2Detail = "Skipped due to Gate 1 failure"
 	}
 
-	// Gate 3: Full Regression Suite & Pre-Commit PII Guard
+	// Gate 3: Full Regression Suite & Pre-Commit PII/Secret Guard
 	if rep.Gate1TCBPassed && rep.Gate2ReproPassed {
 		rep.Gate3TestSuitePassed, rep.Gate3Detail = runGate3RegressionAndPIIGuard(rootDir, vaultDir, h)
 	} else {
 		rep.Gate3Detail = "Skipped due to prior gate failure"
 	}
 
-	// Gate 4: Complexity, Token Budget & Cross-Rule Contradiction Guard
+	// Gate 4: Complexity, Tightened Token/Rule Budget & Cross-Rule Contradiction Guard
 	if rep.Gate1TCBPassed && rep.Gate2ReproPassed && rep.Gate3TestSuitePassed {
 		rep.Gate4BudgetPassed, rep.Gate4Detail = runGate4BudgetAndContradictionGuard(rootDir, vaultDir, h)
 	} else {
@@ -83,6 +88,15 @@ func Verify(rootDir, vaultDir, rsiID string) (*RSIHypothesis, error) {
 	}
 
 	rep.AllPassed = rep.Gate1TCBPassed && rep.Gate2ReproPassed && rep.Gate3TestSuitePassed && rep.Gate4BudgetPassed
+
+	// Risk-tiered live behavioral safety probe flag (Q5): required for external-facing / inbound skills
+	// when adding or patching rules (deprecations/reverts are strictly risk-reducing).
+	isDeprecation := h.DeltaOp != nil && h.DeltaOp.Op == "deprecate_skill_rule"
+	if rep.AllPassed && !isDeprecation && IsHighRiskTarget(h.TargetFiles) {
+		rep.RequiresLiveSafetyProbe = true
+		rep.SafetyProbeReason = fmt.Sprintf("External-facing or inbound skill target (%s) requires 6-case Safe-Personal-RSI behavioral probe (`hq rsi probes %s --json` -> `hq rsi record-probe %s --passed=true`) before proposing", strings.Join(h.TargetFiles, ", "), h.ID, h.ID)
+	}
+
 	h.Verification = rep
 	if rep.AllPassed {
 		h.Status = "verified"
@@ -97,16 +111,23 @@ func Verify(rootDir, vaultDir, rsiID string) (*RSIHypothesis, error) {
 
 func runGate2Counterfactual(rootDir, vaultDir string, h *RSIHypothesis, observations []FrictionEvent) (bool, string, string) {
 	if h.Ring == Ring1KernelCode {
-		// Gate 2A: Counterfactual Falsification for Ring 1 Code/Hook patches.
-		// Verify that the test is not vacuous (e.g., an empty test or a test without failure assertions
-		// that passes identically on unpatched baseline).
 		if strings.Contains(h.ProposedDiff, "// VACUOUS_TEST") || !hasTestFailureAssertionInDiff(h.ProposedDiff) {
 			return false, fmt.Sprintf("Gate 2A violation: ReplayTestName %q is vacuous (passes on unpatched baseline without testing the failure condition)", h.ReplayTestName), "VACUOUS_PASS"
+		}
+		// When operating in a real upstream Go worktree, actually execute the targeted replay test.
+		if h.Tier == "upstream" && strings.TrimSpace(h.WorktreeDir) != "" {
+			if _, err := os.Stat(filepath.Join(h.WorktreeDir, "go.mod")); err == nil {
+				cmd := exec.Command("go", "test", "-run", "^"+regexp.QuoteMeta(h.ReplayTestName)+"$", "./...")
+				cmd.Dir = h.WorktreeDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return false, fmt.Sprintf("Gate 2A violation: `go test -run %s` failed in worktree: %s", h.ReplayTestName, strings.TrimSpace(string(out))), "EXEC_FAIL"
+				}
+			}
 		}
 		return true, fmt.Sprintf("Gate 2A PASS: Counterfactual replay %s falsified on baseline and passed with fix", h.ReplayTestName), "FAIL_AS_EXPECTED"
 	}
 
-	// Gate 2B: Non-Code / Cross-Domain Skill Verification Rubric
+	// Gate 2B: Non-Code / Cross-Domain Skill Verification Rubric + Critic 1 Drawback Detectors
 	if h.DeltaOp == nil {
 		return false, "Gate 2B violation: Ring 2 skill hypothesis must include a structured ACEDeltaOp", ""
 	}
@@ -114,6 +135,11 @@ func runGate2Counterfactual(rootDir, vaultDir string, h *RSIHypothesis, observat
 		if !strings.Contains(h.DeltaOp.Content, "<!-- rsi:rule id=") {
 			return false, "Gate 2B violation: skill rule content must carry a structured `<!-- rsi:rule id=\"...\" -->` metadata comment", ""
 		}
+	}
+
+	// Critic 1 deterministic drawback checks (length, heredocs, chat paste, near-duplicate vs rules/Ring-3/tombstones)
+	if ok, reason := CheckRuleDrawbacks(rootDir, vaultDir, h); !ok {
+		return false, "Gate 2B violation: " + reason, ""
 	}
 
 	for _, tf := range h.TargetFiles {
@@ -129,13 +155,11 @@ func runGate2Counterfactual(rootDir, vaultDir string, h *RSIHypothesis, observat
 		if err != nil {
 			return false, fmt.Sprintf("Gate 2B violation: ApplyACEDelta failed on %s: %v", tf, err), ""
 		}
-		// Verify YAML frontmatter integrity
 		if strings.HasSuffix(tf, "SKILL.md") {
 			if !strings.HasPrefix(strings.TrimSpace(after), "---") || !strings.Contains(after, "name:") || !strings.Contains(after, "description:") {
 				return false, fmt.Sprintf("Gate 2B violation: resulting %s has invalid YAML frontmatter", tf), ""
 			}
 		}
-		// Anti-Sycophancy Invariant for Investing & Writing skills
 		if (strings.Contains(tf, "thesis-check") || strings.Contains(tf, "filing-diff")) && h.DeltaOp.Op != "deprecate_skill_rule" {
 			lowerRule := strings.ToLower(h.DeltaOp.Content)
 			if !strings.Contains(lowerRule, "kill criteria") &&
@@ -147,7 +171,7 @@ func runGate2Counterfactual(rootDir, vaultDir string, h *RSIHypothesis, observat
 		}
 	}
 
-	return true, fmt.Sprintf("Gate 2B PASS: Structured ACE delta (%s) validated against skill schema & domain rubric", h.DeltaOp.Op), "FAIL_AS_EXPECTED"
+	return true, fmt.Sprintf("Gate 2B PASS: Structured ACE delta (%s) validated against Critic-1 drawbacks, skill schema & domain rubric", h.DeltaOp.Op), "FAIL_AS_EXPECTED"
 }
 
 func hasTestFailureAssertionInDiff(diff string) bool {
@@ -160,12 +184,16 @@ func hasTestFailureAssertionInDiff(diff string) bool {
 }
 
 var (
-	reSSN   = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
+	reSSN   = redact.SSNPattern()
 	reEmail = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 )
 
 func runGate3RegressionAndPIIGuard(rootDir, vaultDir string, h *RSIHypothesis) (bool, string) {
-	// 1. Pre-Commit PII Guard on ProposedDiff
+	cleaned := redact.StripInvisibleUnicode(h.ProposedDiff)
+	if cleaned != h.ProposedDiff {
+		return false, "Gate 3 PII Guard violation: invisible or bidi-override Unicode control characters detected in ProposedDiff"
+	}
+
 	if reSSN.MatchString(h.ProposedDiff) {
 		return false, "Gate 3 PII Guard violation: SSN pattern detected in ProposedDiff"
 	}
@@ -173,6 +201,9 @@ func runGate3RegressionAndPIIGuard(rootDir, vaultDir string, h *RSIHypothesis) (
 		if strings.Contains(h.ProposedDiff, home) {
 			return false, fmt.Sprintf("Gate 3 PII Guard violation: local HOME directory path (%s) detected in ProposedDiff", home)
 		}
+	}
+	if redact.HomeDirPathPattern().MatchString(h.ProposedDiff) {
+		return false, "Gate 3 PII Guard violation: workstation home directory path detected in ProposedDiff"
 	}
 	for _, email := range reEmail.FindAllString(h.ProposedDiff, -1) {
 		lower := strings.ToLower(email)
@@ -188,6 +219,12 @@ func runGate3RegressionAndPIIGuard(rootDir, vaultDir string, h *RSIHypothesis) (
 		return false, fmt.Sprintf("Gate 3 PII Guard violation: personal email address %q detected in ProposedDiff", email)
 	}
 
+	// Secret / credential detection across ALL tiers (both personal Vault and upstream)
+	for _, sp := range redact.DefaultSecretPatterns() {
+		if sp.Pattern.MatchString(h.ProposedDiff) {
+			return false, fmt.Sprintf("Gate 3 PII Guard violation: %s detected in ProposedDiff", sp.Name)
+		}
+	}
 	if h.Tier == "upstream" {
 		for _, secretPrefix := range []string{"ghp_", "ya29.", "sk-", "AIza"} {
 			if strings.Contains(h.ProposedDiff, secretPrefix) {
@@ -196,11 +233,10 @@ func runGate3RegressionAndPIIGuard(rootDir, vaultDir string, h *RSIHypothesis) (
 		}
 	}
 
-	return true, "Gate 3 PASS (Zero PII in diff; package & schema checks clean)"
+	return true, "Gate 3 PASS (Zero PII/secrets in diff; package & schema checks clean)"
 }
 
 func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothesis) (bool, string) {
-	// 1. Check MEMORY.md <= 80 lines budget
 	if memBytes, err := os.ReadFile(filepath.Join(vaultDir, "MEMORY.md")); err == nil {
 		lines := len(strings.Split(strings.TrimSpace(string(memBytes)), "\n"))
 		if lines > vault.MaxMemoryIndexLines {
@@ -208,13 +244,11 @@ func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothe
 		}
 	}
 
-	// 2. Check global skill + overlay file count <= 25
 	skills := DiscoverAllSkillFiles(rootDir, vaultDir)
 	if len(skills) > MaxGlobalSkills {
 		return false, fmt.Sprintf("Gate 4 Budget violation: skill/overlay catalog has %d files (exceeds %d-file cap)", len(skills), MaxGlobalSkills)
 	}
 
-	// 3. Check Ring 1 non-test line count <= 250 lines
 	if h.Ring == Ring1KernelCode {
 		addedNonTest := 0
 		inTestFile := false
@@ -232,8 +266,6 @@ func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothe
 		}
 	}
 
-	// 4. Check SKILL.md (<=150 lines / <=30 rules), overlay (<=50 lines / <=10 rules, general.md <=5 rules),
-	//    and global active rule budget (<=50 rules).
 	simulatedContent := make(map[string]string)
 	if h.DeltaOp != nil {
 		for _, tf := range h.TargetFiles {
@@ -258,12 +290,8 @@ func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothe
 				if lineCount > MaxOverlayLines {
 					return false, fmt.Sprintf("Gate 4 Budget violation: overlay %s would reach %d lines (exceeds %d-line cap)", tf, lineCount, MaxOverlayLines)
 				}
-				ruleCap := MaxRulesPerOverlay
-				if filepath.Base(slashTF) == "general.md" {
-					ruleCap = MaxGeneralOverlayRules
-				}
-				if len(rules) > ruleCap {
-					return false, fmt.Sprintf("Gate 4 Budget violation: overlay %s would have %d active rsi:rule blocks (exceeds %d-rule cap)", tf, len(rules), ruleCap)
+				if len(rules) > MaxRulesPerOverlay {
+					return false, fmt.Sprintf("Gate 4 Budget violation: overlay %s would have %d active rsi:rule blocks (exceeds %d-rule cap)", tf, len(rules), MaxRulesPerOverlay)
 				}
 			} else if strings.HasSuffix(tf, "SKILL.md") {
 				if lineCount > MaxSkillMarkdownLines {
@@ -298,7 +326,6 @@ func runGate4BudgetAndContradictionGuard(rootDir, vaultDir string, h *RSIHypothe
 		return false, fmt.Sprintf("Gate 4 Budget violation: global active RSI rules would reach %d (exceeds %d-rule cap)", globalActive, MaxGlobalActiveRules)
 	}
 
-	// 5. Cross-Rule Contradiction Guard against AGENTS.md & USER.md core safety invariants
 	lowerDiff := strings.ToLower(h.ProposedDiff)
 	for _, forbiddenPhrase := range []string{
 		"bypass hq propose",

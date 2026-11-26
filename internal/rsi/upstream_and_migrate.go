@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/approvals"
+	"github.com/zjshen14/agy-hq/internal/extension"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
@@ -57,26 +58,6 @@ func ensureUpstreamRSIWorktree(rootDir, vaultDir, token string) (string, string,
 		return "", "", fmt.Errorf("create upstream RSI worktree %s (%s): %w\n%s", wtDir, branch, err, strings.TrimSpace(string(out)))
 	}
 	return wtDir, branch, nil
-}
-
-func extractRSIRuleBlock(content, ruleID string) (string, bool) {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	marker := fmt.Sprintf(`<!-- rsi:rule id=%q`, ruleID)
-	for i := 0; i < len(lines); i++ {
-		if strings.Contains(lines[i], marker) {
-			var block []string
-			block = append(block, lines[i])
-			for j := i + 1; j < len(lines); j++ {
-				trimmed := strings.TrimSpace(lines[j])
-				if trimmed == "" || strings.HasPrefix(trimmed, "<!-- rsi:rule") || strings.HasPrefix(trimmed, "## ") {
-					break
-				}
-				block = append(block, lines[j])
-			}
-			return strings.Join(block, "\n"), true
-		}
-	}
-	return "", false
 }
 
 // MigrateOverlays extracts any legacy `<!-- rsi:rule -->` blocks embedded inside tracked
@@ -128,23 +109,12 @@ func MigrateOverlays(rootDir, vaultDir string) (*OverlayMigrationReport, error) 
 		extractedAny := false
 
 		for _, r := range rules {
-			block, ok := extractRSIRuleBlock(cur, r.ID)
+			block, ok := extension.ExtractRSIRuleBlock(cur, r.ID)
 			if !ok {
 				continue
 			}
 			destSlug := skillSlug
-			lowerBlock := strings.ToLower(block)
-			if destSlug == "swe-pulse" &&
-				!strings.Contains(lowerBlock, "worktree") &&
-				!strings.Contains(lowerBlock, "gh pr") &&
-				!strings.Contains(lowerBlock, "go test") {
-				destSlug = "general"
-			}
-			if r.ID == "rsi-rule-swe-pulse-2c42ca" {
-				destSlug = "general"
-			}
-
-			if !NonOverridableQuarantineSkills[destSlug] {
+			if !NonOverridableQuarantineSkills[destSlug] && destSlug != "" && destSlug != "general" {
 				relTgt, absTgt, _, tErr := ResolveTier1Target(vaultDir, destSlug)
 				if tErr == nil {
 					beforeTgt, cErr := EnsureOverlaySkeletonContent(absTgt, relTgt)
@@ -261,7 +231,7 @@ func ExportUpstream(rootDir, vaultDir, id, convID, hqBin string) (*approvals.Pro
 		content := string(b)
 		for _, r := range ParseRSIRules(absPath, content) {
 			if r.ID == id {
-				if blk, ok := extractRSIRuleBlock(content, r.ID); ok {
+				if blk, ok := extension.ExtractRSIRuleBlock(content, r.ID); ok {
 					ruleID = r.ID
 					ruleBlock = blk
 					modelScope = r.ModelScope

@@ -100,16 +100,34 @@ func loadSkillBaselines(vaultDir string) map[string]string {
 	return out
 }
 
+// IsInstalledSkill reports whether slug is either a Core OS skill or installed under <vault>/skills/<slug>/SKILL.md.
+func IsInstalledSkill(vaultDir, slug string) bool {
+	s := strings.TrimSpace(slug)
+	if s == "" {
+		return false
+	}
+	if IsCoreOSSkill(s) {
+		return true
+	}
+	if strings.TrimSpace(vaultDir) == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(VaultSkillsDir(vaultDir), s, "SKILL.md"))
+	return err == nil
+}
+
 func saveSkillBaselines(vaultDir string, baselines map[string]string) error {
 	path := baselinesFilePath(vaultDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(baselines, "", "  ")
 	if err != nil {
 		return err
 	}
-	return store.WriteAtomic(path, append(b, '\n'), 0o644)
+	return withMemoryLock(vaultDir, func() error {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		return store.WriteAtomic(path, append(b, '\n'), 0o600)
+	})
 }
 
 func sha256HexTrimmed(s string) string {

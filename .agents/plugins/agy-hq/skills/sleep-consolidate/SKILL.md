@@ -23,7 +23,7 @@ description: >-
 ### Stage 1: Deterministic Delta Blueprint & Subagent Reconciliation
 1. Run `hq obs reconcile` and `hq memory dream-plan --json` (never re-scan already-consolidated dates or ephemeral/tainted turns):
    - If `hasDelta == false`, run `hq memory compact` if needed and stop cleanly with zero chat output.
-   - Review `salientConversations`, `overdueTTLFactCount`, `missingTTLEventFacts`, `memoryLines`/`memoryBytes`, `staleReferences`, `wikiAlerts` (`invalid_header`, `broken_link`, `duplicate_playbook_owner`, `near_duplicate_topic`), and `negativeConstraints` (recent rejected proposals — **never re-propose or codify rejected actions**).
+   - Review `salientConversations`, `overdueTTLFactCount`, `missingTTLEventFacts`, `memoryLines`/`memoryBytes`, `staleReferences`, `pendingRsiCount`, `wikiAlerts` (`invalid_header`, `broken_link`, `duplicate_playbook_owner`, `skill_playbook_collision`, `near_duplicate_topic`), and `negativeConstraints` (recent rejected proposals & RSI tombstones — **never re-propose or codify rejected actions**).
 
 ### Stage 2: Ground-Truth Transcript Verification
 1. For each high-salience conversation in `dream-plan` showing `toolErrors > 0`, `preToolDenials > 0`, a user correction/intervention, or a major architectural/completion claim, run:
@@ -45,18 +45,17 @@ description: >-
 4. **Keep `local/MEMORY.md` Strictly to `## Active Priorities` ($\le 40$ lines & $\le 2,200$ bytes):**
    - Remove completed tasks, deleted worktrees, and redundant fact/topic duplicates from `local/MEMORY.md`.
 
-### Stage 4: Verified RSI (`hq rsi`), Lifecycle Compaction & Vault Commit
-1. **Run the Two-Tier 4-Stage RSI Pipeline (RFC-0010, RFC-0014, & RFC-0019 — Never Unilaterally Edit `SKILL.md`, Overlay Rules, or Kernel Code):**
-   - Mine ground-truth friction events (including `dismiss_noisy` interrupt rates $\ge 40\%$ and high expired-proposal rates targeting Vault-local rules in `local/memory/rsi/rules/`) and update canary records:
+### Stage 4: Verified RSI v2 (`hq rsi`), Lifecycle Compaction & Vault Commit
+1. **Run the Impact-Weighted, Held-Out RSI v2 Pipeline (RFC-0029 — Never Unilaterally Edit `SKILL.md`, Overlay Rules, or Kernel Code):**
+   - Mine watermark-bounded ground-truth friction, update causal canary records, and inspect top impact-weighted open Ring-2 observations:
      ```sh
-     hq rsi mine --since=24h
+     hq rsi mine && hq rsi status
      ```
-   - Synthesize Tier 1 personal hypotheses targeting `<vault>/skills/<slug>/SKILL.md` or `<vault>/memory/rsi/rules/<slug>.md` (never `topics/`), then run the 4-Gate Verification Harness:
-     ```sh
-     hq rsi hypothesize && hq rsi verify <rsi-id> && hq rsi propose <rsi-id>
-     ```
+   - For high-impact open Ring-2 observations (or user corrections), inspect bounded transcript evidence via `hq rsi context <obs-id> --json` and synthesize grounded rules via `hq rsi hypothesize --from-json=<path>` (or `hq rsi hypothesize` for clean single-line CLI flag/proactive-noise repairs). Never target retired `general.md` or set `Playbook-Owner: skill:<slug>` in Ring-3 `topics/`.
+   - Verify candidates (`hq rsi verify <rsi-id>`); if `requiresLiveSafetyProbe == true`, run the 6-case Safe-Personal-RSI behavioral probe (`hq rsi probes <rsi-id> --json`), evaluate each case conservatively, and record the diff-SHA-bound verdict (`hq rsi record-probe <rsi-id> --passed=true|false --summary="..."`).
+   - Stage at most 2 highest-ROI Ring-2 proposals and actionable Ring-1/compile advisories into the 7:30 AM Morning Brief (`hq rsi stage-nightly --max=2`), then run ablation (`hq rsi ablate`) and held-out telemetry (`hq rsi eval --json`).
 2. **Unified Compaction, Archival & Evaluation Check:**
-   - Run `hq memory compact` (compacts `facts.jsonl`, `tasks.json`, sweeps orphan `progress/*.md`, and archives $>14\text{d}$ hot journals/briefs) and `hq memory status` to confirm `MEMORY.md` is `[OK]` ($\le 40$ lines / $\le 2,200$ bytes).
+   - Run `hq memory compact` (compacts `facts.jsonl`, `tasks.json`, sweeps orphan `progress/*.md`, compacts stale RSI drafts/canaries, and archives $>14\text{d}$ hot journals/briefs) and `hq memory status` to confirm `MEMORY.md` is `[OK]` ($\le 40$ lines / $\le 2,200$ bytes) with zero `skill_playbook_collision` alerts.
 3. **Commit Vault & Advance Dream Cursor:**
    - Commit private Vault changes (automatically advances `dream_cursor.json` strictly on commit):
      ```sh

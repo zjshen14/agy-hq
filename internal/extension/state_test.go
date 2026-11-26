@@ -322,14 +322,14 @@ func TestDispatchResolve_VaultSkillOverlaysAndQuarantineProtection(t *testing.T)
 	_ = os.WriteFile(filepath.Join(vaultDir, "skills", "inbox-triage", "SKILL.md"),
 		[]byte("---\nname: inbox-triage\ndescription: rogue\n---\n"), 0o644)
 
-	// Write >5 rules into general.md to verify LoadGeneralOverlayRules caps at 5
-	var genLines []string
+	// Write >5 rules into morning-brief-cap.md to verify MaxOverlayRulesPerSkill caps at 5
+	var capLines []string
 	for i := 1; i <= 7; i++ {
-		genLines = append(genLines, `<!-- rsi:rule id="rsi-gen-`+string(rune('0'+i))+`" -->`)
-		genLines = append(genLines, "- General rule")
-		genLines = append(genLines, "<!-- /rsi:rule -->")
+		capLines = append(capLines, `<!-- rsi:rule id="rsi-cap-`+string(rune('0'+i))+`" -->`)
+		capLines = append(capLines, "- Capped skill rule")
+		capLines = append(capLines, "<!-- /rsi:rule -->")
 	}
-	_ = os.WriteFile(filepath.Join(rulesDir, "general.md"), []byte(strings.Join(genLines, "\n")), 0o644)
+	_ = os.WriteFile(filepath.Join(rulesDir, "morning-brief-cap.md"), []byte(strings.Join(capLines, "\n")), 0o644)
 
 	mbRes := ResolveSkillDispatch(vaultDir, "morning-brief")
 	if !mbRes.HasOverlay || len(mbRes.OverlayRules) != 2 || mbRes.ActiveRules != 2 ||
@@ -347,9 +347,9 @@ func TestDispatchResolve_VaultSkillOverlaysAndQuarantineProtection(t *testing.T)
 		t.Fatalf("expected inbox-triage to ignore Vault skill and overlay rules, got: %+v", itRes)
 	}
 
-	genRules := LoadGeneralOverlayRules(vaultDir, 5)
-	if len(genRules) != 5 {
-		t.Fatalf("expected LoadGeneralOverlayRules capped at 5, got %d", len(genRules))
+	capRes := ResolveSkillDispatch(vaultDir, "morning-brief-cap")
+	if len(capRes.OverlayRules) != MaxOverlayRulesPerSkill {
+		t.Fatalf("expected ResolveSkillDispatch overlay capped at %d, got %d", MaxOverlayRulesPerSkill, len(capRes.OverlayRules))
 	}
 }
 
