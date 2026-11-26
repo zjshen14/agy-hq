@@ -736,21 +736,8 @@ func handlePreToolProtectedWrites(w io.Writer, vaultDir string, payload ToolCall
 	return false, nil
 }
 
-func hydrateConsoleSyncContent(vaultDir string, fd kernel.FrontDeskLease, isLiveHTML bool) (string, string) {
+func hydrateConsoleSyncContent(vaultDir string, fd kernel.FrontDeskLease) (string, string) {
 	artDir := strings.TrimSpace(fd.ArtifactDir)
-	if isLiveHTML {
-		candidates := []string{}
-		if artDir != "" {
-			candidates = append(candidates, filepath.Join(artDir, "hq_console_live.html"))
-		}
-		candidates = append(candidates, filepath.Join(vaultDir, "living_spaces", "hq-console", "index.html"))
-		for _, p := range candidates {
-			if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
-				return string(b), "Live Interactive [HQ] Console (Mobile & Remote Control Ready) — Needs Me, Work, Tokens, and Ops"
-			}
-		}
-		return "", ""
-	}
 	candidates := []string{}
 	if artDir != "" {
 		candidates = append(candidates, filepath.Join(artDir, "hq_console.md"))
@@ -793,25 +780,18 @@ func enforceFrontDeskGuardrails(w io.Writer, vaultDir string, payload ToolCallPa
 
 		slashClean := filepath.ToSlash(cleanPath)
 		isMDConsole := filepath.Base(cleanPath) == "hq_console.md" || strings.HasSuffix(slashClean, "/hq_console.md")
-		isLiveConsole := filepath.Base(cleanPath) == "hq_console_live.html" || strings.HasSuffix(slashClean, "/hq_console_live.html")
 		if isMDConsole {
 			_ = kernel.MarkConsolePinned(vaultDir, payload.ConversationID)
 			if mutatedConsole != nil {
 				*mutatedConsole = true
 			}
 		}
-		if isLiveConsole {
-			_ = kernel.MarkLiveConsolePinned(vaultDir, payload.ConversationID)
-			if mutatedConsole != nil {
-				*mutatedConsole = true
-			}
-		}
 
-		if payload.ToolCall.Name == "write_file" && (isMDConsole || isLiveConsole) {
+		if payload.ToolCall.Name == "write_file" && isMDConsole {
 			rawContent, _ := payload.ToolCall.Args["Content"].(string)
 			trimmed := strings.TrimSpace(rawContent)
 			if trimmed == "{{HQ_SYNC}}" || trimmed == "" {
-				if hydrated, defaultSummary := hydrateConsoleSyncContent(vaultDir, fd, isLiveConsole); hydrated != "" {
+				if hydrated, defaultSummary := hydrateConsoleSyncContent(vaultDir, fd); hydrated != "" {
 					overwriteArgs := make(map[string]interface{}, len(payload.ToolCall.Args)+3)
 					for k, v := range payload.ToolCall.Args {
 						overwriteArgs[k] = v
@@ -853,7 +833,7 @@ func enforceFrontDeskGuardrails(w io.Writer, vaultDir string, payload ToolCallPa
 		base := filepath.Base(cleanPath)
 		isOverlayRule := (strings.Contains(cleanSlash, "/memory/rsi/rules/") || strings.HasPrefix(cleanSlash, "memory/rsi/rules/")) && strings.HasSuffix(cleanSlash, ".md")
 		// Turn-1 housekeeping & skill/overlay instruction reads are exempt from the 3-lookup cap.
-		if base != "CONSOLE.md" && base != "hq_console.md" && base != "hq_console_live.html" && base != "triggers.yaml" && base != "SKILL.md" && !isOverlayRule {
+		if base != "CONSOLE.md" && base != "hq_console.md" && base != "triggers.yaml" && base != "SKILL.md" && !isOverlayRule {
 			isResearchTool = true
 		}
 	case "grep_search", "find_by_name":

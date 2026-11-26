@@ -39,16 +39,15 @@ type AdHocCron struct {
 // FrontDeskLease tracks the single active "Front Desk" intake conversationId in local/memory/front_desk.json
 // to prevent split-brain race conditions across multiple top-level conversations.
 type FrontDeskLease struct {
-	ConversationID    string                  `json:"conversationId"`
-	ArtifactDir       string                  `json:"artifactDir,omitempty"`
-	ProjectID         string                  `json:"projectId,omitempty"`
-	WorkspaceDir      string                  `json:"workspaceDir,omitempty"`
-	ConsolePinned     bool                    `json:"consolePinned,omitempty"`
-	LiveConsolePinned bool                    `json:"liveConsolePinned,omitempty"`
-	ArmedTriggers     map[string]ArmedTrigger `json:"armedTriggers,omitempty"`
-	AdHocCrons        []AdHocCron             `json:"adHocCrons,omitempty"`
-	KilledTaskIDs     []string                `json:"killedTaskIds,omitempty"`
-	UpdatedAt         string                  `json:"updatedAt"`
+	ConversationID string                  `json:"conversationId"`
+	ArtifactDir    string                  `json:"artifactDir,omitempty"`
+	ProjectID      string                  `json:"projectId,omitempty"`
+	WorkspaceDir   string                  `json:"workspaceDir,omitempty"`
+	ConsolePinned  bool                    `json:"consolePinned,omitempty"`
+	ArmedTriggers  map[string]ArmedTrigger `json:"armedTriggers,omitempty"`
+	AdHocCrons     []AdHocCron             `json:"adHocCrons,omitempty"`
+	KilledTaskIDs  []string                `json:"killedTaskIds,omitempty"`
+	UpdatedAt      string                  `json:"updatedAt"`
 }
 
 // FrontDeskPinTip is the standardized recommendation for users to pin the [HQ] Front Desk conversation to their Antigravity sidebar.
@@ -198,7 +197,6 @@ func SetFrontDesk(vaultDir, convID, artifactDir string) error {
 	}
 	if hasPrev && prev.ConversationID == convID {
 		lease.ConsolePinned = prev.ConsolePinned
-		lease.LiveConsolePinned = prev.LiveConsolePinned
 		lease.ArmedTriggers = prev.ArmedTriggers
 		lease.AdHocCrons = prev.AdHocCrons
 		lease.KilledTaskIDs = prev.KilledTaskIDs
@@ -387,23 +385,6 @@ func MarkConsolePinned(vaultDir, convID string) error {
 		return nil
 	}
 	fd.ConsolePinned = true
-	fd.UpdatedAt = time.Now().Format(time.RFC3339)
-	return saveFrontDeskLease(vaultDir, fd)
-}
-
-// MarkLiveConsolePinned records that the active Front Desk has pinned hq_console_live.html via write_file.
-func MarkLiveConsolePinned(vaultDir, convID string) error {
-	fd, ok := GetFrontDesk(vaultDir)
-	if !ok {
-		return nil
-	}
-	if convID != "" && fd.ConversationID != convID {
-		return nil
-	}
-	if fd.LiveConsolePinned {
-		return nil
-	}
-	fd.LiveConsolePinned = true
 	fd.UpdatedAt = time.Now().Format(time.RFC3339)
 	return saveFrontDeskLease(vaultDir, fd)
 }
@@ -710,12 +691,6 @@ func ReconcileFrontDeskFromTranscript(vaultDir, transcriptPath string) bool {
 				if strings.HasSuffix(slashP, "/hq_console.md") || p == "hq_console.md" {
 					if !fd.ConsolePinned {
 						fd.ConsolePinned = true
-						changed = true
-					}
-				}
-				if strings.HasSuffix(slashP, "/hq_console_live.html") || p == "hq_console_live.html" {
-					if !fd.LiveConsolePinned {
-						fd.LiveConsolePinned = true
 						changed = true
 					}
 				}

@@ -28,7 +28,11 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 	}
 	deskConv1 := "conv-fd-cuj48-1"
 
-	// 1. Vacant Front Desk auto-claim emits dual {{HQ_SYNC}} write_file instructions (0 read_file steps)
+	// 1. Vacant Front Desk auto-claim emits single {{HQ_SYNC}} write_file instruction (0 read_file steps)
+	// and retires any legacy hq_console_live.html file left over from older builds.
+	_ = os.WriteFile(filepath.Join(artDesk1, "hq_console_live.html"), []byte("<html>legacy</html>"), 0o644)
+	_ = os.WriteFile(filepath.Join(artDesk1, "hq_console_live.html.metadata.json"), []byte(`{"userFacing":true}`), 0o644)
+
 	ssPayload1 := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q}`, deskConv1, artDesk1)
 	ssOut1, err := env.run(ssPayload1, "hook", "session-start")
 	if err != nil {
@@ -37,10 +41,10 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 	if !strings.Contains(ssOut1, "New [HQ] Front Desk Initialization Required") ||
 		!strings.Contains(ssOut1, "{{HQ_SYNC}}") ||
 		!strings.Contains(ssOut1, "hq_console.md") ||
-		!strings.Contains(ssOut1, "hq_console_live.html") {
-		t.Fatalf("expected dual {{HQ_SYNC}} initialization instructions in SessionStart, got:\n%s", ssOut1)
+		strings.Contains(ssOut1, "hq_console_live.html") {
+		t.Fatalf("expected single-artifact {{HQ_SYNC}} initialization instructions in SessionStart, got:\n%s", ssOut1)
 	}
-	for _, fn := range []string{"hq_console.md", "hq_console.md.metadata.json", "hq_console_live.html", "hq_console_live.html.metadata.json"} {
+	for _, fn := range []string{"hq_console.md", "hq_console.md.metadata.json"} {
 		st, stErr := os.Stat(filepath.Join(artDesk1, fn))
 		if stErr != nil {
 			t.Fatalf("expected %s to be synced into artDesk1 on SessionStart: %v", fn, stErr)
@@ -49,8 +53,13 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 			t.Fatalf("expected 0644 permissions on %s, got %04o", fn, st.Mode().Perm())
 		}
 	}
+	for _, legacyFn := range []string{"hq_console_live.html", "hq_console_live.html.metadata.json"} {
+		if _, stErr := os.Stat(filepath.Join(artDesk1, legacyFn)); !os.IsNotExist(stErr) {
+			t.Fatalf("expected legacy %s to be retired on SessionStart sync", legacyFn)
+		}
+	}
 
-	// Pinning ONLY hq_console.md leaves LiveConsolePinned=false so SessionStart still prompts for hq_console_live.html
+	// Pinning hq_console.md via {{HQ_SYNC}} hydrates 512k Markdown in 0 reads and (after arming triggers) suppresses Turn-2 init banner
 	pinMD := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q,"Content":"{{HQ_SYNC}}"}}}`,
 		deskConv1, artDesk1, filepath.Join(artDesk1, "hq_console.md"))
 	pinMDOut, err := env.run(pinMD, "hook", "pre-tool")
@@ -67,25 +76,13 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 			t.Fatalf("schedule pre-tool failed: %v (%s)", sErr, out)
 		}
 	}
-	ssPartial, err := env.run(ssPayload1, "hook", "session-start")
-	if err != nil || !strings.Contains(ssPartial, "New [HQ] Front Desk Initialization Required") || !strings.Contains(ssPartial, "hq_console_live.html") {
-		t.Fatalf("expected initialization banner to remain until hq_console_live.html is also pinned, got:\n%s", ssPartial)
-	}
-
-	// Pinning hq_console_live.html via {{HQ_SYNC}} hydrates 4-tab HTML (<45KB) and suppresses Turn-2 init banner
-	pinHTML := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q,"Content":"{{HQ_SYNC}}"}}}`,
-		deskConv1, artDesk1, filepath.Join(artDesk1, "hq_console_live.html"))
-	pinHTMLOut, err := env.run(pinHTML, "hook", "pre-tool")
-	if err != nil || !strings.Contains(pinHTMLOut, `"decision":"allow"`) || !strings.Contains(pinHTMLOut, `data-persp=\"tokens\"`) {
-		t.Fatalf("expected hydrated 4-tab HTML overwrite on hq_console_live.html {{HQ_SYNC}}, got err=%v out=%s", err, pinHTMLOut)
-	}
 	fdPinned, ok := kernel.GetFrontDesk(env.vaultDir)
-	if !ok || !fdPinned.ConsolePinned || !fdPinned.LiveConsolePinned {
-		t.Fatalf("expected both ConsolePinned and LiveConsolePinned true, got %+v", fdPinned)
+	if !ok || !fdPinned.ConsolePinned {
+		t.Fatalf("expected ConsolePinned=true, got %+v", fdPinned)
 	}
 	ssSuppressed, err := env.run(ssPayload1, "hook", "session-start")
 	if err != nil || strings.Contains(ssSuppressed, "New [HQ] Front Desk Initialization Required") {
-		t.Fatalf("expected Turn-2 initialization banner to be suppressed after dual pin, got:\n%s", ssSuppressed)
+		t.Fatalf("expected Turn-2 initialization banner to be suppressed after single-artifact pin, got:\n%s", ssSuppressed)
 	}
 
 	// 2. Seed multi-model task (-2.json Opus vs -10.json Neon), child subagent, 3 cold-cache wakeups,
@@ -244,7 +241,7 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 		}
 	}
 
-	// Stage an outbound proposal -> smart default tab flips to "needs_me" on both :4242 and hq_console_live.html
+	// Stage an outbound proposal -> smart default tab flips to "needs_me" on the sole interactive Console
 	mustRunV3(t, env, "propose", "--type=release_publish", "--summary=Publish v9.9.9 release", "--cmd=git push origin v9.9.9")
 	mustRunV3(t, env, "console")
 
@@ -260,35 +257,19 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 		t.Fatalf("expected /api/state to include multi-window token breakdown, code=%d", recAPI.Code)
 	}
 
-	liveBytes, err := os.ReadFile(filepath.Join(artDesk1, "hq_console_live.html"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(liveBytes) > 45*1024 {
-		t.Fatalf("expected hq_console_live.html <= 45 KB, got %d bytes", len(liveBytes))
-	}
-	liveHTML := string(liveBytes)
-	if !strings.Contains(liveHTML, `class="pill persp-btn active" data-persp="needs_me"`) || !strings.Contains(liveHTML, `data-persp="tokens"`) {
-		t.Fatalf("expected 4-tab Living Space with needs_me default and tokens tab in hq_console_live.html")
-	}
-	for _, banned := range []string{"QBU", "Compute Share"} {
-		if strings.Contains(liveHTML, banned) {
-			t.Fatalf("unexpected banned jargon %q in hq_console_live.html", banned)
-		}
-	}
-
-	// Verify CONSOLE.md collapses PASS doctor checks while keeping 512k ceiling and zero QBU jargon
+	// Verify CONSOLE.md collapses PASS doctor checks, keeps 512k ceiling, links Sidecar, and emits zero QBU jargon
 	mdBytes, err := os.ReadFile(filepath.Join(env.vaultDir, "CONSOLE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	mdStr := string(mdBytes)
 	collapsedPASS := strings.Contains(mdStr, "checks passed.") || strings.Contains(mdStr, "other check(s) `PASS`")
-	if !strings.Contains(mdStr, "512k") || !collapsedPASS || strings.Contains(mdStr, "QBU") {
+	if !strings.Contains(mdStr, "512k") || !collapsedPASS || !strings.Contains(mdStr, "sidecar://agy-hq-console/") || strings.Contains(mdStr, "hq_console_live.html") || strings.Contains(mdStr, "QBU") {
 		t.Fatalf("unexpected CONSOLE.md content:\n%s", mdStr)
 	}
 
-	// 5. Shift Handover via `hq claim-desk` removes ALL 4 console files from artDesk1 and passes `hq doctor` Checks #4 & #10
+	// 5. Shift Handover via `hq claim-desk` removes hq_console.md (+ any legacy hq_console_live.html) from artDesk1 and passes `hq doctor` Checks #4 & #10
+	_ = os.WriteFile(filepath.Join(artDesk1, "hq_console_live.html"), []byte("<html>legacy</html>"), 0o644)
 	artDesk2 := filepath.Join(t.TempDir(), "brain-fd-2")
 	if err := os.MkdirAll(artDesk2, 0o755); err != nil {
 		t.Fatal(err)
@@ -298,6 +279,8 @@ func TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync(t *testing.T) {
 		if _, stErr := os.Stat(filepath.Join(artDesk1, fn)); !os.IsNotExist(stErr) {
 			t.Fatalf("expected %s to be deleted from outgoing artDesk1 on Front Desk rotation", fn)
 		}
+	}
+	for _, fn := range []string{"hq_console.md", "hq_console.md.metadata.json"} {
 		if _, stErr := os.Stat(filepath.Join(artDesk2, fn)); stErr != nil {
 			t.Fatalf("expected %s to be synced into incoming artDesk2 on claim-desk: %v", fn, stErr)
 		}

@@ -130,6 +130,7 @@
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 14px; margin-bottom: 10px;
+    overflow-wrap: anywhere; word-break: break-word; min-width: 0;
     transition: border-color 0.15s ease, background 0.15s ease;
   }
   .card:hover { border-color: rgba(56, 189, 248, 0.35); }
@@ -178,8 +179,8 @@
   .btn-reject:hover { background: rgba(239, 68, 68, 0.15); border-color: #ef4444; }
   .btn-secondary { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; }
   .btn-secondary:hover { background: #334155; color: #ffffff; }
-  .muted { color: var(--muted); font-size: 12px; }
-  .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; word-break: break-word; }
+  .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; flex-wrap: wrap; min-width: 0; }
 
   .progress-bar {
     position: relative; width: 100%; height: 8px; background: #1e293b; border-radius: 999px;
@@ -1062,8 +1063,11 @@ function renderSVGBarChart(points, labelFn, valFn, tipFn, barColor) {
     const fill = v > 0 ? barColor : '#1e293b';
     rects += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="2" fill="' + fill + '"><title>' + escapeHTML(tipFn(p)) + '</title></rect>';
     if (i % labelStride === 0 || i === n - 1) {
-      const lx = i * slotW + slotW / 2;
-      labels += '<text x="' + lx.toFixed(1) + '" y="' + (H - 6) + '" fill="#94a3b8" font-size="9" text-anchor="middle">' + escapeHTML(labelFn(p)) + '</text>';
+      const isFirst = i === 0 && n > 12;
+      const isLast = i === n - 1 && n > 12;
+      const lx = isFirst ? 2 : (isLast ? (W - 2) : (i * slotW + slotW / 2));
+      const anchor = isFirst ? 'start' : (isLast ? 'end' : 'middle');
+      labels += '<text x="' + lx.toFixed(1) + '" y="' + (H - 6) + '" fill="#94a3b8" font-size="9" text-anchor="' + anchor + '">' + escapeHTML(labelFn(p)) + '</text>';
     }
   }
   return '<svg class="svg-chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' + rects + labels + '</svg>';
@@ -1214,14 +1218,15 @@ function renderTokensTab(obs) {
     } else {
       let tHtml = '';
       for (const rt of trees) {
+        const kids = rt.children || [];
+        const subCount = kids.length > 0 ? kids.length : (rt.descendantCount || 0);
         const splitInfo = rt.subagentUncachedTokens > 0
-          ? ('Self: <code>' + fmtTokens(rt.selfUncachedTokens) + '</code> · Subagents (' + (rt.descendantCount || 0) + '): <code>' + fmtTokens(rt.subagentUncachedTokens) + '</code>')
+          ? ('Self: <code>' + fmtTokens(rt.selfUncachedTokens) + '</code> · Subagents (' + subCount + '): <code>' + fmtTokens(rt.subagentUncachedTokens) + '</code>')
           : ('Self: <code>' + fmtTokens(rt.uncachedTokens) + '</code> · Peak context: <code>' + fmtTokens(rt.peakContextTokens) + '</code>');
         const rightSummary = '<span class="mono">' + fmtTokens(rt.uncachedTokens) + ' uncached · ' + ((rt.cacheHitRatio || 0) * 100).toFixed(0) + '% cached · <strong>' + fmtUSD(rt.estCostUsd) + '</strong></span>';
         const titleLink = rt.conversationId
           ? '<a href="conversation://' + escapeHTML(rt.conversationId) + '"><strong>' + escapeHTML(rt.title) + '</strong></a>'
           : '<strong>' + escapeHTML(rt.title) + '</strong>';
-        const kids = rt.children || [];
         if (kids.length > 0) {
           const openAttr = openSet.has(rt.conversationId) ? ' open' : '';
           let kHtml = '<div class="muted" style="margin-bottom:4px">' + splitInfo + '</div>';

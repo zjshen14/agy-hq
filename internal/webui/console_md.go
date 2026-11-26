@@ -61,12 +61,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# 🏛️ agy-hq Console & Live Status (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
-	if state.hasFrontDesk && strings.TrimSpace(state.frontDesk.ArtifactDir) != "" {
-		livePath := filepath.ToSlash(filepath.Join(strings.TrimSpace(state.frontDesk.ArtifactDir), "hq_console_live.html"))
-		fmt.Fprintf(&b, "[📱 Interactive Mobile Console](file://%s) · [🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n", livePath)
-	} else {
-		b.WriteString("[🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n")
-	}
+	b.WriteString("[🎛️ Open Interactive Console (Side Pane)](sidecar://agy-hq-console/) · [🌐 Browser UI](http://127.0.0.1:4242)\n\n")
 
 	if len(state.Pending) > 0 {
 		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **Pending Approvals (`%d` item(s) waiting):**\n", len(state.Pending))
@@ -129,7 +124,7 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 
 	var userSpaces []living.SpaceSummary
 	for _, ls := range state.ProactiveV3.LivingSpaces {
-		if ls.Slug != ConsoleLivingSpaceSlug {
+		if ls.Slug != "hq-console" {
 			userSpaces = append(userSpaces, ls)
 		}
 	}
@@ -270,10 +265,8 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		fd := state.frontDesk
 		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
 		pinStatus := "⚠️ Pending Turn-1 write_file pin"
-		if fd.ConsolePinned && fd.LiveConsolePinned {
-			pinStatus = "✅ Pinned in UI (hq_console.md + hq_console_live.html)"
-		} else if fd.ConsolePinned || fd.LiveConsolePinned {
-			pinStatus = fmt.Sprintf("⚠️ Partial UI pin (md=%v, live=%v)", fd.ConsolePinned, fd.LiveConsolePinned)
+		if fd.ConsolePinned {
+			pinStatus = "✅ Pinned in UI (hq_console.md)"
 		}
 		fmt.Fprintf(&b, "- **Console Artifact Pin:** `%s`\n", pinStatus)
 		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
@@ -505,10 +498,15 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 			metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md"))
 			_ = os.Remove(filepath.Join(artDir, "hq_console_mobile.md.metadata.json"))
+			_ = os.Remove(filepath.Join(artDir, "hq_console_live.html"))
+			_ = os.Remove(filepath.Join(artDir, "hq_console_live.html.metadata.json"))
 			_ = store.WriteAtomic(artConsole, content, 0o644)
 			_ = store.WriteAtomic(artMeta, metaBytes, 0o644)
+		} else {
+			_ = os.Remove(filepath.Join(artDir, "hq_console_live.html"))
+			_ = os.Remove(filepath.Join(artDir, "hq_console_live.html.metadata.json"))
 		}
 	}
-	_ = SyncConsoleLivingSpace(vaultDir, state, unchangedBody)
+	_ = os.RemoveAll(living.SpaceDir(vaultDir, "hq-console"))
 	return nil
 }

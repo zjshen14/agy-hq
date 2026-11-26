@@ -158,7 +158,7 @@ func main() {
 		fs := flag.NewFlagSet("console", flag.ExitOnError)
 		_ = fs.Parse(os.Args[2:])
 		dieIfErr("hq console sync failed", webui.SyncMarkdownConsole(vaultDir))
-		fmt.Println("Synced local/CONSOLE.md and active Front Desk hq_console.md + hq_console_live.html artifacts")
+		fmt.Println("Synced local/CONSOLE.md and active Front Desk hq_console.md artifact")
 
 	case "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
@@ -369,9 +369,7 @@ func main() {
 		case "pre-tool", "pre-tool-use":
 			rawStdin, _ := io.ReadAll(os.Stdin)
 			if bytes.Contains(rawStdin, []byte("{{HQ_SYNC}}")) {
-				_, e1 := os.Stat(filepath.Join(vaultDir, "CONSOLE.md"))
-				_, e2 := os.Stat(filepath.Join(vaultDir, "living_spaces", "hq-console", "index.html"))
-				if e1 != nil || e2 != nil {
+				if _, e1 := os.Stat(filepath.Join(vaultDir, "CONSOLE.md")); e1 != nil {
 					webui.SyncMarkdownConsoleForHook(vaultDir, 2*time.Second)
 				}
 			}
