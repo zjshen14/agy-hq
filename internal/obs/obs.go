@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,15 @@ type SubagentSpawnEdge struct {
 	CreatedAt            string `json:"createdAt,omitempty"`
 }
 
+// JournalModelSpan records a turn/execution slice's ground-truth model from local/memory/journal/.
+type JournalModelSpan struct {
+	ExecNum   int    `json:"execNum,omitempty"`
+	StepStart int    `json:"stepStart"`
+	StepEnd   int    `json:"stepEnd"`
+	Model     string `json:"model"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 // TurnMetrics captures token burn, prefix cache efficiency, context watermarks, and 3-part latency for a single turn.
 type TurnMetrics struct {
 	TurnIndex                int      `json:"turnIndex"`
@@ -43,12 +53,16 @@ type TurnMetrics struct {
 	EndedAt                  string   `json:"endedAt"`
 	TriggerKind              string   `json:"triggerKind"` // "user" | "schedule" | "subagent_callback" | "system_wakeup"
 	PromptPreview            string   `json:"promptPreview,omitempty"`
+	Model                    string   `json:"model,omitempty"`
+	ModelTier                string   `json:"modelTier,omitempty"`
 	InputTokens              int64    `json:"inputTokens"`
 	CacheReadTokens          int64    `json:"cacheReadTokens"`
 	OutputTokens             int64    `json:"outputTokens"`
 	UncachedTokens           int64    `json:"uncachedTokens"`
 	GrossTokens              int64    `json:"grossTokens"`
 	CacheHitRatio            float64  `json:"cacheHitRatio"`
+	FirstStepCHR             float64  `json:"firstStepChr,omitempty"`
+	ColdStartInputTokens     int64    `json:"coldStartInputTokens,omitempty"`
 	PeakContextTokens        int64    `json:"peakContextTokens"`
 	CurrentContextTokens     int64    `json:"currentContextTokens"`
 	CompactedPendingNextTurn bool     `json:"compactedPendingNextTurn,omitempty"`
@@ -58,12 +72,14 @@ type TurnMetrics struct {
 	HumanWaitMs              int64    `json:"humanWaitMs"`
 	ActiveLatencyMs          int64    `json:"activeLatencyMs"`
 	ToolsUsed                []string `json:"toolsUsed,omitempty"`
+	HasWriteOrEdit           bool     `json:"hasWriteOrEdit,omitempty"`
 	ToolErrorCount           int      `json:"toolErrorCount,omitempty"`
 	QuotaUnits               float64  `json:"quotaUnits"`
 	EstCostUSD               float64  `json:"estCostUsd"`
+	CacheSavedUSD            float64  `json:"cacheSavedUsd,omitempty"`
 }
 
-// TokenRollup aggregates token, context, compaction, latency, and quota metrics across turns or DAG subtrees.
+// TokenRollup aggregates token, context, compaction, latency, and cost metrics across turns or DAG subtrees.
 type TokenRollup struct {
 	TurnCount         int     `json:"turnCount"`
 	StepCount         int     `json:"stepCount"`
@@ -80,6 +96,7 @@ type TokenRollup struct {
 	HumanWaitMs       int64   `json:"humanWaitMs"`
 	QuotaUnits        float64 `json:"quotaUnits"`
 	EstCostUSD        float64 `json:"estCostUsd"`
+	CacheSavedUSD     float64 `json:"cacheSavedUsd,omitempty"`
 }
 
 // ConversationMetrics stores full parsed metrics + DAG metadata for a single conversation.
@@ -91,8 +108,10 @@ type ConversationMetrics struct {
 	Title                    string              `json:"title,omitempty"`
 	Kind                     string              `json:"kind"` // "front_desk" | "task" | "subagent" | "nested_subagent" | "auto"
 	Scope                    string              `json:"scope,omitempty"`
-	Tier                     string              `json:"tier"` // "quick" | "standard" | "deep"
+	Tier                     string              `json:"tier"`                    // Canonical model tier: "quick" | "standard" | "deep"
+	RequestedTier            string              `json:"requestedTier,omitempty"` // Role/task requested tier
 	Model                    string              `json:"model,omitempty"`
+	ModelSource              string              `json:"modelSource,omitempty"` // "journal" | "task" | "spawn_edge" | "fallback"
 	Status                   string              `json:"status,omitempty"`
 	TranscriptPath           string              `json:"transcriptPath"`
 	FileSize                 int64               `json:"fileSize"`
@@ -100,9 +119,12 @@ type ConversationMetrics struct {
 	StartedAt                string              `json:"startedAt,omitempty"`
 	LastActiveAt             string              `json:"lastActiveAt,omitempty"`
 	CurrentContextTokens     int64               `json:"currentContextTokens"`
+	PostCompactContextTokens int64               `json:"postCompactContextTokens,omitempty"`
 	CompactedPendingNextTurn bool                `json:"compactedPendingNextTurn,omitempty"`
+	DescendantCount          int                 `json:"descendantCount,omitempty"`
 	ChildConversationIDs     []string            `json:"childConversationIds,omitempty"`
 	SpawnEdges               []SubagentSpawnEdge `json:"spawnEdges,omitempty"`
+	JournalSpans             []JournalModelSpan  `json:"journalSpans,omitempty"`
 	Self                     TokenRollup         `json:"self"`
 	Tree                     TokenRollup         `json:"tree"`
 	Turns                    []TurnMetrics       `json:"turns,omitempty"`
@@ -160,6 +182,7 @@ type TopItem struct {
 	Tier                 string      `json:"tier"`
 	Model                string      `json:"model"`
 	ChildCount           int         `json:"childCount"`
+	DescendantCount      int         `json:"descendantCount,omitempty"`
 	CurrentContextTokens int64       `json:"currentContextTokens"`
 	Metrics              TokenRollup `json:"metrics"`
 	SelfMetrics          TokenRollup `json:"selfMetrics"`
@@ -185,6 +208,7 @@ type TopReport struct {
 	KindFilter  string        `json:"kindFilter"`
 	TreeMode    bool          `json:"treeMode"`
 	TurnsMode   bool          `json:"turnsMode"`
+	AllNodes    bool          `json:"allNodes,omitempty"`
 	Limit       int           `json:"limit"`
 	Items       []TopItem     `json:"items,omitempty"`
 	TurnItems   []TopTurnItem `json:"turnItems,omitempty"`
@@ -206,6 +230,8 @@ type DailyBurnPoint struct {
 	GrossTokens     int64   `json:"grossTokens"`
 	CacheHitRatio   float64 `json:"cacheHitRatio"`
 	QuotaUnits      float64 `json:"quotaUnits"`
+	EstCostUSD      float64 `json:"estCostUsd,omitempty"`
+	CacheSavedUSD   float64 `json:"cacheSavedUsd,omitempty"`
 }
 
 // TierBurnPoint summarizes token usage for a single tier ("quick", "standard", "deep").
@@ -215,6 +241,7 @@ type TierBurnPoint struct {
 	GrossTokens    int64   `json:"grossTokens"`
 	CacheHitRatio  float64 `json:"cacheHitRatio"`
 	QuotaUnits     float64 `json:"quotaUnits"`
+	EstCostUSD     float64 `json:"estCostUsd,omitempty"`
 	SharePct       float64 `json:"sharePct"`
 }
 
@@ -228,45 +255,55 @@ type TaskTokenBadge struct {
 	PeakContextTokens    int64   `json:"peakContextTokens"`
 	CurrentContextTokens int64   `json:"currentContextTokens"`
 	QuotaUnits           float64 `json:"quotaUnits"`
+	EstCostUSD           float64 `json:"estCostUsd,omitempty"`
 	ChildCount           int     `json:"childCount"`
+	DescendantCount      int     `json:"descendantCount,omitempty"`
 	CompactLabel         string  `json:"compactLabel"`
 }
 
 // DashboardSummary is embedded into Web UI `/api/state`, `/api/obs`, and `SyncMarkdownConsole`.
 type DashboardSummary struct {
-	UpdatedAt                 string                    `json:"updatedAt"`
-	TodayUncachedTokens       int64                     `json:"todayUncachedTokens"`
-	TodayGrossTokens          int64                     `json:"todayGrossTokens"`
-	TodayCacheHitRatio        float64                   `json:"todayCacheHitRatio"`
-	TodayDeepUncachedTokens   int64                     `json:"todayDeepUncachedTokens"`
-	TodayQuotaUnits           float64                   `json:"todayQuotaUnits"`
-	TodayTurnCount            int                       `json:"todayTurnCount"`
-	AllTimeUncachedTokens     int64                     `json:"allTimeUncachedTokens"`
-	AllTimeGrossTokens        int64                     `json:"allTimeGrossTokens"`
-	AllTimeCacheHitRatio      float64                   `json:"allTimeCacheHitRatio"`
-	FrontDeskConvID           string                    `json:"frontDeskConvId,omitempty"`
-	FrontDeskContextTokens    int64                     `json:"frontDeskContextTokens"`
-	FrontDeskPeakTokens       int64                     `json:"frontDeskPeakTokens"`
-	FrontDeskCompactions      int                       `json:"frontDeskCompactions"`
-	FrontDeskCacheHitRatio    float64                   `json:"frontDeskCacheHitRatio"`
-	FrontDeskContextStatus    string                    `json:"frontDeskContextStatus"` // "OK" | "WARN" | "CRITICAL"
-	FrontDeskCompactedPending bool                      `json:"frontDeskCompactedPending,omitempty"`
-	Budget                    BudgetConfig              `json:"budget"`
-	DailyBudgetPct            float64                   `json:"dailyBudgetPct"`
-	DeepBudgetPct             float64                   `json:"deepBudgetPct"`
-	DailyTrend                []DailyBurnPoint          `json:"dailyTrend"`
-	TierBreakdown             []TierBurnPoint           `json:"tierBreakdown"`
-	TotalAnomalies            int                       `json:"totalAnomalies,omitempty"`
-	Anomalies                 []TokenAnomaly            `json:"anomalies,omitempty"`
-	TaskBadges                map[string]TaskTokenBadge `json:"taskBadges,omitempty"`
+	UpdatedAt                  string                     `json:"updatedAt"`
+	TodayInputTokens           int64                      `json:"todayInputTokens"`
+	TodayCacheReadTokens       int64                      `json:"todayCacheReadTokens"`
+	TodayOutputTokens          int64                      `json:"todayOutputTokens"`
+	TodayUncachedTokens        int64                      `json:"todayUncachedTokens"`
+	TodayGrossTokens           int64                      `json:"todayGrossTokens"`
+	TodayCacheHitRatio         float64                    `json:"todayCacheHitRatio"`
+	TodayDeepUncachedTokens    int64                      `json:"todayDeepUncachedTokens"`
+	TodayQuotaUnits            float64                    `json:"todayQuotaUnits"`
+	TodayEstCostUSD            float64                    `json:"todayEstCostUsd"`
+	TodayCacheSavedUSD         float64                    `json:"todayCacheSavedUsd"`
+	TodayColdSpikes            int                        `json:"todayColdSpikes,omitempty"`
+	TodayColdSpikeTokens       int64                      `json:"todayColdSpikeTokens,omitempty"`
+	TodayTurnCount             int                        `json:"todayTurnCount"`
+	AllTimeUncachedTokens      int64                      `json:"allTimeUncachedTokens"`
+	AllTimeGrossTokens         int64                      `json:"allTimeGrossTokens"`
+	AllTimeCacheHitRatio       float64                    `json:"allTimeCacheHitRatio"`
+	AllTimeEstCostUSD          float64                    `json:"allTimeEstCostUsd"`
+	AllTimeCacheSavedUSD       float64                    `json:"allTimeCacheSavedUsd"`
+	FrontDeskConvID            string                     `json:"frontDeskConvId,omitempty"`
+	FrontDeskContextTokens     int64                      `json:"frontDeskContextTokens"`
+	FrontDeskPostCompactTokens int64                      `json:"frontDeskPostCompactTokens,omitempty"`
+	FrontDeskPeakTokens        int64                      `json:"frontDeskPeakTokens"`
+	FrontDeskCompactions       int                        `json:"frontDeskCompactions"`
+	FrontDeskCacheHitRatio     float64                    `json:"frontDeskCacheHitRatio"`
+	FrontDeskContextStatus     string                     `json:"frontDeskContextStatus"` // "OK" | "WARN" | "CRITICAL"
+	FrontDeskCompactedPending  bool                       `json:"frontDeskCompactedPending,omitempty"`
+	Budget                     BudgetConfig               `json:"budget"`
+	DailyBudgetPct             float64                    `json:"dailyBudgetPct"`
+	DeepBudgetPct              float64                    `json:"deepBudgetPct"`
+	DailyTrend                 []DailyBurnPoint           `json:"dailyTrend"`
+	HourlyTrend                []HourlyBurnPoint          `json:"hourlyTrend,omitempty"`
+	TierBreakdown              []TierBurnPoint            `json:"tierBreakdown"`
+	Windows                    map[string]WindowBreakdown `json:"windows,omitempty"`
+	TotalAnomalies             int                        `json:"totalAnomalies,omitempty"`
+	Anomalies                  []TokenAnomaly             `json:"anomalies,omitempty"`
+	TaskBadges                 map[string]TaskTokenBadge  `json:"taskBadges,omitempty"`
 }
 
-// NormalizeTier infers "quick", "standard", or "deep" from tier and model strings.
-func NormalizeTier(tier, model string) string {
-	t := strings.ToLower(strings.TrimSpace(tier))
-	if t == "quick" || t == "standard" || t == "deep" {
-		return t
-	}
+// ModelCanonicalTier derives "quick", "standard", or "deep" strictly from a model identifier.
+func ModelCanonicalTier(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if strings.Contains(m, "pro") || strings.Contains(m, "carbon") || strings.Contains(m, "argon") || strings.Contains(m, "opus") || strings.Contains(m, "sonnet") {
 		return "deep"
@@ -277,38 +314,87 @@ func NormalizeTier(tier, model string) string {
 	return "standard"
 }
 
-// ComputeQuotaAndCost calculates Quota Burn Units (QBU) and estimated API-equivalent USD cost.
-func ComputeQuotaAndCost(input, cacheRead, output int64, model, tier string) (quotaUnits, estCostUSD float64) {
-	normTier := NormalizeTier(tier, model)
+// ModelFamily classifies a model string into its UI model family ("claude", "carbon", "neon", "hydrogen", "other").
+func ModelFamily(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(m, "claude") || strings.Contains(m, "opus") || strings.Contains(m, "sonnet"):
+		return "claude"
+	case strings.Contains(m, "carbon") || strings.Contains(m, "argon") || strings.Contains(m, "pro"):
+		return "carbon"
+	case strings.Contains(m, "neon"):
+		return "neon"
+	case strings.Contains(m, "hydrogen") || strings.Contains(m, "flash"):
+		return "hydrogen"
+	default:
+		return "other"
+	}
+}
 
-	weight := 1.0
-	inPerM := 0.30
-	cachePerM := 0.075
-	outPerM := 2.50
+// NormalizeTier infers "quick", "standard", or "deep" from tier and model strings.
+// When model is explicitly known (not empty/"inherit"/"auto"), the model's canonical tier takes precedence
+// if tier is unset; callers checking actual model tier should use ModelCanonicalTier(model).
+func NormalizeTier(tier, model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m != "" && m != "inherit" && m != "auto" && strings.TrimSpace(tier) == "" {
+		return ModelCanonicalTier(m)
+	}
+	t := strings.ToLower(strings.TrimSpace(tier))
+	if t == "quick" || t == "standard" || t == "deep" {
+		return t
+	}
+	return ModelCanonicalTier(m)
+}
 
+// ModelRatesPerMillion returns API-equivalent USD rates per 1M tokens (input, cacheRead, output)
+// derived strictly from the executed model when known, falling back to fallbackTier only when model is empty.
+func ModelRatesPerMillion(model, fallbackTier string) (inPerM, cachePerM, outPerM float64) {
+	m := strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case strings.Contains(m, "opus"):
-		weight = 8.0
-		inPerM = 5.00
-		cachePerM = 0.50
-		outPerM = 25.00
-	case normTier == "deep":
-		weight = 5.0
-		inPerM = 1.25
-		cachePerM = 0.3125
-		outPerM = 10.00
-	case normTier == "quick":
-		weight = 0.25
-		inPerM = 0.10
-		cachePerM = 0.025
-		outPerM = 0.40
+		return 5.00, 0.50, 25.00
+	case strings.Contains(m, "sonnet"):
+		return 3.00, 0.30, 15.00
+	case strings.Contains(m, "carbon") || strings.Contains(m, "argon") || strings.Contains(m, "pro"):
+		return 1.25, 0.3125, 10.00
+	case strings.Contains(m, "neon"):
+		return 0.50, 0.125, 3.00
+	case strings.Contains(m, "flash_lite") || strings.Contains(m, "flash-lite") || strings.HasSuffix(m, "-low"):
+		return 0.10, 0.025, 0.40
+	case strings.Contains(m, "hydrogen-medium") || m == "flash":
+		return 0.25, 0.0625, 1.50
+	case strings.Contains(m, "hydrogen") || strings.Contains(m, "flash"):
+		return 0.30, 0.075, 2.50
+	case m == "" || m == "inherit" || m == "auto":
+		switch NormalizeTier(fallbackTier, "") {
+		case "deep":
+			return 1.25, 0.3125, 10.00
+		case "quick":
+			return 0.10, 0.025, 0.40
+		default:
+			return 0.30, 0.075, 2.50
+		}
+	default:
+		return 0.30, 0.075, 2.50
 	}
+}
 
-	weightedTokens := float64(input) + 0.1*float64(cacheRead) + 3.0*float64(output)
-	quotaUnits = weight * (weightedTokens / 1000.0)
+// ComputeQuotaCostAndSavings calculates estimated API-equivalent USD cost, prefix-cache USD savings,
+// and internal QuotaUnits (1 QBU = $0.01 for backward CLI/JSON compatibility).
+func ComputeQuotaCostAndSavings(input, cacheRead, output int64, model, tier string) (quotaUnits, estCostUSD, cacheSavedUSD float64) {
+	inPerM, cachePerM, outPerM := ModelRatesPerMillion(model, tier)
 	estCostUSD = (float64(input)*inPerM + float64(cacheRead)*cachePerM + float64(output)*outPerM) / 1_000_000.0
-	return quotaUnits, estCostUSD
+	if inPerM > cachePerM && cacheRead > 0 {
+		cacheSavedUSD = float64(cacheRead) * (inPerM - cachePerM) / 1_000_000.0
+	}
+	quotaUnits = estCostUSD * 100.0
+	return quotaUnits, estCostUSD, cacheSavedUSD
+}
+
+// ComputeQuotaAndCost calculates internal QuotaUnits (1 QBU = $0.01) and estimated API-equivalent USD cost.
+func ComputeQuotaAndCost(input, cacheRead, output int64, model, tier string) (quotaUnits, estCostUSD float64) {
+	q, c, _ := ComputeQuotaCostAndSavings(input, cacheRead, output, model, tier)
+	return q, c
 }
 
 // RollupTurns computes a TokenRollup across a slice of TurnMetrics.
@@ -332,6 +418,7 @@ func RollupTurns(turns []TurnMetrics, totalSteps int, model, tier string) TokenR
 		r.HumanWaitMs += t.HumanWaitMs
 		r.QuotaUnits += t.QuotaUnits
 		r.EstCostUSD += t.EstCostUSD
+		r.CacheSavedUSD += t.CacheSavedUSD
 	}
 	denom := r.InputTokens + r.CacheReadTokens
 	if denom > 0 {
@@ -357,6 +444,7 @@ func AddRollup(a, b TokenRollup) TokenRollup {
 		HumanWaitMs:       a.HumanWaitMs + b.HumanWaitMs,
 		QuotaUnits:        a.QuotaUnits + b.QuotaUnits,
 		EstCostUSD:        a.EstCostUSD + b.EstCostUSD,
+		CacheSavedUSD:     a.CacheSavedUSD + b.CacheSavedUSD,
 	}
 	if b.PeakContextTokens > out.PeakContextTokens {
 		out.PeakContextTokens = b.PeakContextTokens
@@ -437,6 +525,7 @@ type obsMetaStamps struct {
 	nested       fileStatStamp
 	fd           fileStatStamp
 	fdTranscript fileStatStamp
+	todayJournal fileStatStamp
 }
 
 func currentObsMetaStamps(vaultDir, brainDir string) obsMetaStamps {
@@ -448,6 +537,7 @@ func currentObsMetaStamps(vaultDir, brainDir string) obsMetaStamps {
 		nested:       statFileStamp(filepath.Join(memDir, "nested_conversations.json")),
 		fd:           statFileStamp(filepath.Join(memDir, "front_desk.json")),
 		fdTranscript: fileStatStamp{size: fdSize, modNano: fdMod},
+		todayJournal: statFileStamp(filepath.Join(memDir, "journal", time.Now().Format("2006-01-02"))),
 	}
 }
 
@@ -470,7 +560,7 @@ var (
 	obsMemByV  = make(map[string]*obsMemCacheEntry)
 )
 
-const currentObsIndexVersion = 5
+const currentObsIndexVersion = 6
 
 func shallowCopyObsIndex(src *ObsIndex) *ObsIndex {
 	if src == nil {
@@ -518,8 +608,35 @@ type transcriptCandidate struct {
 	convID         string
 	transcriptPath string
 	modelHint      string
+	execNum        int
+	spans          []JournalModelSpan
 	fileSize       int64
 	modTimeNano    int64
+}
+
+func parseExecNumFromJournalFilename(name string) int {
+	trimmed := strings.TrimSuffix(name, ".json")
+	idx := strings.LastIndexByte(trimmed, '-')
+	if idx < 0 || idx+1 >= len(trimmed) {
+		return 0
+	}
+	n, err := strconv.Atoi(trimmed[idx+1:])
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func journalSpansEqual(a, b []JournalModelSpan) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveTranscriptInDirWithStat(dir string) (string, int64, int64) {
@@ -542,25 +659,89 @@ func resolveTranscriptInDir(dir string) string {
 	return p
 }
 
-func mergeJournalCandidate(byConv map[string]transcriptCandidate, convID, transcriptPath, modelHint string, preferExistingModel bool) {
-	if convID == "" {
+func mergeJournalCandidate(byConv map[string]transcriptCandidate, h transcriptCandidate, preferExistingModel bool) {
+	if h.convID == "" {
 		return
 	}
-	cand := byConv[convID]
-	cand.convID = convID
-	if modelHint != "" && (!preferExistingModel || cand.modelHint == "") {
-		cand.modelHint = modelHint
+	cand := byConv[h.convID]
+	cand.convID = h.convID
+	if h.modelHint != "" && (!preferExistingModel || cand.modelHint == "") {
+		cand.modelHint = h.modelHint
 	}
-	if cand.transcriptPath == "" && transcriptPath != "" {
-		if info, err := os.Stat(transcriptPath); err == nil && !info.IsDir() {
-			cand.transcriptPath = transcriptPath
+	if len(h.spans) > 0 {
+		for _, sp := range h.spans {
+			if sp.Model == "" {
+				continue
+			}
+			dup := false
+			for _, existing := range cand.spans {
+				if existing.ExecNum == sp.ExecNum && existing.StepStart == sp.StepStart && existing.StepEnd == sp.StepEnd && existing.Model == sp.Model {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				cand.spans = append(cand.spans, sp)
+			}
+		}
+	}
+	if cand.transcriptPath == "" && h.transcriptPath != "" {
+		if info, err := os.Stat(h.transcriptPath); err == nil && !info.IsDir() {
+			cand.transcriptPath = h.transcriptPath
 			cand.fileSize = info.Size()
 			cand.modTimeNano = info.ModTime().UnixNano()
 		}
 	}
 	if cand.transcriptPath != "" {
-		byConv[convID] = cand
+		byConv[h.convID] = cand
 	}
+}
+
+func buildJournalHintFromRaw(raw []byte, filename string) (transcriptCandidate, bool) {
+	var je struct {
+		Timestamp      string `json:"timestamp"`
+		ConversationID string `json:"conversationId"`
+		ExecutionNum   int    `json:"executionNum"`
+		TranscriptPath string `json:"transcriptPath"`
+		ModelName      string `json:"modelName"`
+		StepCount      int    `json:"stepCount"`
+		StepStartIdx   int    `json:"stepStartIdx"`
+		TurnStepCount  int    `json:"turnStepCount"`
+	}
+	if json.Unmarshal(raw, &je) != nil || strings.TrimSpace(je.ConversationID) == "" {
+		return transcriptCandidate{}, false
+	}
+	cid := strings.ToLower(strings.TrimSpace(je.ConversationID))
+	execNum := je.ExecutionNum
+	if execNum <= 0 && filename != "" {
+		execNum = parseExecNumFromJournalFilename(filename)
+	}
+	model := strings.TrimSpace(je.ModelName)
+	var spans []JournalModelSpan
+	if model != "" {
+		stepStart := je.StepStartIdx
+		stepEnd := je.StepCount - 1
+		if stepEnd < stepStart && je.TurnStepCount > 0 {
+			stepEnd = stepStart + je.TurnStepCount - 1
+		}
+		if stepEnd < stepStart {
+			stepEnd = stepStart
+		}
+		spans = []JournalModelSpan{{
+			ExecNum:   execNum,
+			StepStart: stepStart,
+			StepEnd:   stepEnd,
+			Model:     model,
+			Timestamp: strings.TrimSpace(je.Timestamp),
+		}}
+	}
+	return transcriptCandidate{
+		convID:         cid,
+		transcriptPath: je.TranscriptPath,
+		modelHint:      model,
+		execNum:        execNum,
+		spans:          spans,
+	}, true
 }
 
 func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalDateCacheEntry) []transcriptCandidate {
@@ -596,10 +777,15 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 	journalRoot := filepath.Join(vaultDir, "memory", "journal")
 	if dateDirs, err := os.ReadDir(journalRoot); err == nil {
 		seenDates := make(map[string]bool, len(dateDirs))
+		var sortedDates []os.DirEntry
 		for _, d := range dateDirs {
 			if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || d.Name() == "archive" {
 				continue
 			}
+			sortedDates = append(sortedDates, d)
+		}
+		sort.Slice(sortedDates, func(i, j int) bool { return sortedDates[i].Name() < sortedDates[j].Name() })
+		for _, d := range sortedDates {
 			dateName := d.Name()
 			seenDates[dateName] = true
 			datePath := filepath.Join(journalRoot, dateName)
@@ -623,20 +809,27 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 					if rErr != nil {
 						continue
 					}
-					var je struct {
-						ConversationID string `json:"conversationId"`
-						TranscriptPath string `json:"transcriptPath"`
-						ModelName      string `json:"modelName"`
+					if hint, ok := buildJournalHintFromRaw(b, f.Name()); ok {
+						dateHints = append(dateHints, hint)
 					}
-					if json.Unmarshal(b, &je) != nil || je.ConversationID == "" {
-						continue
-					}
-					dateHints = append(dateHints, transcriptCandidate{
-						convID:         strings.ToLower(strings.TrimSpace(je.ConversationID)),
-						transcriptPath: je.TranscriptPath,
-						modelHint:      je.ModelName,
-					})
 				}
+				// Sort numerically by executionNum (fixing lexicographical -10.json < -2.json ordering)
+				sort.SliceStable(dateHints, func(i, j int) bool {
+					if dateHints[i].convID != dateHints[j].convID {
+						return dateHints[i].convID < dateHints[j].convID
+					}
+					if dateHints[i].execNum != dateHints[j].execNum {
+						return dateHints[i].execNum < dateHints[j].execNum
+					}
+					ti, tj := "", ""
+					if len(dateHints[i].spans) > 0 {
+						ti = dateHints[i].spans[0].Timestamp
+					}
+					if len(dateHints[j].spans) > 0 {
+						tj = dateHints[j].spans[0].Timestamp
+					}
+					return ti < tj
+				})
 				if journalCache != nil && dirMod != 0 {
 					journalCache[dateName] = journalDateCacheEntry{
 						dirModNano: dirMod,
@@ -645,7 +838,7 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 				}
 			}
 			for _, h := range dateHints {
-				mergeJournalCandidate(byConv, h.convID, h.transcriptPath, h.modelHint, false)
+				mergeJournalCandidate(byConv, h, false)
 			}
 		}
 		if journalCache != nil {
@@ -671,16 +864,9 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 			sc := bufio.NewScanner(af)
 			sc.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 			for sc.Scan() {
-				var je struct {
-					ConversationID string `json:"conversationId"`
-					TranscriptPath string `json:"transcriptPath"`
-					ModelName      string `json:"modelName"`
+				if hint, ok := buildJournalHintFromRaw(sc.Bytes(), ""); ok {
+					mergeJournalCandidate(byConv, hint, true)
 				}
-				if json.Unmarshal(sc.Bytes(), &je) != nil || je.ConversationID == "" {
-					continue
-				}
-				cid := strings.ToLower(strings.TrimSpace(je.ConversationID))
-				mergeJournalCandidate(byConv, cid, je.TranscriptPath, je.ModelName, true)
 			}
 			_ = af.Close()
 		}
@@ -689,6 +875,20 @@ func discoverTranscriptsCached(vaultDir string, journalCache map[string]journalD
 	var out []transcriptCandidate
 	for _, c := range byConv {
 		if c.transcriptPath != "" {
+			if len(c.spans) > 1 {
+				sort.SliceStable(c.spans, func(i, j int) bool {
+					if c.spans[i].StepStart != c.spans[j].StepStart {
+						return c.spans[i].StepStart < c.spans[j].StepStart
+					}
+					if c.spans[i].ExecNum != c.spans[j].ExecNum {
+						return c.spans[i].ExecNum < c.spans[j].ExecNum
+					}
+					return c.spans[i].Timestamp < c.spans[j].Timestamp
+				})
+			}
+			if len(c.spans) > 0 && c.spans[len(c.spans)-1].Model != "" {
+				c.modelHint = c.spans[len(c.spans)-1].Model
+			}
 			out = append(out, c)
 		}
 	}
@@ -751,8 +951,17 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 		}
 		cached, ok := idx.Conversations[cand.convID]
 		if ok && cached.TranscriptPath == cand.transcriptPath && cached.FileSize == fileSize && cached.ModTimeNano == modTimeNano {
-			if cand.modelHint != "" && cached.Model == "" {
+			updatedCached := false
+			if !journalSpansEqual(cached.JournalSpans, cand.spans) {
+				cached.JournalSpans = cand.spans
+				updatedCached = true
+			}
+			if cand.modelHint != "" && (cached.Model == "" || cached.ModelSource == "fallback" || (cached.ModelSource == "journal" && cached.Model != cand.modelHint)) {
 				cached.Model = cand.modelHint
+				cached.ModelSource = "journal"
+				updatedCached = true
+			}
+			if updatedCached {
 				idx.Conversations[cand.convID] = cached
 				dirty = true
 			}
@@ -762,6 +971,10 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 		cm, pErr := ParseTranscriptFile(cand.convID, cand.transcriptPath, cand.modelHint, "")
 		if pErr != nil {
 			continue
+		}
+		cm.JournalSpans = cand.spans
+		if cand.modelHint != "" {
+			cm.ModelSource = "journal"
 		}
 		idx.Conversations[cand.convID] = cm
 		dirty = true
@@ -791,6 +1004,11 @@ func LoadOrRefreshIndex(vaultDir string) (*ObsIndex, error) {
 	return shallowCopyObsIndex(idx), nil
 }
 
+// ParseSinceCutoff converts a window specifier ("today", "24h", "7d", "30d", "all", or Go duration) into a cutoff time.
+func ParseSinceCutoff(since string, now time.Time) time.Time {
+	return parseSinceCutoff(since, now)
+}
+
 func parseSinceCutoff(since string, now time.Time) time.Time {
 	s := strings.ToLower(strings.TrimSpace(since))
 	switch s {
@@ -813,22 +1031,27 @@ func parseSinceCutoff(since string, now time.Time) time.Time {
 	}
 }
 
-func turnMatchesCutoff(t TurnMetrics, cutoff time.Time) bool {
-	if cutoff.IsZero() {
-		return true
-	}
+func turnEffectiveTime(t TurnMetrics) time.Time {
 	ts := parseTimestamp(t.EndedAt)
 	if ts.IsZero() {
 		ts = parseTimestamp(t.StartedAt)
 	}
+	return ts
+}
+
+func turnMatchesCutoff(t TurnMetrics, cutoff time.Time) bool {
+	if cutoff.IsZero() {
+		return true
+	}
+	ts := turnEffectiveTime(t)
 	if ts.IsZero() {
 		return false
 	}
 	return !ts.Before(cutoff)
 }
 
-func localDateStr(rfc3339Str string, loc *time.Location) string {
-	ts := parseTimestamp(rfc3339Str)
+func turnLocalDateStr(t TurnMetrics, loc *time.Location) string {
+	ts := turnEffectiveTime(t)
 	if ts.IsZero() {
 		return "unknown"
 	}
@@ -838,8 +1061,8 @@ func localDateStr(rfc3339Str string, loc *time.Location) string {
 	return ts.Format("2006-01-02")
 }
 
-func localHourStr(rfc3339Str string, loc *time.Location) string {
-	ts := parseTimestamp(rfc3339Str)
+func turnLocalHourStr(t TurnMetrics, loc *time.Location) string {
+	ts := turnEffectiveTime(t)
 	if ts.IsZero() {
 		return "unknown"
 	}
@@ -847,6 +1070,29 @@ func localHourStr(rfc3339Str string, loc *time.Location) string {
 		ts = ts.In(loc)
 	}
 	return ts.Format("2006-01-02 15:00")
+}
+
+func turnModel(t TurnMetrics, cm ConversationMetrics) string {
+	if t.Model != "" {
+		return t.Model
+	}
+	if cm.Model != "" {
+		return cm.Model
+	}
+	return "unknown"
+}
+
+func turnModelTier(t TurnMetrics, cm ConversationMetrics) string {
+	if t.ModelTier != "" {
+		return t.ModelTier
+	}
+	if t.Model != "" {
+		return ModelCanonicalTier(t.Model)
+	}
+	if cm.Model != "" {
+		return ModelCanonicalTier(cm.Model)
+	}
+	return NormalizeTier(cm.Tier, "")
 }
 
 // BuildSummaryReport produces the `hq obs [tokens]` summary and bucket breakdown.
@@ -926,9 +1172,11 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 	convsSeen := make(map[string]bool)
 	for cid, cm := range idx.Conversations {
 		for _, t := range cm.Turns {
+			tModel := turnModel(t, cm)
+			tTier := turnModelTier(t, cm)
 			if turnMatchesCutoff(t, todayCutoff) {
 				rep.TodayUncached += t.UncachedTokens
-				if cm.Tier == "deep" {
+				if tTier == "deep" {
 					rep.TodayDeepUncached += t.UncachedTokens
 				}
 			}
@@ -936,29 +1184,26 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 				continue
 			}
 			convsSeen[cid] = true
-			tr := RollupTurns([]TurnMetrics{t}, t.StepCount, cm.Model, cm.Tier)
+			tr := RollupTurns([]TurnMetrics{t}, t.StepCount, tModel, tTier)
 			rep.Totals = AddRollup(rep.Totals, tr)
 
 			var bKey string
 			switch strings.ToLower(groupBy) {
 			case "hour":
-				bKey = localHourStr(t.StartedAt, now.Location())
+				bKey = turnLocalHourStr(t, now.Location())
 			case "model":
-				bKey = cm.Model
-				if bKey == "" {
-					bKey = "unknown"
-				}
+				bKey = tModel
 			case "tier":
-				bKey = cm.Tier
+				bKey = tTier
 			case "kind":
 				bKey = cm.Kind
 			case "scope":
 				bKey = cm.Scope
 			default: // "day"
-				bKey = localDateStr(t.StartedAt, now.Location())
+				bKey = turnLocalDateStr(t, now.Location())
 			}
 			addToBucket(bucketMap, bucketConvs, bKey, cid, t)
-			addToBucket(tierMap, tierConvs, cm.Tier, cid, t)
+			addToBucket(tierMap, tierConvs, tTier, cid, t)
 			addToBucket(kindMap, kindConvs, cm.Kind, cid, t)
 		}
 	}
@@ -1013,12 +1258,18 @@ func BuildSummaryReport(vaultDir, sinceFilter, groupBy string, now time.Time) (*
 	rep.Buckets = finalizeSlice(bucketMap, bucketConvs, isTimeKey)
 	rep.ByTier = finalizeSlice(tierMap, tierConvs, false)
 	rep.ByKind = finalizeSlice(kindMap, kindConvs, false)
-	rep.Anomalies = EvaluateAnomalies(vaultDir, idx, budget, now)
+	rep.Anomalies = EvaluateAnomaliesSince(vaultDir, idx, budget, now, cutoff)
 	return rep, nil
 }
 
-// BuildTopReport ranks conversations/tasks or individual turns by token burn, QBU, gross tokens, context size, or latency.
+// BuildTopReport ranks conversations/tasks or individual turns by token burn, cost, gross tokens, context size, or latency.
+// In --tree mode with kind="all", only disjoint root trees (ParentConversationID == "") are ranked by default.
 func BuildTopReport(vaultDir, sortBy, kindFilter string, treeMode, turnsMode bool, limit int, now time.Time) (*TopReport, error) {
+	return BuildTopReportWithOptions(vaultDir, sortBy, kindFilter, treeMode, turnsMode, false, limit, now)
+}
+
+// BuildTopReportWithOptions extends BuildTopReport with allNodes so callers can explicitly include intermediate DAG nodes in --tree mode.
+func BuildTopReportWithOptions(vaultDir, sortBy, kindFilter string, treeMode, turnsMode, allNodes bool, limit int, now time.Time) (*TopReport, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -1042,18 +1293,24 @@ func BuildTopReport(vaultDir, sortBy, kindFilter string, treeMode, turnsMode boo
 		KindFilter:  kindFilter,
 		TreeMode:    treeMode,
 		TurnsMode:   turnsMode,
+		AllNodes:    allNodes,
 		Limit:       limit,
 	}
 
+	normKind := strings.ToLower(strings.TrimSpace(kindFilter))
+	disjointRootsOnly := treeMode && !allNodes && (normKind == "" || normKind == "all")
+
 	matchesKind := func(cm ConversationMetrics) bool {
-		k := strings.ToLower(strings.TrimSpace(kindFilter))
-		if k == "" || k == "all" {
+		if disjointRootsOnly && cm.ParentConversationID != "" {
+			return false
+		}
+		if normKind == "" || normKind == "all" {
 			return true
 		}
-		if k == "subagent" {
+		if normKind == "subagent" {
 			return cm.Kind == "subagent" || cm.Kind == "nested_subagent"
 		}
-		return cm.Kind == k
+		return cm.Kind == normKind
 	}
 
 	if turnsMode {
@@ -1071,8 +1328,8 @@ func BuildTopReport(vaultDir, sortBy, kindFilter string, treeMode, turnsMode boo
 					TaskSlug:       cm.TaskSlug,
 					Title:          cm.Title,
 					Kind:           cm.Kind,
-					Tier:           cm.Tier,
-					Model:          cm.Model,
+					Tier:           turnModelTier(t, cm),
+					Model:          turnModel(t, cm),
 					Turn:           t,
 				})
 			}
@@ -1080,8 +1337,8 @@ func BuildTopReport(vaultDir, sortBy, kindFilter string, treeMode, turnsMode boo
 		sort.Slice(turnItems, func(i, j int) bool {
 			ti, tj := turnItems[i].Turn, turnItems[j].Turn
 			switch strings.ToLower(sortBy) {
-			case "qbu", "quota":
-				return ti.QuotaUnits > tj.QuotaUnits
+			case "cost", "usd", "qbu", "quota":
+				return ti.EstCostUSD > tj.EstCostUSD
 			case "gross":
 				return ti.GrossTokens > tj.GrossTokens
 			case "context":
@@ -1124,6 +1381,7 @@ func BuildTopReport(vaultDir, sortBy, kindFilter string, treeMode, turnsMode boo
 			Tier:                 cm.Tier,
 			Model:                cm.Model,
 			ChildCount:           len(cm.ChildConversationIDs),
+			DescendantCount:      cm.DescendantCount,
 			CurrentContextTokens: cm.CurrentContextTokens,
 			Metrics:              m,
 			SelfMetrics:          cm.Self,
@@ -1134,8 +1392,8 @@ func BuildTopReport(vaultDir, sortBy, kindFilter string, treeMode, turnsMode boo
 	sort.Slice(items, func(i, j int) bool {
 		mi, mj := items[i].Metrics, items[j].Metrics
 		switch strings.ToLower(sortBy) {
-		case "qbu", "quota":
-			return mi.QuotaUnits > mj.QuotaUnits
+		case "cost", "usd", "qbu", "quota":
+			return mi.EstCostUSD > mj.EstCostUSD
 		case "gross":
 			return mi.GrossTokens > mj.GrossTokens
 		case "context":
@@ -1204,7 +1462,7 @@ func BuildInspectReport(vaultDir, target string, now time.Time) (*InspectReport,
 		}
 	}
 	budget := LoadBudgetConfig(vaultDir)
-	allAnom := EvaluateAnomalies(vaultDir, idx, budget, now)
+	allAnom := EvaluateAnomaliesSince(vaultDir, idx, budget, now, time.Time{})
 	for _, a := range allAnom {
 		if a.ConversationID == matched.ConversationID {
 			rep.Anomalies = append(rep.Anomalies, a)
@@ -1247,7 +1505,6 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 	}
 
 	todayStr := now.Format("2006-01-02")
-	var todayInput, todayCache, todayOutput int64
 	var allInput, allCache, allOutput int64
 
 	// Prepare 7-day trend buckets
@@ -1273,14 +1530,8 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 		allOutput += cm.Self.OutputTokens
 		sum.AllTimeUncachedTokens += cm.Self.UncachedTokens
 		sum.AllTimeGrossTokens += cm.Self.GrossTokens
-
-		tKey := NormalizeTier(cm.Tier, cm.Model)
-		tb := tierBuckets[tKey]
-		tb.UncachedTokens += cm.Self.UncachedTokens
-		tb.GrossTokens += cm.Self.GrossTokens
-		tb.QuotaUnits += cm.Self.QuotaUnits
-		tierInput[tKey] += cm.Self.InputTokens
-		tierCache[tKey] += cm.Self.CacheReadTokens
+		sum.AllTimeEstCostUSD += cm.Self.EstCostUSD
+		sum.AllTimeCacheSavedUSD += cm.Self.CacheSavedUSD
 
 		if hotConvIDs == nil || hotConvIDs[cm.ConversationID] {
 			sum.TaskBadges[cm.ConversationID] = TaskTokenBadge{
@@ -1292,40 +1543,64 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 				PeakContextTokens:    cm.Tree.PeakContextTokens,
 				CurrentContextTokens: cm.CurrentContextTokens,
 				QuotaUnits:           cm.Tree.QuotaUnits,
+				EstCostUSD:           cm.Tree.EstCostUSD,
 				ChildCount:           len(cm.ChildConversationIDs),
-				CompactLabel: fmt.Sprintf("%s uncached (%.0f%% CHR)",
+				DescendantCount:      cm.DescendantCount,
+				CompactLabel: fmt.Sprintf("%s uncached · %.0f%% cached · ~$%.2f",
 					FormatTokensCompact(cm.Tree.UncachedTokens),
 					cm.Tree.CacheHitRatio*100.0,
+					cm.Tree.EstCostUSD,
 				),
 			}
 		}
 
 		for _, t := range cm.Turns {
-			ds := localDateStr(t.StartedAt, now.Location())
+			tKey := turnModelTier(t, cm)
+			tb := tierBuckets[tKey]
+			if tb == nil {
+				tb = tierBuckets["standard"]
+			}
+			tb.UncachedTokens += t.UncachedTokens
+			tb.GrossTokens += t.GrossTokens
+			tb.QuotaUnits += t.QuotaUnits
+			tb.EstCostUSD += t.EstCostUSD
+			tierInput[tKey] += t.InputTokens
+			tierCache[tKey] += t.CacheReadTokens
+
+			ds := turnLocalDateStr(t, now.Location())
 			if dp, ok := dayBuckets[ds]; ok {
 				dp.UncachedTokens += t.UncachedTokens
 				dp.CacheReadTokens += t.CacheReadTokens
 				dp.OutputTokens += t.OutputTokens
 				dp.GrossTokens += t.GrossTokens
 				dp.QuotaUnits += t.QuotaUnits
+				dp.EstCostUSD += t.EstCostUSD
+				dp.CacheSavedUSD += t.CacheSavedUSD
 			}
 			if ds == todayStr {
-				todayInput += t.InputTokens
-				todayCache += t.CacheReadTokens
-				todayOutput += t.OutputTokens
+				sum.TodayInputTokens += t.InputTokens
+				sum.TodayCacheReadTokens += t.CacheReadTokens
+				sum.TodayOutputTokens += t.OutputTokens
 				sum.TodayUncachedTokens += t.UncachedTokens
 				sum.TodayGrossTokens += t.GrossTokens
 				sum.TodayQuotaUnits += t.QuotaUnits
+				sum.TodayEstCostUSD += t.EstCostUSD
+				sum.TodayCacheSavedUSD += t.CacheSavedUSD
 				sum.TodayTurnCount++
+				if t.ColdStartInputTokens >= 50_000 {
+					sum.TodayColdSpikes++
+					sum.TodayColdSpikeTokens += t.ColdStartInputTokens
+				}
 				if tKey == "deep" {
 					sum.TodayDeepUncachedTokens += t.UncachedTokens
 				}
 			}
 		}
 	}
+	_ = allOutput
 
-	if denom := todayInput + todayCache; denom > 0 {
-		sum.TodayCacheHitRatio = float64(todayCache) / float64(denom)
+	if denom := sum.TodayInputTokens + sum.TodayCacheReadTokens; denom > 0 {
+		sum.TodayCacheHitRatio = float64(sum.TodayCacheReadTokens) / float64(denom)
 	}
 	if denom := allInput + allCache; denom > 0 {
 		sum.AllTimeCacheHitRatio = float64(allCache) / float64(denom)
@@ -1355,6 +1630,7 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 		sum.FrontDeskConvID = fd.ConversationID
 		if fdCM, exists := idx.Conversations[strings.ToLower(fd.ConversationID)]; exists {
 			sum.FrontDeskContextTokens = fdCM.CurrentContextTokens
+			sum.FrontDeskPostCompactTokens = fdCM.PostCompactContextTokens
 			sum.FrontDeskPeakTokens = fdCM.Self.PeakContextTokens
 			sum.FrontDeskCompactions = fdCM.Self.CompactionCount
 			sum.FrontDeskCacheHitRatio = fdCM.Self.CacheHitRatio
@@ -1380,6 +1656,8 @@ func BuildDashboardSummary(vaultDir string, now time.Time) DashboardSummary {
 			sum.DeepBudgetPct = (float64(sum.TodayDeepUncachedTokens) / float64(budget.DailyDeepUncachedBudget)) * 100.0
 		}
 	}
+
+	populateDashboardWindows(&sum, idx, now)
 
 	allAnomalies := EvaluateAnomalies(vaultDir, idx, budget, now)
 	sum.TotalAnomalies = len(allAnomalies)
@@ -1416,11 +1694,13 @@ func GetFrontDeskContextStatus(vaultDir, transcriptPath string) (currentTokens i
 	}
 	if !compactedPending && budget.NudgeContextTokens > 0 && currentTokens >= budget.NudgeContextTokens {
 		nudgeBanner = fmt.Sprintf(
-			"## 💡 Front Desk Context Health (`%s` / `256k` tokens)\n"+
-				"- Active `[HQ] Front Desk` context is at **%s tokens** (threshold: `%s`). To prevent cold-cache wakeup token spikes between idle turns, consider running `/compact` or starting a fresh Front Desk shift (`./bin/hq release-desk`).",
+			"## 💡 Front Desk Context Health (`%s` / `%s` tokens)\n"+
+				"- Active `[HQ] Front Desk` context is at **%s tokens** (cold-wakeup hygiene threshold: `%s`, auto-compaction ceiling: `~%s`). To prevent cold-cache wakeup token spikes between idle turns, consider running `/compact` or starting a fresh Front Desk shift (`./bin/hq release-desk`).",
 			FormatTokensCompact(currentTokens),
+			FormatTokensCompact(budget.EffectiveContextCeiling()),
 			FormatTokensCompact(currentTokens),
 			FormatTokensCompact(budget.NudgeContextTokens),
+			FormatTokensCompact(budget.EffectiveContextCeiling()),
 		)
 	}
 	return currentTokens, budget, nudgeBanner

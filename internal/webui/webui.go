@@ -672,8 +672,7 @@ func computeVaultStateFingerprint(vaultDir string) vaultStateFingerprint {
 	statAt(12, filepath.Join(mem, "channels"))
 	statAt(13, filepath.Join(vaultDir, "private", "channels"))
 	statAt(14, filepath.Join(mem, "workspaces.json"))
-	_, _, fdSize, fdMod := obs.FrontDeskTranscriptStamp(vaultDir)
-	fp[15] = fdMod ^ (fdSize << 13)
+	fp[15] = computeObsStateStamp(vaultDir)
 	return fp
 }
 
@@ -1025,61 +1024,7 @@ func loadTodayJournals(vaultDir string) []hooks.JournalEntry {
 	return out
 }
 
-var pageTmpl = template.Must(template.New("console").Funcs(template.FuncMap{
-	"shortSHA": func(s string) string {
-		if len(s) > 12 {
-			return s[:12]
-		}
-		return s
-	},
-	"draftPayload": func(p approvals.Proposal) string {
-		if p.Metadata != nil {
-			if dp := p.Metadata["draftPayload"]; dp != "" {
-				return dp
-			}
-			if bp := p.Metadata["bodyPreview"]; bp != "" {
-				return bp
-			}
-		}
-		return ""
-	},
-	"base": filepath.Base,
-	"mulf": func(a, b float64) float64 {
-		return a * b
-	},
-	"divf": func(a, b int) float64 {
-		if b == 0 {
-			return 0
-		}
-		return float64(a) / float64(b)
-	},
-	"fmtTokens": obs.FormatTokensCompact,
-	"pctClamp": func(p float64) float64 {
-		if p < 0 {
-			return 0
-		}
-		if p > 100 {
-			return 100
-		}
-		return p
-	},
-	"ctxPct": func(cur int64) float64 {
-		p := (float64(cur) / 256000.0) * 100.0
-		if p > 100 {
-			return 100
-		}
-		return p
-	},
-	"taskBadge": func(badges map[string]obs.TaskTokenBadge, convID string) string {
-		if badges == nil {
-			return ""
-		}
-		if b, ok := badges[strings.ToLower(strings.TrimSpace(convID))]; ok && b.GrossTokens > 0 {
-			return b.CompactLabel
-		}
-		return ""
-	},
-}).Parse(consoleHTML))
+var pageTmpl = template.Must(template.New("console").Funcs(consoleTemplateFuncs()).Parse(consoleHTML))
 
 func renderHTML(w http.ResponseWriter, state DashboardState) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

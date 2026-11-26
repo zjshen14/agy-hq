@@ -519,7 +519,7 @@ func Mine(rootDir, vaultDir string, since time.Duration) ([]FrictionEvent, error
 	// 3b. Scan token anomalies (A3 RunawayTurnBurn & A4 TierMisroutingBurn) as FrictionQuotaAnomaly
 	if obsIdx, err := obs.LoadOrRefreshIndex(vaultDir); err == nil && obsIdx != nil {
 		budget := obs.LoadBudgetConfig(vaultDir)
-		for _, anom := range obs.EvaluateAnomalies(vaultDir, obsIdx, budget, now) {
+		for _, anom := range obs.EvaluateAnomaliesSince(vaultDir, obsIdx, budget, now, cutoff) {
 			if anom.Code != "A3" && anom.Code != "A4" {
 				continue
 			}

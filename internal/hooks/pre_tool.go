@@ -547,7 +547,7 @@ func handlePreToolUse(r io.Reader, w io.Writer, vaultDir string, mutatedConsole 
 		return writeAllowWithOptionalCompactionNudge(w, vaultDir, payload)
 	}
 
-	return enforceFrontDeskGuardrails(w, vaultDir, payload, fd, ctx.roots())
+	return enforceFrontDeskGuardrails(w, vaultDir, payload, fd, ctx.roots(), mutatedConsole)
 }
 
 func handlePreToolRunCommand(w io.Writer, vaultDir string, payload ToolCallPayload, ctx *preToolSessionCtx) (bool, error) {
@@ -736,7 +736,35 @@ func handlePreToolProtectedWrites(w io.Writer, vaultDir string, payload ToolCall
 	return false, nil
 }
 
-func enforceFrontDeskGuardrails(w io.Writer, vaultDir string, payload ToolCallPayload, fd kernel.FrontDeskLease, roots hostpaths.Roots) error {
+func hydrateConsoleSyncContent(vaultDir string, fd kernel.FrontDeskLease, isLiveHTML bool) (string, string) {
+	artDir := strings.TrimSpace(fd.ArtifactDir)
+	if isLiveHTML {
+		candidates := []string{}
+		if artDir != "" {
+			candidates = append(candidates, filepath.Join(artDir, "hq_console_live.html"))
+		}
+		candidates = append(candidates, filepath.Join(vaultDir, "living_spaces", "hq-console", "index.html"))
+		for _, p := range candidates {
+			if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+				return string(b), "Live Interactive [HQ] Console (Mobile & Remote Control Ready) — Needs Me, Work, Tokens, and Ops"
+			}
+		}
+		return "", ""
+	}
+	candidates := []string{}
+	if artDir != "" {
+		candidates = append(candidates, filepath.Join(artDir, "hq_console.md"))
+	}
+	candidates = append(candidates, filepath.Join(vaultDir, "CONSOLE.md"))
+	for _, p := range candidates {
+		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+			return string(b), "Live [HQ] Front Desk Console & Task Board"
+		}
+	}
+	return "", ""
+}
+
+func enforceFrontDeskGuardrails(w io.Writer, vaultDir string, payload ToolCallPayload, fd kernel.FrontDeskLease, roots hostpaths.Roots, mutatedConsole *bool) error {
 	// Rule A: Block Direct Source/Worktree File Edits on the Front Desk (edit_file / write_file)
 	if payload.ToolCall.Name == "edit_file" || payload.ToolCall.Name == "write_file" {
 		pathArg, _ := payload.ToolCall.Args["Path"].(string)
@@ -763,8 +791,43 @@ func enforceFrontDeskGuardrails(w io.Writer, vaultDir string, payload ToolCallPa
 			return writePreToolDeny(w, "Blocked by agy-hq Front Desk non-blocking policy: Do not edit source code or worktree files inline on the [HQ] Front Desk thread. Delegate coding and multi-file edits to a background subagent via invoke_subagent (in local/worktrees/<repo>-<task>/) or ./bin/hq spawn so the Front Desk stays unblocked.")
 		}
 
-		if filepath.Base(cleanPath) == "hq_console.md" || strings.HasSuffix(filepath.ToSlash(cleanPath), "/hq_console.md") {
+		slashClean := filepath.ToSlash(cleanPath)
+		isMDConsole := filepath.Base(cleanPath) == "hq_console.md" || strings.HasSuffix(slashClean, "/hq_console.md")
+		isLiveConsole := filepath.Base(cleanPath) == "hq_console_live.html" || strings.HasSuffix(slashClean, "/hq_console_live.html")
+		if isMDConsole {
 			_ = kernel.MarkConsolePinned(vaultDir, payload.ConversationID)
+			if mutatedConsole != nil {
+				*mutatedConsole = true
+			}
+		}
+		if isLiveConsole {
+			_ = kernel.MarkLiveConsolePinned(vaultDir, payload.ConversationID)
+			if mutatedConsole != nil {
+				*mutatedConsole = true
+			}
+		}
+
+		if payload.ToolCall.Name == "write_file" && (isMDConsole || isLiveConsole) {
+			rawContent, _ := payload.ToolCall.Args["Content"].(string)
+			trimmed := strings.TrimSpace(rawContent)
+			if trimmed == "{{HQ_SYNC}}" || trimmed == "" {
+				if hydrated, defaultSummary := hydrateConsoleSyncContent(vaultDir, fd, isLiveConsole); hydrated != "" {
+					overwriteArgs := make(map[string]interface{}, len(payload.ToolCall.Args)+3)
+					for k, v := range payload.ToolCall.Args {
+						overwriteArgs[k] = v
+					}
+					overwriteArgs["Content"] = hydrated
+					overwriteArgs["Overwrite"] = true
+					if _, hasMeta := overwriteArgs["ArtifactMetadata"]; !hasMeta {
+						overwriteArgs["ArtifactMetadata"] = map[string]interface{}{
+							"UserFacing":      true,
+							"RequestFeedback": false,
+							"Summary":         defaultSummary,
+						}
+					}
+					return writePreToolAllowOverwrite(w, overwriteArgs)
+				}
+			}
 		}
 
 		return writePreToolAllow(w)
@@ -790,7 +853,7 @@ func enforceFrontDeskGuardrails(w io.Writer, vaultDir string, payload ToolCallPa
 		base := filepath.Base(cleanPath)
 		isOverlayRule := (strings.Contains(cleanSlash, "/memory/rsi/rules/") || strings.HasPrefix(cleanSlash, "memory/rsi/rules/")) && strings.HasSuffix(cleanSlash, ".md")
 		// Turn-1 housekeeping & skill/overlay instruction reads are exempt from the 3-lookup cap.
-		if base != "CONSOLE.md" && base != "hq_console.md" && base != "triggers.yaml" && base != "SKILL.md" && !isOverlayRule {
+		if base != "CONSOLE.md" && base != "hq_console.md" && base != "hq_console_live.html" && base != "triggers.yaml" && base != "SKILL.md" && !isOverlayRule {
 			isResearchTool = true
 		}
 	case "grep_search", "find_by_name":

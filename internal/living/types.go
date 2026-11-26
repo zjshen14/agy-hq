@@ -5,13 +5,14 @@ import (
 	"strings"
 )
 
-// Supported composable Living Space block types (RFC-0027 §4.3).
+// Supported composable Living Space block types (RFC-0027 §4.3 & RFC-0030 §3).
 const (
 	BlockKPIStrip          = "kpi_strip"
 	BlockTimelineAccordion = "timeline_accordion"
 	BlockComparisonTable   = "comparison_table"
 	BlockChecklistLedger   = "checklist_ledger"
 	BlockCalloutNotes      = "callout_notes"
+	BlockMetricBars        = "metric_bars"
 )
 
 // LocalizedText accepts either a plain JSON string ("Launch") or a locale map ({"en": "Launch", "zh": "发布"}).
@@ -169,11 +170,26 @@ type CalloutNote struct {
 	CopyAltLabel LocalizedText `json:"copyAltLabel,omitempty"`
 }
 
+// MetricBarRow renders a horizontal proportion/progress bar row in a `metric_bars` block,
+// with optional threshold marker ticks (e.g., 120k Warn & 180k Crit on a 512k ceiling bar).
+type MetricBarRow struct {
+	Label         LocalizedText `json:"label"`
+	Value         LocalizedText `json:"value"`
+	Sub           LocalizedText `json:"sub,omitempty"`
+	Pct           float64       `json:"pct"`
+	WarnMarkerPct float64       `json:"warnMarkerPct,omitempty"`
+	CritMarkerPct float64       `json:"critMarkerPct,omitempty"`
+	Tone          string        `json:"tone,omitempty"` // neutral | ok | warn | danger | accent
+	Group         string        `json:"group,omitempty"`
+	Perspectives  []string      `json:"perspectives,omitempty"`
+}
+
 // BlockSpec is one composable section in a Living Space.
 type BlockSpec struct {
 	ID           string        `json:"id"`
-	Type         string        `json:"type"` // kpi_strip | timeline_accordion | comparison_table | checklist_ledger | callout_notes
+	Type         string        `json:"type"` // kpi_strip | timeline_accordion | comparison_table | checklist_ledger | callout_notes | metric_bars
 	Title        LocalizedText `json:"title,omitempty"`
+	Group        string        `json:"group,omitempty"`
 	DataSourceID string        `json:"dataSourceId,omitempty"`
 	Perspectives []string      `json:"perspectives,omitempty"`
 	// kpi_strip fields
@@ -193,6 +209,8 @@ type BlockSpec struct {
 	Items []ChecklistRow `json:"items,omitempty"`
 	// callout_notes fields
 	Notes []CalloutNote `json:"notes,omitempty"`
+	// metric_bars fields
+	Bars []MetricBarRow `json:"bars,omitempty"`
 }
 
 // SpaceDoc is the canonical JSON source stored at <vault>/living_spaces/<slug>/space.json.
@@ -207,7 +225,11 @@ type SpaceDoc struct {
 	LocaleLabels       map[string]string `json:"localeLabels,omitempty"`
 	Perspectives       []PerspectiveSpec `json:"perspectives,omitempty"`
 	DefaultPerspective string            `json:"defaultPerspective,omitempty"`
+	HideAllPerspective bool              `json:"hideAllPerspective,omitempty"`
 	Groups             []string          `json:"groups,omitempty"`
+	DefaultGroup       string            `json:"defaultGroup,omitempty"`
+	HideAllGroup       bool              `json:"hideAllGroup,omitempty"`
+	GroupPerspectives  []string          `json:"groupPerspectives,omitempty"`
 	DataSources        []DataSourceSpec  `json:"dataSources,omitempty"`
 	Blocks             []BlockSpec       `json:"blocks,omitempty"`
 	CreatedAt          string            `json:"createdAt"`

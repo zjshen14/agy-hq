@@ -11,6 +11,7 @@
   :root {
     --bg: var(--background, #0b0f19);
     --card: var(--card-bg, #111625);
+    --card-alt: #0c111d;
     --card-hover: #161e31;
     --border: var(--border-color, #1e293b);
     --text: var(--foreground, #f1f5f9);
@@ -23,242 +24,206 @@
     --warn-glow: rgba(245, 158, 11, 0.18);
     --danger: #ef4444;
     --danger-glow: rgba(239, 68, 68, 0.18);
-    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "JetBrains Mono", monospace;
+    --violet: #a78bfa;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     padding: 16px;
+    max-width: 1120px;
+    margin-inline: auto;
     background: var(--bg);
     color: var(--text);
     font-family: var(--font);
     font-size: 13px;
     line-height: 1.45;
   }
+  code, pre, .mono { font-family: var(--mono); }
   header {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
     border-bottom: 1px solid var(--border);
     padding-bottom: 12px;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .brand h1 {
-    font-size: 16px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
-    margin: 0;
-    color: var(--text);
-  }
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand h1 { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin: 0; color: var(--text); }
+  .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .live-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+    background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.35); color: #4ade80;
+  }
+  .live-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #22c55e;
+    box-shadow: 0 0 8px #22c55e; animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+
+  .top-kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .kpi-tile {
+    background: var(--card-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+  }
+  .kpi-tile.tone-warn { border-color: rgba(245, 158, 11, 0.5); }
+  .kpi-tile.tone-danger { border-color: rgba(239, 68, 68, 0.5); }
+  .kpi-tile.tone-ok { border-color: rgba(34, 197, 94, 0.4); }
+  .kpi-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 2px; }
+  .kpi-val { font-size: 15px; font-weight: 700; color: var(--text); }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .tab-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab-btn {
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 6px 13px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 8px;
+  }
+  .tab-btn:hover { color: var(--text); border-color: rgba(56, 189, 248, 0.4); }
+  .tab-btn.active {
+    background: rgba(56, 189, 248, 0.16);
+    border-color: var(--accent);
+    color: #e0f2fe;
+  }
+  .tab-count {
+    font-size: 10px;
+    padding: 1px 6px;
     border-radius: 999px;
-    font-size: 11px;
-    font-weight: 600;
-    background: rgba(34, 197, 94, 0.12);
-    border: 1px solid rgba(34, 197, 94, 0.35);
-    color: #4ade80;
+    background: rgba(148, 163, 184, 0.18);
+    color: var(--text);
   }
-  .live-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #22c55e;
-    box-shadow: 0 0 8px #22c55e;
-    animation: pulse 2s infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.85); }
-  }
+  .tab-count.warn { background: var(--warn-glow); color: #fbbf24; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
   h2 {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-    margin: 18px 0 8px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 16px 0 8px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
   }
   .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px 14px;
-    margin-bottom: 10px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 10px;
     transition: border-color 0.15s ease, background 0.15s ease;
   }
-  .card:hover {
-    border-color: rgba(56, 189, 248, 0.35);
-  }
+  .card:hover { border-color: rgba(56, 189, 248, 0.35); }
   .card.pending-hero {
     border-color: rgba(245, 158, 11, 0.45);
-    background: linear-gradient(180deg, rgba(245, 158, 11, 0.04) 0%, var(--card) 100%);
+    background: linear-gradient(180deg, rgba(245, 158, 11, 0.05) 0%, var(--card) 100%);
   }
   .flash-banner {
-    background: rgba(34, 197, 94, 0.12);
-    border: 1px solid rgba(34, 197, 94, 0.4);
-    color: #86efac;
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 14px;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.4); color: #86efac;
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px;
+    display: flex; align-items: center; justify-content: space-between;
   }
   .badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
+    display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
   }
   .badge-warn { background: var(--warn-glow); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
   .badge-pass { background: var(--ok-glow); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
   .badge-info { background: var(--accent-glow); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
   .badge-danger { background: var(--danger-glow); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-  
-  .preview-box {
-    margin: 8px 0;
-  }
+
+  .preview-box { margin: 8px 0; }
   .preview-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #38bdf8;
-    margin-bottom: 4px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #38bdf8; margin-bottom: 4px; display: flex; align-items: center; gap: 4px;
   }
   .preview-quote {
-    background: #06080e;
-    border-left: 3px solid #38bdf8;
-    color: #f1f5f9;
-    margin: 0;
-    padding: 8px 12px;
-    border-radius: 0 6px 6px 0;
-    font-size: 12px;
-    line-height: 1.45;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font);
+    background: #06080e; border-left: 3px solid #38bdf8; color: #f1f5f9; margin: 0;
+    padding: 8px 12px; border-radius: 0 6px 6px 0; font-size: 12px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word;
   }
   pre.code-block {
-    background: #06080e;
-    border: 1px solid rgba(30, 41, 59, 0.8);
-    color: #38bdf8;
-    padding: 8px 10px;
-    border-radius: 6px;
-    overflow-x: auto;
-    margin: 8px 0;
-    font-family: "JetBrains Mono", Consolas, monospace;
-    font-size: 12px;
-    line-height: 1.4;
+    background: #06080e; border: 1px solid rgba(30, 41, 59, 0.8); color: #38bdf8;
+    padding: 8px 10px; border-radius: 6px; overflow-x: auto; margin: 8px 0; font-size: 12px;
   }
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 10px;
-  }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   button, .btn {
-    cursor: pointer;
-    border: none;
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 600;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+    cursor: pointer; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
     transition: transform 0.08s ease, opacity 0.15s ease, background 0.15s ease;
-    text-decoration: none;
   }
-  button:active, .btn:active {
-    transform: scale(0.97);
-  }
-  .btn-approve {
-    background: #16a34a;
-    color: #ffffff;
-    box-shadow: 0 0 10px rgba(34, 197, 94, 0.25);
-  }
+  button:active, .btn:active { transform: scale(0.97); }
+  .btn-approve { background: #16a34a; color: #ffffff; }
   .btn-approve:hover { background: #22c55e; }
-  .btn-reject {
-    background: transparent;
-    border: 1px solid rgba(239, 68, 68, 0.5);
-    color: #f87171;
-  }
+  .btn-reject { background: transparent; border: 1px solid rgba(239, 68, 68, 0.5); color: #f87171; }
   .btn-reject:hover { background: rgba(239, 68, 68, 0.15); border-color: #ef4444; }
-  .btn-secondary {
-    background: #1e293b;
-    border: 1px solid #334155;
-    color: #cbd5e1;
-  }
+  .btn-secondary { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; }
   .btn-secondary:hover { background: #334155; color: #ffffff; }
   .muted { color: var(--muted); font-size: 12px; }
-  .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+  .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+
   .progress-bar {
-    width: 100%;
-    height: 6px;
-    background: #1e293b;
-    border-radius: 3px;
-    overflow: hidden;
-    margin: 8px 0 4px;
+    position: relative; width: 100%; height: 8px; background: #1e293b; border-radius: 999px;
+    margin: 8px 0 4px; overflow: visible;
   }
   .progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #38bdf8 0%, #22c55e 100%);
-    border-radius: 3px;
+    height: 100%; background: linear-gradient(90deg, #38bdf8 0%, #22c55e 100%); border-radius: 999px;
   }
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 8px;
-    margin-bottom: 10px;
+  .progress-fill.warn { background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%); }
+  .progress-fill.danger { background: linear-gradient(90deg, #ef4444 0%, #f87171 100%); }
+  .marker-tick {
+    position: absolute; top: -3px; bottom: -3px; width: 2px; border-radius: 1px;
   }
-  .kpi-tile {
-    background: #0c111d;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 10px;
+  .marker-tick.warn { background: #f59e0b; }
+  .marker-tick.crit { background: #ef4444; }
+
+  .win-switcher { display: inline-flex; gap: 4px; background: var(--card-alt); padding: 3px; border-radius: 999px; border: 1px solid var(--border); }
+  .win-btn {
+    background: transparent; color: var(--muted); border: none; padding: 4px 10px;
+    border-radius: 999px; font-size: 11px; font-weight: 600; cursor: pointer;
   }
-  .kpi-label {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--muted);
-    margin-bottom: 2px;
+  .win-btn.active { background: var(--accent); color: #06131f; }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin-bottom: 10px; }
+  .tok-table-wrap { overflow-x: auto; }
+  table.tok-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.tok-table th, table.tok-table td { padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  table.tok-table th { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  table.tok-table td.num, table.tok-table th.num { text-align: right; font-family: var(--mono); }
+
+  .family-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: #1e293b; margin: 8px 0; }
+  .family-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+
+  .tree-item {
+    border: 1px solid var(--border); border-radius: 7px; background: var(--card-alt);
+    padding: 8px 10px; margin-bottom: 7px;
   }
-  .kpi-val {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--text);
-  }
-  .kpi-sub {
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: 2px;
-  }
+  .tree-item summary { cursor: pointer; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+  .tree-kids { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+  .tree-kid-row { display: flex; justify-content: space-between; gap: 8px; color: #cbd5e1; flex-wrap: wrap; }
+
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+  .svg-chart { width: 100%; height: 120px; display: block; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 </style>
@@ -302,379 +267,583 @@
   {{end}}
 </div>
 
-<h2>
-  <span>Pending Approvals (<span id="pending-count">{{len .Pending}}</span>)</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">1-Tap Remote Authorization</span>
-</h2>
-<div id="pending-list">
-{{if .Pending}}
-  {{range .Pending}}
-  <div class="card pending-hero" id="proposal-{{.ID}}">
-    <div class="meta-row">
-      <div><strong style="font-size:13px">{{.Summary}}</strong></div>
-      <span class="badge badge-warn">{{.ActionType}}</span>
-    </div>
-    <div class="muted" style="margin:4px 0">
-      ID: <code>{{.ID}}</code> · SHA-256: <code title="{{.SHA256}}">{{shortSHA .SHA256}}</code>{{if .ExpiresAt}} · Expires: <code>{{.ExpiresAt}}</code>{{end}}
-    </div>
-    {{if .RiskFlags}}
-    <div style="margin:6px 0">
-      <span class="badge badge-danger">⚠️ Contextual PII Warning: {{range $i, $f := .RiskFlags}}{{if $i}}, {{end}}{{$f}}{{end}}</span>
-    </div>
-    {{end}}
-    {{if draftPayload .}}
-    <div class="preview-box">
-      <div class="preview-title">💬 Message Preview</div>
-      <blockquote class="preview-quote">{{draftPayload .}}</blockquote>
-    </div>
-    {{end}}
-    <pre class="code-block">{{.Command}}</pre>
-    <div class="actions">
-      <button type="button" class="btn btn-approve" data-hq-action="approve" data-id="{{.ID}}" data-sha="{{shortSHA .SHA256}}">
-        ✓ Approve ({{shortSHA .SHA256}})
-      </button>
-      <button type="button" class="btn btn-reject" data-hq-action="reject" data-id="{{.ID}}">
-        ✕ Reject
-      </button>
-    </div>
+{{$defTab := defaultTab .}}
+{{$actCnt := actionCount .}}
+{{$ceil := effectiveCeiling .Observability.Budget}}
+
+<div class="top-kpi-strip" id="global-kpi-strip">
+  <div class="kpi-tile {{if gt $actCnt 0}}tone-warn{{else}}tone-ok{{end}}" id="gkpi-actions-tile">
+    <div class="kpi-label">Action Required</div>
+    <div class="kpi-val" id="gkpi-actions">{{$actCnt}}</div>
+    <div class="kpi-sub" id="gkpi-actions-sub">{{len .Pending}} pending · {{len .Ideas}} ideas</div>
   </div>
-  {{end}}
-{{else}}
-  <div class="card muted" id="no-pending">No pending outbound actions requiring authorization.</div>
-{{end}}
+  <div class="kpi-tile">
+    <div class="kpi-label">Active Work</div>
+    <div class="kpi-val" id="gkpi-tasks">{{len .Tasks}}</div>
+    <div class="kpi-sub" id="gkpi-tasks-sub">{{len .Workspaces}} workspaces · {{len .Goals}} goals</div>
+  </div>
+  <div class="kpi-tile">
+    <div class="kpi-label">Today Uncached · Cache Hit</div>
+    <div class="kpi-val" id="gkpi-tokens">{{fmtTokens .Observability.TodayUncachedTokens}} · {{printf "%.0f" (mulf .Observability.TodayCacheHitRatio 100.0)}}%</div>
+    <div class="kpi-sub" id="gkpi-tokens-sub">{{fmtTokens .Observability.TodayGrossTokens}} gross ({{.Observability.TodayTurnCount}} turns)</div>
+  </div>
+  <div class="kpi-tile">
+    <div class="kpi-label">Today Est. Cost · Cache Saved</div>
+    <div class="kpi-val" id="gkpi-cost">{{fmtUSD .Observability.TodayEstCostUSD}}</div>
+    <div class="kpi-sub" id="gkpi-cost-sub">Saved {{fmtUSD .Observability.TodayCacheSavedUSD}} via prefix cache</div>
+  </div>
 </div>
 
-{{if .ProactiveV3.ExpiredProposals}}
-<h2>Timed-Out Approvals Unsent ({{len .ProactiveV3.ExpiredProposals}})</h2>
-<div id="expired-proposals-list">
-  {{range .ProactiveV3.ExpiredProposals}}
-  <div class="card">
-    <div class="meta-row">
-      <strong>⏰ {{.Proposal.Summary}}</strong>
-      <span class="badge badge-warn">expired</span>
-    </div>
-    <div class="muted" style="margin:4px 0">ID: <code>{{.Proposal.ID}}</code> · Expired: <code>{{.Timestamp}}</code></div>
-    <div class="actions">
-      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="restage-proposal" data-id="{{.Proposal.ID}}">↻ Re-open 24h Card</button>
-      <button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="dismiss-expired" data-id="{{.Proposal.ID}}">✕ Dismiss</button>
-    </div>
-  </div>
-  {{end}}
-</div>
-{{end}}
+<nav class="tab-nav" role="tablist" aria-label="Console Sections" data-default-tab="{{$defTab}}">
+  <button type="button" class="tab-btn {{if eq $defTab "needs_me"}}active{{end}}" role="tab" data-tab="needs_me">
+    Needs Me <span class="tab-count {{if gt $actCnt 0}}warn{{end}}" id="tab-badge-needs">{{$actCnt}}</span>
+  </button>
+  <button type="button" class="tab-btn {{if eq $defTab "work"}}active{{end}}" role="tab" data-tab="work">
+    Work <span class="tab-count" id="tab-badge-work">{{len .Tasks}}</span>
+  </button>
+  <button type="button" class="tab-btn" role="tab" data-tab="tokens">
+    Tokens <span class="tab-count {{if gt .Observability.TotalAnomalies 0}}warn{{end}}" id="tab-badge-tokens">{{fmtTokens .Observability.TodayUncachedTokens}}</span>
+  </button>
+  <button type="button" class="tab-btn" role="tab" data-tab="ops">
+    Ops <span class="tab-count" id="tab-badge-ops">{{len .Schedules}}</span>
+  </button>
+</nav>
 
-{{if .ProactiveV3.DecisionCards}}
-<h2>Quick Decisions ({{len .ProactiveV3.DecisionCards}})</h2>
-<div id="decision-cards-list">
-  {{range .ProactiveV3.DecisionCards}}
-  {{$itemID := .ID}}
-  <div class="card" id="decision-{{.ID}}">
-    <div class="meta-row">
-      <strong>⚡ {{.Title}}</strong>
-      <span class="badge badge-info">{{.SourceSkill}}</span>
-    </div>
-    {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
-    <div class="actions">
-      {{range .Decisions}}
-      <button type="button" class="btn {{if .Recommended}}btn-approve{{else}}btn-secondary{{end}}" style="font-size:11px;padding:4px 8px" data-hq-action="outbox-act" data-id="{{$itemID}}" data-opt="{{.ID}}">{{.Label}}</button>
+<!-- ==================== TAB 1: NEEDS ME ==================== -->
+<section class="tab-panel {{if eq $defTab "needs_me"}}active{{end}}" id="panel-needs_me">
+  <h2>
+    <span>Pending Approvals (<span id="pending-count">{{len .Pending}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">1-Tap Cryptographic SHA-256 Authorization</span>
+  </h2>
+  <div id="pending-list">
+  {{if .Pending}}
+    {{range .Pending}}
+    <div class="card pending-hero" id="proposal-{{.ID}}">
+      <div class="meta-row">
+        <div><strong style="font-size:13px">{{.Summary}}</strong></div>
+        <span class="badge badge-warn">{{.ActionType}}</span>
+      </div>
+      <div class="muted" style="margin:4px 0">
+        ID: <code>{{.ID}}</code> · SHA-256: <code title="{{.SHA256}}">{{shortSHA .SHA256}}</code>{{if .ExpiresAt}} · Expires: <code>{{.ExpiresAt}}</code>{{end}}
+      </div>
+      {{if .RiskFlags}}
+      <div style="margin:6px 0">
+        <span class="badge badge-danger">⚠️ Contextual PII Warning: {{range $i, $f := .RiskFlags}}{{if $i}}, {{end}}{{$f}}{{end}}</span>
+      </div>
       {{end}}
-    </div>
-  </div>
-  {{end}}
-</div>
-{{end}}
-
-{{if .ProactiveV3.LivingSpaces}}
-<h2>Living Spaces ({{len .ProactiveV3.LivingSpaces}})</h2>
-<div id="living-spaces-list">
-  {{range .ProactiveV3.LivingSpaces}}
-  <div class="card">
-    <div class="meta-row">
-      <strong><a href="/living-spaces/{{.Slug}}" target="_blank">🧩 {{.Title}}</a></strong>
-      <span class="badge badge-info">{{.Slug}}</span>
-    </div>
-    <div class="muted" style="margin:4px 0">Updated {{.UpdatedAt}}{{if .GoalSlug}} · Goal: <code>{{.GoalSlug}}</code>{{end}}</div>
-    <div class="actions">
-      <a class="btn btn-secondary" style="font-size:11px;padding:4px 8px" href="/living-spaces/{{.Slug}}" target="_blank">Open Sandboxed Space ↗</a>
-    </div>
-  </div>
-  {{end}}
-</div>
-{{end}}
-
-<h2>Proactive Gatekeeper & Daily Quota</h2>
-<div class="card" id="quota-card">
-  <div class="meta-row">
-    <div><strong>Background Auto Spawns Today:</strong> <span id="quota-spawns">{{.Quota.EffectiveAutoSpawns}}</span> / <span id="quota-max-spawns">{{.Quota.MaxDailySpawns}}</span>{{if gt .Quota.InteractiveSpawnsToday 0}} <span class="muted" id="quota-interactive">(+{{.Quota.InteractiveSpawnsToday}} interactive)</span>{{else}}<span class="muted" id="quota-interactive"></span>{{end}}</div>
-    <div>
-      {{if .Quota.CircuitOpen}}
-        <span class="badge badge-warn">CIRCUIT OPEN ({{.Quota.CircuitReason}})</span>
-      {{else}}
-        <span class="badge badge-pass">BUDGET OK</span>
+      {{if draftPayload .}}
+      <div class="preview-box">
+        <div class="preview-title">💬 Message Preview</div>
+        <blockquote class="preview-quote">{{draftPayload .}}</blockquote>
+      </div>
       {{end}}
-    </div>
-  </div>
-  <div class="progress-bar">
-    <div class="progress-fill" style="width: {{if gt .Quota.MaxDailySpawns 0}}{{printf "%.1f" (pctClamp (mulf (divf .Quota.EffectiveAutoSpawns .Quota.MaxDailySpawns) 100.0))}}{{else}}0{{end}}%;"></div>
-  </div>
-  <div class="muted" style="margin-top:6px">Last Heartbeat: {{if .Quota.LastStatus}}{{.Quota.LastStatus}}{{else}}Not run yet today{{end}}</div>
-</div>
-
-<h2>
-  <span>Token &amp; Context Observability</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">RFC-0012 Telemetry</span>
-</h2>
-<div class="card" id="obs-card">
-  <div class="kpi-grid">
-    <div class="kpi-tile">
-      <div class="kpi-label">Today Uncached Burn</div>
-      {{if .Observability.Budget.TokenCircuitDisabled}}
-      <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}}</div>
-      <div class="kpi-sub">Budget guard disabled ({{.Observability.TodayTurnCount}} turns)</div>
-      {{else}}
-      <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyUncachedBudget}}</div>
-      <div class="kpi-sub">{{printf "%.1f" .Observability.DailyBudgetPct}}% of daily budget ({{.Observability.TodayTurnCount}} turns)</div>
-      {{end}}
-    </div>
-    <div class="kpi-tile">
-      <div class="kpi-label">Prefix Cache Hit Ratio</div>
-      <div class="kpi-val" id="obs-chr">{{printf "%.1f" (mulf .Observability.TodayCacheHitRatio 100.0)}}%</div>
-      <div class="kpi-sub">All-time: {{printf "%.1f" (mulf .Observability.AllTimeCacheHitRatio 100.0)}}% ({{fmtTokens .Observability.AllTimeGrossTokens}} gross)</div>
-    </div>
-    <div class="kpi-tile">
-      <div class="kpi-label">Front Desk Context (256k Cap)</div>
-      <div class="kpi-val" id="obs-fd-ctx">{{if .Observability.FrontDeskCompactedPending}}Compacted{{else}}{{fmtTokens .Observability.FrontDeskContextTokens}} / 256k{{end}}</div>
-      <div class="kpi-sub">Status: {{.Observability.FrontDeskContextStatus}}{{if .Observability.FrontDeskCompactedPending}} (pending next turn){{end}} · Compactions: {{.Observability.FrontDeskCompactions}}</div>
-    </div>
-    <div class="kpi-tile">
-      <div class="kpi-label">Deep Tier Burn Today</div>
-      {{if .Observability.Budget.TokenCircuitDisabled}}
-      <div class="kpi-val" id="obs-deep-burn">{{fmtTokens .Observability.TodayDeepUncachedTokens}}</div>
-      {{else}}
-      <div class="kpi-val" id="obs-deep-burn">{{fmtTokens .Observability.TodayDeepUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyDeepUncachedBudget}}</div>
-      {{end}}
-      <div class="kpi-sub">{{printf "%.0f" .Observability.TodayQuotaUnits}} QBU today</div>
-    </div>
-  </div>
-  <div class="meta-row" style="margin-top:4px">
-    <span class="muted">Front Desk Context Fill ({{if .Observability.FrontDeskCompactedPending}}compacted · pending next turn{{else}}{{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens)}}% of ~256k auto-compaction ceiling{{end}})</span>
-    <span class="badge {{if eq .Observability.FrontDeskContextStatus "OK"}}badge-pass{{else if eq .Observability.FrontDeskContextStatus "WARN"}}badge-warn{{else}}badge-danger{{end}}">{{.Observability.FrontDeskContextStatus}}</span>
-  </div>
-  <div class="progress-bar">
-    <div class="progress-fill" style="width: {{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens)}}%;"></div>
-  </div>
-  {{if .Observability.Anomalies}}
-  <div style="margin-top:8px" id="obs-anomalies">
-    {{range .Observability.Anomalies}}
-    <div style="margin-top:4px;font-size:11px">
-      <span class="badge {{if eq .Severity "CRITICAL"}}badge-danger{{else}}badge-warn{{end}}">{{.Code}} · {{.Severity}}</span>
-      <span>{{.Summary}}</span>
-    </div>
-    {{end}}
-    {{if gt .Observability.TotalAnomalies (len .Observability.Anomalies)}}
-    <div class="muted" style="margin-top:6px;font-size:11px">Showing top {{len .Observability.Anomalies}} of {{.Observability.TotalAnomalies}} anomalies — run <code>hq obs anomalies</code> for full list.</div>
-    {{end}}
-  </div>
-  {{end}}
-</div>
-
-<h2>
-  <span>Live Task Board (<span id="task-count">{{len .Tasks}}</span>)</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Layer-1 Coordinated Tasks</span>
-</h2>
-<div id="tasks-list">
-{{if .Tasks}}
-  {{range .Tasks}}
-  <div class="card" id="task-{{.TaskSlug}}">
-    <div class="meta-row">
-      <strong>{{.Title}}</strong>
-      <span class="badge {{if eq .Status "active"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
-    </div>
-    <div class="muted" style="margin:4px 0">
-      Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a>{{if taskBadge $.Observability.TaskBadges .ConversationID}} · Tokens: <code>{{taskBadge $.Observability.TaskBadges .ConversationID}}</code>{{end}}
-    </div>
-    {{if .LastSummary}}<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">{{.LastSummary}}</div>{{end}}
-    <div class="actions">
-      {{if eq .Status "active"}}
-      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="complete-task" data-slug="{{.TaskSlug}}">Complete</button>
-      {{end}}
-      {{if ne .Status "archived"}}
-      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="archive-task" data-slug="{{.TaskSlug}}">Archive</button>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-{{else}}
-  <div class="card muted">No active tasks on the live board.</div>
-{{end}}
-</div>
-
-<h2>
-  <span>Active Workspaces ({{len .Workspaces}})</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Git Worktrees &amp; Provider Workspaces · Read-Only</span>
-</h2>
-<div id="workspaces-list">
-{{if .Workspaces}}
-  {{range .Workspaces}}
-  <div class="card">
-    <div class="meta-row">
-      <strong>{{if eq .Provider "core/git-worktree"}}🌿{{else}}🧩{{end}} <code style="color:var(--accent)">{{.DisplayName}}</code> <span class="muted">{{.Provider}}</span></strong>
-      <span class="badge {{if eq .State "clean"}}badge-pass{{else if eq .State "dirty"}}badge-warn{{else}}badge-danger{{end}}">{{.State}}</span>
-    </div>
-    <div class="muted" style="margin:4px 0">
-      {{.Ownership}}{{if .WriterTask}} · Writer: <code>{{.WriterTask}}</code>{{if .LeaseEnforced}} 🔒{{end}}{{end}}{{if .BoundTasks}} · Bound: {{range $i, $t := .BoundTasks}}{{if $i}}, {{end}}<code>{{$t}}</code>{{end}}{{end}}{{if .RefreshedAt}} · Refreshed: <code>{{.RefreshedAt}}</code>{{end}}{{if .RefreshError}} · <span style="color:#fca5a5">last refresh failed</span>{{end}}
-    </div>
-    <div class="muted" style="font-size:11px">Root: <code>{{.Root}}</code>{{if and .WorkDir (ne .WorkDir .Root)}} · Work dir: <code>{{.WorkDir}}</code>{{end}}</div>
-    {{if .Orphaned}}<div style="margin-top:4px"><span class="badge badge-danger">⚠️ Orphaned with open changes</span></div>{{end}}
-    {{if .Summary}}<div style="margin-top:4px">{{.Summary}}</div>{{end}}
-    {{range .Changes}}
-    <div class="muted" style="font-size:11px;margin-top:2px">{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer"><code>{{.ID}}</code></a>{{else}}<code>{{.ID}}</code>{{end}} · {{.State}}{{if .NeedsOwner}} · ⏳ needs you{{end}}{{if .Title}} — {{.Title}}{{end}}</div>
-    {{end}}
-  </div>
-  {{end}}
-{{else}}
-  <div class="card muted">No active workspaces.</div>
-{{end}}
-</div>
-
-{{if or .Delegates.PolicyConfigured .Delegates.TransportCount .Delegates.PendingNudges}}
-<h2>
-  <span>Delegated Peers ({{.Delegates.EnabledPolicyCount}}/{{.Delegates.PolicyCount}})</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Scoped Peer Policies &amp; Audit · Read-Only</span>
-</h2>
-<div id="delegates-panel">
-  <div class="card">
-    <div class="meta-row">
-      <strong>🛡️ Scoped Delegates</strong>
-      <span class="badge {{if .Delegates.PolicyConfigured}}badge-pass{{else}}badge-warn{{end}}">{{if .Delegates.PolicyConfigured}}active{{else}}unconfigured{{end}}</span>
-    </div>
-    <div class="muted" style="margin:4px 0">
-      Transports: <code>{{.Delegates.TransportCount}}</code> · Replies (1h): <code>{{.Delegates.RepliesLastHour}}/{{.Delegates.GlobalMaxPerHour}}</code> · Queued Nudges: <code>{{.Delegates.PendingNudges}}</code>
-    </div>
-    {{range .Delegates.RecentAudit}}
-    <div class="muted" style="font-size:11px;margin-top:2px"><code>{{.Timestamp}}</code> · <strong>{{.Action}}</strong> {{if .PolicyID}}(<code>{{.PolicyID}}</code>){{end}} → <code>{{.Outcome}}</code>{{if .Detail}} — {{.Detail}}{{end}}</div>
-    {{end}}
-  </div>
-</div>
-{{end}}
-
-<h2>
-  <span>Scheduled Automations (<span id="schedules-count">{{len .Schedules}}</span>)</span>
-  <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Core OS Daemons &amp; Conversation Crons</span>
-</h2>
-<div id="schedules-list">
-{{if .Schedules}}
-  {{range .Schedules}}
-  <div class="card" id="sched-{{.ID}}">
-    <div class="meta-row">
-      <strong>{{if eq .Kind "daemon"}}⚙️ {{.ID}}{{else}}🕒 {{.ID}}{{end}}</strong>
-      <span class="badge {{if .Enabled}}badge-pass{{else}}badge-warn{{end}}">{{if .Enabled}}{{if eq .Kind "daemon"}}daemon{{else}}chat cron{{end}}{{else}}paused{{end}}</span>
-    </div>
-    <div class="muted" style="margin:4px 0">
-      Cron: <code>{{.Cron}}</code> · Runner: <code>{{.Runner}}</code>{{if .Skill}} · Skill: <code>/{{.Skill}}</code>{{end}}{{if .LatestConvID}} · Latest: <a href="conversation://{{.LatestConvID}}">{{.LatestConvID}}</a>{{end}}
-    </div>
-    {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
-    {{if or .LastCheckedAt .LastTriggeredAt .SkipsCount}}
-    <div class="muted" style="font-size:11px">
-      {{if .LastCheckedAt}}Last checked: <code>{{.LastCheckedAt}}</code>{{end}}{{if .LastTriggeredAt}} · Last fired: <code>{{.LastTriggeredAt}}</code>{{end}}{{if .SkipsCount}} · 0-token skips: <code>{{.SkipsCount}}</code>{{end}}{{if and .LastStatus (ne .LastStatus "ok")}} · Status: <code style="color:#fcd34d">{{.LastStatus}}</code>{{end}}
-    </div>
-    {{end}}
-    {{if .LastError}}<div class="muted" style="font-size:11px;color:#fca5a5">Last error: {{.LastError}}</div>{{end}}
-    {{if eq .Kind "daemon"}}
-    <div class="actions">
-      {{if .Enabled}}
-      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="pause">Pause</button>
-      {{else}}
-      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="resume">Resume</button>
-      {{end}}
-      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="fire">Run Now</button>
-    </div>
-    {{end}}
-  </div>
-  {{end}}
-{{else}}
-  <div class="card muted">No scheduled automations configured.</div>
-{{end}}
-</div>
-
-{{if .ActiveSpaces}}
-<h2>Active Console Spaces ({{len .ActiveSpaces}})</h2>
-<div id="spaces-list">
-  {{range .ActiveSpaces}}
-  <div class="card" id="space-{{.ID}}">
-    <div class="meta-row">
-      <strong>🗂️ {{.Title}}</strong>
-      <div>
-        {{if eq .OverrideMode "pin"}}<span class="badge badge-info">PINNED</span> {{end}}
-        <span class="badge badge-pass">{{.ID}}</span>
+      <pre class="code-block">{{.Command}}</pre>
+      <div class="actions">
+        <button type="button" class="btn btn-approve" data-hq-action="approve" data-id="{{.ID}}" data-sha="{{shortSHA .SHA256}}">
+          ✓ Approve ({{shortSHA .SHA256}})
+        </button>
+        <button type="button" class="btn btn-reject" data-hq-action="reject" data-id="{{.ID}}">
+          ✕ Reject
+        </button>
       </div>
     </div>
-    <div class="muted" style="margin:4px 0">Schedule: <code>{{.Schedule}}</code>{{if .Scope}} · Scope: <code>{{.Scope}}</code>{{end}}</div>
-    {{range .RenderedCards}}
-    <div style="margin-top:8px">
-      <div class="kpi-label">{{.Title}}</div>
-      {{range .Lines}}<div class="muted" style="color:#cbd5e1">• {{.}}</div>{{end}}
+    {{end}}
+  {{else}}
+    <div class="card muted" id="no-pending">No pending outbound actions requiring authorization.</div>
+  {{end}}
+  </div>
+
+  <div id="expired-proposals-section">
+  {{if .ProactiveV3.ExpiredProposals}}
+    <h2>Timed-Out Approvals Unsent ({{len .ProactiveV3.ExpiredProposals}})</h2>
+    <div id="expired-proposals-list">
+      {{range .ProactiveV3.ExpiredProposals}}
+      <div class="card">
+        <div class="meta-row">
+          <strong>⏰ {{.Proposal.Summary}}</strong>
+          <span class="badge badge-warn">expired</span>
+        </div>
+        <div class="muted" style="margin:4px 0">ID: <code>{{.Proposal.ID}}</code> · Expired: <code>{{.Timestamp}}</code></div>
+        <div class="actions">
+          <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="restage-proposal" data-id="{{.Proposal.ID}}">↻ Re-open 24h Card</button>
+          <button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="dismiss-expired" data-id="{{.Proposal.ID}}">✕ Dismiss</button>
+        </div>
+      </div>
+      {{end}}
+    </div>
+  {{end}}
+  </div>
+
+  <div id="decision-cards-section">
+  {{if .ProactiveV3.DecisionCards}}
+    <h2>Quick Decisions ({{len .ProactiveV3.DecisionCards}})</h2>
+    <div id="decision-cards-list">
+      {{range .ProactiveV3.DecisionCards}}
+      {{$itemID := .ID}}
+      <div class="card" id="decision-{{.ID}}">
+        <div class="meta-row">
+          <strong>⚡ {{.Title}}</strong>
+          <span class="badge badge-info">{{.SourceSkill}}</span>
+        </div>
+        {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
+        <div class="actions">
+          {{range .Decisions}}
+          <button type="button" class="btn {{if .Recommended}}btn-approve{{else}}btn-secondary{{end}}" style="font-size:11px;padding:4px 8px" data-hq-action="outbox-act" data-id="{{$itemID}}" data-opt="{{.ID}}">{{.Label}}</button>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </div>
+  {{end}}
+  </div>
+
+  <div id="goals-waits-section">
+  {{if or .Goals .OverdueWaits}}
+    <h2>Active Goals ({{len .Goals}}) &amp; Counterparty SLAs ({{len .OverdueWaits}})</h2>
+    {{range .OverdueWaits}}
+    <div class="card" style="border-color:rgba(245,158,11,0.45)">
+      <div class="meta-row">
+        <strong>⏳ Overdue SLA: {{.Waiting.Counterparty}} (<code>{{.GoalSlug}}</code>)</strong>
+        <span class="badge badge-warn">due {{.Waiting.FollowUpAfter}}</span>
+      </div>
+      <div class="muted" style="margin-top:4px">{{.Waiting.Summary}} · via <code>{{.Waiting.Channel}}</code></div>
     </div>
     {{end}}
-    <div class="actions">
-      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-override" data-id="{{.ID}}" data-mode="hide">Hide Space</button>
-      {{if .OverrideMode}}<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-override" data-id="{{.ID}}" data-mode="auto">Reset Schedule</button>{{end}}
+    {{range .Goals}}
+    <div class="card">
+      <div class="meta-row">
+        <strong>🎯 {{.Title}}</strong>
+        <span class="badge badge-info">{{.Scope}}</span>
+      </div>
+      <div class="muted" style="margin-top:4px">Slug: <code>{{.Slug}}</code>{{if .TargetDate}} · Target: <code>{{.TargetDate}}</code>{{end}}</div>
+    </div>
+    {{end}}
+  {{end}}
+  </div>
+
+  <h2>Proactive Ideas Feed (<span id="ideas-count">{{len .Ideas}}</span>)</h2>
+  <div id="ideas-list">
+  {{if .Ideas}}
+    {{range .Ideas}}
+    <div class="card" id="idea-{{.ID}}">
+      <div class="meta-row">
+        <strong>💡 {{.Title}}</strong>
+        <span class="badge badge-info">{{if .SourceSkill}}{{.SourceSkill}}{{else}}idea{{end}}</span>
+      </div>
+      {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
+      <div class="actions">
+        <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="promote">Promote</button>
+        <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="snooze">Snooze 24h</button>
+        <button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="dismiss">Dismiss</button>
+      </div>
+    </div>
+    {{end}}
+  {{else}}
+    <div class="card muted">No pending proactive ideas in outbox.</div>
+  {{end}}
+  </div>
+</section>
+
+<!-- ==================== TAB 2: WORK ==================== -->
+<section class="tab-panel {{if eq $defTab "work"}}active{{end}}" id="panel-work">
+  <h2>
+    <span>Live Task Board (<span id="task-count">{{len .Tasks}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Layer-1 Coordinated Tasks &amp; Subagents</span>
+  </h2>
+  <div id="tasks-list">
+  {{if .Tasks}}
+    {{range .Tasks}}
+    <div class="card" id="task-{{.TaskSlug}}">
+      <div class="meta-row">
+        <strong>{{.Title}}</strong>
+        <span class="badge {{if eq .Status "active"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
+      </div>
+      <div class="muted" style="margin:4px 0">
+        Slug: <code>{{.TaskSlug}}</code> · Model: {{.Model}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a>{{if taskBadge $.Observability.TaskBadges .ConversationID}} · Tokens: <code>{{taskBadge $.Observability.TaskBadges .ConversationID}}</code>{{end}}
+      </div>
+      {{if .LastSummary}}<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">{{.LastSummary}}</div>{{end}}
+      <div class="actions">
+        {{if eq .Status "active"}}
+        <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="complete-task" data-slug="{{.TaskSlug}}">Complete</button>
+        {{end}}
+        {{if ne .Status "archived"}}
+        <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="archive-task" data-slug="{{.TaskSlug}}">Archive</button>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+  {{else}}
+    <div class="card muted">No active tasks on the live board.</div>
+  {{end}}
+  </div>
+
+  <h2>
+    <span id="workspaces-heading">Active Workspaces ({{len .Workspaces}})</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Git Worktrees &amp; Provider Workspaces · Read-Only</span>
+  </h2>
+  <div id="workspaces-list">
+  {{if .Workspaces}}
+    {{range .Workspaces}}
+    <div class="card">
+      <div class="meta-row">
+        <strong>{{if eq .Provider "core/git-worktree"}}🌿{{else}}🧩{{end}} <code style="color:var(--accent)">{{.DisplayName}}</code> <span class="muted">{{.Provider}}</span></strong>
+        <span class="badge {{if eq .State "clean"}}badge-pass{{else if eq .State "dirty"}}badge-warn{{else}}badge-danger{{end}}">{{.State}}</span>
+      </div>
+      <div class="muted" style="margin:4px 0">
+        {{.Ownership}}{{if .WriterTask}} · Writer: <code>{{.WriterTask}}</code>{{if .LeaseEnforced}} 🔒{{end}}{{end}}{{if .BoundTasks}} · Bound: {{range $i, $t := .BoundTasks}}{{if $i}}, {{end}}<code>{{$t}}</code>{{end}}{{end}}{{if .RefreshedAt}} · Refreshed: <code>{{.RefreshedAt}}</code>{{end}}{{if .RefreshError}} · <span style="color:#fca5a5">last refresh failed</span>{{end}}
+      </div>
+      <div class="muted" style="font-size:11px">Root: <code>{{.Root}}</code>{{if and .WorkDir (ne .WorkDir .Root)}} · Work dir: <code>{{.WorkDir}}</code>{{end}}</div>
+      {{if .Orphaned}}<div style="margin-top:4px"><span class="badge badge-danger">⚠️ Orphaned with open changes</span></div>{{end}}
+      {{if .Summary}}<div style="margin-top:4px">{{.Summary}}</div>{{end}}
+      {{range .Changes}}
+      <div class="muted" style="font-size:11px;margin-top:2px">{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer"><code>{{.ID}}</code></a>{{else}}<code>{{.ID}}</code>{{end}} · {{.State}}{{if .NeedsOwner}} · ⏳ needs you{{end}}{{if .Title}} — {{.Title}}{{end}}</div>
+      {{end}}
+    </div>
+    {{end}}
+  {{else}}
+    <div class="card muted">No active workspaces.</div>
+  {{end}}
+  </div>
+
+  <div id="active-spaces-section">
+  {{if .ActiveSpaces}}
+    <h2>Active Console Spaces ({{len .ActiveSpaces}})</h2>
+    <div id="spaces-list">
+      {{range .ActiveSpaces}}
+      <div class="card" id="space-{{.ID}}">
+        <div class="meta-row">
+          <strong>🗂️ {{.Title}}</strong>
+          <div>
+            {{if eq .OverrideMode "pin"}}<span class="badge badge-info">PINNED</span> {{end}}
+            <span class="badge badge-pass">{{.ID}}</span>
+          </div>
+        </div>
+        <div class="muted" style="margin:4px 0">Schedule: <code>{{.Schedule}}</code>{{if .Scope}} · Scope: <code>{{.Scope}}</code>{{end}}</div>
+        {{range .RenderedCards}}
+        <div style="margin-top:8px">
+          <div class="kpi-label">{{.Title}}</div>
+          {{range .Lines}}<div class="muted" style="color:#cbd5e1">• {{.}}</div>{{end}}
+        </div>
+        {{end}}
+        <div class="actions">
+          <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-override" data-id="{{.ID}}" data-mode="hide">Hide Space</button>
+          {{if .OverrideMode}}<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="space-override" data-id="{{.ID}}" data-mode="auto">Reset Schedule</button>{{end}}
+        </div>
+      </div>
+      {{end}}
+    </div>
+  {{end}}
+  </div>
+
+  <div id="living-spaces-section">
+  {{if .ProactiveV3.LivingSpaces}}
+    <h2>Living Spaces ({{len .ProactiveV3.LivingSpaces}})</h2>
+    <div id="living-spaces-list">
+      {{range .ProactiveV3.LivingSpaces}}
+      <div class="card">
+        <div class="meta-row">
+          <strong><a href="/living-spaces/{{.Slug}}" target="_blank">🧩 {{.Title}}</a></strong>
+          <span class="badge badge-info">{{.Slug}}</span>
+        </div>
+        <div class="muted" style="margin:4px 0">Updated {{.UpdatedAt}}{{if .GoalSlug}} · Goal: <code>{{.GoalSlug}}</code>{{end}}</div>
+        <div class="actions">
+          <a class="btn btn-secondary" style="font-size:11px;padding:4px 8px" href="/living-spaces/{{.Slug}}" target="_blank">Open Sandboxed Space ↗</a>
+        </div>
+      </div>
+      {{end}}
+    </div>
+  {{end}}
+  </div>
+</section>
+
+<!-- ==================== TAB 3: TOKENS ==================== -->
+<section class="tab-panel" id="panel-tokens">
+  <h2>
+    <span>Token Usage, Prefix Cache &amp; Context Window</span>
+    <div class="win-switcher" role="group" aria-label="Token Window">
+      <button type="button" class="win-btn active" data-win="today">Today</button>
+      <button type="button" class="win-btn" data-win="7d">7d</button>
+      <button type="button" class="win-btn" data-win="30d">30d</button>
+      <button type="button" class="win-btn" data-win="all">All</button>
+    </div>
+  </h2>
+
+  <div class="card" id="obs-card">
+    <div class="kpi-grid" id="tok-window-kpis">
+      <div class="kpi-tile">
+        <div class="kpi-label" id="tok-kpi-unc-lbl">Uncached Burn (Today)</div>
+        {{if .Observability.Budget.TokenCircuitDisabled}}
+        <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}}</div>
+        <div class="kpi-sub" id="obs-today-uncached-sub">In: {{fmtTokens .Observability.TodayInputTokens}} · Out: {{fmtTokens .Observability.TodayOutputTokens}} ({{.Observability.TodayTurnCount}} turns)</div>
+        {{else}}
+        <div class="kpi-val" id="obs-today-uncached">{{fmtTokens .Observability.TodayUncachedTokens}} / {{fmtTokens .Observability.Budget.DailyUncachedBudget}}</div>
+        <div class="kpi-sub" id="obs-today-uncached-sub">{{printf "%.1f" .Observability.DailyBudgetPct}}% of daily budget ({{.Observability.TodayTurnCount}} turns)</div>
+        {{end}}
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Prefix Cache Hit Ratio</div>
+        <div class="kpi-val" id="obs-chr">{{printf "%.1f" (mulf .Observability.TodayCacheHitRatio 100.0)}}%</div>
+        <div class="kpi-sub" id="obs-chr-sub">{{fmtTokens .Observability.TodayCacheReadTokens}} cached / {{fmtTokens .Observability.TodayGrossTokens}} gross</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Est. API-Equiv Cost</div>
+        <div class="kpi-val" id="obs-est-cost">{{fmtUSD .Observability.TodayEstCostUSD}}</div>
+        <div class="kpi-sub" id="obs-est-cost-sub">Deep uncached: {{fmtTokens .Observability.TodayDeepUncachedTokens}}</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Prefix-Cache Savings</div>
+        <div class="kpi-val" id="obs-cache-saved">{{fmtUSD .Observability.TodayCacheSavedUSD}}</div>
+        <div class="kpi-sub" id="obs-cold-sub">Cold wakeups (&ge;50k): {{.Observability.TodayColdSpikes}} ({{fmtTokens .Observability.TodayColdSpikeTokens}})</div>
+      </div>
+    </div>
+
+    <div class="meta-row" style="margin-top:6px">
+      <span class="muted" id="obs-fd-label">
+        <strong>[HQ] Front Desk Context:</strong>
+        {{if .Observability.FrontDeskCompactedPending}}
+          Compacted (pending next turn) / {{fmtTokens $ceil}}
+        {{else}}
+          {{fmtTokens .Observability.FrontDeskContextTokens}} / {{fmtTokens $ceil}} ({{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens $ceil)}}% of ~{{fmtTokens $ceil}} auto-compaction ceiling)
+        {{end}}
+        · Cold-wakeup ticks: <code>{{fmtTokens .Observability.Budget.WarnContextTokens}}</code> warn / <code>{{fmtTokens .Observability.Budget.CritContextTokens}}</code> crit · Compactions: <code>{{.Observability.FrontDeskCompactions}}</code>
+      </span>
+      <span id="obs-fd-badge" class="badge {{if eq .Observability.FrontDeskContextStatus "OK"}}badge-pass{{else if eq .Observability.FrontDeskContextStatus "WARN"}}badge-warn{{else}}badge-danger{{end}}">{{.Observability.FrontDeskContextStatus}}</span>
+    </div>
+    <div class="progress-bar">
+      <div id="obs-fd-bar" class="progress-fill {{if eq .Observability.FrontDeskContextStatus "WARN"}}warn{{else if eq .Observability.FrontDeskContextStatus "CRITICAL"}}danger{{end}}" style="width: {{printf "%.1f" (ctxPct .Observability.FrontDeskContextTokens $ceil)}}%;"></div>
+      <span class="marker-tick warn" style="left: {{printf "%.1f" (ctxPct .Observability.Budget.WarnContextTokens $ceil)}}%;" title="Cold-wakeup warning threshold ({{fmtTokens .Observability.Budget.WarnContextTokens}})"></span>
+      <span class="marker-tick crit" style="left: {{printf "%.1f" (ctxPct .Observability.Budget.CritContextTokens $ceil)}}%;" title="Cold-wakeup critical threshold ({{fmtTokens .Observability.Budget.CritContextTokens}})"></span>
     </div>
   </div>
-  {{end}}
-</div>
-{{end}}
 
-<h2>Proactive Ideas Feed (<span id="ideas-count">{{len .Ideas}}</span>)</h2>
-<div id="ideas-list">
-{{if .Ideas}}
-  {{range .Ideas}}
-  <div class="card" id="idea-{{.ID}}">
+  <h2>
+    <span>Usage by Model &amp; Family</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px" id="tok-model-win-note">Window: Today</span>
+  </h2>
+  <div class="card" id="tok-models-card">
+    <div class="family-bar" id="tok-family-bar"></div>
+    <div class="family-legend" id="tok-family-legend"></div>
+    <div class="tok-table-wrap">
+      <table class="tok-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Tier</th>
+            <th class="num">Turns</th>
+            <th class="num">Uncached (In + Out)</th>
+            <th class="num">Cache Read (Hit %)</th>
+            <th class="num">Est. Cost</th>
+            <th class="num">Cache Saved</th>
+          </tr>
+        </thead>
+        <tbody id="tok-models-tbody">
+          <tr><td colspan="7" class="muted">Loading model breakdown…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2>
+    <span>Top Task &amp; Coordinator Trees (Disjoint — Zero Double-Counting)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Click any tree with subagents to expand</span>
+  </h2>
+  <div id="tok-trees-list">
+    <div class="card muted">No conversations active in selected window.</div>
+  </div>
+
+  <h2>
+    <span>7-Day Daily &amp; 24-Hour Activity Trends</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Pure SVG · Hover bars for exact tokens &amp; cost</span>
+  </h2>
+  <div class="charts-grid">
+    <div class="card">
+      <div class="kpi-label" style="margin-bottom:6px">7-Day Daily Uncached Tokens &amp; Cost</div>
+      <div id="tok-chart-7d"></div>
+    </div>
+    <div class="card">
+      <div class="kpi-label" style="margin-bottom:6px">Last 24 Hours Activity (Hourly Uncached)</div>
+      <div id="tok-chart-24h"></div>
+    </div>
+  </div>
+
+  <h2>
+    <span>Active 24h Token &amp; Context Alerts (<span id="obs-anom-count">{{.Observability.TotalAnomalies}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Scoped to live state &amp; last 24h</span>
+  </h2>
+  <div id="obs-anomalies">
+  {{if .Observability.Anomalies}}
+    {{range .Observability.Anomalies}}
+    <div class="card">
+      <div class="meta-row">
+        <strong>{{.Kind}}</strong>
+        <span class="badge {{if eq .Severity "CRITICAL"}}badge-danger{{else}}badge-warn{{end}}">{{.Code}} · {{.Severity}}</span>
+      </div>
+      <div style="margin-top:4px">{{.Summary}}</div>
+      <div class="muted" style="margin-top:4px">Fix: {{.Remediation}}</div>
+    </div>
+    {{end}}
+  {{else}}
+    <div class="card muted">Zero active token, prefix-cache, context, or budget anomalies in the last 24h.</div>
+  {{end}}
+  </div>
+</section>
+
+<!-- ==================== TAB 4: OPS ==================== -->
+<section class="tab-panel" id="panel-ops">
+  <h2>Proactive Gatekeeper &amp; Daily Auto-Spawn Quota</h2>
+  <div class="card" id="quota-card">
     <div class="meta-row">
-      <strong>💡 {{.Title}}</strong>
-      <span class="badge badge-info">{{if .SourceSkill}}{{.SourceSkill}}{{else}}idea{{end}}</span>
+      <div><strong>Background Auto Spawns Today:</strong> <span id="quota-spawns">{{.Quota.EffectiveAutoSpawns}}</span> / <span id="quota-max-spawns">{{.Quota.MaxDailySpawns}}</span>{{if gt .Quota.InteractiveSpawnsToday 0}} <span class="muted" id="quota-interactive">(+{{.Quota.InteractiveSpawnsToday}} interactive)</span>{{else}}<span class="muted" id="quota-interactive"></span>{{end}}</div>
+      <div id="quota-circuit-badge">
+        {{if .Quota.CircuitOpen}}
+          <span class="badge badge-warn">CIRCUIT OPEN ({{.Quota.CircuitReason}})</span>
+        {{else}}
+          <span class="badge badge-pass">BUDGET OK</span>
+        {{end}}
+      </div>
     </div>
-    {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
-    <div class="actions">
-      <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="promote">Promote</button>
-      <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="snooze">Snooze 24h</button>
-      <button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="{{.ID}}" data-idea-op="dismiss">Dismiss</button>
+    <div class="progress-bar">
+      <div id="quota-bar-fill" class="progress-fill" style="width: {{if gt .Quota.MaxDailySpawns 0}}{{printf "%.1f" (pctClamp (mulf (divf .Quota.EffectiveAutoSpawns .Quota.MaxDailySpawns) 100.0))}}{{else}}0{{end}}%;"></div>
     </div>
+    <div class="muted" style="margin-top:6px" id="quota-heartbeat">Last Heartbeat: {{if .Quota.LastStatus}}{{.Quota.LastStatus}}{{else}}Not run yet today{{end}}</div>
+  </div>
+
+  <h2>
+    <span>Scheduled Automations (<span id="schedules-count">{{len .Schedules}}</span>)</span>
+    <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Core OS Daemons &amp; Conversation Crons</span>
+  </h2>
+  <div id="schedules-list">
+  {{if .Schedules}}
+    {{range .Schedules}}
+    <div class="card" id="sched-{{.ID}}">
+      <div class="meta-row">
+        <strong>{{if eq .Kind "daemon"}}⚙️ {{.ID}}{{else}}🕒 {{.ID}}{{end}}</strong>
+        <span class="badge {{if .Enabled}}badge-pass{{else}}badge-warn{{end}}">{{if .Enabled}}{{if eq .Kind "daemon"}}daemon{{else}}chat cron{{end}}{{else}}paused{{end}}</span>
+      </div>
+      <div class="muted" style="margin:4px 0">
+        Cron: <code>{{.Cron}}</code> · Runner: <code>{{.Runner}}</code>{{if .Skill}} · Skill: <code>/{{.Skill}}</code>{{end}}{{if .LatestConvID}} · Latest: <a href="conversation://{{.LatestConvID}}">{{.LatestConvID}}</a>{{end}}
+      </div>
+      {{if .Summary}}<div class="muted" style="margin:4px 0;color:#cbd5e1">{{.Summary}}</div>{{end}}
+      {{if or .LastCheckedAt .LastTriggeredAt .SkipsCount}}
+      <div class="muted" style="font-size:11px">
+        {{if .LastCheckedAt}}Last checked: <code>{{.LastCheckedAt}}</code>{{end}}{{if .LastTriggeredAt}} · Last fired: <code>{{.LastTriggeredAt}}</code>{{end}}{{if .SkipsCount}} · 0-token skips: <code>{{.SkipsCount}}</code>{{end}}{{if and .LastStatus (ne .LastStatus "ok")}} · Status: <code style="color:#fcd34d">{{.LastStatus}}</code>{{end}}
+      </div>
+      {{end}}
+      {{if .LastError}}<div class="muted" style="font-size:11px;color:#fca5a5">Last error: {{.LastError}}</div>{{end}}
+      {{if eq .Kind "daemon"}}
+      <div class="actions">
+        {{if .Enabled}}
+        <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="pause">Pause</button>
+        {{else}}
+        <button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="resume">Resume</button>
+        {{end}}
+        <button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="{{.ID}}" data-trigger-op="fire">Run Now</button>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+  {{else}}
+    <div class="card muted">No scheduled automations configured.</div>
+  {{end}}
+  </div>
+
+  <div id="delegates-section">
+  {{if or .Delegates.PolicyConfigured .Delegates.TransportCount .Delegates.PendingNudges}}
+    <h2>
+      <span>Delegated Peers ({{.Delegates.EnabledPolicyCount}}/{{.Delegates.PolicyCount}})</span>
+      <span class="muted" style="text-transform:none;font-weight:normal;font-size:11px">Scoped Peer Policies &amp; Audit · Read-Only</span>
+    </h2>
+    <div id="delegates-panel">
+      <div class="card">
+        <div class="meta-row">
+          <strong>🛡️ Scoped Delegates</strong>
+          <span class="badge {{if .Delegates.PolicyConfigured}}badge-pass{{else}}badge-warn{{end}}">{{if .Delegates.PolicyConfigured}}active{{else}}unconfigured{{end}}</span>
+        </div>
+        <div class="muted" style="margin:4px 0">
+          Transports: <code>{{.Delegates.TransportCount}}</code> · Replies (1h): <code>{{.Delegates.RepliesLastHour}}/{{.Delegates.GlobalMaxPerHour}}</code> · Queued Nudges: <code>{{.Delegates.PendingNudges}}</code>
+        </div>
+        {{range .Delegates.RecentAudit}}
+        <div class="muted" style="font-size:11px;margin-top:2px"><code>{{.Timestamp}}</code> · <strong>{{.Action}}</strong> {{if .PolicyID}}(<code>{{.PolicyID}}</code>){{end}} → <code>{{.Outcome}}</code>{{if .Detail}} — {{.Detail}}{{end}}</div>
+        {{end}}
+      </div>
+    </div>
+  {{end}}
+  </div>
+
+  <h2>Today's Turn Journal (<span id="journal-count">{{len .TodayTurns}}</span>)</h2>
+  <div id="journal-list">
+  {{if .TodayTurns}}
+    {{range .TodayTurns}}
+    <div class="card">
+      <div><strong>{{if .UserPrompt}}{{.UserPrompt}}{{else}}{{.ResponseSummary}}{{end}}</strong></div>
+      <div class="muted">{{.Timestamp}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a> · {{.ModelName}}</div>
+    </div>
+    {{end}}
+  {{else}}
+    <div class="card muted">No turns logged today yet.</div>
+  {{end}}
+  </div>
+
+  <h2>System Health (Doctor)</h2>
+  <div id="health-grid">
+  {{range .Health}}
+  <div class="card" style="margin-bottom:6px">
+    <div class="meta-row">
+      <strong>{{.Name}}</strong>
+      <span class="badge {{if eq .Status "PASS"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
+    </div>
+    <div class="muted" style="margin-top:2px">{{.Detail}}</div>
   </div>
   {{end}}
-{{else}}
-  <div class="card muted">No pending proactive ideas in outbox.</div>
-{{end}}
-</div>
-
-<h2>Today's Turn Journal ({{len .TodayTurns}})</h2>
-<div id="journal-list">
-{{if .TodayTurns}}
-  {{range .TodayTurns}}
-  <div class="card">
-    <div><strong>{{.UserPrompt}}</strong></div>
-    <div class="muted">{{.Timestamp}} · Conv: <a href="conversation://{{.ConversationID}}">{{.ConversationID}}</a> · {{.ModelName}}</div>
   </div>
-  {{end}}
-{{else}}
-  <div class="card muted">No turns logged today yet.</div>
-{{end}}
-</div>
+</section>
 
-<h2>System Health (Doctor)</h2>
-<div id="health-grid">
-{{range .Health}}
-<div class="card" style="margin-bottom:6px">
-  <div class="meta-row">
-    <strong>{{.Name}}</strong>
-    <span class="badge {{if eq .Status "PASS"}}badge-pass{{else}}badge-warn{{end}}">{{.Status}}</span>
-  </div>
-  <div class="muted" style="margin-top:2px">{{.Detail}}</div>
-</div>
-{{end}}
-</div>
-
+<script id="hq-bootstrap-state" type="application/json">{{stateJSON .}}</script>
 <script>
+const CSRF_TOKEN = ((document.querySelector('meta[name="hq-csrf-token"]') || {}).content) || '';
+let latestState = null;
+let activeTokenWindow = 'today';
+
+function hqFetch(url, options) {
+  options = options || {};
+  options.headers = options.headers || {};
+  if (window.sidecar && typeof window.sidecar.fetch === 'function') {
+    return window.sidecar.fetch(url, options);
+  }
+  return fetch(url, options);
+}
+
+function escapeHTML(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fmtTokens(n) {
+  n = Number(n || 0);
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (n >= 10000) return Math.round(n / 1000) + 'k';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+
+function fmtUSD(v) {
+  v = Number(v || 0);
+  if (v <= 0) return '$0.00';
+  if (v < 0.01) return '<$0.01';
+  return '~$' + v.toFixed(2);
+}
+
+function clampPct(p) {
+  p = Number(p || 0);
+  if (p < 0) return 0;
+  if (p > 100) return 100;
+  return p;
+}
+
 function showFlash(message, isError) {
   const container = document.getElementById('flash-container');
   const banner = document.createElement('div');
@@ -690,17 +859,6 @@ function showFlash(message, isError) {
   setTimeout(() => { if (banner.parentElement) banner.remove(); }, 5000);
 }
 
-const CSRF_TOKEN = ((document.querySelector('meta[name="hq-csrf-token"]') || {}).content) || '';
-
-function escapeHTML(s) {
-  return String(s || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 function postHeaders() {
   return {
     'Content-Type': 'application/json',
@@ -709,10 +867,48 @@ function postHeaders() {
   };
 }
 
+// Tab switching with sessionStorage persistence
+function activateTab(tabId, persist) {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
+  });
+  document.querySelectorAll('.tab-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.id === 'panel-' + tabId);
+  });
+  if (persist) {
+    try { sessionStorage.setItem('hq_console_active_tab', tabId); } catch (e) {}
+  }
+}
+
+(function initTabs() {
+  const nav = document.querySelector('.tab-nav');
+  let initial = (nav && nav.getAttribute('data-default-tab')) || 'needs_me';
+  try {
+    const saved = sessionStorage.getItem('hq_console_active_tab');
+    if (saved && document.getElementById('panel-' + saved)) {
+      initial = saved;
+    }
+  } catch (e) {}
+  activateTab(initial, false);
+
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => activateTab(btn.getAttribute('data-tab'), true));
+  });
+  document.querySelectorAll('.win-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeTokenWindow = btn.getAttribute('data-win') || 'today';
+      document.querySelectorAll('.win-btn').forEach(x => x.classList.toggle('active', x === btn));
+      if (latestState && latestState.observability) {
+        renderTokensTab(latestState.observability);
+      }
+    });
+  });
+})();
+
 async function approveProposal(id, sha) {
   if (!confirm('Execute approved action for proposal ' + id + ' (sha256: ' + sha + ')?')) return;
   try {
-    const res = await fetch('/api/approve', {
+    const res = await hqFetch('/api/approve', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, sha256: sha, csrf_token: CSRF_TOKEN })
@@ -729,7 +925,7 @@ async function rejectProposal(id) {
   const reason = prompt('Reason for rejecting ' + id + ' (optional):', 'Rejected via HQ Console');
   if (reason === null) return;
   try {
-    const res = await fetch('/api/reject', {
+    const res = await hqFetch('/api/reject', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, reason: reason, csrf_token: CSRF_TOKEN })
@@ -744,7 +940,7 @@ async function rejectProposal(id) {
 
 async function completeTask(slug) {
   try {
-    const res = await fetch('/api/tasks/complete', {
+    const res = await hqFetch('/api/tasks/complete', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ slug: slug, csrf_token: CSRF_TOKEN })
@@ -759,7 +955,7 @@ async function completeTask(slug) {
 
 async function archiveTask(slug) {
   try {
-    const res = await fetch('/api/tasks/archive', {
+    const res = await hqFetch('/api/tasks/archive', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ slug: slug, csrf_token: CSRF_TOKEN })
@@ -775,64 +971,578 @@ async function archiveTask(slug) {
 document.addEventListener('click', function(ev) {
   const btn = ev.target && ev.target.closest ? ev.target.closest('[data-hq-action]') : null;
   if (!btn) return;
-  const act = btn.getAttribute('data-hq-action');
+  const act = btn.getAttribute('data-hq-action') || '';
+  const id = btn.getAttribute('data-id') || '';
   if (act === 'approve') {
-    approveProposal(btn.getAttribute('data-id') || '', btn.getAttribute('data-sha') || '');
+    approveProposal(id, btn.getAttribute('data-sha') || '');
   } else if (act === 'reject') {
-    rejectProposal(btn.getAttribute('data-id') || '');
+    rejectProposal(id);
   } else if (act === 'complete-task') {
     completeTask(btn.getAttribute('data-slug') || '');
   } else if (act === 'archive-task') {
     archiveTask(btn.getAttribute('data-slug') || '');
-  } else if (act === 'idea-action') {
-    const id = btn.getAttribute('data-id') || '';
+  } else if (act === 'idea-action' && id) {
     const op = btn.getAttribute('data-idea-op') || '';
     let reason = '';
     if (op === 'dismiss') {
       reason = prompt('Optional reason for dismissing idea ' + id + ':', 'Not relevant right now') || '';
     }
-    fetch('/api/ideas/action', {
+    hqFetch('/api/ideas/action', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, action: op, reason: reason, duration: '24h', csrf_token: CSRF_TOKEN })
     }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated ' + id), !d.ok); refreshState(); });
-  } else if (act === 'space-override') {
-    const id = btn.getAttribute('data-id') || '';
+  } else if (act === 'space-override' && id) {
     const mode = btn.getAttribute('data-mode') || 'auto';
-    fetch('/api/console-spaces/set', {
+    hqFetch('/api/console-spaces/set', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, mode: mode, csrf_token: CSRF_TOKEN })
-    }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated space ' + id), !d.ok); location.reload(); });
-  } else if (act === 'trigger-action') {
-    const id = btn.getAttribute('data-id') || '';
+    }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated space ' + id), !d.ok); refreshState(); });
+  } else if (act === 'trigger-action' && id) {
     const op = btn.getAttribute('data-trigger-op') || '';
-    fetch('/api/triggers/action', {
+    hqFetch('/api/triggers/action', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, action: op, csrf_token: CSRF_TOKEN })
     }).then(r => r.json()).then(d => { showFlash(d.message || ('Updated schedule ' + id), !d.ok); refreshState(); });
   } else if (act === 'outbox-act' && id) {
     const opt = btn.getAttribute('data-opt') || '';
-    fetch('/api/outbox/act', {
+    hqFetch('/api/outbox/act', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, option: opt, csrf_token: CSRF_TOKEN })
-    }).then(r => r.json()).then(d => { showFlash((d.result && d.result.summary) || d.error || 'Updated decision', !d.ok); window.location.reload(); });
+    }).then(r => r.json()).then(d => { showFlash((d.result && d.result.summary) || d.error || 'Updated decision', !d.ok); refreshState(); });
   } else if (act === 'restage-proposal' && id) {
-    fetch('/api/approvals/restage', {
+    hqFetch('/api/approvals/restage', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, csrf_token: CSRF_TOKEN })
-    }).then(r => r.json()).then(d => { showFlash(d.ok ? ('Restaged as ' + (d.proposal && d.proposal.id)) : (d.error || 'Restage failed'), !d.ok); window.location.reload(); });
+    }).then(r => r.json()).then(d => { showFlash(d.ok ? ('Restaged as ' + (d.proposal && d.proposal.id)) : (d.error || 'Restage failed'), !d.ok); refreshState(); });
   } else if (act === 'dismiss-expired' && id) {
-    fetch('/api/approvals/dismiss-expired', {
+    hqFetch('/api/approvals/dismiss-expired', {
       method: 'POST',
       headers: postHeaders(),
       body: JSON.stringify({ id: id, csrf_token: CSRF_TOKEN })
-    }).then(r => r.json()).then(d => { showFlash(d.ok ? ('Dismissed expired ' + id) : (d.error || 'Dismiss failed'), !d.ok); window.location.reload(); });
+    }).then(r => r.json()).then(d => { showFlash(d.ok ? ('Dismissed expired ' + id) : (d.error || 'Dismiss failed'), !d.ok); refreshState(); });
   }
 });
+
+const FAMILY_META = {
+  claude:   { label: 'Claude', color: '#a78bfa' },
+  carbon:   { label: 'Carbon / Pro', color: '#38bdf8' },
+  neon:     { label: 'Neon', color: '#22c55e' },
+  hydrogen: { label: 'Hydrogen / Flash', color: '#f59e0b' },
+  other:    { label: 'Other', color: '#64748b' }
+};
+
+function renderSVGBarChart(points, labelFn, valFn, tipFn, barColor) {
+  if (!points || points.length === 0) {
+    return '<div class="muted" style="padding:12px 0">No activity recorded yet.</div>';
+  }
+  let maxVal = 1;
+  for (const p of points) {
+    const v = valFn(p);
+    if (v > maxVal) maxVal = v;
+  }
+  const W = 420, H = 112, padTop = 8, padBottom = 22;
+  const plotH = H - padTop - padBottom;
+  const n = points.length;
+  const slotW = W / n;
+  const barW = Math.max(4, Math.min(28, slotW * 0.68));
+  let rects = '';
+  let labels = '';
+  const labelStride = n > 12 ? 4 : 1;
+  for (let i = 0; i < n; i++) {
+    const p = points[i];
+    const v = valFn(p);
+    const bh = v > 0 ? Math.max(3, (v / maxVal) * plotH) : 1;
+    const x = i * slotW + (slotW - barW) / 2;
+    const y = padTop + (plotH - bh);
+    const fill = v > 0 ? barColor : '#1e293b';
+    rects += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="2" fill="' + fill + '"><title>' + escapeHTML(tipFn(p)) + '</title></rect>';
+    if (i % labelStride === 0 || i === n - 1) {
+      const lx = i * slotW + slotW / 2;
+      labels += '<text x="' + lx.toFixed(1) + '" y="' + (H - 6) + '" fill="#94a3b8" font-size="9" text-anchor="middle">' + escapeHTML(labelFn(p)) + '</text>';
+    }
+  }
+  return '<svg class="svg-chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' + rects + labels + '</svg>';
+}
+
+function renderTokensTab(obs) {
+  if (!obs) return;
+  const winMap = obs.windows || {};
+  const wb = winMap[activeTokenWindow] || {
+    window: activeTokenWindow,
+    turnCount: obs.todayTurnCount || 0,
+    convCount: 0,
+    inputTokens: obs.todayInputTokens || 0,
+    cacheReadTokens: obs.todayCacheReadTokens || 0,
+    outputTokens: obs.todayOutputTokens || 0,
+    uncachedTokens: obs.todayUncachedTokens || 0,
+    grossTokens: obs.todayGrossTokens || 0,
+    deepUncachedTokens: obs.todayDeepUncachedTokens || 0,
+    cacheHitRatio: obs.todayCacheHitRatio || 0,
+    estCostUsd: obs.todayEstCostUsd || 0,
+    cacheSavedUsd: obs.todayCacheSavedUsd || 0,
+    coldSpikes: obs.todayColdSpikes || 0,
+    coldSpikeTokens: obs.todayColdSpikeTokens || 0,
+    byModel: [],
+    byFamily: [],
+    topRootTrees: []
+  };
+  const winNames = { today: 'Today', '7d': 'Last 7 Days', '30d': 'Last 30 Days', all: 'All Time' };
+  const winTitle = winNames[activeTokenWindow] || activeTokenWindow;
+  const budget = obs.budget || {};
+  const ceiling = budget.contextCeilingTokens > 0 ? budget.contextCeilingTokens : 512000;
+
+  // Window KPIs
+  const uncLbl = document.getElementById('tok-kpi-unc-lbl');
+  const uncVal = document.getElementById('obs-today-uncached');
+  const uncSub = document.getElementById('obs-today-uncached-sub');
+  if (uncLbl) uncLbl.textContent = 'Uncached Burn (' + winTitle + ')';
+  if (uncVal) {
+    if (activeTokenWindow === 'today' && !budget.tokenCircuitDisabled && budget.dailyUncachedBudget > 0) {
+      uncVal.textContent = fmtTokens(wb.uncachedTokens) + ' / ' + fmtTokens(budget.dailyUncachedBudget);
+    } else {
+      uncVal.textContent = fmtTokens(wb.uncachedTokens);
+    }
+  }
+  if (uncSub) {
+    let subTxt = 'In: ' + fmtTokens(wb.inputTokens) + ' · Out: ' + fmtTokens(wb.outputTokens) + ' (' + (wb.turnCount || 0) + ' turns)';
+    if (activeTokenWindow === 'today' && !budget.tokenCircuitDisabled && budget.dailyUncachedBudget > 0) {
+      subTxt = (obs.dailyBudgetPct || 0).toFixed(1) + '% of daily budget · ' + subTxt;
+    }
+    uncSub.textContent = subTxt;
+  }
+
+  const chrEl = document.getElementById('obs-chr');
+  const chrSub = document.getElementById('obs-chr-sub');
+  if (chrEl) chrEl.textContent = ((wb.cacheHitRatio || 0) * 100).toFixed(1) + '%';
+  if (chrSub) chrSub.textContent = fmtTokens(wb.cacheReadTokens) + ' cached / ' + fmtTokens(wb.grossTokens) + ' gross';
+
+  const costEl = document.getElementById('obs-est-cost');
+  const costSub = document.getElementById('obs-est-cost-sub');
+  if (costEl) costEl.textContent = fmtUSD(wb.estCostUsd);
+  if (costSub) costSub.textContent = 'Deep uncached: ' + fmtTokens(wb.deepUncachedTokens) + (wb.convCount ? (' · ' + wb.convCount + ' threads') : '');
+
+  const savedEl = document.getElementById('obs-cache-saved');
+  const coldSub = document.getElementById('obs-cold-sub');
+  if (savedEl) savedEl.textContent = fmtUSD(wb.cacheSavedUsd);
+  if (coldSub) coldSub.textContent = 'Cold wakeups (\u226550k): ' + (wb.coldSpikes || 0) + ' (' + fmtTokens(wb.coldSpikeTokens || 0) + ')';
+
+  // Front Desk 512k dual-marker bar
+  const fdLbl = document.getElementById('obs-fd-label');
+  const fdBadge = document.getElementById('obs-fd-badge');
+  const fdBar = document.getElementById('obs-fd-bar');
+  const fdPct = clampPct(((obs.frontDeskContextTokens || 0) / ceiling) * 100);
+  if (fdLbl) {
+    const mainPart = obs.frontDeskCompactedPending
+      ? ('Compacted (pending next turn) / ' + fmtTokens(ceiling))
+      : (fmtTokens(obs.frontDeskContextTokens) + ' / ' + fmtTokens(ceiling) + ' (' + fdPct.toFixed(1) + '% of ~' + fmtTokens(ceiling) + ' auto-compaction ceiling)');
+    const postNote = (!obs.frontDeskCompactedPending && obs.frontDeskPostCompactTokens > 0)
+      ? (' · Post-compact baseline: <code>' + fmtTokens(obs.frontDeskPostCompactTokens) + '</code>')
+      : '';
+    fdLbl.innerHTML = '<strong>[HQ] Front Desk Context:</strong> ' + mainPart +
+      ' · Cold-wakeup ticks: <code>' + fmtTokens(budget.warnContextTokens || 120000) + '</code> warn / <code>' + fmtTokens(budget.critContextTokens || 180000) + '</code> crit · Compactions: <code>' + (obs.frontDeskCompactions || 0) + '</code>' + postNote;
+  }
+  if (fdBadge) {
+    const st = obs.frontDeskContextStatus || 'OK';
+    fdBadge.textContent = st;
+    fdBadge.className = 'badge ' + (st === 'OK' ? 'badge-pass' : (st === 'WARN' ? 'badge-warn' : 'badge-danger'));
+  }
+  if (fdBar) {
+    const st = obs.frontDeskContextStatus || 'OK';
+    fdBar.style.width = fdPct.toFixed(1) + '%';
+    fdBar.className = 'progress-fill' + (st === 'WARN' ? ' warn' : (st === 'CRITICAL' ? ' danger' : ''));
+  }
+
+  // Family bar + Model table
+  const winNote = document.getElementById('tok-model-win-note');
+  if (winNote) winNote.textContent = 'Window: ' + winTitle;
+  const famBar = document.getElementById('tok-family-bar');
+  const famLeg = document.getElementById('tok-family-legend');
+  const fams = wb.byFamily || [];
+  if (famBar && famLeg) {
+    if (fams.length > 0 && wb.uncachedTokens > 0) {
+      let bHtml = '', lHtml = '';
+      for (const f of fams) {
+        const meta = FAMILY_META[f.family] || FAMILY_META.other;
+        const pct = Math.max(1, (f.uncachedTokens / wb.uncachedTokens) * 100);
+        bHtml += '<span style="width:' + pct.toFixed(1) + '%;background:' + meta.color + '" title="' + escapeHTML(meta.label + ': ' + fmtTokens(f.uncachedTokens) + ' (' + fmtUSD(f.estCostUsd) + ')') + '"></span>';
+        lHtml += '<span><i class="legend-dot" style="background:' + meta.color + '"></i>' + escapeHTML(meta.label) + ': <strong>' + fmtTokens(f.uncachedTokens) + '</strong> (' + fmtUSD(f.estCostUsd) + ')</span>';
+      }
+      famBar.innerHTML = bHtml;
+      famLeg.innerHTML = lHtml;
+    } else {
+      famBar.innerHTML = '';
+      famLeg.innerHTML = '<span class="muted">No model turns recorded in ' + escapeHTML(winTitle) + '.</span>';
+    }
+  }
+
+  const mBody = document.getElementById('tok-models-tbody');
+  if (mBody) {
+    const models = wb.byModel || [];
+    if (models.length === 0) {
+      mBody.innerHTML = '<tr><td colspan="7" class="muted">No turns recorded in ' + escapeHTML(winTitle) + '.</td></tr>';
+    } else {
+      let rowsHtml = '';
+      for (const m of models) {
+        const tierCls = m.tier === 'deep' ? 'badge-warn' : (m.tier === 'quick' ? 'badge-pass' : 'badge-info');
+        rowsHtml += '<tr>' +
+          '<td><code>' + escapeHTML(m.model) + '</code></td>' +
+          '<td><span class="badge ' + tierCls + '">' + escapeHTML(m.tier) + '</span></td>' +
+          '<td class="num">' + (m.turnCount || 0) + '</td>' +
+          '<td class="num">' + fmtTokens(m.uncachedTokens) + ' <span class="muted">(' + fmtTokens(m.inputTokens) + '+' + fmtTokens(m.outputTokens) + ')</span></td>' +
+          '<td class="num">' + fmtTokens(m.cacheReadTokens) + ' <span class="muted">(' + ((m.cacheHitRatio || 0) * 100).toFixed(0) + '%)</span></td>' +
+          '<td class="num">' + fmtUSD(m.estCostUsd) + '</td>' +
+          '<td class="num">' + fmtUSD(m.cacheSavedUsd) + '</td>' +
+          '</tr>';
+      }
+      mBody.innerHTML = rowsHtml;
+    }
+  }
+
+  // Disjoint Root Trees (preserving open <details> state across 5s refreshes)
+  const treesEl = document.getElementById('tok-trees-list');
+  if (treesEl) {
+    const openSet = new Set();
+    treesEl.querySelectorAll('details[open][data-tree-id]').forEach(d => openSet.add(d.getAttribute('data-tree-id')));
+    const trees = wb.topRootTrees || [];
+    if (trees.length === 0) {
+      treesEl.innerHTML = '<div class="card muted">No conversations active in ' + escapeHTML(winTitle) + '.</div>';
+    } else {
+      let tHtml = '';
+      for (const rt of trees) {
+        const splitInfo = rt.subagentUncachedTokens > 0
+          ? ('Self: <code>' + fmtTokens(rt.selfUncachedTokens) + '</code> · Subagents (' + (rt.descendantCount || 0) + '): <code>' + fmtTokens(rt.subagentUncachedTokens) + '</code>')
+          : ('Self: <code>' + fmtTokens(rt.uncachedTokens) + '</code> · Peak context: <code>' + fmtTokens(rt.peakContextTokens) + '</code>');
+        const rightSummary = '<span class="mono">' + fmtTokens(rt.uncachedTokens) + ' uncached · ' + ((rt.cacheHitRatio || 0) * 100).toFixed(0) + '% cached · <strong>' + fmtUSD(rt.estCostUsd) + '</strong></span>';
+        const titleLink = rt.conversationId
+          ? '<a href="conversation://' + escapeHTML(rt.conversationId) + '"><strong>' + escapeHTML(rt.title) + '</strong></a>'
+          : '<strong>' + escapeHTML(rt.title) + '</strong>';
+        const kids = rt.children || [];
+        if (kids.length > 0) {
+          const openAttr = openSet.has(rt.conversationId) ? ' open' : '';
+          let kHtml = '<div class="muted" style="margin-bottom:4px">' + splitInfo + '</div>';
+          for (const ch of kids) {
+            kHtml += '<div class="tree-kid-row">' +
+              '<span>↳ <a href="conversation://' + escapeHTML(ch.conversationId) + '">' + escapeHTML(ch.title) + '</a> <span class="muted">(' + escapeHTML(ch.model) + ')</span></span>' +
+              '<span class="mono">' + fmtTokens(ch.uncachedTokens) + ' uncached · ' + ((ch.cacheHitRatio || 0) * 100).toFixed(0) + '% cached · ' + fmtUSD(ch.estCostUsd) + '</span>' +
+              '</div>';
+          }
+          tHtml += '<details class="tree-item" data-tree-id="' + escapeHTML(rt.conversationId) + '"' + openAttr + '>' +
+            '<summary><span>' + titleLink + ' <span class="badge badge-info">' + kids.length + ' sub</span></span>' + rightSummary + '</summary>' +
+            '<div class="tree-kids">' + kHtml + '</div></details>';
+        } else {
+          tHtml += '<div class="tree-item"><div class="meta-row"><span>' + titleLink + '</span>' + rightSummary + '</div>' +
+            '<div class="muted" style="margin-top:3px;font-size:11px">' + splitInfo + ' · Model: <code>' + escapeHTML(rt.model) + '</code></div></div>';
+        }
+      }
+      treesEl.innerHTML = tHtml;
+    }
+  }
+
+  // Pure SVG 7d & 24h Trend Charts
+  const c7 = document.getElementById('tok-chart-7d');
+  if (c7) {
+    c7.innerHTML = renderSVGBarChart(
+      obs.dailyTrend || [],
+      d => (d.date || '').slice(5),
+      d => d.uncachedTokens || 0,
+      d => d.date + ': ' + fmtTokens(d.uncachedTokens) + ' uncached · ' + ((d.cacheHitRatio || 0) * 100).toFixed(0) + '% cached · ' + fmtUSD(d.estCostUsd),
+      '#38bdf8'
+    );
+  }
+  const c24 = document.getElementById('tok-chart-24h');
+  if (c24) {
+    c24.innerHTML = renderSVGBarChart(
+      obs.hourlyTrend || [],
+      h => h.label || '',
+      h => h.uncachedTokens || 0,
+      h => h.hour + ': ' + fmtTokens(h.uncachedTokens) + ' uncached · ' + ((h.cacheHitRatio || 0) * 100).toFixed(0) + '% cached · ' + fmtUSD(h.estCostUsd),
+      '#22c55e'
+    );
+  }
+
+  // Active 24h Anomalies
+  const anomCnt = document.getElementById('obs-anom-count');
+  if (anomCnt) anomCnt.textContent = obs.totalAnomalies || 0;
+  const anomList = document.getElementById('obs-anomalies');
+  if (anomList) {
+    const anoms = obs.anomalies || [];
+    if (anoms.length === 0) {
+      anomList.innerHTML = '<div class="card muted">Zero active token, prefix-cache, context, or budget anomalies in the last 24h.</div>';
+    } else {
+      let aHtml = '';
+      for (const a of anoms) {
+        const cls = a.severity === 'CRITICAL' ? 'badge-danger' : 'badge-warn';
+        aHtml += '<div class="card"><div class="meta-row"><strong>' + escapeHTML(a.kind) + '</strong>' +
+          '<span class="badge ' + cls + '">' + escapeHTML(a.code + ' · ' + a.severity) + '</span></div>' +
+          '<div style="margin-top:4px">' + escapeHTML(a.summary) + '</div>' +
+          '<div class="muted" style="margin-top:4px">Fix: ' + escapeHTML(a.remediation) + '</div></div>';
+      }
+      anomList.innerHTML = aHtml;
+    }
+  }
+}
+
+function renderAllFromState(state) {
+  if (!state) return;
+  latestState = state;
+  const obs = state.observability || {};
+  const pv3 = state.proactiveV3 || {};
+  const pending = state.pending || [];
+  const expired = pv3.expiredProposals || [];
+  const decisions = pv3.decisionCards || [];
+  const tasks = state.tasks || [];
+  const ideas = state.ideas || [];
+  const workspaces = state.workspaces || [];
+  const schedules = state.schedules || [];
+  const actionTotal = pending.length + expired.length + decisions.length;
+
+  const upd = document.getElementById('last-updated');
+  if (upd && state.updatedAt) upd.textContent = 'Updated ' + state.updatedAt;
+
+  // Global KPI Strip & Tab Badges
+  const gkActTile = document.getElementById('gkpi-actions-tile');
+  if (gkActTile) gkActTile.className = 'kpi-tile ' + (actionTotal > 0 ? 'tone-warn' : 'tone-ok');
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setText('gkpi-actions', actionTotal);
+  setText('gkpi-actions-sub', pending.length + ' pending · ' + ideas.length + ' ideas');
+  setText('gkpi-tasks', tasks.length);
+  setText('gkpi-tasks-sub', workspaces.length + ' workspaces · ' + ((state.goals || []).length) + ' goals');
+  setText('gkpi-tokens', fmtTokens(obs.todayUncachedTokens) + ' · ' + Math.round((obs.todayCacheHitRatio || 0) * 100) + '%');
+  setText('gkpi-tokens-sub', fmtTokens(obs.todayGrossTokens) + ' gross (' + (obs.todayTurnCount || 0) + ' turns)');
+  setText('gkpi-cost', fmtUSD(obs.todayEstCostUsd));
+  setText('gkpi-cost-sub', 'Saved ' + fmtUSD(obs.todayCacheSavedUsd) + ' via prefix cache');
+
+  const tbNeeds = document.getElementById('tab-badge-needs');
+  if (tbNeeds) { tbNeeds.textContent = actionTotal; tbNeeds.className = 'tab-count' + (actionTotal > 0 ? ' warn' : ''); }
+  setText('tab-badge-work', tasks.length);
+  const tbTok = document.getElementById('tab-badge-tokens');
+  if (tbTok) { tbTok.textContent = fmtTokens(obs.todayUncachedTokens); tbTok.className = 'tab-count' + ((obs.totalAnomalies || 0) > 0 ? ' warn' : ''); }
+  setText('tab-badge-ops', schedules.length);
+
+  // 1. Needs Me: Pending Approvals (preserving ExpiresAt & Contextual PII Warning!)
+  setText('pending-count', pending.length);
+  const pendingList = document.getElementById('pending-list');
+  if (pendingList) {
+    if (pending.length > 0) {
+      let html = '';
+      for (const p of pending) {
+        const shortSha = p.sha256 ? p.sha256.substring(0, 12) : '';
+        const preview = (p.metadata && (p.metadata.draftPayload || p.metadata.bodyPreview)) ? (p.metadata.draftPayload || p.metadata.bodyPreview) : '';
+        const expHtml = p.expiresAt ? (' · Expires: <code>' + escapeHTML(p.expiresAt) + '</code>') : '';
+        const piiHtml = (p.riskFlags && p.riskFlags.length > 0)
+          ? '<div style="margin:6px 0"><span class="badge badge-danger">⚠️ Contextual PII Warning: ' + escapeHTML(p.riskFlags.join(', ')) + '</span></div>'
+          : '';
+        const previewHtml = preview
+          ? '<div class="preview-box"><div class="preview-title">💬 Message Preview</div><blockquote class="preview-quote">' + escapeHTML(preview) + '</blockquote></div>'
+          : '';
+        html += '<div class="card pending-hero" id="proposal-' + escapeHTML(p.id) + '">' +
+          '<div class="meta-row"><div><strong style="font-size:13px">' + escapeHTML(p.summary) + '</strong></div>' +
+          '<span class="badge badge-warn">' + escapeHTML(p.actionType) + '</span></div>' +
+          '<div class="muted" style="margin:4px 0">ID: <code>' + escapeHTML(p.id) + '</code> · SHA-256: <code title="' + escapeHTML(p.sha256) + '">' + escapeHTML(shortSha) + '</code>' + expHtml + '</div>' +
+          piiHtml + previewHtml +
+          '<pre class="code-block">' + escapeHTML(p.command) + '</pre>' +
+          '<div class="actions">' +
+          '<button type="button" class="btn btn-approve" data-hq-action="approve" data-id="' + escapeHTML(p.id) + '" data-sha="' + escapeHTML(shortSha) + '">✓ Approve (' + escapeHTML(shortSha) + ')</button>' +
+          '<button type="button" class="btn btn-reject" data-hq-action="reject" data-id="' + escapeHTML(p.id) + '">✕ Reject</button>' +
+          '</div></div>';
+      }
+      pendingList.innerHTML = html;
+    } else {
+      pendingList.innerHTML = '<div class="card muted" id="no-pending">No pending outbound actions requiring authorization.</div>';
+    }
+  }
+
+  // Expired Proposals & Decision Cards
+  const expSec = document.getElementById('expired-proposals-section');
+  if (expSec) {
+    if (expired.length > 0) {
+      let eHtml = '<h2>Timed-Out Approvals Unsent (' + expired.length + ')</h2><div id="expired-proposals-list">';
+      for (const rec of expired) {
+        const prop = rec.proposal || {};
+        eHtml += '<div class="card"><div class="meta-row"><strong>⏰ ' + escapeHTML(prop.summary) + '</strong><span class="badge badge-warn">expired</span></div>' +
+          '<div class="muted" style="margin:4px 0">ID: <code>' + escapeHTML(prop.id) + '</code> · Expired: <code>' + escapeHTML(rec.timestamp) + '</code></div>' +
+          '<div class="actions">' +
+          '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="restage-proposal" data-id="' + escapeHTML(prop.id) + '">↻ Re-open 24h Card</button>' +
+          '<button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="dismiss-expired" data-id="' + escapeHTML(prop.id) + '">✕ Dismiss</button>' +
+          '</div></div>';
+      }
+      expSec.innerHTML = eHtml + '</div>';
+    } else {
+      expSec.innerHTML = '';
+    }
+  }
+
+  const decSec = document.getElementById('decision-cards-section');
+  if (decSec) {
+    if (decisions.length > 0) {
+      let dHtml = '<h2>Quick Decisions (' + decisions.length + ')</h2><div id="decision-cards-list">';
+      for (const dc of decisions) {
+        let btns = '';
+        for (const opt of (dc.decisions || [])) {
+          const cls = opt.recommended ? 'btn-approve' : 'btn-secondary';
+          btns += '<button type="button" class="btn ' + cls + '" style="font-size:11px;padding:4px 8px" data-hq-action="outbox-act" data-id="' + escapeHTML(dc.id) + '" data-opt="' + escapeHTML(opt.id) + '">' + escapeHTML(opt.label) + '</button>';
+        }
+        dHtml += '<div class="card" id="decision-' + escapeHTML(dc.id) + '">' +
+          '<div class="meta-row"><strong>⚡ ' + escapeHTML(dc.title) + '</strong><span class="badge badge-info">' + escapeHTML(dc.sourceSkill) + '</span></div>' +
+          (dc.summary ? '<div class="muted" style="margin:4px 0;color:#cbd5e1">' + escapeHTML(dc.summary) + '</div>' : '') +
+          '<div class="actions">' + btns + '</div></div>';
+      }
+      decSec.innerHTML = dHtml + '</div>';
+    } else {
+      decSec.innerHTML = '';
+    }
+  }
+
+  // Ideas
+  setText('ideas-count', ideas.length);
+  const ideasList = document.getElementById('ideas-list');
+  if (ideasList) {
+    if (ideas.length > 0) {
+      let iHtml = '';
+      for (const it of ideas) {
+        iHtml += '<div class="card" id="idea-' + escapeHTML(it.id) + '">' +
+          '<div class="meta-row"><strong>💡 ' + escapeHTML(it.title) + '</strong><span class="badge badge-info">' + escapeHTML(it.sourceSkill || 'idea') + '</span></div>' +
+          (it.summary ? '<div class="muted" style="margin:4px 0;color:#cbd5e1">' + escapeHTML(it.summary) + '</div>' : '') +
+          '<div class="actions">' +
+          '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="' + escapeHTML(it.id) + '" data-idea-op="promote">Promote</button>' +
+          '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="' + escapeHTML(it.id) + '" data-idea-op="snooze">Snooze 24h</button>' +
+          '<button type="button" class="btn btn-reject" style="font-size:11px;padding:4px 8px" data-hq-action="idea-action" data-id="' + escapeHTML(it.id) + '" data-idea-op="dismiss">Dismiss</button>' +
+          '</div></div>';
+      }
+      ideasList.innerHTML = iHtml;
+    } else {
+      ideasList.innerHTML = '<div class="card muted">No pending proactive ideas in outbox.</div>';
+    }
+  }
+
+  // 2. Work: Tasks (preserving TaskBadges!)
+  setText('task-count', tasks.length);
+  setText('workspaces-heading', 'Active Workspaces (' + workspaces.length + ')');
+  const tasksList = document.getElementById('tasks-list');
+  const badges = obs.taskBadges || {};
+  if (tasksList) {
+    if (tasks.length > 0) {
+      let html = '';
+      for (const t of tasks) {
+        const badgeClass = t.status === 'active' ? 'badge-pass' : 'badge-warn';
+        const cidKey = String(t.conversationId || '').trim().toLowerCase();
+        const tb = badges[cidKey];
+        const tokBadgeHtml = (tb && tb.grossTokens > 0 && tb.compactLabel)
+          ? (' · Tokens: <code>' + escapeHTML(tb.compactLabel) + '</code>')
+          : '';
+        html += '<div class="card" id="task-' + escapeHTML(t.taskSlug) + '">' +
+          '<div class="meta-row"><strong>' + escapeHTML(t.title) + '</strong>' +
+          '<span class="badge ' + badgeClass + '">' + escapeHTML(t.status) + '</span></div>' +
+          '<div class="muted" style="margin:4px 0">Slug: <code>' + escapeHTML(t.taskSlug) + '</code> · Model: ' + escapeHTML(t.model) + ' · Conv: <a href="conversation://' + escapeHTML(t.conversationId) + '">' + escapeHTML(t.conversationId) + '</a>' + tokBadgeHtml + '</div>' +
+          (t.lastSummary ? '<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">' + escapeHTML(t.lastSummary) + '</div>' : '') +
+          '<div class="actions">' +
+          (t.status === 'active' ? '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="complete-task" data-slug="' + escapeHTML(t.taskSlug) + '">Complete</button>' : '') +
+          (t.status !== 'archived' ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="archive-task" data-slug="' + escapeHTML(t.taskSlug) + '">Archive</button>' : '') +
+          '</div></div>';
+      }
+      tasksList.innerHTML = html;
+    } else {
+      tasksList.innerHTML = '<div class="card muted">No active tasks on the live board.</div>';
+    }
+  }
+
+  // 3. Tokens Tab
+  renderTokensTab(obs);
+
+  // 4. Ops: Quota & Schedules & Health
+  if (state.quota) {
+    const autoUsed = (state.quota.autoSpawnsToday || state.quota.interactiveSpawnsToday)
+      ? (state.quota.autoSpawnsToday || 0)
+      : (state.quota.spawnsToday || 0);
+    setText('quota-spawns', autoUsed);
+    if (state.quota.maxDailySpawns) setText('quota-max-spawns', state.quota.maxDailySpawns);
+    setText('quota-interactive', state.quota.interactiveSpawnsToday > 0 ? ' (+' + state.quota.interactiveSpawnsToday + ' interactive)' : '');
+    const qBadge = document.getElementById('quota-circuit-badge');
+    if (qBadge) {
+      qBadge.innerHTML = state.quota.circuitOpen
+        ? '<span class="badge badge-warn">CIRCUIT OPEN (' + escapeHTML(state.quota.circuitReason) + ')</span>'
+        : '<span class="badge badge-pass">BUDGET OK</span>';
+    }
+    const qBar = document.getElementById('quota-bar-fill');
+    if (qBar && state.quota.maxDailySpawns > 0) {
+      qBar.style.width = clampPct((autoUsed / state.quota.maxDailySpawns) * 100).toFixed(1) + '%';
+    }
+    setText('quota-heartbeat', 'Last Heartbeat: ' + (state.quota.lastStatus || 'Not run yet today'));
+  }
+
+  setText('schedules-count', schedules.length);
+  const schedList = document.getElementById('schedules-list');
+  if (schedList) {
+    if (schedules.length > 0) {
+      let shtml = '';
+      for (const s of schedules) {
+        const icon = s.kind === 'daemon' ? '⚙️ ' : '🕒 ';
+        const badgeCls = s.enabled ? 'badge-pass' : 'badge-warn';
+        const badgeTxt = s.enabled ? (s.kind === 'daemon' ? 'daemon' : 'chat cron') : 'paused';
+        let meta = 'Cron: <code>' + escapeHTML(s.cron) + '</code> · Runner: <code>' + escapeHTML(s.runner) + '</code>';
+        if (s.skill) meta += ' · Skill: <code>/' + escapeHTML(s.skill) + '</code>';
+        if (s.latestConvId) meta += ' · Latest: <a href="conversation://' + escapeHTML(s.latestConvId) + '">' + escapeHTML(s.latestConvId) + '</a>';
+        let telemetry = '';
+        if (s.lastCheckedAt || s.lastTriggeredAt || s.skipsCount) {
+          const parts = [];
+          if (s.lastCheckedAt) parts.push('Last checked: <code>' + escapeHTML(s.lastCheckedAt) + '</code>');
+          if (s.lastTriggeredAt) parts.push('Last fired: <code>' + escapeHTML(s.lastTriggeredAt) + '</code>');
+          if (s.skipsCount) parts.push('0-token skips: <code>' + escapeHTML(s.skipsCount) + '</code>');
+          telemetry = '<div class="muted" style="font-size:11px">' + parts.join(' · ') + '</div>';
+        }
+        let actions = '';
+        if (s.kind === 'daemon') {
+          actions = '<div class="actions">' +
+            (s.enabled
+              ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="pause">Pause</button>'
+              : '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="resume">Resume</button>') +
+            '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="fire">Run Now</button>' +
+            '</div>';
+        }
+        shtml += '<div class="card" id="sched-' + escapeHTML(s.id) + '">' +
+          '<div class="meta-row"><strong>' + icon + escapeHTML(s.id) + '</strong><span class="badge ' + badgeCls + '">' + badgeTxt + '</span></div>' +
+          '<div class="muted" style="margin:4px 0">' + meta + '</div>' +
+          (s.summary ? '<div class="muted" style="margin:4px 0;color:#cbd5e1">' + escapeHTML(s.summary) + '</div>' : '') +
+          telemetry +
+          (s.lastError ? '<div class="muted" style="font-size:11px;color:#fca5a5">Last error: ' + escapeHTML(s.lastError) + '</div>' : '') +
+          actions + '</div>';
+      }
+      schedList.innerHTML = shtml;
+    } else {
+      schedList.innerHTML = '<div class="card muted">No scheduled automations configured.</div>';
+    }
+  }
+
+  const healthGrid = document.getElementById('health-grid');
+  if (healthGrid && state.health) {
+    let hHtml = '';
+    for (const h of state.health) {
+      const cls = h.status === 'PASS' ? 'badge-pass' : 'badge-warn';
+      hHtml += '<div class="card" style="margin-bottom:6px"><div class="meta-row"><strong>' + escapeHTML(h.name) + '</strong><span class="badge ' + cls + '">' + escapeHTML(h.status) + '</span></div><div class="muted" style="margin-top:2px">' + escapeHTML(h.detail) + '</div></div>';
+    }
+    healthGrid.innerHTML = hHtml;
+  }
+}
+
+// Hydrate Tokens charts & tables immediately from SSR bootstrap JSON
+(function hydrateBootstrap() {
+  try {
+    const el = document.getElementById('hq-bootstrap-state');
+    if (el && el.textContent) {
+      latestState = JSON.parse(el.textContent);
+      if (latestState && latestState.observability) {
+        renderTokensTab(latestState.observability);
+      }
+    }
+  } catch (err) {
+    console.warn('bootstrap parse failed:', err);
+  }
+})();
 
 let refreshInFlight = false;
 let refreshTimer = null;
@@ -845,123 +1555,10 @@ async function refreshState() {
   try {
     const fetchOpts = { headers: { 'Accept': 'application/json' } };
     if (controller) fetchOpts.signal = controller.signal;
-    const res = await fetch('/api/state', fetchOpts);
+    const res = await hqFetch('/api/state', fetchOpts);
     if (!res.ok) return;
     const state = await res.json();
-    document.getElementById('last-updated').textContent = 'Updated ' + state.updatedAt;
-
-    // Update pending approvals
-    const pendingList = document.getElementById('pending-list');
-    document.getElementById('pending-count').textContent = state.pending ? state.pending.length : 0;
-    if (state.pending && state.pending.length > 0) {
-      let html = '';
-      for (const p of state.pending) {
-        const shortSha = p.sha256 ? p.sha256.substring(0, 12) : '';
-        const preview = (p.metadata && (p.metadata.draftPayload || p.metadata.bodyPreview)) ? (p.metadata.draftPayload || p.metadata.bodyPreview) : '';
-        const previewHtml = preview ?
-          '<div class="preview-box">' +
-          '<div class="preview-title">💬 Message Preview</div>' +
-          '<blockquote class="preview-quote">' + escapeHTML(preview) + '</blockquote>' +
-          '</div>' : '';
-
-        html += '<div class="card pending-hero" id="proposal-' + escapeHTML(p.id) + '">' +
-          '<div class="meta-row"><div><strong style="font-size:13px">' + escapeHTML(p.summary) + '</strong></div>' +
-          '<span class="badge badge-warn">' + escapeHTML(p.actionType) + '</span></div>' +
-          '<div class="muted" style="margin:4px 0">ID: <code>' + escapeHTML(p.id) + '</code> · SHA-256: <code title="' + escapeHTML(p.sha256) + '">' + escapeHTML(shortSha) + '</code></div>' +
-          previewHtml +
-          '<pre class="code-block">' + escapeHTML(p.command) + '</pre>' +
-          '<div class="actions">' +
-          '<button type="button" class="btn btn-approve" data-hq-action="approve" data-id="' + escapeHTML(p.id) + '" data-sha="' + escapeHTML(shortSha) + '">✓ Approve (' + escapeHTML(shortSha) + ')</button>' +
-          '<button type="button" class="btn btn-reject" data-hq-action="reject" data-id="' + escapeHTML(p.id) + '">✕ Reject</button>' +
-          '</div></div>';
-      }
-      pendingList.innerHTML = html;
-    } else {
-      pendingList.innerHTML = '<div class="card muted" id="no-pending">No pending outbound actions requiring authorization.</div>';
-    }
-
-    // Update tasks
-    const tasksList = document.getElementById('tasks-list');
-    document.getElementById('task-count').textContent = state.tasks ? state.tasks.length : 0;
-    if (state.tasks && state.tasks.length > 0) {
-      let html = '';
-      for (const t of state.tasks) {
-        const badgeClass = t.status === 'active' ? 'badge-pass' : 'badge-warn';
-        html += '<div class="card" id="task-' + escapeHTML(t.taskSlug) + '">' +
-          '<div class="meta-row"><strong>' + escapeHTML(t.title) + '</strong>' +
-          '<span class="badge ' + badgeClass + '">' + escapeHTML(t.status) + '</span></div>' +
-          '<div class="muted" style="margin:4px 0">Slug: <code>' + escapeHTML(t.taskSlug) + '</code> · Model: ' + escapeHTML(t.model) + ' · Conv: <a href="conversation://' + escapeHTML(t.conversationId) + '">' + escapeHTML(t.conversationId) + '</a></div>' +
-          (t.lastSummary ? '<div class="muted" style="margin:4px 0 8px;color:#cbd5e1">' + escapeHTML(t.lastSummary) + '</div>' : '') +
-          '<div class="actions">' +
-          (t.status === 'active' ? '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="complete-task" data-slug="' + escapeHTML(t.taskSlug) + '">Complete</button>' : '') +
-          (t.status !== 'archived' ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="archive-task" data-slug="' + escapeHTML(t.taskSlug) + '">Archive</button>' : '') +
-          '</div></div>';
-      }
-      tasksList.innerHTML = html;
-    } else {
-      tasksList.innerHTML = '<div class="card muted">No active tasks on the live board.</div>';
-    }
-
-    // Update schedules
-    const schedList = document.getElementById('schedules-list');
-    const schedCount = document.getElementById('schedules-count');
-    if (schedCount) schedCount.textContent = state.schedules ? state.schedules.length : 0;
-    if (schedList) {
-      if (state.schedules && state.schedules.length > 0) {
-        let shtml = '';
-        for (const s of state.schedules) {
-          const icon = s.kind === 'daemon' ? '⚙️ ' : '🕒 ';
-          const badgeCls = s.enabled ? 'badge-pass' : 'badge-warn';
-          const badgeTxt = s.enabled ? (s.kind === 'daemon' ? 'daemon' : 'chat cron') : 'paused';
-          let meta = 'Cron: <code>' + escapeHTML(s.cron) + '</code> · Runner: <code>' + escapeHTML(s.runner) + '</code>';
-          if (s.skill) meta += ' · Skill: <code>/' + escapeHTML(s.skill) + '</code>';
-          if (s.latestConvId) meta += ' · Latest: <a href="conversation://' + escapeHTML(s.latestConvId) + '">' + escapeHTML(s.latestConvId) + '</a>';
-          let telemetry = '';
-          if (s.lastCheckedAt || s.lastTriggeredAt || s.skipsCount) {
-            const parts = [];
-            if (s.lastCheckedAt) parts.push('Last checked: <code>' + escapeHTML(s.lastCheckedAt) + '</code>');
-            if (s.lastTriggeredAt) parts.push('Last fired: <code>' + escapeHTML(s.lastTriggeredAt) + '</code>');
-            if (s.skipsCount) parts.push('0-token skips: <code>' + escapeHTML(s.skipsCount) + '</code>');
-            telemetry = '<div class="muted" style="font-size:11px">' + parts.join(' · ') + '</div>';
-          }
-          let actions = '';
-          if (s.kind === 'daemon') {
-            actions = '<div class="actions">' +
-              (s.enabled
-                ? '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="pause">Pause</button>'
-                : '<button type="button" class="btn btn-approve" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="resume">Resume</button>') +
-              '<button type="button" class="btn btn-secondary" style="font-size:11px;padding:4px 8px" data-hq-action="trigger-action" data-id="' + escapeHTML(s.id) + '" data-trigger-op="fire">Run Now</button>' +
-              '</div>';
-          }
-          shtml += '<div class="card" id="sched-' + escapeHTML(s.id) + '">' +
-            '<div class="meta-row"><strong>' + icon + escapeHTML(s.id) + '</strong><span class="badge ' + badgeCls + '">' + badgeTxt + '</span></div>' +
-            '<div class="muted" style="margin:4px 0">' + meta + '</div>' +
-            (s.summary ? '<div class="muted" style="margin:4px 0;color:#cbd5e1">' + escapeHTML(s.summary) + '</div>' : '') +
-            telemetry +
-            (s.lastError ? '<div class="muted" style="font-size:11px;color:#fca5a5">Last error: ' + escapeHTML(s.lastError) + '</div>' : '') +
-            actions +
-            '</div>';
-        }
-        schedList.innerHTML = shtml;
-      } else {
-        schedList.innerHTML = '<div class="card muted">No scheduled automations configured.</div>';
-      }
-    }
-
-    // Update Quota spawns
-    if (state.quota) {
-      const qSpan = document.getElementById('quota-spawns');
-      const autoUsed = (state.quota.autoSpawnsToday || state.quota.interactiveSpawnsToday)
-        ? (state.quota.autoSpawnsToday || 0)
-        : (state.quota.spawnsToday || 0);
-      if (qSpan) qSpan.textContent = autoUsed;
-      const qMax = document.getElementById('quota-max-spawns');
-      if (qMax && state.quota.maxDailySpawns) qMax.textContent = state.quota.maxDailySpawns;
-      const qInter = document.getElementById('quota-interactive');
-      if (qInter) {
-        qInter.textContent = state.quota.interactiveSpawnsToday > 0 ? ' (+' + state.quota.interactiveSpawnsToday + ' interactive)' : '';
-      }
-    }
+    renderAllFromState(state);
   } catch (err) {
     console.warn('background state refresh failed:', err);
   } finally {

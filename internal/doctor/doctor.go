@@ -162,19 +162,23 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		if artDir != "" {
 			artPath := filepath.Join(artDir, "hq_console.md")
 			metaPath := filepath.Join(artDir, "hq_console.md.metadata.json")
+			livePath := filepath.Join(artDir, "hq_console_live.html")
+			liveMeta := filepath.Join(artDir, "hq_console_live.html.metadata.json")
 			_, errArt := os.Stat(artPath)
 			_, errMeta := os.Stat(metaPath)
-			if errArt == nil && errMeta == nil {
+			_, errLive := os.Stat(livePath)
+			_, errLiveMeta := os.Stat(liveMeta)
+			if errArt == nil && errMeta == nil && errLive == nil && errLiveMeta == nil {
 				results = append(results, CheckResult{
 					Name:   "Front Desk Console Artifact",
 					Status: "PASS",
-					Detail: fmt.Sprintf("Synced at %s (UI pinned=%v)", artPath, fd.ConsolePinned),
+					Detail: fmt.Sprintf("Synced hq_console.md & hq_console_live.html at %s (mdPinned=%v, livePinned=%v)", artDir, fd.ConsolePinned, fd.LiveConsolePinned),
 				})
 			} else {
 				results = append(results, CheckResult{
 					Name:   "Front Desk Console Artifact",
 					Status: "WARN",
-					Detail: fmt.Sprintf("Missing %s; run './bin/hq console'", artPath),
+					Detail: fmt.Sprintf("Missing console artifact(s) in %s; run './bin/hq console'", artDir),
 				})
 			}
 		}
@@ -356,6 +360,7 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		fdCtxStr = "compacted (pending next turn)"
 	}
 	chrPct := obsSum.TodayCacheHitRatio * 100.0
+	ceilStr := obs.FormatTokensCompact(obsSum.Budget.EffectiveContextCeiling())
 	var tokStatus, tokDetail string
 	switch {
 	case obsSum.Budget.TokenCircuitDisabled:
@@ -363,19 +368,19 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 		if obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.FrontDeskContextStatus == "WARN" {
 			tokStatus = "WARN"
 		}
-		tokDetail = fmt.Sprintf("Today uncached %s (budget circuit disabled), CHR %.1f%%, Front Desk context %s / 256k (%s)",
-			todayUncachedStr, chrPct, fdCtxStr, obsSum.FrontDeskContextStatus)
+		tokDetail = fmt.Sprintf("Today uncached %s (budget circuit disabled), CHR %.1f%% (~$%.2f), Front Desk context %s / %s (%s)",
+			todayUncachedStr, chrPct, obsSum.TodayEstCostUSD, fdCtxStr, ceilStr, obsSum.FrontDeskContextStatus)
 	case obsSum.FrontDeskContextStatus == "CRITICAL" || obsSum.DailyBudgetPct >= 100 || obsSum.DeepBudgetPct >= 100:
 		tokStatus = "WARN"
-		tokDetail = fmt.Sprintf("Today uncached %s / %s (%.1f%%), Front Desk context %s / 256k (%s); run 'hq obs anomalies' or '/compact'",
-			todayUncachedStr, dailyBudgetStr, obsSum.DailyBudgetPct, fdCtxStr, obsSum.FrontDeskContextStatus)
+		tokDetail = fmt.Sprintf("Today uncached %s / %s (%.1f%%, ~$%.2f), Front Desk context %s / %s (%s); run 'hq obs anomalies' or '/compact'",
+			todayUncachedStr, dailyBudgetStr, obsSum.DailyBudgetPct, obsSum.TodayEstCostUSD, fdCtxStr, ceilStr, obsSum.FrontDeskContextStatus)
 	default:
 		tokStatus = "PASS"
 		if obsSum.FrontDeskContextStatus == "WARN" || obsSum.DailyBudgetPct >= 80 || obsSum.DeepBudgetPct >= 80 {
 			tokStatus = "WARN"
 		}
-		tokDetail = fmt.Sprintf("Today uncached %s / %s (%.1f%%), CHR %.1f%%, Front Desk context %s / 256k (%s)",
-			todayUncachedStr, dailyBudgetStr, obsSum.DailyBudgetPct, chrPct, fdCtxStr, obsSum.FrontDeskContextStatus)
+		tokDetail = fmt.Sprintf("Today uncached %s / %s (%.1f%%, ~$%.2f), CHR %.1f%%, Front Desk context %s / %s (%s)",
+			todayUncachedStr, dailyBudgetStr, obsSum.DailyBudgetPct, obsSum.TodayEstCostUSD, chrPct, fdCtxStr, ceilStr, obsSum.FrontDeskContextStatus)
 	}
 	results = append(results, CheckResult{
 		Name:   "Token Budget & Context Health",

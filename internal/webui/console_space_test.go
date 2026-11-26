@@ -63,9 +63,22 @@ func TestSyncConsoleLivingSpaceMobileArtifactAndCSPSandbox(t *testing.T) {
 		t.Fatalf("expected hq_console_live.html.metadata.json: %v", err)
 	}
 	htmlStr := string(liveBytes)
+	if len(liveBytes) > 45*1024 {
+		t.Fatalf("expected portable hq_console_live.html <= 45 KB, got %d bytes", len(liveBytes))
+	}
+	if strings.Contains(htmlStr, "All Views") {
+		t.Fatalf("expected HideAllPerspective to omit 'All Views' pill in hq_console_live.html")
+	}
+	for _, banned := range []string{"QBU", "Compute Share", "/ 256k"} {
+		if strings.Contains(htmlStr, banned) {
+			t.Fatalf("expected zero jargon/legacy ceiling %q in hq_console_live.html", banned)
+		}
+	}
 	for _, want := range []string{
 		"agy-hq Live Console",
 		`"defaultPerspective":"needs_me"`,
+		`data-persp="tokens"`,
+		"512k",
 		"Reply to Alice on mobile launch",
 		"hq approve " + prop.ID,
 		"hq outbox act dec-mob-1 --option=handled",
@@ -98,5 +111,60 @@ func TestSyncConsoleLivingSpaceMobileArtifactAndCSPSandbox(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
 		t.Fatalf("expected 200 + strict CSP on /living-spaces/hq-console/raw, got %d csp=%q", rec.Code, rec.Header().Get("Content-Security-Policy"))
+	}
+}
+
+func TestConsole4TabSmartDefaultAndTokensUX(t *testing.T) {
+	vaultDir := t.TempDir()
+	artDir := t.TempDir()
+	_ = kernel.SetFrontDesk(vaultDir, "fd-work-default", artDir)
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "active-only",
+		Title:          "[Task:core] Active Engineering Work",
+		Kind:           "task",
+		ConversationID: "conv-work-only-1",
+		Status:         "active",
+	})
+
+	if err := SyncMarkdownConsole(vaultDir); err != nil {
+		t.Fatalf("SyncMarkdownConsole: %v", err)
+	}
+	liveBytes, err := os.ReadFile(filepath.Join(artDir, "hq_console_live.html"))
+	if err != nil {
+		t.Fatalf("read hq_console_live.html: %v", err)
+	}
+	if !strings.Contains(string(liveBytes), `"defaultPerspective":"work"`) {
+		t.Fatalf("expected defaultPerspective=work when 0 pending actions and >=1 active task")
+	}
+
+	h := NewHandler(vaultDir)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / failed: %d", rec.Code)
+	}
+	webHTML := rec.Body.String()
+	for _, want := range []string{
+		`data-default-tab="work"`,
+		`data-tab="needs_me"`,
+		`data-tab="work"`,
+		`data-tab="tokens"`,
+		`data-tab="ops"`,
+		`data-win="today"`,
+		`data-win="7d"`,
+		`data-win="30d"`,
+		`data-win="all"`,
+		`function hqFetch(`,
+		`512k`,
+	} {
+		if !strings.Contains(webHTML, want) {
+			t.Fatalf("expected %q in Web Console HTML", want)
+		}
+	}
+	for _, banned := range []string{"QBU", "Compute Share", "/ 256k"} {
+		if strings.Contains(webHTML, banned) {
+			t.Fatalf("expected zero %q jargon in Web Console HTML", banned)
+		}
 	}
 }

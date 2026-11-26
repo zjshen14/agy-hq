@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,7 +158,7 @@ func main() {
 		fs := flag.NewFlagSet("console", flag.ExitOnError)
 		_ = fs.Parse(os.Args[2:])
 		dieIfErr("hq console sync failed", webui.SyncMarkdownConsole(vaultDir))
-		fmt.Println("Synced local/CONSOLE.md and active Front Desk hq_console.md artifact")
+		fmt.Println("Synced local/CONSOLE.md and active Front Desk hq_console.md + hq_console_live.html artifacts")
 
 	case "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
@@ -365,7 +367,15 @@ func main() {
 			dieIfErr("hq hook session-start", hooks.HandleSessionStart(os.Stdin, os.Stdout, vaultDir))
 			webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)
 		case "pre-tool", "pre-tool-use":
-			needsSync, err := hooks.HandlePreToolUseWithSync(os.Stdin, os.Stdout, vaultDir)
+			rawStdin, _ := io.ReadAll(os.Stdin)
+			if bytes.Contains(rawStdin, []byte("{{HQ_SYNC}}")) {
+				_, e1 := os.Stat(filepath.Join(vaultDir, "CONSOLE.md"))
+				_, e2 := os.Stat(filepath.Join(vaultDir, "living_spaces", "hq-console", "index.html"))
+				if e1 != nil || e2 != nil {
+					webui.SyncMarkdownConsoleForHook(vaultDir, 2*time.Second)
+				}
+			}
+			needsSync, err := hooks.HandlePreToolUseWithSync(bytes.NewReader(rawStdin), os.Stdout, vaultDir)
 			dieIfErr("hq hook pre-tool", err)
 			if needsSync {
 				webui.SyncMarkdownConsoleForHook(vaultDir, 4*time.Second)

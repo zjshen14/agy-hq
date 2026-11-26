@@ -24,7 +24,71 @@ func rollupsApproxEqual(a, b TokenRollup) bool {
 		a.ActiveLatencyMs == b.ActiveLatencyMs &&
 		a.HumanWaitMs == b.HumanWaitMs &&
 		floatApproxEqual(a.QuotaUnits, b.QuotaUnits) &&
-		floatApproxEqual(a.EstCostUSD, b.EstCostUSD)
+		floatApproxEqual(a.EstCostUSD, b.EstCostUSD) &&
+		floatApproxEqual(a.CacheSavedUSD, b.CacheSavedUSD)
+}
+
+func resolveTurnModelFromSpans(t TurnMetrics, spans []JournalModelSpan, defaultModel string) string {
+	if len(spans) == 0 {
+		return defaultModel
+	}
+	bestModel := ""
+	bestOverlap := -1
+	bestExec := -1
+	for _, sp := range spans {
+		if sp.Model == "" {
+			continue
+		}
+		lo := t.StepStartIdx
+		if sp.StepStart > lo {
+			lo = sp.StepStart
+		}
+		hi := t.StepEndIdx
+		if sp.StepEnd < hi {
+			hi = sp.StepEnd
+		}
+		if hi >= lo {
+			ov := hi - lo + 1
+			if ov > bestOverlap || (ov == bestOverlap && sp.ExecNum >= bestExec) {
+				bestOverlap = ov
+				bestExec = sp.ExecNum
+				bestModel = sp.Model
+			}
+		}
+	}
+	if bestModel != "" {
+		return bestModel
+	}
+	tTS := turnEffectiveTime(t)
+	if !tTS.IsZero() {
+		var bestDiff time.Duration
+		for _, sp := range spans {
+			if sp.Model == "" || sp.Timestamp == "" {
+				continue
+			}
+			spTS := parseTimestamp(sp.Timestamp)
+			if spTS.IsZero() {
+				continue
+			}
+			diff := spTS.Sub(tTS)
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff <= 5*time.Minute && (bestModel == "" || diff < bestDiff) {
+				bestDiff = diff
+				bestModel = sp.Model
+			}
+		}
+		if bestModel != "" {
+			return bestModel
+		}
+	}
+	for i := len(spans) - 1; i >= 0; i-- {
+		if spans[i].Model != "" && spans[i].StepStart <= t.StepEndIdx {
+			return spans[i].Model
+		}
+	}
+	return defaultModel
 }
 
 func floatApproxEqual(a, b float64) bool {
@@ -88,21 +152,33 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	}
 
 	taskByConv := make(map[string]kernel.ActiveTask)
+	supersededOwner := make(map[string]kernel.ActiveTask)
+	recordTask := func(t kernel.ActiveTask, overwrite bool) {
+		cid := strings.ToLower(strings.TrimSpace(t.ConversationID))
+		if cid != "" {
+			if overwrite {
+				taskByConv[cid] = t
+			} else if _, exists := taskByConv[cid]; !exists {
+				taskByConv[cid] = t
+			}
+		}
+		for _, rawSup := range t.SupersededConversationIDs {
+			supID := strings.ToLower(strings.TrimSpace(rawSup))
+			if supID != "" && supID != cid && supID != fdID {
+				if _, exists := supersededOwner[supID]; overwrite || !exists {
+					supersededOwner[supID] = t
+				}
+			}
+		}
+	}
 	if hot, err := kernel.ListTasks(vaultDir); err == nil {
 		for _, t := range hot {
-			if t.ConversationID != "" {
-				taskByConv[strings.ToLower(strings.TrimSpace(t.ConversationID))] = t
-			}
+			recordTask(t, true)
 		}
 	}
 	if cold, _, err := kernel.ListArchivedTasks(vaultDir, 0); err == nil {
 		for _, t := range cold {
-			cid := strings.ToLower(strings.TrimSpace(t.ConversationID))
-			if cid != "" {
-				if _, exists := taskByConv[cid]; !exists {
-					taskByConv[cid] = t
-				}
-			}
+			recordTask(t, false)
 		}
 	}
 
@@ -129,7 +205,7 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	nestedParents := kernel.LoadNestedConversationParents(vaultDir)
 	parentIDs, edgeByChild := collectWinningSpawnEdges(idx)
 
-	// 2. Enrich each conversation's metadata (Ground-truth SpawnEdge > tasks.json > transcript fallback)
+	// 2. Enrich each conversation's metadata (Ground-truth SpawnEdge > Journal > tasks.json > transcript fallback)
 	for _, cid := range parentIDs {
 		cm := idx.Conversations[cid]
 		origTitle := cm.Title
@@ -137,10 +213,19 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 		origKind := cm.Kind
 		origScope := cm.Scope
 		origTier := cm.Tier
+		origReqTier := cm.RequestedTier
 		origModel := cm.Model
+		origModelSrc := cm.ModelSource
 		origStatus := cm.Status
 		origParent := cm.ParentConversationID
 		origSelf := cm.Self
+
+		if len(cm.JournalSpans) > 0 {
+			if latest := cm.JournalSpans[len(cm.JournalSpans)-1].Model; latest != "" {
+				cm.Model = latest
+				cm.ModelSource = "journal"
+			}
+		}
 
 		if fdID != "" && cid == fdID {
 			cm.Kind = "front_desk"
@@ -149,8 +234,9 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			cm.Scope = "hq"
 			if cm.Model == "" {
 				cm.Model = "gemini-4-hydrogen-medium"
+				cm.ModelSource = "fallback"
 			}
-			cm.Tier = NormalizeTier("", cm.Model)
+			cm.Tier = ModelCanonicalTier(cm.Model)
 			cm.Status = "active"
 		} else {
 			if t, ok := taskByConv[cid]; ok {
@@ -159,10 +245,14 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 				cm.Kind = t.EffectiveKind()
 				cm.Scope = t.EffectiveScope()
 				if t.Tier != "" {
-					cm.Tier = t.Tier
+					cm.RequestedTier = t.Tier
+					if cm.Tier == "" {
+						cm.Tier = t.Tier
+					}
 				}
-				if t.Model != "" && cm.Model == "" {
+				if t.Model != "" && (cm.Model == "" || cm.ModelSource == "fallback") {
 					cm.Model = t.Model
+					cm.ModelSource = "task"
 				}
 				if t.ParentConversationID != "" {
 					cm.ParentConversationID = strings.ToLower(strings.TrimSpace(t.ParentConversationID))
@@ -185,9 +275,13 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 					cm.Title = title
 					cm.TaskSlug = slug
 					cm.Scope = scope
-					cm.Tier = tier
-					if cm.Model == "" && cleanModel != "" && cleanModel != "inherit" {
+					cm.RequestedTier = tier
+					if (cm.Model == "" || cm.ModelSource == "fallback") && cleanModel != "" && cleanModel != "inherit" {
 						cm.Model = cleanModel
+						cm.ModelSource = "spawn_edge"
+					}
+					if cm.Model == "" {
+						cm.Tier = tier
 					}
 				} else if cleanRole != "" && cm.Title == "" {
 					cm.Title = cleanRole
@@ -201,6 +295,23 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 				cm.Kind = "nested_subagent"
 				if cm.ParentConversationID == "" && nestedParent != "" {
 					cm.ParentConversationID = nestedParent
+				}
+			} else if ownerTask, isSuperseded := supersededOwner[cid]; isSuperseded {
+				ownerCID := strings.ToLower(strings.TrimSpace(ownerTask.ConversationID))
+				cm.Scope = ownerTask.EffectiveScope()
+				if ownerTask.Tier != "" && cm.RequestedTier == "" {
+					cm.RequestedTier = ownerTask.Tier
+				}
+				if cm.Title == "" || strings.HasPrefix(cm.TaskSlug, "conv-") {
+					shortID := store.ShortConvID(cid)
+					cm.Title = ownerTask.Title + " (prior run " + shortID + ")"
+					cm.TaskSlug = ownerTask.TaskSlug + "-superseded-" + shortID
+				}
+				if ownerCID != "" && ownerCID != cid {
+					if _, ownerInIdx := idx.Conversations[ownerCID]; ownerInIdx {
+						cm.ParentConversationID = ownerCID
+						cm.Kind = "nested_subagent"
+					}
 				}
 			}
 
@@ -240,7 +351,11 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			cm.Scope = "general"
 		}
 		if cm.Model == "" {
-			switch cm.Tier {
+			tierHint := cm.RequestedTier
+			if tierHint == "" {
+				tierHint = cm.Tier
+			}
+			switch strings.ToLower(strings.TrimSpace(tierHint)) {
 			case "deep":
 				cm.Model = "gemini-4-carbon-high"
 			case "quick":
@@ -248,35 +363,47 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 			default:
 				cm.Model = "gemini-4-neon-medium"
 			}
+			cm.ModelSource = "fallback"
+		} else if cm.ModelSource == "" {
+			cm.ModelSource = "journal"
 		}
-		cm.Tier = NormalizeTier(cm.Tier, cm.Model)
+		cm.Tier = ModelCanonicalTier(cm.Model)
 
-		// Recompute per-turn and Self QBU/EstCostUSD on a cloned Turns slice if changed
+		// Recompute per-turn model, cost, and cache savings on a cloned Turns slice if changed
 		turnsChanged := false
 		for ti := range cm.Turns {
-			q, c := ComputeQuotaAndCost(cm.Turns[ti].InputTokens, cm.Turns[ti].CacheReadTokens, cm.Turns[ti].OutputTokens, cm.Model, cm.Tier)
-			if !floatApproxEqual(cm.Turns[ti].QuotaUnits, q) || !floatApproxEqual(cm.Turns[ti].EstCostUSD, c) {
+			tModel := resolveTurnModelFromSpans(cm.Turns[ti], cm.JournalSpans, cm.Model)
+			tTier := ModelCanonicalTier(tModel)
+			q, c, s := ComputeQuotaCostAndSavings(cm.Turns[ti].InputTokens, cm.Turns[ti].CacheReadTokens, cm.Turns[ti].OutputTokens, tModel, tTier)
+			if cm.Turns[ti].Model != tModel || cm.Turns[ti].ModelTier != tTier ||
+				!floatApproxEqual(cm.Turns[ti].QuotaUnits, q) ||
+				!floatApproxEqual(cm.Turns[ti].EstCostUSD, c) ||
+				!floatApproxEqual(cm.Turns[ti].CacheSavedUSD, s) {
 				if !turnsChanged {
 					clonedTurns := make([]TurnMetrics, len(cm.Turns))
 					copy(clonedTurns, cm.Turns)
 					cm.Turns = clonedTurns
 					turnsChanged = true
 				}
+				cm.Turns[ti].Model = tModel
+				cm.Turns[ti].ModelTier = tTier
 				cm.Turns[ti].QuotaUnits = q
 				cm.Turns[ti].EstCostUSD = c
+				cm.Turns[ti].CacheSavedUSD = s
 			}
 		}
 		cm.Self = RollupTurns(cm.Turns, cm.Self.StepCount, cm.Model, cm.Tier)
 
 		if turnsChanged || cm.Title != origTitle || cm.TaskSlug != origSlug || cm.Kind != origKind ||
-			cm.Scope != origScope || cm.Tier != origTier || cm.Model != origModel ||
+			cm.Scope != origScope || cm.Tier != origTier || cm.RequestedTier != origReqTier ||
+			cm.Model != origModel || cm.ModelSource != origModelSrc ||
 			cm.Status != origStatus || cm.ParentConversationID != origParent || !rollupsApproxEqual(cm.Self, origSelf) {
 			changed = true
 		}
 		idx.Conversations[cid] = cm
 	}
 
-	// 3. Populate ChildConversationIDs, RootConversationID, and compute recursive Tree rollups
+	// 3. Populate ChildConversationIDs, RootConversationID, DescendantCount, and compute recursive Tree rollups
 	for cid, cm := range idx.Conversations {
 		kids := childrenByParent[cid]
 		sort.Strings(kids)
@@ -304,38 +431,43 @@ func enrichAndBuildDAG(vaultDir string, idx *ObsIndex) bool {
 	}
 
 	memo := make(map[string]TokenRollup)
+	descMemo := make(map[string]int)
 	inProgress := make(map[string]bool)
-	var computeTree func(cid string) TokenRollup
-	computeTree = func(cid string) TokenRollup {
+	var computeTree func(cid string) (TokenRollup, int)
+	computeTree = func(cid string) (TokenRollup, int) {
 		if r, ok := memo[cid]; ok {
-			return r
+			return r, descMemo[cid]
 		}
 		cm, ok := idx.Conversations[cid]
 		if !ok {
-			return TokenRollup{}
+			return TokenRollup{}, 0
 		}
 		if inProgress[cid] {
-			return cm.Self
+			return cm.Self, 0
 		}
 		inProgress[cid] = true
 		agg := cm.Self
+		desc := 0
 		for _, childID := range cm.ChildConversationIDs {
 			if _, exists := idx.Conversations[childID]; exists {
-				childRollup := computeTree(childID)
+				childRollup, childDesc := computeTree(childID)
 				agg = AddRollup(agg, childRollup)
+				desc += 1 + childDesc
 			}
 		}
 		delete(inProgress, cid)
 		memo[cid] = agg
-		return agg
+		descMemo[cid] = desc
+		return agg, desc
 	}
 
 	for cid, cm := range idx.Conversations {
-		nextTree := computeTree(cid)
-		if !rollupsApproxEqual(cm.Tree, nextTree) {
+		nextTree, nextDesc := computeTree(cid)
+		if !rollupsApproxEqual(cm.Tree, nextTree) || cm.DescendantCount != nextDesc {
 			changed = true
 		}
 		cm.Tree = nextTree
+		cm.DescendantCount = nextDesc
 		idx.Conversations[cid] = cm
 	}
 

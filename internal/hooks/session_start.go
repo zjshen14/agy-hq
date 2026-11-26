@@ -248,7 +248,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 				}
 			}
 
-			if !ok || !fd.ConsolePinned || len(unarmedTriggers) > 0 {
+			if !ok || !fd.ConsolePinned || !fd.LiveConsolePinned || len(unarmedTriggers) > 0 {
 				artDir := strings.TrimSpace(payload.ArtifactDirectoryPath)
 				if artDir == "" {
 					artDir = strings.TrimSpace(fd.ArtifactDir)
@@ -257,7 +257,7 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					artDir = vault.ResolveArtifactDir(payload.ConversationID)
 				}
 				artPath := filepath.Join(artDir, "hq_console.md")
-				consolePath := filepath.Join(vaultDir, "CONSOLE.md")
+				liveArtPath := filepath.Join(artDir, "hq_console_live.html")
 
 				var initLines []string
 				initLines = append(initLines,
@@ -265,15 +265,24 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					fmt.Sprintf("- Active Front Desk Conversation ID: `%s`.", payload.ConversationID),
 					"- **Step 1 (Zero Redundant Reads):** `USER.md`, `MEMORY.md`, active worktrees, tracked Task Conversations, and `local/triggers.yaml` schedules are already loaded in this session context. Do **NOT** run shell commands or `read_file` to re-fetch them.",
 				)
-				if !fd.ConsolePinned {
-					initLines = append(initLines, fmt.Sprintf(
-						"- **Step 2 (Pin Live Console Artifact):** Read `%s` and call `write_file` (`Overwrite=true`, `ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live [HQ] Front Desk Console & Task Board\"}`) to `%s` so Antigravity pins the live status artifact in this conversation's UI.",
-						consolePath, artPath,
-					))
+				if !fd.ConsolePinned || !fd.LiveConsolePinned {
+					initLines = append(initLines, "- **Step 2 (Pin Live Console Artifacts — 0-Read `{{HQ_SYNC}}` Hydration):** Call `write_file` in parallel with `Content=\"{{HQ_SYNC}}\"` (`PreToolUse` hydrates exact ground-truth bytes in 0 LLM tokens — do **NOT** call `read_file` first):")
+					if !fd.ConsolePinned {
+						initLines = append(initLines, fmt.Sprintf(
+							"  - `write_file(Path=%q, Content=\"{{HQ_SYNC}}\", Overwrite=true, ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live [HQ] Front Desk Console & Task Board\"})`",
+							artPath,
+						))
+					}
+					if !fd.LiveConsolePinned {
+						initLines = append(initLines, fmt.Sprintf(
+							"  - `write_file(Path=%q, Content=\"{{HQ_SYNC}}\", Overwrite=true, ArtifactMetadata={UserFacing: true, RequestFeedback: false, Summary: \"Live Interactive [HQ] Console (Needs Me, Work, Tokens, Ops)\"})`",
+							liveArtPath,
+						))
+					}
 				} else {
 					initLines = append(initLines, fmt.Sprintf(
-						"- **Step 2 (Pin Live Console Artifact):** Already pinned at `%s`.",
-						artPath,
+						"- **Step 2 (Pin Live Console Artifacts):** Already pinned at `%s` and `%s`.",
+						artPath, liveArtPath,
 					))
 				}
 				if len(unarmedTriggers) > 0 {
@@ -289,8 +298,8 @@ func HandleSessionStart(r io.Reader, w io.Writer, vaultDir string) error {
 					}
 				}
 				initLines = append(initLines, fmt.Sprintf(
-					"- **Step 4 (Concise Welcome & Sidebar Pin):** Present a short status summary with clickable links to `[hq_console.md](file://%s)` and all active `[Task:<scope>]` conversations, and recommend the user pin this `[HQ] Front Desk` conversation to their Antigravity sidebar so it stays anchored at the top.",
-					artPath,
+					"- **Step 4 (Concise Welcome & Sidebar Pin):** Present a short status summary with clickable links to `[hq_console.md](file://%s)`, `[hq_console_live.html](file://%s)`, and all active `[Task:<scope>]` conversations, and recommend the user pin this `[HQ] Front Desk` conversation to their Antigravity sidebar so it stays anchored at the top.",
+					artPath, liveArtPath,
 				))
 				zone2Sections = append(zone2Sections, strings.Join(initLines, "\n"))
 			}

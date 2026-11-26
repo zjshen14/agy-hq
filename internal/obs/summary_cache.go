@@ -20,6 +20,12 @@ type summaryCacheRecord struct {
 	FrontDeskTranscript  string           `json:"frontDeskTranscript,omitempty"`
 	FrontDeskFileSize    int64            `json:"frontDeskFileSize,omitempty"`
 	FrontDeskModTimeNano int64            `json:"frontDeskModTimeNano,omitempty"`
+	TodayJournalSize     int64            `json:"todayJournalSize"`
+	TodayJournalModNano  int64            `json:"todayJournalModNano"`
+	ObsIndexSize         int64            `json:"obsIndexSize"`
+	ObsIndexModNano      int64            `json:"obsIndexModNano"`
+	TasksFileSize        int64            `json:"tasksFileSize"`
+	TasksModTimeNano     int64            `json:"tasksModTimeNano"`
 	Summary              DashboardSummary `json:"summary"`
 }
 
@@ -78,6 +84,14 @@ func InvalidateSummaryCache(vaultDir string) {
 	obsCacheMu.Unlock()
 }
 
+func currentNonFDActivityStamps(vaultDir string, dateStr string) (jStamp, idxStamp, tasksStamp fileStatStamp) {
+	memDir := filepath.Join(vaultDir, "memory")
+	jStamp = statFileStamp(filepath.Join(memDir, "journal", dateStr))
+	idxStamp = statFileStamp(obsIndexFilePath(vaultDir))
+	tasksStamp = statFileStamp(filepath.Join(memDir, "tasks.json"))
+	return jStamp, idxStamp, tasksStamp
+}
+
 func saveSummaryCache(vaultDir, brainDir string, now time.Time, sum DashboardSummary) {
 	if vaultDir == "" {
 		return
@@ -85,16 +99,24 @@ func saveSummaryCache(vaultDir, brainDir string, now time.Time, sum DashboardSum
 	if now.IsZero() {
 		now = time.Now()
 	}
+	dateStr := now.Format("2006-01-02")
 	fdConvID, fdPath, fdSize, fdMod := currentFrontDeskTranscriptStamp(vaultDir, brainDir)
+	jStamp, idxStamp, tasksStamp := currentNonFDActivityStamps(vaultDir, dateStr)
 	rec := summaryCacheRecord{
 		Version:              currentObsIndexVersion,
-		Date:                 now.Format("2006-01-02"),
+		Date:                 dateStr,
 		WrittenAt:            now.UTC().Format(time.RFC3339Nano),
 		BrainDir:             brainDir,
 		FrontDeskConvID:      fdConvID,
 		FrontDeskTranscript:  fdPath,
 		FrontDeskFileSize:    fdSize,
 		FrontDeskModTimeNano: fdMod,
+		TodayJournalSize:     jStamp.size,
+		TodayJournalModNano:  jStamp.modNano,
+		ObsIndexSize:         idxStamp.size,
+		ObsIndexModNano:      idxStamp.modNano,
+		TasksFileSize:        tasksStamp.size,
+		TasksModTimeNano:     tasksStamp.modNano,
 		Summary:              sum,
 	}
 	data, err := json.Marshal(rec)
@@ -119,11 +141,18 @@ func loadSummaryCache(vaultDir, brainDir string, now time.Time, maxAge time.Dura
 	if rec.Version != currentObsIndexVersion || rec.BrainDir != brainDir {
 		return DashboardSummary{}, false
 	}
-	if rec.Date != now.Format("2006-01-02") {
+	dateStr := now.Format("2006-01-02")
+	if rec.Date != dateStr {
 		return DashboardSummary{}, false
 	}
 	fdConvID, fdPath, fdSize, fdMod := currentFrontDeskTranscriptStamp(vaultDir, brainDir)
 	if rec.FrontDeskConvID != fdConvID || rec.FrontDeskTranscript != fdPath || rec.FrontDeskFileSize != fdSize || rec.FrontDeskModTimeNano != fdMod {
+		return DashboardSummary{}, false
+	}
+	jStamp, idxStamp, tasksStamp := currentNonFDActivityStamps(vaultDir, dateStr)
+	if rec.TodayJournalSize != jStamp.size || rec.TodayJournalModNano != jStamp.modNano ||
+		rec.ObsIndexSize != idxStamp.size || rec.ObsIndexModNano != idxStamp.modNano ||
+		rec.TasksFileSize != tasksStamp.size || rec.TasksModTimeNano != tasksStamp.modNano {
 		return DashboardSummary{}, false
 	}
 	writtenAt, err := time.Parse(time.RFC3339Nano, rec.WrittenAt)

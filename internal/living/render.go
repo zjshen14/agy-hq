@@ -130,18 +130,36 @@ func RenderHTML(doc SpaceDoc, opts RenderOptions) ([]byte, error) {
 	if len(doc.Perspectives) > 0 || len(doc.Groups) > 0 {
 		body.WriteString(`<nav class="controls">`)
 		if len(doc.Perspectives) > 0 {
-			body.WriteString(`<div class="ctrl-group" role="tablist"><button type="button" class="pill persp-btn active" data-persp="all">All Views</button>`)
-			for _, p := range doc.Perspectives {
-				body.WriteString(fmt.Sprintf(`<button type="button" class="pill persp-btn" data-persp="%s">%s</button>`,
-					html.EscapeString(strings.ToLower(p.ID)), col.span(p.Label)))
+			body.WriteString(`<div class="ctrl-group" role="tablist">`)
+			if !doc.HideAllPerspective {
+				body.WriteString(`<button type="button" class="pill persp-btn active" data-persp="all">All Views</button>`)
+			}
+			for idx, p := range doc.Perspectives {
+				activeCls := ""
+				if doc.HideAllPerspective && idx == 0 {
+					activeCls = " active"
+				}
+				body.WriteString(fmt.Sprintf(`<button type="button" class="pill persp-btn%s" data-persp="%s">%s</button>`,
+					activeCls, html.EscapeString(strings.ToLower(p.ID)), col.span(p.Label)))
 			}
 			body.WriteString(`</div>`)
 		}
 		if len(doc.Groups) > 0 {
-			body.WriteString(`<div class="ctrl-group"><button type="button" class="pill grp-btn active" data-grp="all">All</button>`)
-			for _, g := range doc.Groups {
-				body.WriteString(fmt.Sprintf(`<button type="button" class="pill grp-btn" data-grp="%s">%s</button>`,
-					html.EscapeString(strings.ToLower(g)), html.EscapeString(g)))
+			grpPerspAttr := ""
+			if len(doc.GroupPerspectives) > 0 {
+				grpPerspAttr = fmt.Sprintf(` data-perspectives="%s"`, html.EscapeString(attrList(doc.GroupPerspectives)))
+			}
+			body.WriteString(`<div class="ctrl-group"` + grpPerspAttr + `>`)
+			if !doc.HideAllGroup {
+				body.WriteString(`<button type="button" class="pill grp-btn active" data-grp="all">All</button>`)
+			}
+			for idx, g := range doc.Groups {
+				activeCls := ""
+				if doc.HideAllGroup && idx == 0 {
+					activeCls = " active"
+				}
+				body.WriteString(fmt.Sprintf(`<button type="button" class="pill grp-btn%s" data-grp="%s">%s</button>`,
+					activeCls, html.EscapeString(strings.ToLower(g)), html.EscapeString(g)))
 			}
 			body.WriteString(`</div>`)
 		}
@@ -151,8 +169,9 @@ func RenderHTML(doc SpaceDoc, opts RenderOptions) ([]byte, error) {
 	// Render each composable block
 	for _, blk := range doc.Blocks {
 		perspAttr := attrList(blk.Perspectives)
-		body.WriteString(fmt.Sprintf(`<section class="block block-%s" data-perspectives="%s">`,
-			html.EscapeString(blk.Type), html.EscapeString(perspAttr)))
+		grpAttr := strings.ToLower(strings.TrimSpace(blk.Group))
+		body.WriteString(fmt.Sprintf(`<section class="block block-%s" data-perspectives="%s" data-group="%s">`,
+			html.EscapeString(blk.Type), html.EscapeString(perspAttr), html.EscapeString(grpAttr)))
 		if !blk.Title.IsEmpty() {
 			body.WriteString(`<h2>` + col.span(blk.Title) + `</h2>`)
 		}
@@ -167,6 +186,8 @@ func RenderHTML(doc SpaceDoc, opts RenderOptions) ([]byte, error) {
 			renderChecklistLedger(&body, blk, col)
 		case BlockCalloutNotes:
 			renderCalloutNotes(&body, blk, col)
+		case BlockMetricBars:
+			renderMetricBars(&body, blk, col)
 		}
 		body.WriteString(`</section>`)
 	}
@@ -174,10 +195,20 @@ func RenderHTML(doc SpaceDoc, opts RenderOptions) ([]byte, error) {
 	body.WriteString(fmt.Sprintf(`<footer class="ftr">Living Space <code>%s</code> · Updated %s · 0-token local build</footer>`,
 		html.EscapeString(doc.Slug), html.EscapeString(doc.UpdatedAt)))
 
+	defPersp := strings.ToLower(strings.TrimSpace(doc.DefaultPerspective))
+	if defPersp == "" && doc.HideAllPerspective && len(doc.Perspectives) > 0 {
+		defPersp = strings.ToLower(strings.TrimSpace(doc.Perspectives[0].ID))
+	}
+	defGrp := strings.ToLower(strings.TrimSpace(doc.DefaultGroup))
+	if defGrp == "" && doc.HideAllGroup && len(doc.Groups) > 0 {
+		defGrp = strings.ToLower(strings.TrimSpace(doc.Groups[0]))
+	}
 	i18nPayload := map[string]interface{}{
+		"slug":               doc.Slug,
 		"locales":            locales,
 		"default":            primary,
-		"defaultPerspective": strings.ToLower(strings.TrimSpace(doc.DefaultPerspective)),
+		"defaultPerspective": defPersp,
+		"defaultGroup":       defGrp,
 	}
 	if len(locales) > 1 {
 		i18nPayload["dicts"] = col.dicts
@@ -378,24 +409,66 @@ func renderCalloutNotes(sb *strings.Builder, blk BlockSpec, col *i18nCollector) 
 	sb.WriteString(`</div>`)
 }
 
+func clampBarPct(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+func renderMetricBars(sb *strings.Builder, blk BlockSpec, col *i18nCollector) {
+	sb.WriteString(`<div class="mbar-list">`)
+	for _, r := range blk.Bars {
+		tone := strings.TrimSpace(r.Tone)
+		if tone == "" {
+			tone = "accent"
+		}
+		pct := clampBarPct(r.Pct)
+		sb.WriteString(fmt.Sprintf(`<div class="mbar-row" data-group="%s" data-perspectives="%s"><div class="mbar-top"><span class="mbar-lbl">%s</span><span class="mbar-val">%s</span></div><div class="mbar-track"><span class="mbar-fill tone-%s" style="width:%.1f%%"></span>`,
+			html.EscapeString(strings.ToLower(r.Group)), html.EscapeString(attrList(r.Perspectives)), col.span(r.Label), col.span(r.Value), html.EscapeString(tone), pct))
+		if r.WarnMarkerPct > 0 && r.WarnMarkerPct < 100 {
+			sb.WriteString(fmt.Sprintf(`<i class="mbar-tick tick-warn" style="left:%.1f%%" title="Warn"></i>`, clampBarPct(r.WarnMarkerPct)))
+		}
+		if r.CritMarkerPct > 0 && r.CritMarkerPct < 100 {
+			sb.WriteString(fmt.Sprintf(`<i class="mbar-tick tick-crit" style="left:%.1f%%" title="Critical"></i>`, clampBarPct(r.CritMarkerPct)))
+		}
+		sb.WriteString(`</div>`)
+		if !r.Sub.IsEmpty() {
+			sb.WriteString(`<div class="mbar-sub">` + col.span(r.Sub) + `</div>`)
+		}
+		sb.WriteString(`</div>`)
+	}
+	sb.WriteString(`</div>`)
+}
+
 const livingSpaceCSS = `
-:root{--bg:var(--background,#f8fafc);--card-bg:var(--card,#ffffff);--fg:var(--foreground,#0f172a);--muted:var(--muted-foreground,#475569);--bdr:var(--border,#e2e8f0);--acc:var(--primary,#2563eb);--ok:#16a34a;--warn:#d97706}
-@media(prefers-color-scheme:dark){:root{--bg:var(--background,#0b1120);--card-bg:var(--card,#111827);--fg:var(--foreground,#f1f5f9);--muted:var(--muted-foreground,#94a3b8);--bdr:var(--border,#1e293b);--acc:var(--primary,#60a5fa)}}
+:root{--bg:var(--background,#f8fafc);--card-bg:var(--card,#ffffff);--fg:var(--foreground,#0f172a);--muted:var(--muted-foreground,#475569);--bdr:var(--border,#e2e8f0);--acc:var(--primary,#2563eb);--ok:#16a34a;--warn:#d97706;--danger:#ef4444}
+@media(prefers-color-scheme:dark){:root{--bg:var(--background,#0b1120);--card-bg:var(--card,#111827);--fg:var(--foreground,#f1f5f9);--muted:var(--muted-foreground,#94a3b8);--bdr:var(--border,#1e293b);--acc:var(--primary,#60a5fa);--danger:#f87171}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 .wrap{max-width:960px;margin:0 auto;padding:20px 16px 40px}
 .hdr{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px}
 h1{margin:0;font-size:22px;line-height:1.25}h2{margin:0 0 10px;font-size:16px}h3{margin:0 0 6px;font-size:14px}
 .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
-.controls{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+.controls{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;margin-bottom:16px}
 .ctrl-group,.lang-switch{display:flex;flex-wrap:wrap;gap:6px}
 .pill{border:1px solid var(--bdr);background:var(--card-bg);color:var(--fg);padding:5px 12px;border-radius:999px;font-size:12px;cursor:pointer;font-weight:500}
 .pill.active{background:var(--acc);color:#fff;border-color:var(--acc)}
 .block{background:var(--card-bg);border:1px solid var(--bdr);border-radius:12px;padding:16px;margin-bottom:14px}
 .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .kpi-card{border:1px solid var(--bdr);border-radius:10px;padding:12px;background:var(--bg)}
-.kpi-card.tone-accent{border-color:var(--acc)}.kpi-card.tone-warn{border-color:var(--warn)}.kpi-card.tone-ok{border-color:var(--ok)}
+.kpi-card.tone-accent{border-color:var(--acc)}.kpi-card.tone-warn{border-color:var(--warn)}.kpi-card.tone-ok{border-color:var(--ok)}.kpi-card.tone-danger{border-color:var(--danger)}
 .kpi-lbl{font-size:12px;color:var(--muted);margin-bottom:4px}.kpi-val{font-size:18px;font-weight:700}.kpi-sub{font-size:12px;color:var(--muted);margin-top:4px}
 .bar{height:6px;background:var(--bdr);border-radius:999px;overflow:hidden;margin-top:6px}.bar span{display:block;height:100%;background:var(--acc)}
+.mbar-list{display:flex;flex-direction:column;gap:10px}
+.mbar-row{border:1px solid var(--bdr);border-radius:9px;padding:10px 12px;background:var(--bg)}
+.mbar-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px}.mbar-lbl{font-weight:600}.mbar-val{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.mbar-track{position:relative;height:8px;background:var(--bdr);border-radius:999px;margin-top:6px;overflow:visible}
+.mbar-fill{display:block;height:100%;border-radius:999px;background:var(--acc)}.mbar-fill.tone-ok{background:var(--ok)}.mbar-fill.tone-warn{background:var(--warn)}.mbar-fill.tone-danger{background:var(--danger)}.mbar-fill.tone-neutral{background:var(--muted)}
+.mbar-tick{position:absolute;top:-3px;bottom:-3px;width:2px;border-radius:1px}.mbar-tick.tick-warn{background:var(--warn)}.mbar-tick.tick-crit{background:var(--danger)}
+.mbar-sub{font-size:12px;color:var(--muted);margin-top:5px}
 .timeline{display:flex;flex-direction:column;gap:8px}
 .tl-item{border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;background:var(--bg)}
 .tl-item summary{cursor:pointer;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -413,7 +486,7 @@ h1{margin:0;font-size:22px;line-height:1.25}h2{margin:0 0 10px;font-size:16px}h3
 .skipped-sec{margin-top:8px;font-size:13px;color:var(--muted)}.skipped-sec summary{cursor:pointer}
 .notes-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
 .note{border:1px solid var(--bdr);border-left:4px solid var(--acc);border-radius:8px;padding:10px 12px;background:var(--bg)}
-.note.tone-warn{border-left-color:var(--warn)}.note.tone-ok{border-left-color:var(--ok)}.note p{margin:4px 0 0;font-size:13px;white-space:pre-line}
+.note.tone-warn{border-left-color:var(--warn)}.note.tone-ok{border-left-color:var(--ok)}.note.tone-danger{border-left-color:var(--danger)}.note p{margin:4px 0 0;font-size:13px;white-space:pre-line}
 .act-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .copy-btn{border:1px solid var(--bdr);background:var(--card-bg);color:var(--fg);padding:5px 10px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px;min-height:30px}
 .copy-btn.primary-btn{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -447,7 +520,12 @@ const livingSpaceJS = `
     if(p&&i18n.dicts&&i18n.dicts[p])setLang(p);
   }catch(e){}
 
-  var activePersp=(i18n.defaultPerspective||'all'),activeGrp='all';
+  var perspStoreKey='hq_space_persp_'+(i18n.slug||'default');
+  var activePersp=(i18n.defaultPerspective||'all'),activeGrp=(i18n.defaultGroup||'all');
+  try{
+    var savedP=sessionStorage.getItem(perspStoreKey);
+    if(savedP&&document.querySelector('.persp-btn[data-persp="'+savedP+'"]'))activePersp=savedP;
+  }catch(e){}
   function applyFilters(){
     document.querySelectorAll('[data-perspectives],[data-group]').forEach(function(el){
       var ps=(el.getAttribute('data-perspectives')||'').split(',').filter(Boolean);
@@ -461,7 +539,16 @@ const livingSpaceJS = `
     b.classList.toggle('active',b.getAttribute('data-persp')===activePersp);
     b.addEventListener('click',function(){
       activePersp=b.getAttribute('data-persp');
+      try{sessionStorage.setItem(perspStoreKey,activePersp);}catch(e){}
       document.querySelectorAll('.persp-btn').forEach(function(x){x.classList.toggle('active',x===b);});
+      applyFilters();
+    });
+  });
+  document.querySelectorAll('.grp-btn').forEach(function(b){
+    b.classList.toggle('active',b.getAttribute('data-grp')===activeGrp);
+    b.addEventListener('click',function(){
+      activeGrp=b.getAttribute('data-grp');
+      document.querySelectorAll('.grp-btn').forEach(function(x){x.classList.toggle('active',x===b);});
       applyFilters();
     });
   });
@@ -486,13 +573,6 @@ const livingSpaceJS = `
   }
   document.querySelectorAll('.copy-btn[data-copy]').forEach(function(b){
     b.addEventListener('click',function(){copyToClipboard(b.getAttribute('data-copy')||'',b);});
-  });
-  document.querySelectorAll('.grp-btn').forEach(function(b){
-    b.addEventListener('click',function(){
-      activeGrp=b.getAttribute('data-grp');
-      document.querySelectorAll('.grp-btn').forEach(function(x){x.classList.toggle('active',x===b);});
-      applyFilters();
-    });
   });
 
   function updateCountdowns(){

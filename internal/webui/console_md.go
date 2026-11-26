@@ -269,9 +269,11 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 	if state.hasFrontDesk {
 		fd := state.frontDesk
 		fmt.Fprintf(&b, "- **Active Front Desk:** [`[HQ] Front Desk`](conversation://%s) (`%s`)\n", fd.ConversationID, fd.ConversationID)
-		pinStatus := "⚠️ Pending Turn-1 `write_file` pin"
-		if fd.ConsolePinned {
-			pinStatus = "✅ Pinned in UI"
+		pinStatus := "⚠️ Pending Turn-1 write_file pin"
+		if fd.ConsolePinned && fd.LiveConsolePinned {
+			pinStatus = "✅ Pinned in UI (hq_console.md + hq_console_live.html)"
+		} else if fd.ConsolePinned || fd.LiveConsolePinned {
+			pinStatus = fmt.Sprintf("⚠️ Partial UI pin (md=%v, live=%v)", fd.ConsolePinned, fd.LiveConsolePinned)
 		}
 		fmt.Fprintf(&b, "- **Console Artifact Pin:** `%s`\n", pinStatus)
 		armed, unarmed := kernel.GetUnarmedTriggers(vaultDir)
@@ -303,27 +305,32 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 		interNote = fmt.Sprintf(" · Interactive: `+%d`", state.Quota.InteractiveSpawnsToday)
 	}
 	fmt.Fprintf(&b, "- **Background Auto Spawns Today:** `%d / %d` (`%s`%s%s)\n", state.Quota.EffectiveAutoSpawns(), state.Quota.MaxDailySpawns, circuitBadge, interNote, gatekeeperNote)
+	ceilStr := obs.FormatTokensCompact(state.Observability.Budget.EffectiveContextCeiling())
 	if state.Observability.Budget.TokenCircuitDisabled {
-		fmt.Fprintf(&b, "- **Token Burn Today (Uncached):** `%s` (`budget guard disabled` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s`)\n",
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached):** `%s` (`budget guard disabled` · Gross: `%s` · Prefix CHR: `%.1f%%` · Est. Cost: `%s` · Cache Saved: `%s` · Deep: `%s`)\n",
 			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
 			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
 			state.Observability.TodayCacheHitRatio*100.0,
+			FormatUSD(state.Observability.TodayEstCostUSD),
+			FormatUSD(state.Observability.TodayCacheSavedUSD),
 			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
 		)
 	} else {
-		fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Deep: `%s / %s`)\n",
+		fmt.Fprintf(&b, "- **Token Burn Today (Uncached / Budget):** `%s / %s` (`%.1f%%` · Gross: `%s` · Prefix CHR: `%.1f%%` · Est. Cost: `%s` · Cache Saved: `%s` · Deep: `%s / %s`)\n",
 			obs.FormatTokensCompact(state.Observability.TodayUncachedTokens),
 			obs.FormatTokensCompact(state.Observability.Budget.DailyUncachedBudget),
 			state.Observability.DailyBudgetPct,
 			obs.FormatTokensCompact(state.Observability.TodayGrossTokens),
 			state.Observability.TodayCacheHitRatio*100.0,
+			FormatUSD(state.Observability.TodayEstCostUSD),
+			FormatUSD(state.Observability.TodayCacheSavedUSD),
 			obs.FormatTokensCompact(state.Observability.TodayDeepUncachedTokens),
 			obs.FormatTokensCompact(state.Observability.Budget.DailyDeepUncachedBudget),
 		)
 	}
-	fdCtxDisplay := obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens) + " / 256k"
+	fdCtxDisplay := obs.FormatTokensCompact(state.Observability.FrontDeskContextTokens) + " / " + ceilStr
 	if state.Observability.FrontDeskCompactedPending {
-		fdCtxDisplay = "compacted (pending next turn) / 256k"
+		fdCtxDisplay = "compacted (pending next turn) / " + ceilStr
 	}
 	fmt.Fprintf(&b, "- **Front Desk Context Watermark:** `%s` (`%s` · Compactions: `%d` · CHR: `%.1f%%`)\n",
 		fdCtxDisplay,
@@ -435,13 +442,37 @@ func syncMarkdownConsole(vaultDir string, obsCacheMaxAge time.Duration) error {
 	appendDelegatesMarkdownSection(&b, state.Delegates)
 
 	b.WriteString("## 🩺 5. System Health (`hq doctor`)\n")
-	b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
+	var warnChecks []string
+	passCount := 0
+	tokPassDetail := ""
 	for _, h := range state.Health {
-		icon := "✅"
-		if h.Status != "PASS" {
-			icon = "⚠️"
+		if h.Status == "PASS" {
+			passCount++
+			if h.Name == "Token Budget & Context Health" {
+				tokPassDetail = h.Detail
+			}
+		} else {
+			warnChecks = append(warnChecks, fmt.Sprintf("| **%s** | ⚠️ `%s` | %s |", h.Name, h.Status, h.Detail))
 		}
-		fmt.Fprintf(&b, "| **%s** | %s `%s` | %s |\n", h.Name, icon, h.Status, h.Detail)
+	}
+	if len(warnChecks) > 0 {
+		b.WriteString("| Check | Status | Detail |\n| :--- | :--- | :--- |\n")
+		for _, row := range warnChecks {
+			b.WriteString(row + "\n")
+		}
+		if passCount > 0 {
+			if tokPassDetail != "" {
+				fmt.Fprintf(&b, "\n- ✅ *%d other check(s) `PASS` (%s) — see **Ops** tab in Interactive Console or run `./bin/hq doctor`.*\n", passCount, tokPassDetail)
+			} else {
+				fmt.Fprintf(&b, "\n- ✅ *%d other check(s) `PASS` — see **Ops** tab in Interactive Console or run `./bin/hq doctor`.*\n", passCount)
+			}
+		}
+	} else {
+		if tokPassDetail != "" {
+			fmt.Fprintf(&b, "- ✅ **All `%d` checks `PASS`** *(%s)* — see **Ops** tab in Interactive Console or run `./bin/hq doctor` for full breakdown.\n", passCount, tokPassDetail)
+		} else {
+			fmt.Fprintf(&b, "- ✅ **All `%d` checks `PASS`** — see **Ops** tab in Interactive Console or run `./bin/hq doctor` for full breakdown.\n", passCount)
+		}
 	}
 
 	rendered := b.String()

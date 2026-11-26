@@ -531,6 +531,11 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 		if curTurn == nil {
 			return
 		}
+		if curTurn.PlannerSteps == 0 && curTurn.GrossTokens == 0 && curTurn.CompactionCount == 0 {
+			curTurn = nil
+			curToolSet = nil
+			return
+		}
 		if curTurn.StepEndIdx < endStepIdx {
 			curTurn.StepEndIdx = endStepIdx
 		}
@@ -550,11 +555,17 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			curTurn.ToolsUsed = append(curTurn.ToolsUsed, k)
 		}
 		sort.Strings(curTurn.ToolsUsed)
-		curTurn.QuotaUnits, curTurn.EstCostUSD = ComputeQuotaAndCost(
+		if cm.Model != "" {
+			curTurn.Model = cm.Model
+			curTurn.ModelTier = ModelCanonicalTier(cm.Model)
+		} else if cm.Tier != "" {
+			curTurn.ModelTier = NormalizeTier(cm.Tier, "")
+		}
+		curTurn.QuotaUnits, curTurn.EstCostUSD, curTurn.CacheSavedUSD = ComputeQuotaCostAndSavings(
 			curTurn.InputTokens,
 			curTurn.CacheReadTokens,
 			curTurn.OutputTokens,
-			cm.Model,
+			curTurn.Model,
 			cm.Tier,
 		)
 		turns = append(turns, *curTurn)
@@ -648,6 +659,9 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 				curTurn.PeakContextTokens = ctx
 			}
 			if st.Type == "PLANNER_RESPONSE" && ctx > 0 {
+				if cm.CompactedPendingNextTurn {
+					cm.PostCompactContextTokens = ctx
+				}
 				curTurn.CurrentContextTokens = ctx
 				curTurn.CompactedPendingNextTurn = false
 				cm.CurrentContextTokens = ctx
@@ -661,6 +675,7 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			curTurn.CompactedPendingNextTurn = true
 			cm.CurrentContextTokens = 0
 			cm.CompactedPendingNextTurn = true
+			cm.PostCompactContextTokens = 0
 		}
 
 		if st.Type == "USER_INPUT" {
@@ -676,6 +691,16 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			pendingWorkflowCalls = nil
 			pendingAgentAPICalls = nil
 
+			if curTurn.PlannerSteps == 0 {
+				stepPrompt := st.InputTokens + st.CacheReadTokens
+				if stepPrompt > 0 {
+					curTurn.FirstStepCHR = float64(st.CacheReadTokens) / float64(stepPrompt)
+					if stepPrompt >= 50_000 && curTurn.FirstStepCHR < 0.20 {
+						curTurn.ColdStartInputTokens = st.InputTokens
+					}
+				}
+			}
+
 			curTurn.PlannerSteps++
 			// Estimate LLM generation time from previous step timestamp inside the turn
 			accumulateLLMLatency(&curTurn.LLMLatencyMs, stTime, lastStepTime)
@@ -687,6 +712,9 @@ func ParseTranscriptFile(convID, transcriptPath, model, tier string) (Conversati
 			for _, tc := range st.ToolCalls {
 				if tc.Name != "" {
 					curToolSet[tc.Name] = true
+				}
+				if tc.Name == "write_file" || tc.Name == "edit_file" {
+					curTurn.HasWriteOrEdit = true
 				}
 				if tc.Name == "run_command" {
 					lastPlannerHadRunCmd = true

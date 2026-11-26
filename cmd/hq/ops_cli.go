@@ -648,12 +648,12 @@ func runObsCLI(vaultDir string, args []string) {
 
 		fmt.Printf("HQ Token & Context Observability (Window: %s | GroupBy: %s)\n", rep.Since, rep.GroupBy)
 		fmt.Printf("════════════════════════════════════════════════════════════════════════════════════════\n")
-		fmt.Printf("  Uncached Burn (In+Out): %s  (Input: %s | Output: %s | QBU: %.0f | Est: $%.2f)\n",
+		fmt.Printf("  Uncached Burn (In+Out): %s  (Input: %s | Output: %s | Est: ~$%.2f | Cache Saved: ~$%.2f)\n",
 			obs.FormatTokensCompact(rep.Totals.UncachedTokens),
 			obs.FormatTokensCompact(rep.Totals.InputTokens),
 			obs.FormatTokensCompact(rep.Totals.OutputTokens),
-			rep.Totals.QuotaUnits,
-			rep.Totals.EstCostUSD)
+			rep.Totals.EstCostUSD,
+			rep.Totals.CacheSavedUSD)
 		fmt.Printf("  Gross Billed (w/Cache): %s  (Cache Read: %s | Prefix Cache Hit Ratio: %.1f%%)\n",
 			obs.FormatTokensCompact(rep.Totals.GrossTokens),
 			obs.FormatTokensCompact(rep.Totals.CacheReadTokens),
@@ -684,19 +684,20 @@ func runObsCLI(vaultDir string, args []string) {
 			if rep.FrontDeskCompactedPending {
 				fdCtxStr = "compacted (pending next turn)"
 			}
-			fmt.Printf("  [HQ] Front Desk (%s): Context %s / 256k (Peak: %s | Compactions: %d | CHR: %.1f%%)\n",
+			fmt.Printf("  [HQ] Front Desk (%s): Context %s / %s (Peak: %s | Compactions: %d | CHR: %.1f%%)\n",
 				fdID,
 				fdCtxStr,
+				obs.FormatTokensCompact(rep.Budget.EffectiveContextCeiling()),
 				obs.FormatTokensCompact(rep.FrontDesk.PeakContextTokens),
 				rep.FrontDesk.CompactionCount,
 				rep.FrontDesk.CacheHitRatio*100.0)
 		}
 
 		fmt.Printf("\nBreakdown by %s:\n", strings.ToUpper(rep.GroupBy))
-		fmt.Printf("  %-22s %6s %6s %10s %9s %9s %10s %10s %7s %8s %8s\n",
-			"KEY", "CONVS", "TURNS", "UNCACHED", "AVG_UNC", "P50_UNC", "CACHE_RD", "GROSS", "CHR%", "QBU", "LATENCY")
+		fmt.Printf("  %-22s %6s %6s %10s %9s %9s %10s %10s %7s %9s %8s\n",
+			"KEY", "CONVS", "TURNS", "UNCACHED", "AVG_UNC", "P50_UNC", "CACHE_RD", "GROSS", "CHR%", "EST_USD", "LATENCY")
 		for _, b := range rep.Buckets {
-			fmt.Printf("  %-22s %6d %6d %10s %9s %9s %10s %10s %6.1f%% %8.0f %8s\n",
+			fmt.Printf("  %-22s %6d %6d %10s %9s %9s %10s %10s %6.1f%% %9s %8s\n",
 				truncateDisplay(b.Key, 22),
 				b.ConvCount,
 				b.Rollup.TurnCount,
@@ -706,7 +707,7 @@ func runObsCLI(vaultDir string, args []string) {
 				obs.FormatTokensCompact(b.Rollup.CacheReadTokens),
 				obs.FormatTokensCompact(b.Rollup.GrossTokens),
 				b.Rollup.CacheHitRatio*100.0,
-				b.Rollup.QuotaUnits,
+				fmt.Sprintf("~$%.2f", b.Rollup.EstCostUSD),
 				obs.FormatDurationCompact(b.Rollup.ActiveLatencyMs))
 		}
 
@@ -726,15 +727,16 @@ func runObsCLI(vaultDir string, args []string) {
 
 	case "top":
 		fs := flag.NewFlagSet("obs top", flag.ExitOnError)
-		sortBy := fs.String("by", "uncached", "Sort metric (uncached, qbu, gross, context, latency)")
+		sortBy := fs.String("by", "uncached", "Sort metric (uncached, cost, gross, context, latency)")
 		kind := fs.String("kind", "all", "Filter by kind (all, task, subagent, nested_subagent, front_desk, auto)")
-		treeMode := fs.Bool("tree", false, "Rank by full DAG tree rollup (Self + Descendant Subagents)")
+		treeMode := fs.Bool("tree", false, "Rank by disjoint DAG root tree rollup (Self + Descendant Subagents)")
+		allNodes := fs.Bool("all-nodes", false, "Include intermediate child nodes alongside roots when --tree is set")
 		turnsMode := fs.Bool("turns", false, "Rank individual expensive turns across all transcripts")
 		limit := fs.Int("limit", 10, "Maximum rows to display")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
 
-		rep, err := obs.BuildTopReport(vaultDir, *sortBy, *kind, *treeMode, *turnsMode, *limit, now)
+		rep, err := obs.BuildTopReportWithOptions(vaultDir, *sortBy, *kind, *treeMode, *turnsMode, *allNodes, *limit, now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hq obs top failed: %v\n", err)
 			os.Exit(1)
@@ -766,24 +768,32 @@ func runObsCLI(vaultDir string, args []string) {
 
 		modeLabel := "Self"
 		if *treeMode {
-			modeLabel = "Tree (Self + Children)"
+			if *allNodes {
+				modeLabel = "Tree (All Nodes)"
+			} else {
+				modeLabel = "Tree (Disjoint Roots)"
+			}
 		}
 		fmt.Printf("Top %d Conversations — %s (Sorted by: %s | Kind: %s)\n", len(rep.Items), modeLabel, rep.SortBy, rep.KindFilter)
-		fmt.Printf("  %-4s %-10s %-11s %-6s %-28s %5s %5s %10s %10s %7s %8s %9s\n",
-			"RANK", "CONV", "KIND", "TIER", "TITLE", "TURNS", "CHILD", "UNCACHED", "GROSS", "CHR%", "QBU", "PEAK_CTX")
+		fmt.Printf("  %-4s %-10s %-11s %-6s %-28s %5s %5s %10s %10s %7s %9s %9s\n",
+			"RANK", "CONV", "KIND", "TIER", "TITLE", "TURNS", "SUBS", "UNCACHED", "GROSS", "CHR%", "EST_USD", "PEAK_CTX")
 		for _, item := range rep.Items {
-			fmt.Printf("  #%-3d %-10s %-11s %-6s %-28s %5d %5d %10s %10s %6.1f%% %8.0f %9s\n",
+			subCount := item.ChildCount
+			if *treeMode && item.DescendantCount > subCount {
+				subCount = item.DescendantCount
+			}
+			fmt.Printf("  #%-3d %-10s %-11s %-6s %-28s %5d %5d %10s %10s %6.1f%% %9s %9s\n",
 				item.Rank,
 				shortPrefix(item.ConversationID, 8),
 				truncateDisplay(item.Kind, 11),
 				item.Tier,
 				truncateDisplay(item.Title, 28),
 				item.Metrics.TurnCount,
-				item.ChildCount,
+				subCount,
 				obs.FormatTokensCompact(item.Metrics.UncachedTokens),
 				obs.FormatTokensCompact(item.Metrics.GrossTokens),
 				item.Metrics.CacheHitRatio*100.0,
-				item.Metrics.QuotaUnits,
+				fmt.Sprintf("~$%.2f", item.Metrics.EstCostUSD),
 				obs.FormatTokensCompact(item.Metrics.PeakContextTokens))
 		}
 
@@ -819,32 +829,35 @@ func runObsCLI(vaultDir string, args []string) {
 		curCtxStr := obs.FormatTokensCompact(cm.CurrentContextTokens)
 		if cm.CompactedPendingNextTurn {
 			curCtxStr = "compacted (pending next turn)"
+		} else if cm.PostCompactContextTokens > 0 {
+			curCtxStr = fmt.Sprintf("%s (post-compact baseline: %s)", curCtxStr, obs.FormatTokensCompact(cm.PostCompactContextTokens))
 		}
 		fmt.Printf("  Current Context: %s | Peak Context: %s | Compactions: %d\n",
 			curCtxStr,
 			obs.FormatTokensCompact(cm.Self.PeakContextTokens),
 			cm.Self.CompactionCount)
-		fmt.Printf("  Self Burn: Uncached %s (In: %s, Out: %s) | Gross %s | CHR %.1f%% | QBU %.0f | Latency %s\n",
+		fmt.Printf("  Self Burn: Uncached %s (In: %s, Out: %s) | Gross %s | CHR %.1f%% | Est ~$%.2f | Latency %s\n",
 			obs.FormatTokensCompact(cm.Self.UncachedTokens),
 			obs.FormatTokensCompact(cm.Self.InputTokens),
 			obs.FormatTokensCompact(cm.Self.OutputTokens),
 			obs.FormatTokensCompact(cm.Self.GrossTokens),
 			cm.Self.CacheHitRatio*100.0,
-			cm.Self.QuotaUnits,
+			cm.Self.EstCostUSD,
 			obs.FormatDurationCompact(cm.Self.ActiveLatencyMs))
 		if len(cm.ChildConversationIDs) > 0 {
-			fmt.Printf("  Tree Burn: Uncached %s | Gross %s | CHR %.1f%% | QBU %.0f (%d direct child subagent(s))\n",
+			fmt.Printf("  Tree Burn: Uncached %s | Gross %s | CHR %.1f%% | Est ~$%.2f (%d direct child / %d descendant subagent(s))\n",
 				obs.FormatTokensCompact(cm.Tree.UncachedTokens),
 				obs.FormatTokensCompact(cm.Tree.GrossTokens),
 				cm.Tree.CacheHitRatio*100.0,
-				cm.Tree.QuotaUnits,
-				len(cm.ChildConversationIDs))
+				cm.Tree.EstCostUSD,
+				len(cm.ChildConversationIDs),
+				cm.DescendantCount)
 		}
 
 		if *showChildren && len(rep.Children) > 0 {
 			fmt.Printf("\nChild Subagents (%d):\n", len(rep.Children))
 			for _, ch := range rep.Children {
-				fmt.Printf("  - [%s] %s (%s | %s): Uncached %s, Gross %s, CHR %.1f%%, Turns %d\n",
+				fmt.Printf("  - [%s] %s (%s | %s): Uncached %s, Gross %s, CHR %.1f%%, Est ~$%.2f, Turns %d\n",
 					shortPrefix(ch.ConversationID, 8),
 					ch.Title,
 					ch.Tier,
@@ -852,24 +865,34 @@ func runObsCLI(vaultDir string, args []string) {
 					obs.FormatTokensCompact(ch.Self.UncachedTokens),
 					obs.FormatTokensCompact(ch.Self.GrossTokens),
 					ch.Self.CacheHitRatio*100.0,
+					ch.Self.EstCostUSD,
 					ch.Self.TurnCount)
 			}
 		}
 
 		if *showTurns && len(cm.Turns) > 0 {
 			fmt.Printf("\nTurn-by-Turn Telemetry (%d turns):\n", len(cm.Turns))
-			fmt.Printf("  %-6s %-20s %6s %10s %10s %10s %7s %9s %8s\n",
-				"TURN", "STARTED_AT", "STEPS", "UNCACHED", "CACHE_RD", "GROSS", "CHR%", "PEAK_CTX", "LATENCY")
+			fmt.Printf("  %-6s %-20s %-18s %5s %9s %9s %9s %7s %8s %8s\n",
+				"TURN", "ENDED_AT", "MODEL", "PLN", "UNCACHED", "CACHE_RD", "GROSS", "CHR%", "EST_USD", "LATENCY")
 			for _, t := range cm.Turns {
-				fmt.Printf("  T#%-4d %-20s %6d %10s %10s %10s %6.1f%% %9s %8s\n",
+				tsCol := t.EndedAt
+				if tsCol == "" {
+					tsCol = t.StartedAt
+				}
+				mCol := t.Model
+				if mCol == "" {
+					mCol = cm.Model
+				}
+				fmt.Printf("  T#%-4d %-20s %-18s %5d %9s %9s %9s %6.1f%% %8s %8s\n",
 					t.TurnIndex,
-					truncateDisplay(t.StartedAt, 20),
-					t.StepCount,
+					truncateDisplay(tsCol, 20),
+					truncateDisplay(mCol, 18),
+					t.PlannerSteps,
 					obs.FormatTokensCompact(t.UncachedTokens),
 					obs.FormatTokensCompact(t.CacheReadTokens),
 					obs.FormatTokensCompact(t.GrossTokens),
 					t.CacheHitRatio*100.0,
-					obs.FormatTokensCompact(t.PeakContextTokens),
+					fmt.Sprintf("~$%.2f", t.EstCostUSD),
 					obs.FormatDurationCompact(t.ActiveLatencyMs))
 			}
 		}
@@ -883,6 +906,7 @@ func runObsCLI(vaultDir string, args []string) {
 
 	case "anomalies":
 		fs := flag.NewFlagSet("obs anomalies", flag.ExitOnError)
+		since := fs.String("since", "24h", "Time window for turn/subagent anomalies (24h, 7d, 30d, all)")
 		asJSON := fs.Bool("json", false, "Output JSON")
 		_ = fs.Parse(args)
 
@@ -892,16 +916,17 @@ func runObsCLI(vaultDir string, args []string) {
 			os.Exit(1)
 		}
 		budget := obs.LoadBudgetConfig(vaultDir)
-		anomalies := obs.EvaluateAnomalies(vaultDir, idx, budget, now)
+		cutoff := obs.ParseSinceCutoff(*since, now)
+		anomalies := obs.EvaluateAnomaliesSince(vaultDir, idx, budget, now, cutoff)
 		if *asJSON {
 			printJSON(anomalies)
 			return
 		}
 		if len(anomalies) == 0 {
-			fmt.Println("Zero token, prefix-cache, context, or budget anomalies detected.")
+			fmt.Printf("Zero token, prefix-cache, context, or budget anomalies detected (window: %s).\n", *since)
 			return
 		}
-		fmt.Printf("Detected %d Token & Context Anomaly Alert(s):\n", len(anomalies))
+		fmt.Printf("Detected %d Token & Context Anomaly Alert(s) (Window: %s):\n", len(anomalies), *since)
 		for _, a := range anomalies {
 			fmt.Printf("  - [%s][%s] %s (%s)\n", a.Severity, a.Code, a.Kind, a.ID)
 			fmt.Printf("      Summary:     %s\n", a.Summary)
@@ -914,6 +939,7 @@ func runObsCLI(vaultDir string, args []string) {
 		setDailyDeep := fs.Int64("set-daily-deep", 0, "Set daily deep-tier uncached token budget (e.g. 5000000)")
 		disableTokenCircuit := fs.Bool("disable-token-circuit", false, "Disable daily token budget alerts and auto-spawn circuit breaker (telemetry remains active)")
 		enableTokenCircuit := fs.Bool("enable-token-circuit", false, "Re-enable daily token budget alerts and auto-spawn circuit breaker")
+		setCtxCeiling := fs.Int64("set-context-ceiling", 0, "Set host auto-compaction context ceiling (default 512000)")
 		setWarnCtx := fs.Int64("set-warn-context", 0, "Set Front Desk context warning threshold (default 120000)")
 		setNudgeCtx := fs.Int64("set-nudge-context", 0, "Set Front Desk SessionStart /compact nudge threshold (default 160000)")
 		setCritCtx := fs.Int64("set-crit-context", 0, "Set Front Desk critical context threshold (default 180000)")
@@ -947,6 +973,10 @@ func runObsCLI(vaultDir string, args []string) {
 		}
 		if *setDailyDeep > 0 {
 			cfg.DailyDeepUncachedBudget = *setDailyDeep
+			updated = true
+		}
+		if *setCtxCeiling > 0 {
+			cfg.ContextCeilingTokens = *setCtxCeiling
 			updated = true
 		}
 		if *setWarnCtx > 0 {
@@ -1004,11 +1034,12 @@ func runObsCLI(vaultDir string, args []string) {
 		}
 		fmt.Printf("  Daily Auto Spawn Budget:    %d / %d auto spawns today (+%d interactive, circuit=%s)\n",
 			qState.EffectiveAutoSpawns(), qState.MaxDailySpawns, qState.InteractiveSpawnsToday, circuitLabel)
-		fmt.Printf("  Front Desk Context Guards:  WARN=%s | NUDGE=%s | CRITICAL=%s\n",
+		fmt.Printf("  Front Desk Context Guards:  WARN=%s | NUDGE=%s | CRITICAL=%s | CEILING=%s\n",
 			obs.FormatTokensCompact(cfg.WarnContextTokens),
 			obs.FormatTokensCompact(cfg.NudgeContextTokens),
-			obs.FormatTokensCompact(cfg.CritContextTokens))
-		fmt.Printf("  Runaway Turn Guards (A3):   MaxSteps=%d | MaxUncached=%s | MaxOutput=%s\n",
+			obs.FormatTokensCompact(cfg.CritContextTokens),
+			obs.FormatTokensCompact(cfg.EffectiveContextCeiling()))
+		fmt.Printf("  Runaway Turn Guards (A3):   MaxPlannerSteps=%d | MaxUncached=%s | MaxOutput=%s\n",
 			cfg.MaxTurnSteps,
 			obs.FormatTokensCompact(cfg.MaxTurnUncachedTokens),
 			obs.FormatTokensCompact(cfg.MaxTurnOutputTokens))

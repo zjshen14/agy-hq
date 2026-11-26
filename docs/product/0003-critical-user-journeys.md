@@ -1,6 +1,6 @@
 # Product Spec 0003: Critical User Journeys (CUJs) & E2E Acceptance Criteria
 
-> **Status:** Active (`internal/e2e/cuj*_test.go` — 49 `TestCUJ*` functions across CUJs 1–47)
+> **Status:** Active (`internal/e2e/cuj*_test.go` — 50 `TestCUJ*` functions across CUJs 1–48)
 > **Goal:** Define the crisp, deterministic expected behaviors across every core `agy-hq` user journey and enforce them via automated black-box End-to-End (E2E) tests against the compiled `bin/hq` binary.
 
 ---
@@ -57,6 +57,7 @@
 | **CUJ-45** | 0-Token Pulse Look-Ahead (`D1`–`D10`), 3-State Goal Readiness & 3m Outbox Burst Coalescing | `hq goals checklist|park`, `hq pulse precheck`, `hq outbox add|eval` | `TestCUJ45_PulseAnticipationReadinessAndBurstCoalescing` |
 | **CUJ-46** | 1-Tap `DecisionOption` Cards, Ring-0 Taint Safety, Proposal Restage, `hq cancel` & Noisy-Interrupt RSI | `hq outbox act`, `hq approvals expired|restage`, `hq cancel`, `hq rsi mine` | `TestCUJ46_DecisionOptionCardsTaintSafetyAndProposalRestage` |
 | **CUJ-47** | Composable Living Spaces, Locale-Neutral vs. Vault i18n, 0-Token `dataSources` & CSP Sandbox | `hq space create|refresh|sync-goal|export-artifact`, `:4242/living-spaces/<slug>` | `TestCUJ47_ComposableLivingSpacesI18nDataSourcesAndCSPSandbox` |
+| **CUJ-48** | 4-Tab Console UX, Per-Turn Multi-Model Token Calibration, Disjoint Tree Attribution, `512k` Ceiling & Dual-Artifact Front Desk Lifecycle | `hq obs tokens|top|anomalies`, `hq console`, `hq hook session-start|pre-tool`, `hq claim-desk`, `:4242/` | `TestCUJ48_ConsoleUXTokenCalibrationAndDualArtifactSync` |
 
 ---
 
@@ -395,3 +396,9 @@
 ## CUJ-47: Composable Living Spaces, Locale-Neutral vs. Vault i18n, 0-Token `dataSources` & CSP Sandbox ([RFC-0027](../design/0027-muse-proactive-actions.md))
 1. **Composable Compilation, Goal Sync & Live Data Refresh (`hq space create|refresh|sync-goal|export-artifact`):** Hides the language toggle under the neutral `["en"]` framework default while enabling instant `<script id="hq-i18n">` switching under Vault `["en", "zh"]`, syncs 3-state Goal checklists and `hq_builtin` `workspaces` in `0` LLM tokens, and exports remote-accessible `generative_ui` HTML artifacts (`space_<slug>.html` + `.metadata.json`).
 2. **Strict Loopback Isolation (`:4242/living-spaces/<slug>`):** Renders compiled Spaces inside `<iframe sandbox="allow-scripts">` (omitting `allow-same-origin`) with strict `Content-Security-Policy: default-src 'none'` on `/raw`.
+
+---
+
+## CUJ-48: 4-Tab Console UX, Per-Turn Multi-Model Token Calibration, Disjoint Tree Attribution, `512k` Ceiling & Dual-Artifact Front Desk Lifecycle ([RFC-0030](../design/0030-console-ux-token-audit.md))
+1. **Per-Turn Model Pricing, `512k` Ceiling & `24h` Calibrated Anomalies (`hq obs tokens|top|anomalies`):** Sorts turn journals numerically (`-2.json` vs `-10.json`), attributes multi-model conversations per turn (`claude-opus-5-5-high` vs `gemini-4-neon-medium`), ranks disjoint root trees without child subagent double-counting, reports a `512k` host compaction ceiling alongside Front Desk `120k`/`160k`/`180k` cold-cache wakeup thresholds, and scopes live `A2`/`A3`/`A4` anomalies to `24h` (`ColdStartInputTokens`, `PlannerSteps`).
+2. **Unified 4-Tab Console & Zero-Token Dual-Artifact Lifecycle (`:4242/`, `hq_console_live.html`, `hq hook session-start|pre-tool`, `hq claim-desk`):** Serves 4 tabs (`Needs Me`, `Work`, `Tokens`, `Ops`) with smart default tab selection (`Needs Me` when `ActionRequired > 0` else `Work` when `ActiveTasks > 0`) and plain `Tokens + Cache Hit % + Est. Cost ($)` labels across `:4242` (`Today · 7d · 30d · All`) and `< 45 KB` `hq_console_live.html` (`Today · 7d`), hydrates `write_file(..., Content="{{HQ_SYNC}}")` in `0` `read_file` calls on Turn 1, and retires both `hq_console.md` and `hq_console_live.html` (+ `.metadata.json`) cleanly on Front Desk rotation.

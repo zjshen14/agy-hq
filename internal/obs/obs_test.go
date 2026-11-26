@@ -943,3 +943,218 @@ func TestBuildSummaryReportPerRunMeanAndMedian(t *testing.T) {
 		t.Fatalf("expected P50GrossPerRun=50000, got %d", autoBucket.P50GrossPerRun)
 	}
 }
+
+func TestRFC0030TokenCalibrationJournalSpansDisjointTreesAndCacheStamps(t *testing.T) {
+	tmp := t.TempDir()
+	vaultDir := filepath.Join(tmp, "local")
+	brainDir := filepath.Join(tmp, "brain")
+	t.Setenv("HQ_BRAIN_DIR", brainDir)
+
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	fdID := "aaaa0030-0000-0000-0000-000000000001"
+	taskID := "bbbb0030-0000-0000-0000-000000000002"
+	supID := "bbbb0030-0000-0000-0000-000000000003"
+	subID := "cccc0030-0000-0000-0000-000000000004"
+
+	if err := kernel.SetFrontDesk(vaultDir, fdID, filepath.Join(brainDir, fdID)); err != nil {
+		t.Fatalf("SetFrontDesk: %v", err)
+	}
+
+	// 1. Front Desk has 3 cold-start turns (>=50k input, 0 cache -> triggers A2 ColdCacheThrash)
+	// plus a trailing phantom USER_INPUT with 0 planner steps (must be filtered out),
+	// and a turn with 35 planner steps + 35 tool results = 71 raw steps (<60 PlannerSteps -> must NOT trigger A3).
+	fdLines := []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T07:00:00Z","content":"Cold 1"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-25T07:00:02Z","input_tokens":60000,"cache_read_tokens":0,"output_tokens":500,"content":"ok"}`,
+		`{"step_index":2,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T08:00:00Z","content":"Cold 2"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-25T08:00:02Z","input_tokens":65000,"cache_read_tokens":5000,"output_tokens":500,"content":"ok"}`,
+		`{"step_index":4,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T09:00:00Z","content":"Cold 3 with 35 planner steps"}`,
+	}
+	stepIdx := 5
+	for p := 0; p < 35; p++ {
+		inTok := 1000
+		cacheTok := 70000
+		if p == 0 {
+			inTok = 70000
+			cacheTok = 0
+		}
+		fdLines = append(fdLines,
+			fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-25T09:01:00Z","input_tokens":%d,"cache_read_tokens":%d,"output_tokens":100,"tool_calls":[{"id":"c","name":"read_file","args":{"Path":"/tmp/x"}}]}`, stepIdx, inTok, cacheTok),
+			fmt.Sprintf(`{"step_index":%d,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-25T09:01:01Z","content":"ok"}`, stepIdx+1),
+		)
+		stepIdx += 2
+	}
+	// Trailing queued USER_INPUT with 0 planner steps -> phantom turn must be ignored
+	fdLines = append(fdLines, fmt.Sprintf(`{"step_index":%d,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T09:05:00Z","content":"Queued"}`, stepIdx))
+	fdPath := writeTranscriptFixture(t, brainDir, fdID, fdLines)
+
+	// 2. Task with 10 turns: exec 2 uses claude-opus-5-5-high, exec 10 (-10.json) uses gemini-4-neon-high,
+	// and turn 1 crosses midnight (StartedAt 2026-11-24T23:58:00Z, EndedAt 2026-11-25T00:02:00Z).
+	var taskLines []string
+	for turn := 0; turn < 10; turn++ {
+		startTS := fmt.Sprintf("2026-11-25T10:%02d:00Z", turn)
+		endTS := fmt.Sprintf("2026-11-25T10:%02d:05Z", turn)
+		if turn == 0 {
+			startTS = "2026-11-24T23:58:00Z"
+			endTS = "2026-11-25T00:02:00Z"
+		}
+		taskLines = append(taskLines,
+			fmt.Sprintf(`{"step_index":%d,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":%q,"content":"Task turn %d"}`, turn*2, startTS, turn+1),
+			fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":%q,"input_tokens":10000,"cache_read_tokens":40000,"output_tokens":1000,"content":"done"}`, turn*2+1, endTS),
+		)
+	}
+	// Add spawn edge on taskID -> subID with Role="[deep] core: Analyzer"
+	taskLines = append(taskLines,
+		`{"step_index":20,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T10:20:00Z","content":"Delegate"}`,
+		`{"step_index":21,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-25T10:20:02Z","input_tokens":5000,"cache_read_tokens":45000,"output_tokens":500,"tool_calls":[{"id":"s1","name":"invoke_subagent","args":{"Role":"[deep] core: Analyzer","Model":"gemini-4-neon-high","Prompt":"Analyze"}}]}`,
+		fmt.Sprintf(`{"step_index":22,"type":"GENERIC","source":"SYSTEM","created_at":"2026-11-25T10:20:03Z","content":"Created the following subagent:\n{\n  \"conversationId\": \"%s\"\n}"}`, subID),
+	)
+	taskPath := writeTranscriptFixture(t, brainDir, taskID, taskLines)
+
+	// Write journal entries for taskID including -2.json (opus) and -10.json (neon) to verify numerical execNum sort
+	jDir := filepath.Join(vaultDir, "memory", "journal", "2026-11-25")
+	if err := os.MkdirAll(jDir, 0o755); err != nil {
+		t.Fatalf("mkdir journal: %v", err)
+	}
+	for execNum := 1; execNum <= 11; execNum++ {
+		mName := "gemini-4-hydrogen-medium"
+		stepStart := (execNum - 1) * 2
+		stepCount := stepStart + 2
+		if execNum == 2 {
+			mName = "claude-opus-5-5-high"
+		} else if execNum >= 10 {
+			mName = "gemini-4-neon-high"
+		}
+		if execNum == 11 {
+			stepStart = 20
+			stepCount = 23
+		}
+		jRaw := fmt.Sprintf(`{"timestamp":"2026-11-25T10:%02d:05Z","conversationId":%q,"executionNum":%d,"transcriptPath":%q,"modelName":%q,"stepStartIdx":%d,"stepCount":%d}`,
+			execNum, taskID, execNum, taskPath, mName, stepStart, stepCount)
+		if err := os.WriteFile(filepath.Join(jDir, fmt.Sprintf("%s-%d.json", taskID, execNum)), []byte(jRaw), 0o644); err != nil {
+			t.Fatalf("write journal %d: %v", execNum, err)
+		}
+	}
+
+	// Superseded prior conversation & subagent conversation
+	writeTranscriptFixture(t, brainDir, supID, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T06:00:00Z","content":"Prior run"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-25T06:00:03Z","input_tokens":8000,"cache_read_tokens":2000,"output_tokens":1000,"content":"prior"}`,
+	})
+	writeTranscriptFixture(t, brainDir, subID, []string{
+		`{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-11-25T10:20:05Z","content":"Analyze"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","created_at":"2026-11-25T10:20:08Z","input_tokens":20000,"cache_read_tokens":80000,"output_tokens":2000,"tool_calls":[{"id":"e1","name":"edit_file","args":{"Path":"/tmp/a"}}]}`,
+	})
+
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:                  "core-audit",
+		Title:                     "[Task:core] Token Audit",
+		Kind:                      "task",
+		Scope:                     "core",
+		Tier:                      "standard",
+		ConversationID:            taskID,
+		SupersededConversationIDs: []string{supID},
+		Status:                    "active",
+	})
+
+	idx, err := LoadOrRefreshIndex(vaultDir)
+	if err != nil {
+		t.Fatalf("LoadOrRefreshIndex: %v", err)
+	}
+
+	// Verify phantom turn filtering & PlannerSteps A3 immunity + A2 cold-wakeup detection on Front Desk
+	fdCM := idx.Conversations[fdID]
+	if len(fdCM.Turns) != 3 {
+		t.Fatalf("expected 3 real turns (trailing 0-token USER_INPUT filtered), got %d", len(fdCM.Turns))
+	}
+	anoms := EvaluateAnomalies(vaultDir, idx, LoadBudgetConfig(vaultDir), now)
+	hasA2 := false
+	for _, a := range anoms {
+		if a.Code == "A2" && a.ConversationID == fdID {
+			hasA2 = true
+		}
+		if a.Code == "A3" && a.ConversationID == fdID {
+			t.Fatalf("expected 35 PlannerSteps (71 raw steps) NOT to trigger A3 RunawayTurnBurn, got %+v", a)
+		}
+		if a.Code == "A4" && a.ConversationID == subID {
+			t.Fatalf("expected editing neon subagent NOT to trigger A4 TierMisroutingBurn, got %+v", a)
+		}
+	}
+	if !hasA2 {
+		t.Fatalf("expected A2 ColdCacheThrash on Front Desk with 3 cold starts, got %+v", anoms)
+	}
+
+	// Verify numerical journal sort (-10/-11 wins over -2) and per-turn model pricing
+	taskCM := idx.Conversations[taskID]
+	if taskCM.Model != "gemini-4-neon-high" {
+		t.Fatalf("expected latest journal model gemini-4-neon-high (numerical sort > -2), got %q", taskCM.Model)
+	}
+	if taskCM.Turns[1].Model != "claude-opus-5-5-high" || taskCM.Turns[1].ModelTier != "deep" {
+		t.Fatalf("expected turn 2 model claude-opus-5-5-high (deep), got model=%q tier=%q", taskCM.Turns[1].Model, taskCM.Turns[1].ModelTier)
+	}
+	// Opus turn: 10k*$5/M ($0.05) + 40k*$0.50/M ($0.02) + 1k*$25/M ($0.025) = $0.095; cacheSaved = 40k*($5-$0.50)/M = $0.18
+	if !floatApproxEqual(taskCM.Turns[1].EstCostUSD, 0.095) || !floatApproxEqual(taskCM.Turns[1].CacheSavedUSD, 0.18) || !floatApproxEqual(taskCM.Turns[1].QuotaUnits, 9.5) {
+		t.Fatalf("unexpected Opus turn pricing: cost=%v saved=%v qbu=%v", taskCM.Turns[1].EstCostUSD, taskCM.Turns[1].CacheSavedUSD, taskCM.Turns[1].QuotaUnits)
+	}
+
+	// Verify role-tier vs model-tier decoupling on subID ("[deep]" role on neon model -> standard tier, neon pricing)
+	subCM := idx.Conversations[subID]
+	if subCM.RequestedTier != "deep" || subCM.Tier != "standard" {
+		t.Fatalf("expected RequestedTier=deep and canonical Tier=standard for neon subagent, got req=%q tier=%q", subCM.RequestedTier, subCM.Tier)
+	}
+
+	// Verify SupersededConversationIDs linkage & disjoint --tree ranking
+	supCM := idx.Conversations[supID]
+	if supCM.ParentConversationID != taskID || taskCM.DescendantCount != 2 {
+		t.Fatalf("expected supID linked under taskID with DescendantCount=2, got parent=%q desc=%d", supCM.ParentConversationID, taskCM.DescendantCount)
+	}
+	topTree, err := BuildTopReport(vaultDir, "uncached", "all", true, false, 10, now)
+	if err != nil {
+		t.Fatalf("BuildTopReport --tree: %v", err)
+	}
+	if len(topTree.Items) != 2 {
+		t.Fatalf("expected 2 disjoint root trees (Front Desk + Task), got %d: %+v", len(topTree.Items), topTree.Items)
+	}
+	topAllNodes, _ := BuildTopReportWithOptions(vaultDir, "uncached", "all", true, false, true, 10, now)
+	if len(topAllNodes.Items) != 4 {
+		t.Fatalf("expected 4 nodes with --all-nodes, got %d", len(topAllNodes.Items))
+	}
+
+	// Verify cross-midnight EndedAt conservation & 512k ceiling + summary cache invalidation on non-FD task change
+	sum := BuildDashboardSummary(vaultDir, now)
+	if sum.Budget.EffectiveContextCeiling() != 512_000 {
+		t.Fatalf("expected 512k default context ceiling, got %d", sum.Budget.EffectiveContextCeiling())
+	}
+	todayWin := sum.Windows["today"]
+	if todayWin.UncachedTokens != sum.TodayUncachedTokens {
+		t.Fatalf("expected today window uncached (%d) == TodayUncachedTokens (%d)", todayWin.UncachedTokens, sum.TodayUncachedTokens)
+	}
+	var rootSum int64
+	for _, rt := range sum.Windows["all"].TopRootTrees {
+		rootSum += rt.UncachedTokens
+	}
+	if rootSum != sum.AllTimeUncachedTokens {
+		t.Fatalf("expected disjoint TopRootTrees sum (%d) == AllTimeUncachedTokens (%d)", rootSum, sum.AllTimeUncachedTokens)
+	}
+
+	// Verify summary_cache.json hits, then invalidates immediately when a non-Front-Desk task updates tasks.json
+	if _, ok := loadSummaryCache(vaultDir, brainDir, now.Add(5*time.Second), time.Minute); !ok {
+		t.Fatalf("expected fresh summary cache hit before non-FD task update")
+	}
+	_ = kernel.RegisterTask(vaultDir, kernel.ActiveTask{
+		TaskSlug:       "new-bg-task",
+		Title:          "[Task:core] New Background Task",
+		Kind:           "task",
+		ConversationID: "dddd0030-0000-0000-0000-000000000099",
+		Status:         "active",
+	})
+	if _, ok := loadSummaryCache(vaultDir, brainDir, now.Add(6*time.Second), time.Minute); ok {
+		t.Fatalf("expected summary cache miss immediately after non-Front-Desk tasks.json update")
+	}
+
+	// Verify GetFrontDeskContextStatus formats 512k ceiling
+	_ = SaveBudgetConfig(vaultDir, BudgetConfig{NudgeContextTokens: 50_000})
+	if _, _, nudge := GetFrontDeskContextStatus(vaultDir, fdPath); !strings.Contains(nudge, "512k") {
+		t.Fatalf("expected 512k context ceiling in nudge banner, got %q", nudge)
+	}
+}

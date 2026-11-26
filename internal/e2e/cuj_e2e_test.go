@@ -1534,10 +1534,14 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 		t.Fatalf("expected 4th Front Desk read to be denied (subagent must not reset Front Desk counter), got: %s", out4)
 	}
 
-	// 4. Pin hq_console.md and arm all 3 triggers via PreToolUse
-	pinCall := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q}}}`, deskConv1, artDesk1, filepath.Join(artDesk1, "hq_console.md"))
+	// 4. Pin hq_console.md + hq_console_live.html and arm all 3 triggers via PreToolUse
+	pinCall := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q,"Content":"{{HQ_SYNC}}"}}}`, deskConv1, artDesk1, filepath.Join(artDesk1, "hq_console.md"))
 	if out, err := env.run(pinCall, "hook", "pre-tool"); err != nil || !strings.Contains(out, `"decision":"allow"`) {
 		t.Fatalf("write_file hq_console.md pre-tool failed: %v (%s)", err, out)
+	}
+	pinLiveCall := fmt.Sprintf(`{"conversationId":%q,"artifactDirectoryPath":%q,"toolCall":{"name":"write_file","args":{"Path":%q,"Content":"{{HQ_SYNC}}"}}}`, deskConv1, artDesk1, filepath.Join(artDesk1, "hq_console_live.html"))
+	if out, err := env.run(pinLiveCall, "hook", "pre-tool"); err != nil || !strings.Contains(out, `"decision":"allow"`) {
+		t.Fatalf("write_file hq_console_live.html pre-tool failed: %v (%s)", err, out)
 	}
 	for _, s := range []struct {
 		cron   string
@@ -1554,8 +1558,8 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 	}
 
 	fdAfterArm, ok := kernel.GetFrontDesk(env.vaultDir)
-	if !ok || !fdAfterArm.ConsolePinned || len(fdAfterArm.ArmedTriggers) != 3 {
-		t.Fatalf("expected ConsolePinned=true and 3 ArmedTriggers, got: %+v", fdAfterArm)
+	if !ok || !fdAfterArm.ConsolePinned || !fdAfterArm.LiveConsolePinned || len(fdAfterArm.ArmedTriggers) != 3 {
+		t.Fatalf("expected ConsolePinned=true, LiveConsolePinned=true, and 3 ArmedTriggers, got: %+v", fdAfterArm)
 	}
 
 	// Next SessionStart on deskConv1 should NO LONGER show "New [HQ] Front Desk Initialization Required"
@@ -1615,9 +1619,9 @@ func TestCUJ13_FrontDeskInitHardeningAndTriggerArming(t *testing.T) {
 		t.Fatalf("expected outgoing Front Desk %s to be archived as completed in tasks.json, got: %+v (found=%v)", deskConv1, archivedDesk, found)
 	}
 
-	// New Front Desk must have fresh ConsolePinned=false and 0 armed triggers, and hq doctor should pass Console & Task Board checks
+	// New Front Desk must have fresh ConsolePinned=false, LiveConsolePinned=false, and 0 armed triggers, and hq doctor should pass Console & Task Board checks
 	fdShift2, ok := kernel.GetFrontDesk(env.vaultDir)
-	if !ok || fdShift2.ConversationID != deskConv2 || fdShift2.ConsolePinned || len(fdShift2.ArmedTriggers) != 0 {
+	if !ok || fdShift2.ConversationID != deskConv2 || fdShift2.ConsolePinned || fdShift2.LiveConsolePinned || len(fdShift2.ArmedTriggers) != 0 {
 		t.Fatalf("expected fresh Front Desk state for %s, got: %+v", deskConv2, fdShift2)
 	}
 

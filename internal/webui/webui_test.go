@@ -553,7 +553,7 @@ func TestSyncMarkdownConsolePostCheckpointWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CONSOLE.md pre-compact: %v", err)
 	}
-	if !strings.Contains(string(raw1), "- **Front Desk Context Watermark:** `205k / 256k` (`CRITICAL`") {
+	if !strings.Contains(string(raw1), "- **Front Desk Context Watermark:** `205k / 512k` (`CRITICAL`") {
 		t.Fatalf("expected CRITICAL 205k watermark pre-compact, got:\n%s", string(raw1))
 	}
 
@@ -571,13 +571,13 @@ func TestSyncMarkdownConsolePostCheckpointWatermark(t *testing.T) {
 			t.Fatalf("read %s post-compact: %v", p, rErr)
 		}
 		text2 := string(raw2)
-		if !strings.Contains(text2, "- **Front Desk Context Watermark:** `compacted (pending next turn) / 256k` (`OK` · Compactions: `1`") {
+		if !strings.Contains(text2, "- **Front Desk Context Watermark:** `compacted (pending next turn) / 512k` (`OK` · Compactions: `1`") {
 			t.Fatalf("expected compacted OK watermark in %s, got:\n%s", p, text2)
 		}
-		if strings.Contains(text2, "Front Desk context 205k / 256k (CRITICAL)") {
+		if strings.Contains(text2, "Front Desk context 205k / 512k (CRITICAL)") {
 			t.Fatalf("expected doctor health row not to report stale CRITICAL in %s, got:\n%s", p, text2)
 		}
-		if !strings.Contains(text2, "Front Desk context compacted (pending next turn) / 256k (OK)") {
+		if !strings.Contains(text2, "Front Desk context compacted (pending next turn) / 512k (OK)") {
 			t.Fatalf("expected doctor health row to report compacted OK in %s, got:\n%s", p, text2)
 		}
 	}
@@ -595,7 +595,7 @@ func TestSyncMarkdownConsolePostCheckpointWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CONSOLE.md post-recovery: %v", err)
 	}
-	if !strings.Contains(string(raw3), "- **Front Desk Context Watermark:** `42k / 256k` (`OK` · Compactions: `1`") {
+	if !strings.Contains(string(raw3), "- **Front Desk Context Watermark:** `42k / 512k` (`OK` · Compactions: `1`") {
 		t.Fatalf("expected 42k OK watermark after recovery, got:\n%s", string(raw3))
 	}
 }

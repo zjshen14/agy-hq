@@ -1,6 +1,6 @@
 # RFC-0030: Token Observability Calibration, Unified 4-Tab Console UX & Dual-Artifact Lifecycle Sync
 
-- **Status:** Proposed (Phase 1 Research & RFC — awaiting review before Phase 2 code)
+- **Status:** Implemented (Verified via `CUJ-48`)
 - **Created:** 2026-11-25
 - **Builds On:** [RFC-0007 (Front Desk Init Hardening)](./0007-front-desk-initialization-hardening.md), [RFC-0009 (Scalable Task Board)](./0009-task-board-redesign.md), [RFC-0012 (Token Observability)](./0012-token-observability.md), [RFC-0027 (Living Spaces & Calm Console)](./0027-muse-proactive-actions.md)
 - **Research:** [25 — Forensic Audit of Token Math, Console UX & Artifact Lifecycle](../research/25_console_ux_and_token_observability_audit.md)
@@ -126,7 +126,7 @@ All three console surfaces compile from a single `BuildConsoleSnapshot(vaultDir,
 | **Phase 2B (`webui`, `living`)** | `BuildConsoleSnapshot` (`obs_view.go`), 4-tab `console.html` + `hq_console_live.html` with `Tokens` tab & SVG charts, `hqFetch` + `id` bugfixes, non-destructive `5s` polling, & compact `<= 120L` `CONSOLE.md`. | `webui` + `living` unit tests (`default-src 'none'` CSP, `< 45 KB` HTML size, single- vs multi-locale, `0` JS errors). |
 | **Phase 2C (`kernel`, `hooks`, `doctor`, `AGENTS.md`)** | `LiveConsolePinned`, 6-file `removeConsoleArtifacts`, `PreToolUse` `{{HQ_SYNC}}` hydration, `SessionStart` dual-pin prompt, `doctor` `#4`/`#10`, CLI, & `AGENTS.md`. | **`CUJ-48`** black-box E2E test + `100%` `./bin/hq ci pre-push` pass. |
 
-### Open Questions for Review
-1. **QBU Calibration (`1 QBU = $0.01` vs. Legacy Token Multipliers):** Confirm anchoring `1 QBU = $0.01` over the 3-family + Claude rate table in §3.2 (while keeping `DailyUncachedBudget = 50M` and `DailyDeepUncachedBudget = 30M` denominated in raw uncached tokens so existing `budget.json` thresholds remain unchanged).
-2. **Default Tab When `Needs Me == 0`:** Should `:4242` and `hq_console_live.html` always open on `Needs Me` (showing the green *"All Clear"* card + Goals), or auto-select `Work` when `Needs Me == 0` and no previous tab is saved in `sessionStorage`? *(Recommended: `Needs Me` when `ActionRequired > 0`, `Work` when `ActionRequired == 0` and `ActiveTasks > 0`, preserving user-clicked tab in `sessionStorage`.)*
-3. **Turn-1 `{{HQ_SYNC}}` Hydration:** Confirm replacing the Turn-1 `read_file(CONSOLE.md)` + full-text `write_file` step with `0`-read parallel `write_file(..., Content="{{HQ_SYNC}}")` for both `hq_console.md` and `hq_console_live.html`.
+### Resolved Design Decisions
+1. **Zero Custom Jargon in Console UI (`Tokens + Cache Hit % + Est. Cost ($)`):** Console UI surfaces (`console.html`, `hq_console_live.html`, and `CONSOLE.md`) show plain **`Tokens` (`Uncached`, `Cached`, `Output`) + `Cache Hit %` + `API-Equiv Cost ($)`** without exposing internal `"QBU"` or `"Compute Share"` jargon, while retaining `QuotaUnits = EstCostUSD * 100.0` internally in Go/JSON structs for backward CLI/JSON compatibility (`DailyUncachedBudget = 50M` and `DailyDeepUncachedBudget = 30M` stay denominated in raw uncached tokens).
+2. **Smart Default Tab Selection:** Both `:4242` and `hq_console_live.html` open on **`Needs Me`** when `ActionRequired > 0`, else **`Work`** when `ActiveTasks > 0` (falling back to `Needs Me`), while preserving any user-selected tab in `sessionStorage`.
+3. **Turn-1 `{{HQ_SYNC}}` Hydration:** Turn-1 Front Desk initialization uses `0`-read parallel `write_file(..., Content="{{HQ_SYNC}}")` calls for both `hq_console.md` and `hq_console_live.html`, hydrated in `PreToolUse` from ground-truth disk state.

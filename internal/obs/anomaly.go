@@ -13,11 +13,15 @@ import (
 	"github.com/zjshen14/agy-hq/internal/store"
 )
 
+// DefaultContextCeilingTokens is Antigravity's automatic CHECKPOINT compaction ceiling on Gemini 4 models (~512k).
+const DefaultContextCeilingTokens int64 = 512_000
+
 // BudgetConfig defines daily token budgets and context/turn anomaly thresholds in local/memory/obs/budget.json.
 type BudgetConfig struct {
 	DailyUncachedBudget     int64 `json:"dailyUncachedBudget"`
 	DailyDeepUncachedBudget int64 `json:"dailyDeepUncachedBudget"`
 	TokenCircuitDisabled    bool  `json:"tokenCircuitDisabled,omitempty"`
+	ContextCeilingTokens    int64 `json:"contextCeilingTokens,omitempty"`
 	WarnContextTokens       int64 `json:"warnContextTokens"`
 	NudgeContextTokens      int64 `json:"nudgeContextTokens"`
 	CritContextTokens       int64 `json:"critContextTokens"`
@@ -27,11 +31,20 @@ type BudgetConfig struct {
 	MaxDailySpawns          int   `json:"maxDailySpawns,omitempty"`
 }
 
-// DefaultBudgetConfig returns the RFC-0012 default budget and context guard configuration.
+// EffectiveContextCeiling returns ContextCeilingTokens or DefaultContextCeilingTokens (512,000) when unset.
+func (c BudgetConfig) EffectiveContextCeiling() int64 {
+	if c.ContextCeilingTokens > 0 {
+		return c.ContextCeilingTokens
+	}
+	return DefaultContextCeilingTokens
+}
+
+// DefaultBudgetConfig returns the calibrated default budget and context guard configuration.
 func DefaultBudgetConfig() BudgetConfig {
 	return BudgetConfig{
 		DailyUncachedBudget:     50_000_000,
 		DailyDeepUncachedBudget: 30_000_000,
+		ContextCeilingTokens:    DefaultContextCeilingTokens,
 		WarnContextTokens:       120_000,
 		NudgeContextTokens:      160_000,
 		CritContextTokens:       180_000,
@@ -63,6 +76,9 @@ func LoadBudgetConfig(vaultDir string) BudgetConfig {
 		cfg.DailyDeepUncachedBudget = parsed.DailyDeepUncachedBudget
 	}
 	cfg.TokenCircuitDisabled = parsed.TokenCircuitDisabled
+	if parsed.ContextCeilingTokens > 0 {
+		cfg.ContextCeilingTokens = parsed.ContextCeilingTokens
+	}
 	if parsed.WarnContextTokens > 0 {
 		cfg.WarnContextTokens = parsed.WarnContextTokens
 	}
@@ -80,6 +96,9 @@ func LoadBudgetConfig(vaultDir string) BudgetConfig {
 	}
 	if parsed.MaxTurnOutputTokens > 0 {
 		cfg.MaxTurnOutputTokens = parsed.MaxTurnOutputTokens
+	}
+	if parsed.MaxDailySpawns > 0 {
+		cfg.MaxDailySpawns = parsed.MaxDailySpawns
 	}
 	return cfg
 }
@@ -109,8 +128,17 @@ type TokenAnomaly struct {
 	ThresholdValue int64  `json:"thresholdValue"`
 }
 
-// EvaluateAnomalies evaluates all 5 RFC-0012 anomaly detectors (A1..A5) against the observability index.
+// EvaluateAnomalies evaluates live token/context/cache/budget anomalies within the default 24h active window.
 func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now time.Time) []TokenAnomaly {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return EvaluateAnomaliesSince(vaultDir, idx, cfg, now, now.Add(-24*time.Hour))
+}
+
+// EvaluateAnomaliesSince evaluates all 5 anomaly detectors (A1..A5) against the observability index,
+// scoping historical turn/subagent alerts (A2, A3, A4) to turns occurring at or after cutoff (or all-time when cutoff is zero).
+func EvaluateAnomaliesSince(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now, cutoff time.Time) []TokenAnomaly {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -125,6 +153,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 	var anomalies []TokenAnomaly
 	todayStr := now.Format("2006-01-02")
 	var todayUncached, todayDeepUncached int64
+	ceilingStr := FormatTokensCompact(cfg.EffectiveContextCeiling())
 
 	fd, hasFD := kernel.GetFrontDesk(vaultDir)
 	fdID := ""
@@ -132,7 +161,6 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 		fdID = strings.ToLower(strings.TrimSpace(fd.ConversationID))
 	}
 
-	// Sort conversation IDs for deterministic anomaly ordering
 	var convIDs []string
 	for cid := range idx.Conversations {
 		convIDs = append(convIDs, cid)
@@ -142,7 +170,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 	for _, cid := range convIDs {
 		cm := idx.Conversations[cid]
 
-		// A1: Front Desk Context Bloat
+		// A1: Front Desk Context Bloat (live active Front Desk state)
 		if fdID != "" && cid == fdID && !cm.CompactedPendingNextTurn && cm.CurrentContextTokens >= cfg.WarnContextTokens {
 			sev := "WARN"
 			thresh := cfg.WarnContextTokens
@@ -159,9 +187,10 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				TaskSlug:       "front-desk",
 				Timestamp:      cm.LastActiveAt,
 				Summary: fmt.Sprintf(
-					"[HQ] Front Desk context is at %s tokens (threshold: %s, compaction ceiling: ~256k). Idle gaps >5m cause cold-cache wakeups.",
+					"[HQ] Front Desk context is at %s tokens (hygiene threshold: %s, auto-compaction ceiling: ~%s). Idle gaps >5m cause cold-cache wakeups.",
 					FormatTokensCompact(cm.CurrentContextTokens),
 					FormatTokensCompact(thresh),
+					ceilingStr,
 				),
 				Remediation:    "Run `/compact` in the Front Desk thread or start a fresh Front Desk shift (`./bin/hq release-desk`).",
 				MetricValue:    cm.CurrentContextTokens,
@@ -169,51 +198,59 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 			})
 		}
 
-		// A2: Cold-Cache Wakeup Thrash (TurnCount >= 5, PeakContextTokens >= 100k, CacheHitRatio < 70%)
-		if cm.Self.TurnCount >= 5 && cm.Self.PeakContextTokens >= 100_000 && cm.Self.CacheHitRatio < 0.70 {
-			sev := "WARN"
-			if cm.Self.CacheHitRatio < 0.50 && cm.Self.UncachedTokens >= 2_000_000 {
-				sev = "CRITICAL"
-			}
-			anomalies = append(anomalies, TokenAnomaly{
-				ID:             fmt.Sprintf("A2-%s", store.ShortConvID(cid)),
-				Code:           "A2",
-				Kind:           "ColdCacheThrash",
-				Severity:       sev,
-				ConversationID: cid,
-				TaskSlug:       cm.TaskSlug,
-				Timestamp:      cm.LastActiveAt,
-				Summary: fmt.Sprintf(
-					"%s (%s) has %.1f%% prefix cache hit ratio across %d turns (peak context %s, uncached burn %s).",
-					cm.Title,
-					store.ShortConvID(cid),
-					cm.Self.CacheHitRatio*100.0,
-					cm.Self.TurnCount,
-					FormatTokensCompact(cm.Self.PeakContextTokens),
-					FormatTokensCompact(cm.Self.UncachedTokens),
-				),
-				Remediation:    "Keep long-lived threads compact (`/compact`) and move multi-turn deep work into dedicated `./bin/hq spawn` Task Conversations.",
-				MetricValue:    int64(cm.Self.CacheHitRatio * 100.0),
-				ThresholdValue: 70,
-			})
-		}
+		var coldSpikes int
+		var coldSpikeTokens int64
+		var lastColdTS string
+		var windowDeepUncached, windowDeepGross int64
+		var windowDeepCost float64
+		var windowPlannerSteps int
+		var hasAnyWriteEdit bool
+		var lastWindowTS, lastDeepModel string
 
-		// A3: Runaway Turn Burn
 		for _, t := range cm.Turns {
-			if localDateStr(t.StartedAt, now.Location()) == todayStr {
+			if t.HasWriteOrEdit {
+				hasAnyWriteEdit = true
+			}
+			tTier := turnModelTier(t, cm)
+			if turnLocalDateStr(t, now.Location()) == todayStr {
 				todayUncached += t.UncachedTokens
-				if cm.Tier == "deep" {
+				if tTier == "deep" {
 					todayDeepUncached += t.UncachedTokens
 				}
 			}
 
-			isRunawaySteps := cfg.MaxTurnSteps > 0 && t.StepCount >= cfg.MaxTurnSteps
+			if !turnMatchesCutoff(t, cutoff) {
+				continue
+			}
+			if t.EndedAt != "" {
+				lastWindowTS = t.EndedAt
+			} else if t.StartedAt != "" {
+				lastWindowTS = t.StartedAt
+			}
+			windowPlannerSteps += t.PlannerSteps
+
+			if t.ColdStartInputTokens >= 50_000 {
+				coldSpikes++
+				coldSpikeTokens += t.ColdStartInputTokens
+				lastColdTS = lastWindowTS
+			}
+
+			if tTier == "deep" {
+				windowDeepUncached += t.UncachedTokens
+				windowDeepGross += t.GrossTokens
+				windowDeepCost += t.EstCostUSD
+				lastDeepModel = turnModel(t, cm)
+			}
+
+			// A3: Runaway Turn Burn (checks PlannerSteps, NOT raw JSONL StepCount)
+			isRunawaySteps := cfg.MaxTurnSteps > 0 && t.PlannerSteps >= cfg.MaxTurnSteps
 			isRunawayUncached := cfg.MaxTurnUncachedTokens > 0 && t.UncachedTokens >= cfg.MaxTurnUncachedTokens
 			isRunawayOutput := cfg.MaxTurnOutputTokens > 0 && t.OutputTokens >= cfg.MaxTurnOutputTokens
 
 			if isRunawaySteps || isRunawayUncached || isRunawayOutput {
 				sev := "WARN"
-				if t.UncachedTokens >= cfg.MaxTurnUncachedTokens*2 || t.StepCount >= cfg.MaxTurnSteps*2 {
+				if (cfg.MaxTurnUncachedTokens > 0 && t.UncachedTokens >= cfg.MaxTurnUncachedTokens*2) ||
+					(cfg.MaxTurnSteps > 0 && t.PlannerSteps >= cfg.MaxTurnSteps*2) {
 					sev = "CRITICAL"
 				}
 				var reasons []string
@@ -223,9 +260,9 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 					reasons = append(reasons, fmt.Sprintf("%s uncached tokens", FormatTokensCompact(t.UncachedTokens)))
 				}
 				if isRunawaySteps {
-					reasons = append(reasons, fmt.Sprintf("%d steps", t.StepCount))
+					reasons = append(reasons, fmt.Sprintf("%d planner steps", t.PlannerSteps))
 					if !isRunawayUncached {
-						metricVal = int64(t.StepCount)
+						metricVal = int64(t.PlannerSteps)
 						threshVal = int64(cfg.MaxTurnSteps)
 					}
 				}
@@ -236,6 +273,10 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 						threshVal = cfg.MaxTurnOutputTokens
 					}
 				}
+				ts := t.EndedAt
+				if ts == "" {
+					ts = t.StartedAt
+				}
 				anomalies = append(anomalies, TokenAnomaly{
 					ID:             fmt.Sprintf("A3-%s-T%d", store.ShortConvID(cid), t.TurnIndex),
 					Code:           "A3",
@@ -244,9 +285,9 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 					ConversationID: cid,
 					TaskSlug:       cm.TaskSlug,
 					TurnIndex:      t.TurnIndex,
-					Timestamp:      t.EndedAt,
+					Timestamp:      ts,
 					Summary: fmt.Sprintf(
-						"Turn #%d in %s (%s) consumed %s (gross %s, CHR %.1f%%).",
+						"Turn #%d in %s (%s) consumed %s (gross %s, %.1f%% cached).",
 						t.TurnIndex,
 						cm.Title,
 						store.ShortConvID(cid),
@@ -261,9 +302,53 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 			}
 		}
 
-		// A4: Tier Misrouting Burn (deep-tier subagent burning >= 300k uncached or >= 2.5M gross tokens)
-		if (cm.Kind == "subagent" || cm.Kind == "nested_subagent") && cm.Tier == "deep" &&
-			(cm.Self.UncachedTokens >= 300_000 || cm.Self.GrossTokens >= 2_500_000) {
+		// A2: Cold-Cache Wakeup Thrash (Turn-opening cold spikes >= 50k input at <20% first-step CHR)
+		if coldSpikes >= 3 {
+			sev := "WARN"
+			if coldSpikes >= 6 || coldSpikeTokens >= 1_000_000 {
+				sev = "CRITICAL"
+			}
+			ts := lastColdTS
+			if ts == "" {
+				ts = cm.LastActiveAt
+			}
+			anomalies = append(anomalies, TokenAnomaly{
+				ID:             fmt.Sprintf("A2-%s", store.ShortConvID(cid)),
+				Code:           "A2",
+				Kind:           "ColdCacheThrash",
+				Severity:       sev,
+				ConversationID: cid,
+				TaskSlug:       cm.TaskSlug,
+				Timestamp:      ts,
+				Summary: fmt.Sprintf(
+					"%s (%s) woke cold %d times (>=50k input, <20%% cache hit), burning %s uncached cold-start tokens.",
+					cm.Title,
+					store.ShortConvID(cid),
+					coldSpikes,
+					FormatTokensCompact(coldSpikeTokens),
+				),
+				Remediation:    "Run `/compact` on long-lived coordinator threads and delegate deep multi-turn work via `./bin/hq spawn`.",
+				MetricValue:    coldSpikeTokens,
+				ThresholdValue: 150_000,
+			})
+		}
+
+		// A4: Tier Misrouting Burn (auto/quick routed to deep, or non-editing lookup subagent burning deep tokens)
+		reqTier := strings.ToLower(strings.TrimSpace(cm.RequestedTier))
+		isMisroutedAutoOrQuick := (cm.Kind == "auto" && reqTier != "deep" && windowDeepUncached >= 50_000) ||
+			(reqTier == "quick" && windowDeepUncached >= 50_000)
+		isNonEditingDeepSubagent := (cm.Kind == "subagent" || cm.Kind == "nested_subagent") && !hasAnyWriteEdit &&
+			((windowPlannerSteps <= 5 && windowDeepUncached >= 100_000) || windowDeepUncached >= 300_000 || windowDeepGross >= 2_500_000)
+
+		if windowDeepUncached > 0 && (isMisroutedAutoOrQuick || isNonEditingDeepSubagent) {
+			ts := lastWindowTS
+			if ts == "" {
+				ts = cm.LastActiveAt
+			}
+			mLabel := lastDeepModel
+			if mLabel == "" {
+				mLabel = cm.Model
+			}
 			anomalies = append(anomalies, TokenAnomaly{
 				ID:             fmt.Sprintf("A4-%s", store.ShortConvID(cid)),
 				Code:           "A4",
@@ -271,18 +356,19 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				Severity:       "WARN",
 				ConversationID: cid,
 				TaskSlug:       cm.TaskSlug,
-				Timestamp:      cm.LastActiveAt,
+				Timestamp:      ts,
 				Summary: fmt.Sprintf(
-					"Deep-tier subagent %s (%s, model: %s) burned %s uncached (%s gross, %.0f QBU).",
+					"Deep-tier %s %s (%s, model: %s) burned %s uncached (%s gross, ~$%.2f) with 0 file edits.",
+					cm.Kind,
 					cm.Title,
 					store.ShortConvID(cid),
-					cm.Model,
-					FormatTokensCompact(cm.Self.UncachedTokens),
-					FormatTokensCompact(cm.Self.GrossTokens),
-					cm.Self.QuotaUnits,
+					mLabel,
+					FormatTokensCompact(windowDeepUncached),
+					FormatTokensCompact(windowDeepGross),
+					windowDeepCost,
 				),
-				Remediation:    "Route routine coding, test execution, and extraction subagents to `standard` (`flash`) to preserve `deep` (`pro`/`opus`) quota.",
-				MetricValue:    cm.Self.UncachedTokens,
+				Remediation:    "Route lookup, extraction, and routine background runs to `standard` (`neon`) or `routine` (`hydrogen`) to preserve `deep` (`carbon`/`opus`) quota.",
+				MetricValue:    windowDeepUncached,
 				ThresholdValue: 300_000,
 			})
 		}
@@ -303,7 +389,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				used:     todayUncached,
 				limit:    cfg.DailyUncachedBudget,
 				label:    "uncached token burn",
-				warnRem:  "Approaching daily uncached token budget; prefer `standard` (`flash`) for background subagents.",
+				warnRem:  "Approaching daily uncached token budget; prefer `standard` (`neon`/`hydrogen`) for background subagents.",
 				critRem:  "Daily uncached token budget reached: automated `kind: auto` background triggers are paused until midnight or `./bin/hq obs budget --reset-circuit`.",
 			},
 			{
@@ -311,7 +397,7 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 				used:     todayDeepUncached,
 				limit:    cfg.DailyDeepUncachedBudget,
 				label:    "deep-tier uncached token burn",
-				warnRem:  "Approaching daily deep-tier token budget; route non-architectural subagents to `flash`.",
+				warnRem:  "Approaching daily deep-tier token budget; route non-architectural subagents to `neon`/`hydrogen`.",
 				critRem:  "Daily deep-tier token budget reached: automated `kind: auto` background triggers are paused until midnight or `./bin/hq obs budget --reset-circuit`.",
 			},
 		} {
@@ -344,7 +430,6 @@ func EvaluateAnomalies(vaultDir string, idx *ObsIndex, cfg BudgetConfig, now tim
 		}
 	}
 
-	// Sort anomalies: CRITICAL first, then by Code (A1, A5, A2, A3, A4), then newest timestamp
 	sort.SliceStable(anomalies, func(i, j int) bool {
 		if anomalies[i].Severity != anomalies[j].Severity {
 			return anomalies[i].Severity == "CRITICAL"
@@ -374,9 +459,9 @@ func SyncDailyBudgetCircuitBreaker(vaultDir string, now time.Time) (tripped bool
 	var todayUncached, todayDeepUncached int64
 	for _, cm := range idx.Conversations {
 		for _, t := range cm.Turns {
-			if localDateStr(t.StartedAt, now.Location()) == todayStr {
+			if turnLocalDateStr(t, now.Location()) == todayStr {
 				todayUncached += t.UncachedTokens
-				if cm.Tier == "deep" {
+				if turnModelTier(t, cm) == "deep" {
 					todayDeepUncached += t.UncachedTokens
 				}
 			}
@@ -401,8 +486,6 @@ func SyncDailyBudgetCircuitBreaker(vaultDir string, now time.Time) (tripped bool
 			_ = kernel.SaveQuota(vaultDir, q)
 		}
 	} else {
-		// If the circuit breaker was previously tripped by a budget guard, but the budget
-		// was increased (or a new day started) so tripped is now false, automatically close it.
 		q := kernel.LoadQuota(vaultDir)
 		if q.CircuitOpen && (strings.HasPrefix(q.CircuitReason, "daily uncached token budget reached") ||
 			strings.HasPrefix(q.CircuitReason, "daily deep-tier token budget reached")) {

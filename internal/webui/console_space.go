@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,8 +17,8 @@ import (
 const ConsoleLivingSpaceSlug = "hq-console"
 
 // BuildConsoleSpaceDoc deterministically compiles live DashboardState into a mobile-first,
-// 0-token Living Space (`hq-console`) accessible both remotely in Antigravity Remote Control
-// (`hq_console_live.html`) and locally at `http://127.0.0.1:4242/living-spaces/hq-console`.
+// 0-token 4-tab Living Space (`hq-console`: Needs Me, Work, Tokens, Ops) accessible both remotely
+// in Antigravity Remote Control (`hq_console_live.html`) and locally at `/living-spaces/hq-console`.
 func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) living.SpaceDoc {
 	if now.IsZero() {
 		now = time.Now()
@@ -32,19 +33,21 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 	}
 
 	sel := state.TaskSelection
-	actionCount := len(state.Pending) + len(state.ProactiveV3.ExpiredProposals) + len(state.ProactiveV3.DecisionCards)
+	actionCount := ConsoleActionCount(state)
 	actionTone := "ok"
 	if actionCount > 0 {
 		actionTone = "warn"
 	}
-	budgetVal := obs.FormatTokensCompact(state.Observability.TodayUncachedTokens)
-	if !state.Observability.Budget.TokenCircuitDisabled && state.Observability.Budget.DailyUncachedBudget > 0 {
-		budgetVal = fmt.Sprintf("%s (%.0f%%)", budgetVal, state.Observability.DailyBudgetPct)
-	}
+	obsSum := state.Observability
+	tokHeadline := fmt.Sprintf("%s · %.0f%% · %s",
+		obs.FormatTokensCompact(obsSum.TodayUncachedTokens),
+		obsSum.TodayCacheHitRatio*100.0,
+		FormatUSD(obsSum.TodayEstCostUSD),
+	)
 
 	var blocks []living.BlockSpec
 
-	// 1. Always-visible KPI banner across all tabs
+	// 1. Always-visible KPI banner across all 4 tabs
 	blocks = append(blocks, living.BlockSpec{
 		ID:   "console-kpi",
 		Type: living.BlockKPIStrip,
@@ -52,11 +55,11 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			{Label: biText("Action Required", "待处理决策"), Value: living.Text(fmt.Sprintf("%d", actionCount)), Tone: actionTone},
 			{Label: biText("Active Tasks", "活跃任务"), Value: living.Text(fmt.Sprintf("%d", sel.ActiveCount)), Tone: "accent"},
 			{Label: biText("Active Goals", "进行中目标"), Value: living.Text(fmt.Sprintf("%d", len(state.Goals))), Tone: "neutral"},
-			{Label: biText("Today Uncached · CHR", "今日消耗 · 缓存命中"), Value: living.Text(fmt.Sprintf("%s · %.0f%%", budgetVal, state.Observability.TodayCacheHitRatio*100.0)), Tone: "neutral"},
+			{Label: biText("Today Uncached · Cache · Cost", "今日消耗 · 缓存 · 估算"), Value: living.Text(tokHeadline), Tone: "neutral"},
 		},
 	})
 
-	// 2. Needs Me Tab: Pending Approvals, Expired Approvals, Decision Cards
+	// 2. Needs Me Tab: Pending Approvals, Expired Approvals, Decision Cards, Goals & Ideas
 	var actionNotes []living.CalloutNote
 	for _, p := range state.Pending {
 		short := p.SHA256
@@ -144,7 +147,6 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		Notes:        actionNotes,
 	})
 
-	// 3. Needs Me Tab: Active Goals (3-state readiness) & Overdue SLAs
 	if len(state.Goals) > 0 || len(state.OverdueWaits) > 0 {
 		var goalRows []living.TableRow
 		for _, g := range state.Goals {
@@ -158,7 +160,6 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 				when = g.TargetDate
 			}
 			status := g.Status
-			badge := ""
 			if g.ParkedUntil != "" {
 				status = "parked (" + g.ParkedUntil + ")"
 			}
@@ -170,7 +171,6 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 					living.Text(when),
 					living.Text(status),
 				},
-				Badge: badge,
 			})
 		}
 		if len(goalRows) > 0 {
@@ -211,7 +211,6 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		}
 	}
 
-	// Pending Ideas Feed (Needs Me)
 	if len(state.Ideas) > 0 {
 		var ideaNotes []living.CalloutNote
 		for _, it := range state.Ideas {
@@ -235,7 +234,7 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		})
 	}
 
-	// 4. Work & Spaces Tab: Active Tasks (with clickable conversation:// links!)
+	// 3. Work Tab: Task Board, Active Workspaces, and Living Spaces
 	if len(sel.VisibleRows) > 0 {
 		var taskNotes []living.CalloutNote
 		wsByKey := surfaceEntriesByKey(state.Workspaces)
@@ -256,8 +255,8 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			if wsBadge := taskWorkspaceBadge(t, wsByKey); wsBadge != "" {
 				meta = append(meta, wsBadge)
 			}
-			if tb, ok := state.Observability.TaskBadges[strings.ToLower(strings.TrimSpace(t.ConversationID))]; ok && tb.GrossTokens > 0 {
-				meta = append(meta, obs.FormatTokensCompact(tb.TreeUncachedTokens)+" tok")
+			if tb, ok := obsSum.TaskBadges[strings.ToLower(strings.TrimSpace(t.ConversationID))]; ok && tb.GrossTokens > 0 {
+				meta = append(meta, tb.CompactLabel)
 			}
 			body := strings.Join(meta, " · ")
 			if s := store.TruncateRunes(strings.Join(strings.Fields(t.LastSummary), " "), 160); s != "" {
@@ -283,9 +282,21 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 			Perspectives: []string{"work"},
 			Notes:        taskNotes,
 		})
+	} else {
+		blocks = append(blocks, living.BlockSpec{
+			ID:           "console-tasks-empty",
+			Type:         living.BlockCalloutNotes,
+			Title:        biText("Task Board", "任务看板"),
+			Perspectives: []string{"work"},
+			Notes: []living.CalloutNote{{
+				Tone:         "info",
+				Title:        biText("No Active Tasks", "暂无活跃任务"),
+				Body:         biText("No active or recently completed tasks on the live board.", "当前看板没有活跃或近期完成的任务。"),
+				Perspectives: []string{"work"},
+			}},
+		})
 	}
 
-	// Active Workspaces (Work & Spaces)
 	if len(state.Workspaces) > 0 {
 		var wsRows []living.TableRow
 		for _, w := range state.Workspaces {
@@ -320,7 +331,6 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		})
 	}
 
-	// Other Living Spaces Index (Work & Spaces)
 	var otherSpaces []living.CalloutNote
 	for _, ls := range state.ProactiveV3.LivingSpaces {
 		if ls.Slug == ConsoleLivingSpaceSlug {
@@ -345,7 +355,10 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		})
 	}
 
-	// 5. Ops & Health Tab: Schedules (with NextRunHuman!), Quota/Watermark, Reversals & Health
+	// 4. Tokens Tab: Dual-Marker 512k Context Bar, Today/7d Per-Model, Per-Task Root Trees, Cache Savings & Trends
+	blocks = append(blocks, buildConsoleTokensBlocks(obsSum, biText)...)
+
+	// 5. Ops Tab: Schedules, System Health (`hq doctor`), Recent Journal & Reversals
 	if len(state.Schedules) > 0 {
 		var schedRows []living.TableRow
 		for _, sc := range state.Schedules {
@@ -388,7 +401,6 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		})
 	}
 
-	// Recent Reversals (`hq cancel`) + System Health (`hq doctor`)
 	var healthRows []living.TableRow
 	for _, h := range state.Health {
 		badge := ""
@@ -445,15 +457,305 @@ func BuildConsoleSpaceDoc(vaultDir string, state DashboardState, now time.Time) 
 		Subtitle:           biText("Synced "+state.UpdatedAt+" · Mobile & Remote Control ready (tap Copy chips to act via chat)", "同步于 "+state.UpdatedAt+" · 支持手机端 Remote Control（点击复制按钮贴入对话即可执行）"),
 		Locales:            cfg.DefaultLocales,
 		LocaleLabels:       cfg.LocaleLabels,
-		DefaultPerspective: "needs_me",
+		DefaultPerspective: ConsoleDefaultTab(state),
+		HideAllPerspective: true,
+		Groups:             []string{"Today", "7d"},
+		DefaultGroup:       "today",
+		HideAllGroup:       true,
+		GroupPerspectives:  []string{"tokens"},
 		Perspectives: []living.PerspectiveSpec{
 			{ID: "needs_me", Label: biText("Needs Me", "待我处理")},
-			{ID: "work", Label: biText("Work & Spaces", "任务与空间")},
-			{ID: "ops", Label: biText("Ops & Health", "运维与健康")},
+			{ID: "work", Label: biText("Work", "工作看板")},
+			{ID: "tokens", Label: biText("Tokens", "Token 用量")},
+			{ID: "ops", Label: biText("Ops", "运维健康")},
 		},
 		Blocks:    blocks,
 		UpdatedAt: now.UTC().Format(time.RFC3339),
 	}
+}
+
+func buildConsoleTokensBlocks(obsSum obs.DashboardSummary, biText func(string, string) living.LocalizedText) []living.BlockSpec {
+	var out []living.BlockSpec
+	ceiling := obsSum.Budget.EffectiveContextCeiling()
+	ceilStr := obs.FormatTokensCompact(ceiling)
+	fdPct := ContextFillPct(obsSum.FrontDeskContextTokens, ceiling)
+	warnPct := ContextFillPct(obsSum.Budget.WarnContextTokens, ceiling)
+	critPct := ContextFillPct(obsSum.Budget.CritContextTokens, ceiling)
+
+	fdTone := "ok"
+	switch obsSum.FrontDeskContextStatus {
+	case "CRITICAL":
+		fdTone = "danger"
+	case "WARN":
+		fdTone = "warn"
+	}
+	fdVal := fmt.Sprintf("%s / %s (%.1f%%)", obs.FormatTokensCompact(obsSum.FrontDeskContextTokens), ceilStr, fdPct)
+	if obsSum.FrontDeskCompactedPending {
+		fdVal = fmt.Sprintf("Compacted (pending next turn) / %s", ceilStr)
+	}
+	fdSub := fmt.Sprintf("Status: %s · Cold-wakeup markers: %s warn / %s crit · Compactions: %d · Cache Hit: %.1f%%",
+		obsSum.FrontDeskContextStatus,
+		obs.FormatTokensCompact(obsSum.Budget.WarnContextTokens),
+		obs.FormatTokensCompact(obsSum.Budget.CritContextTokens),
+		obsSum.FrontDeskCompactions,
+		obsSum.FrontDeskCacheHitRatio*100.0,
+	)
+	if obsSum.FrontDeskPostCompactTokens > 0 && !obsSum.FrontDeskCompactedPending {
+		fdSub += fmt.Sprintf(" · Post-compact baseline: %s", obs.FormatTokensCompact(obsSum.FrontDeskPostCompactTokens))
+	}
+
+	ctxBars := []living.MetricBarRow{
+		{
+			Label:         biText("[HQ] Front Desk Context Window", "[HQ] 前台上下文窗口"),
+			Value:         living.Text(fdVal),
+			Sub:           living.Text(fdSub),
+			Pct:           fdPct,
+			WarnMarkerPct: warnPct,
+			CritMarkerPct: critPct,
+			Tone:          fdTone,
+			Perspectives:  []string{"tokens"},
+		},
+	}
+	if !obsSum.Budget.TokenCircuitDisabled && obsSum.Budget.DailyUncachedBudget > 0 {
+		bTone := "accent"
+		if obsSum.DailyBudgetPct >= 100 {
+			bTone = "danger"
+		} else if obsSum.DailyBudgetPct >= 80 {
+			bTone = "warn"
+		}
+		ctxBars = append(ctxBars, living.MetricBarRow{
+			Label:        biText("Daily Uncached Token Budget", "今日非缓存 Token 预算"),
+			Value:        living.Text(fmt.Sprintf("%s / %s (%.1f%%)", obs.FormatTokensCompact(obsSum.TodayUncachedTokens), obs.FormatTokensCompact(obsSum.Budget.DailyUncachedBudget), obsSum.DailyBudgetPct)),
+			Sub:          living.Text(fmt.Sprintf("Deep tier today: %s / %s (%.1f%%)", obs.FormatTokensCompact(obsSum.TodayDeepUncachedTokens), obs.FormatTokensCompact(obsSum.Budget.DailyDeepUncachedBudget), obsSum.DeepBudgetPct)),
+			Pct:          obsSum.DailyBudgetPct,
+			Tone:         bTone,
+			Perspectives: []string{"tokens"},
+		})
+	}
+	out = append(out, living.BlockSpec{
+		ID:           "tokens-context",
+		Type:         living.BlockMetricBars,
+		Title:        biText("Context Hygiene & Daily Budget", "上下文水位与每日预算"),
+		Perspectives: []string{"tokens"},
+		Bars:         ctxBars,
+	})
+
+	// Windowed sections for "today" and "7d"
+	for _, winKey := range []string{"today", "7d"} {
+		wb, ok := obsSum.Windows[winKey]
+		if !ok {
+			wb = obs.WindowBreakdown{Window: winKey}
+		}
+		winLabelEN := "Today"
+		winLabelZH := "今日"
+		if winKey == "7d" {
+			winLabelEN = "Last 7 Days"
+			winLabelZH = "近 7 天"
+		}
+
+		// Summary & Prefix-Cache Efficiency Cards
+		coldTone := "ok"
+		if wb.ColdSpikes >= 3 {
+			coldTone = "warn"
+		}
+		out = append(out, living.BlockSpec{
+			ID:           "tokens-summary-" + winKey,
+			Type:         living.BlockCalloutNotes,
+			Group:        winKey,
+			Title:        biText(winLabelEN+" Token & Prefix-Cache Summary", winLabelZH+" Token 与前缀缓存概览"),
+			Perspectives: []string{"tokens"},
+			Notes: []living.CalloutNote{
+				{
+					Tone:  "info",
+					Title: biText("Uncached Burn & Est. API Cost", "非缓存消耗与 API 等效成本"),
+					Body: living.Text(fmt.Sprintf("Uncached: %s (In: %s · Out: %s)\nEst. API-Equiv Cost: %s across %d turns (%d threads)",
+						obs.FormatTokensCompact(wb.UncachedTokens),
+						obs.FormatTokensCompact(wb.InputTokens),
+						obs.FormatTokensCompact(wb.OutputTokens),
+						FormatUSD(wb.EstCostUSD),
+						wb.TurnCount,
+						wb.ConvCount,
+					)),
+					Group:        winKey,
+					Perspectives: []string{"tokens"},
+				},
+				{
+					Tone:  coldTone,
+					Title: biText("Prefix Cache Hit Ratio & Savings", "前缀缓存命中率与节省"),
+					Body: living.Text(fmt.Sprintf("Cache Hit: %.1f%% (%s cached / %s gross)\nPrefix-Cache Saved: %s · Cold Wakeups (>=50k): %d (%s)",
+						wb.CacheHitRatio*100.0,
+						obs.FormatTokensCompact(wb.CacheReadTokens),
+						obs.FormatTokensCompact(wb.GrossTokens),
+						FormatUSD(wb.CacheSavedUSD),
+						wb.ColdSpikes,
+						obs.FormatTokensCompact(wb.ColdSpikeTokens),
+					)),
+					Group:        winKey,
+					Perspectives: []string{"tokens"},
+				},
+			},
+		})
+
+		// Per-Model Table
+		var modelRows []living.TableRow
+		for _, mr := range wb.ByModel {
+			modelRows = append(modelRows, living.TableRow{
+				Group:        winKey,
+				Perspectives: []string{"tokens"},
+				Cells: []living.LocalizedText{
+					living.Text(mr.Model),
+					living.Text(mr.Tier),
+					living.Text(fmt.Sprintf("%d", mr.TurnCount)),
+					living.Text(fmt.Sprintf("%s (%s in + %s out)", obs.FormatTokensCompact(mr.UncachedTokens), obs.FormatTokensCompact(mr.InputTokens), obs.FormatTokensCompact(mr.OutputTokens))),
+					living.Text(fmt.Sprintf("%s (%.0f%%)", obs.FormatTokensCompact(mr.CacheReadTokens), mr.CacheHitRatio*100.0)),
+					living.Text(FormatUSD(mr.EstCostUSD)),
+				},
+			})
+		}
+		if len(modelRows) == 0 {
+			modelRows = append(modelRows, living.TableRow{
+				Group:        winKey,
+				Perspectives: []string{"tokens"},
+				Cells: []living.LocalizedText{
+					biText("No turns in window", "窗口内暂无调用"),
+					living.Text("—"),
+					living.Text("0"),
+					living.Text("0"),
+					living.Text("0%"),
+					living.Text("$0.00"),
+				},
+			})
+		}
+		out = append(out, living.BlockSpec{
+			ID:           "tokens-models-" + winKey,
+			Type:         living.BlockComparisonTable,
+			Group:        winKey,
+			Title:        biText(winLabelEN+" Usage by Model", winLabelZH+" 按模型用量明细"),
+			Perspectives: []string{"tokens"},
+			Columns: []living.LocalizedText{
+				biText("Model", "模型"),
+				biText("Tier", "层级"),
+				biText("Turns", "轮次"),
+				biText("Uncached (In + Out)", "非缓存 (输入+输出)"),
+				biText("Cache Read (Hit %)", "缓存读取 (命中率)"),
+				biText("Est. Cost", "等效成本"),
+			},
+			Rows: modelRows,
+		})
+
+		// Disjoint Per-Task Root Trees Accordion
+		if len(wb.TopRootTrees) > 0 {
+			var entries []living.TimelineEntry
+			for idx, rt := range wb.TopRootTrees {
+				var details []living.LocalizedText
+				if rt.SubagentUncached > 0 {
+					details = append(details, living.Text(fmt.Sprintf("Coordinator/Task Self: %s uncached · Subagents (%d): %s uncached",
+						obs.FormatTokensCompact(rt.SelfUncached),
+						rt.DescendantCount,
+						obs.FormatTokensCompact(rt.SubagentUncached),
+					)))
+				} else {
+					details = append(details, living.Text(fmt.Sprintf("Self: %s uncached (In: %s · Out: %s) · Peak Context: %s",
+						obs.FormatTokensCompact(rt.UncachedTokens),
+						obs.FormatTokensCompact(rt.InputTokens),
+						obs.FormatTokensCompact(rt.OutputTokens),
+						obs.FormatTokensCompact(rt.PeakContext),
+					)))
+				}
+				for _, ch := range rt.Children {
+					details = append(details, living.Text(fmt.Sprintf("↳ %s (%s): %s uncached · %.0f%% cached · %s",
+						ch.Title,
+						ch.Model,
+						obs.FormatTokensCompact(ch.UncachedTokens),
+						ch.CacheHitRatio*100.0,
+						FormatUSD(ch.EstCostUSD),
+					)))
+				}
+				entries = append(entries, living.TimelineEntry{
+					ID:           fmt.Sprintf("tree-%s-%d", winKey, idx),
+					DateLabel:    living.Text(FormatUSD(rt.EstCostUSD)),
+					Title:        living.Text(store.TruncateRunes(rt.Title, 56)),
+					Summary:      living.Text(fmt.Sprintf("%s uncached · %.0f%% cached", obs.FormatTokensCompact(rt.UncachedTokens), rt.CacheHitRatio*100.0)),
+					Group:        winKey,
+					Perspectives: []string{"tokens"},
+					Details:      details,
+				})
+			}
+			out = append(out, living.BlockSpec{
+				ID:           "tokens-trees-" + winKey,
+				Type:         living.BlockTimelineAccordion,
+				Group:        winKey,
+				Title:        biText(winLabelEN+" Top Task & Coordinator Trees (Disjoint)", winLabelZH+" 按任务树归集消耗（无重叠）"),
+				Perspectives: []string{"tokens"},
+				Entries:      entries,
+			})
+		}
+	}
+
+	// 7-Day Daily Trend Bars (visible on 7d filter)
+	if len(obsSum.DailyTrend) > 0 {
+		var maxDay int64 = 1
+		for _, dp := range obsSum.DailyTrend {
+			if dp.UncachedTokens > maxDay {
+				maxDay = dp.UncachedTokens
+			}
+		}
+		var dayBars []living.MetricBarRow
+		for _, dp := range obsSum.DailyTrend {
+			pct := (float64(dp.UncachedTokens) / float64(maxDay)) * 100.0
+			dayBars = append(dayBars, living.MetricBarRow{
+				Label:        living.Text(dp.Date),
+				Value:        living.Text(fmt.Sprintf("%s uncached · %s", obs.FormatTokensCompact(dp.UncachedTokens), FormatUSD(dp.EstCostUSD))),
+				Sub:          living.Text(fmt.Sprintf("Cache read: %s (%.0f%% hit) · Gross: %s", obs.FormatTokensCompact(dp.CacheReadTokens), dp.CacheHitRatio*100.0, obs.FormatTokensCompact(dp.GrossTokens))),
+				Pct:          pct,
+				Tone:         "accent",
+				Group:        "7d",
+				Perspectives: []string{"tokens"},
+			})
+		}
+		out = append(out, living.BlockSpec{
+			ID:           "tokens-trend-7d",
+			Type:         living.BlockMetricBars,
+			Group:        "7d",
+			Title:        biText("7-Day Daily Burn Trend", "近 7 天每日消耗趋势"),
+			Perspectives: []string{"tokens"},
+			Bars:         dayBars,
+		})
+	}
+
+	// Active 24h Anomalies (visible across Today & 7d on Tokens tab)
+	if len(obsSum.Anomalies) > 0 {
+		var anomNotes []living.CalloutNote
+		for _, a := range obsSum.Anomalies {
+			tone := "warn"
+			if a.Severity == "CRITICAL" {
+				tone = "danger"
+			}
+			copyCmd := ""
+			if a.Code == "A1" {
+				copyCmd = "/compact"
+			} else if a.ConversationID != "" {
+				copyCmd = "hq obs inspect " + store.ShortConvID(a.ConversationID)
+			}
+			anomNotes = append(anomNotes, living.CalloutNote{
+				Tone:         tone,
+				Title:        living.Text(fmt.Sprintf("[%s · %s] %s", a.Code, a.Severity, a.Kind)),
+				Body:         living.Text(a.Summary + "\nFix: " + a.Remediation),
+				Perspectives: []string{"tokens"},
+				CopyText:     copyCmd,
+				CopyLabel:    biText("Copy Action", "复制处理命令"),
+			})
+		}
+		out = append(out, living.BlockSpec{
+			ID:           "tokens-anomalies",
+			Type:         living.BlockCalloutNotes,
+			Title:        biText(fmt.Sprintf("Active 24h Token & Context Alerts (%d)", len(obsSum.Anomalies)), fmt.Sprintf("24 小时活跃异常告警 (%d)", len(obsSum.Anomalies))),
+			Perspectives: []string{"tokens"},
+			Notes:        anomNotes,
+		})
+	}
+
+	return out
 }
 
 // SyncConsoleLivingSpace compiles DashboardState into `<vault>/living_spaces/hq-console/` AND
@@ -502,11 +804,18 @@ func SyncConsoleLivingSpace(vaultDir string, state DashboardState, unchangedBody
 	}
 	if artDir != "" {
 		_ = os.MkdirAll(artDir, 0o755)
-		if err := store.WriteAtomic(artHTML, htmlBytes, 0o600); err != nil {
+		if err := store.WriteAtomic(artHTML, htmlBytes, 0o644); err != nil {
 			return err
 		}
-		metaJSON := fmt.Sprintf("{\n  \"artifactType\": \"ARTIFACT_TYPE_OTHER\",\n  \"summary\": \"Live Interactive [HQ] Console (Mobile & Remote Control Ready) — Needs Me, Work & Spaces, and Ops & Health\",\n  \"updatedAt\": %q,\n  \"userFacing\": true\n}\n", now.UTC().Format(time.RFC3339Nano))
-		_ = store.WriteAtomic(artMeta, []byte(metaJSON), 0o600)
+		meta := map[string]interface{}{
+			"artifactType":    "ARTIFACT_TYPE_OTHER",
+			"requestFeedback": false,
+			"summary":         "Live Interactive [HQ] Console (Mobile & Remote Control Ready) — Needs Me, Work, Tokens, and Ops",
+			"updatedAt":       now.UTC().Format(time.RFC3339Nano),
+			"userFacing":      true,
+		}
+		metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+		_ = store.WriteAtomic(artMeta, append(metaBytes, '\n'), 0o644)
 	}
 	return nil
 }

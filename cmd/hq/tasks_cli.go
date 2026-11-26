@@ -244,7 +244,8 @@ func runClaimDeskCLI(vaultDir string, args []string) {
 	fmt.Printf("Claimed Front Desk intake lease for conversation %s\n", *convID)
 	_, unarmed := kernel.GetUnarmedTriggers(vaultDir)
 	artPath := filepath.Join(*artDir, "hq_console.md")
-	fmt.Printf("  - Step 1 (Pin Console Artifact): write_file to %s with ArtifactMetadata={UserFacing:true, RequestFeedback:false}\n", artPath)
+	liveArtPath := filepath.Join(*artDir, "hq_console_live.html")
+	fmt.Printf("  - Step 1 (Pin Console Artifact): call write_file with Content=\"{{HQ_SYNC}}\" to %s and %s (ArtifactMetadata={UserFacing:true, RequestFeedback:false})\n", artPath, liveArtPath)
 	if len(unarmed) > 0 {
 		fmt.Printf("  - Step 2 (Arm %d Proactive Schedule(s) from local/triggers.yaml):\n", len(unarmed))
 		for _, s := range unarmed {
