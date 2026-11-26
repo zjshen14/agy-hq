@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,5 +167,22 @@ func TestConsole4TabSmartDefaultAndTokensUX(t *testing.T) {
 		if strings.Contains(webHTML, banned) {
 			t.Fatalf("expected zero %q jargon in Web Console HTML", banned)
 		}
+	}
+	const bootOpen = `<script id="hq-bootstrap-state" type="application/json">`
+	startIdx := strings.Index(webHTML, bootOpen)
+	if startIdx < 0 {
+		t.Fatalf("missing bootstrap JSON script tag in Web Console HTML")
+	}
+	rest := webHTML[startIdx+len(bootOpen):]
+	endIdx := strings.Index(rest, "</script>")
+	if endIdx < 0 {
+		t.Fatalf("unterminated bootstrap JSON script tag in Web Console HTML")
+	}
+	var bootState DashboardState
+	if err := json.Unmarshal([]byte(rest[:endIdx]), &bootState); err != nil {
+		t.Fatalf("bootstrap JSON must unmarshal directly into DashboardState (not double-encoded string): %v", err)
+	}
+	if bootState.Observability.Budget.EffectiveContextCeiling() != 512_000 {
+		t.Fatalf("expected hydrated bootstrap context ceiling 512000, got %d", bootState.Observability.Budget.EffectiveContextCeiling())
 	}
 }

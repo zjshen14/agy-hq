@@ -55,15 +55,16 @@ func ContextFillPct(cur, ceiling int64) float64 {
 }
 
 // StateBootstrapJSON serializes DashboardState safely for inline <script type="application/json"> hydration.
-func StateBootstrapJSON(state DashboardState) template.HTML {
+func StateBootstrapJSON(state DashboardState) template.JS {
 	cp := state
 	cp.CSRFToken = ""
+	cp.TodayTurns = nil
 	b, err := json.Marshal(cp)
 	if err != nil {
 		return "{}"
 	}
 	safe := strings.ReplaceAll(string(b), "</", `<\/`)
-	return template.HTML(safe)
+	return template.JS(safe)
 }
 
 func computeObsStateStamp(vaultDir string) int64 {
