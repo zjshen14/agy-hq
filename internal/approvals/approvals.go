@@ -127,6 +127,7 @@ func (p Proposal) IsExpired(now time.Time) bool {
 type InterventionRecord struct {
 	Timestamp string   `json:"timestamp"`
 	Decision  string   `json:"decision"`
+	Dismissed bool     `json:"dismissed,omitempty"`
 	Proposal  Proposal `json:"proposal"`
 	Output    string   `json:"output,omitempty"`
 	Error     string   `json:"error,omitempty"`
@@ -864,6 +865,7 @@ func RejectProposalWithOptions(vaultDir, id string, opts RejectOptions) error {
 	rec := InterventionRecord{
 		Timestamp: now.Format(time.RFC3339),
 		Decision:  "rejected",
+		Dismissed: opts.SuppressResume,
 		Proposal:  prop,
 		Output:    reason,
 	}

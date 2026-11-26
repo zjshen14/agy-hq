@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/zjshen14/agy-hq/internal/obs"
+	"github.com/zjshen14/agy-hq/internal/transcript"
 	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 var (
-	reQuarantinedReadCmd   = regexp.MustCompile(`^\s*(?:(?:\S+/)?hq)\s+(?:(?:gmail|gchat)\s+read-quarantined|watch\s+read|brief\s+format-quarantined)\b`)
 	reBgTaskNoticeLine     = regexp.MustCompile(`(?im)^Tool is running as a background task with task id:\s*([0-9a-zA-Z_-]+/task-\d+)\b`)
 	reBgTaskFinishedLine   = regexp.MustCompile(`(?i)(?:Task id\s+"([0-9a-zA-Z_-]+/task-\d+)"\s+(?:finished|was canceled|canceled|failed|completed|exited)|sender=([0-9a-zA-Z_-]+/task-\d+))`)
 	reBgTimerDescLine      = regexp.MustCompile(`(?im)^Task Description:\s*Timer:\s*([^,\n]+)`)
@@ -100,82 +100,20 @@ func parseTimerDescriptionDuration(raw string) time.Duration {
 	return 0
 }
 
-// isReadOnlyFileViewerOutput returns true if the tool output step is a file viewer (`read_file`)
-// or if the preceding planner step only invoked non-command tools (preventing string literals like
-// "Command exited with code 1" inside source files from triggering false-positive error counts).
 func isReadOnlyFileViewerOutput(content string, lastPlannerHadTools bool, lastPlannerHadRunCommand bool) bool {
-	if strings.HasPrefix(content, "Showing lines ") || strings.Contains(content, "\nShowing lines ") {
-		return true
-	}
-	if lastPlannerHadTools && !lastPlannerHadRunCommand {
-		return true
-	}
-	return false
-}
-
-func hasCommandExitNonZeroLine(content string) bool {
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "Command exited with code ") {
-			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "Command exited with code "))
-			if len(rest) > 0 && rest[0] >= '1' && rest[0] <= '9' {
-				return true
-			}
-		}
-	}
-	return false
+	return transcript.IsReadOnlyFileViewerOutput(content, lastPlannerHadTools, lastPlannerHadRunCommand)
 }
 
 func isPreToolDenialStep(status, content string) bool {
-	if !strings.Contains(content, "Blocked by agy-hq") {
-		return false
-	}
-	if strings.HasPrefix(content, "Showing lines ") || strings.Contains(content, "\nShowing lines ") {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(status), "ERROR") ||
-		strings.Contains(content, "Encountered error") ||
-		strings.HasPrefix(strings.TrimSpace(content), "Blocked by agy-hq") ||
-		strings.Contains(content, `"decision":"deny"`) {
-		return true
-	}
-	return false
+	return transcript.IsPreToolDenialStep(status, content)
 }
 
 func isTranscriptStepErrorWithContext(status, content string, lastPlannerHadTools bool, lastPlannerHadRunCommand bool) bool {
-	if strings.EqualFold(strings.TrimSpace(status), "ERROR") {
-		return true
-	}
-	if strings.HasPrefix(content, "Showing lines ") || strings.Contains(content, "\nShowing lines ") {
-		return false
-	}
-	if strings.Contains(content, "Encountered error in tool execution:") || strings.Contains(content, "Encountered error in step execution:") {
-		return true
-	}
-	if !isReadOnlyFileViewerOutput(content, lastPlannerHadTools, lastPlannerHadRunCommand) && hasCommandExitNonZeroLine(content) {
-		return true
-	}
-	return false
+	return transcript.IsStepError(status, content, lastPlannerHadTools, lastPlannerHadRunCommand)
 }
 
 func isTransientExternalError(content string) bool {
-	lower := strings.ToLower(content)
-	for _, pat := range []string{
-		"429 too many requests",
-		"status 429",
-		"502 bad gateway",
-		"503 service unavailable",
-		"504 gateway timeout",
-		"etimedout",
-		"econnreset",
-		"rate limit exceeded",
-		"connection reset by peer",
-	} {
-		if strings.Contains(lower, pat) {
-			return true
-		}
-	}
-	return false
+	return transcript.IsTransientExternalError(content)
 }
 
 type transcriptTurnMetrics struct {
@@ -389,7 +327,7 @@ func parseTranscriptTurnMetrics(transcriptPath string, stepStartIdx int) (transc
 			if tc.Name == "run_command" {
 				lastPlannerHadRunCommand = true
 				if cmdStr, ok := tc.Args["CommandLine"].(string); ok {
-					if reQuarantinedReadCmd.MatchString(cmdStr) {
+					if transcript.IsQuarantinedReadCmd(cmdStr) {
 						tm.TaintedCmdSeen = true
 					}
 				}

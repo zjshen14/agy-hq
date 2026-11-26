@@ -60,6 +60,7 @@ type DreamPlan struct {
 	StaleReferences      []string                `json:"staleReferences,omitempty"`
 	WikiAlerts           []string                `json:"wikiAlerts,omitempty"`
 	NegativeConstraints  []string                `json:"negativeConstraints,omitempty"`
+	PendingRSICount      int                     `json:"pendingRsiCount"`
 }
 
 func dreamCursorPath(vaultDir string) string {
@@ -105,12 +106,13 @@ func (p *DreamPlan) PrecheckLine() string {
 	if p == nil || !p.HasDelta {
 		return ""
 	}
-	line := fmt.Sprintf("dream-delta: convs=%d overdueFacts=%d staleRefs=%d wikiAlerts=%d archiveDays=%d overBudget=%v",
+	line := fmt.Sprintf("dream-delta: convs=%d overdueFacts=%d staleRefs=%d wikiAlerts=%d archiveDays=%d pendingRsi=%d overBudget=%v",
 		len(p.SalientConversations),
 		p.OverdueTTLFactCount,
 		len(p.StaleReferences),
 		len(p.WikiAlerts),
 		p.PendingArchiveDays,
+		p.PendingRSICount,
 		p.MemoryOverBudget,
 	)
 	if len(line) > 190 {
@@ -122,6 +124,8 @@ func (p *DreamPlan) PrecheckLine() string {
 type interventionLite struct {
 	Timestamp string `json:"timestamp"`
 	Decision  string `json:"decision"`
+	Dismissed bool   `json:"dismissed,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 	Proposal  struct {
 		ActionType string `json:"actionType"`
 		Summary    string `json:"summary"`
@@ -263,19 +267,24 @@ func BuildDreamPlan(vaultDir string, opts DreamPlanOptions) (*DreamPlan, error) 
 	for _, s := range audit.DuplicatePlaybookOwners {
 		wikiAlerts = append(wikiAlerts, "duplicate_playbook_owner:"+s)
 	}
+	for _, s := range audit.SkillPlaybookCollisions {
+		wikiAlerts = append(wikiAlerts, "skill_playbook_collision:"+s)
+	}
 	for _, s := range audit.NearDuplicateTopics {
 		wikiAlerts = append(wikiAlerts, "near_duplicate_topic:"+s)
 	}
 
 	pendingArchiveDays := countHotJournalDaysOlderThan(vaultDir, now.AddDate(0, 0, -DefaultHotArchiveDays))
 	negConstraints := loadRecentRejectedConstraints(vaultDir, now.AddDate(0, 0, -30), 10)
+	pendingRSI := countPendingRSIWork(vaultDir, now)
 
 	hasDelta := len(salient) > 0 ||
 		audit.OverdueTTLFactCount > 0 ||
 		audit.OverBudget ||
 		len(audit.StaleReferences) > 0 ||
 		len(wikiAlerts) > 0 ||
-		pendingArchiveDays > 0
+		pendingArchiveDays > 0 ||
+		pendingRSI > 0
 
 	return &DreamPlan{
 		GeneratedAt:          now.UTC().Format(time.RFC3339),
@@ -294,6 +303,7 @@ func BuildDreamPlan(vaultDir string, opts DreamPlanOptions) (*DreamPlan, error) 
 		StaleReferences:      audit.StaleReferences,
 		WikiAlerts:           wikiAlerts,
 		NegativeConstraints:  negConstraints,
+		PendingRSICount:      pendingRSI,
 	}, nil
 }
 
@@ -356,7 +366,10 @@ func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems in
 	var items []string
 	seen := make(map[string]bool)
 	scanInterventionsSince(vaultDir, since, func(rec interventionLite) {
-		if !strings.EqualFold(strings.TrimSpace(rec.Decision), "rejected") {
+		if !strings.EqualFold(strings.TrimSpace(rec.Decision), "rejected") || rec.Dismissed {
+			return
+		}
+		if strings.Contains(strings.ToLower(rec.Reason), "expired_dismissed") || strings.Contains(strings.ToLower(rec.Reason), "dismiss") {
 			return
 		}
 		summary := strings.TrimSpace(rec.Proposal.Summary)
@@ -370,8 +383,114 @@ func loadRecentRejectedConstraints(vaultDir string, since time.Time, maxItems in
 			items = append(items, entry)
 		}
 	})
+	// Also append recent RSI rejection/revert tombstones from memory/rsi/archive.jsonl (lock-free).
+	archivePath := filepath.Join(vaultDir, "memory", "rsi", "archive.jsonl")
+	if isRegularNonSymlinkFile(archivePath) {
+		if f, err := os.Open(archivePath); err == nil {
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				var rec struct {
+					Status          string `json:"status"`
+					Title           string `json:"title"`
+					AppliedAt       string `json:"appliedAt"`
+					RejectionReason string `json:"rejectionReason"`
+				}
+				if json.Unmarshal(scanner.Bytes(), &rec) != nil {
+					continue
+				}
+				st := strings.ToLower(strings.TrimSpace(rec.Status))
+				if st != "rejected" && st != "reverted" {
+					continue
+				}
+				if ts, ok := parseAnyTimestamp(rec.AppliedAt); ok && ts.Before(since) {
+					continue
+				}
+				title := strings.TrimSpace(rec.Title)
+				if title == "" {
+					continue
+				}
+				reasonSuffix := ""
+				if r := strings.TrimSpace(rec.RejectionReason); r != "" {
+					reasonSuffix = " (" + store.TruncateRunesWithSuffix(r, 60, "…") + ")"
+				}
+				entry := fmt.Sprintf("[rsi:%s] %s%s", st, store.TruncateRunesWithSuffix(title, 120, "…"), reasonSuffix)
+				key := strings.ToLower(entry)
+				if !seen[key] {
+					seen[key] = true
+					items = append(items, entry)
+				}
+			}
+			_ = f.Close()
+		}
+	}
 	if len(items) > maxItems {
 		items = items[len(items)-maxItems:]
 	}
 	return items
+}
+
+// countPendingRSIWork scans memory/rsi/ lock-free for actionable RSI work that should wake
+// nightly sleep-consolidate even when there are no new journal turns:
+// (1) open user_correction observations, (2) canary regressions (harmfulCount >= 2),
+// (3) stale orphaned drafts (>7d old).
+func countPendingRSIWork(vaultDir string, now time.Time) int {
+	count := 0
+	obsPath := filepath.Join(vaultDir, "memory", "rsi", "observations.jsonl")
+	if isRegularNonSymlinkFile(obsPath) {
+		if f, err := os.Open(obsPath); err == nil {
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				var ev struct {
+					Status string `json:"status"`
+					Origin string `json:"origin"`
+				}
+				if json.Unmarshal(scanner.Bytes(), &ev) == nil && ev.Status == "open" && ev.Origin == "user_correction" {
+					count++
+				}
+			}
+			_ = f.Close()
+		}
+	}
+	archPath := filepath.Join(vaultDir, "memory", "rsi", "archive.jsonl")
+	if isRegularNonSymlinkFile(archPath) {
+		if f, err := os.Open(archPath); err == nil {
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				var rec struct {
+					Status       string `json:"status"`
+					HarmfulCount int    `json:"harmfulCount"`
+				}
+				if json.Unmarshal(scanner.Bytes(), &rec) == nil && rec.Status == "canary" && rec.HarmfulCount >= 2 {
+					count++
+				}
+			}
+			_ = f.Close()
+		}
+	}
+	hypDir := filepath.Join(vaultDir, "memory", "rsi", "hypotheses")
+	if entries, err := os.ReadDir(hypDir); err == nil {
+		staleCutoff := now.Add(-7 * 24 * time.Hour)
+		for _, e := range entries {
+			if e.IsDir() || e.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			b, rErr := os.ReadFile(filepath.Join(hypDir, e.Name()))
+			if rErr != nil {
+				continue
+			}
+			var h struct {
+				Status    string `json:"status"`
+				CreatedAt string `json:"createdAt"`
+			}
+			if json.Unmarshal(b, &h) == nil && h.Status == "draft" {
+				if ts, ok := parseAnyTimestamp(h.CreatedAt); ok && ts.Before(staleCutoff) {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }

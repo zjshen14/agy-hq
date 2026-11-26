@@ -19,6 +19,9 @@ var Ring0ProtectedPaths = []string{
 	"internal/events/",
 	"internal/plugin/",
 	"internal/rsi/tcb.go",
+	"internal/rsi/drawbacks.go",
+	"internal/rsi/probes.go",
+	"internal/rsi/eval.go",
 	"internal/rsi/verifier.go",
 	"internal/rsi/proposer.go",
 	"internal/sandbox/",
@@ -105,9 +108,14 @@ func CheckTCBAndAntiGoodhart(rootDir, vaultDir string, h *RSIHypothesis, observa
 		}
 	}
 
-	// 2b. Non-overridable quarantine skill guard & Tier 1 tracked-repo isolation
+	// 2b. Non-overridable quarantine skill guard, retired general.md guard & Tier 1 tracked-repo isolation
 	if err := checkTierAndQuarantineTargets(h); err != nil {
 		return false, err.Error()
+	}
+
+	// 2c. Critic 2: Security-Downgrade & Evolve-IPI External-Content Obedience Hard-Block
+	if ok, reason := checkSecurityDowngradeAndIPI(h); !ok {
+		return false, reason
 	}
 
 	// 3. Anti-Collapse Wholesale-Rewrite Check on SKILL.md, AGENTS.md, and MEMORY.md
@@ -165,6 +173,11 @@ func checkTierAndQuarantineTargets(h *RSIHypothesis) error {
 	}
 	for _, tf := range h.TargetFiles {
 		slash := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(tf)), "./")
+		if slash == "local/memory/rsi/rules/general.md" || strings.HasSuffix(slash, "/memory/rsi/rules/general.md") {
+			if h.DeltaOp == nil || h.DeltaOp.Op != "deprecate_skill_rule" {
+				return fmt.Errorf("Gate 1 violation: general.md overlay is retired; RSI rules must target a named skill")
+			}
+		}
 		for qSkill := range NonOverridableQuarantineSkills {
 			if strings.Contains(slash, "/"+qSkill+"/") || strings.HasSuffix(slash, "/"+qSkill+".md") || slash == qSkill {
 				return fmt.Errorf("Gate 1 violation: quarantine skill %q is non-overridable and cannot be modified via RSI", qSkill)
@@ -188,9 +201,41 @@ func checkTierAndQuarantineTargets(h *RSIHypothesis) error {
 }
 
 var (
-	reDeletedTestFunc = regexp.MustCompile(`^-\s*func\s+(Test\w+)\s*\(\s*\w+\s+\*testing\.T\s*\)`)
-	reJSONTag         = regexp.MustCompile("`json:\"([^\"]+)\"`")
+	reDeletedTestFunc   = regexp.MustCompile(`^-\s*func\s+(Test\w+)\s*\(\s*\w+\s+\*testing\.T\s*\)`)
+	reJSONTag           = regexp.MustCompile("`json:\"([^\"]+)\"`")
+	reSecurityDowngrade = regexp.MustCompile(`(?i)(?:curl\s+[^\n]*\s-k\b|curl\s+-k\b|--insecure\b|git_ssl_no_verify\s*=\s*(?:1|true)|node_tls_reject_unauthorized\s*=\s*0|stricthostkeychecking\s*=\s*no|ssl\._create_unverified_context|verify\s*=\s*false|insecureskipverify\s*:\s*true|--no-verify\b|chmod\s+(?:-r\s+)?777\b)`)
+	reExternalObedience = regexp.MustCompile(`(?i)(?:follow|execute|obey|run|trust)\s+(?:any\s+|all\s+)?(?:commands?|instructions?|directives?|prompts?|payloads?)\s+(?:found\s+|embedded\s+|included\s+)?(?:in|inside|from)\s+(?:incoming\s+|external\s+|untrusted\s+)?(?:emails?|gmail|chats?|gchat|messages?|web\s*pages?|attachments?|calendar\s+invites?)|(?:disable|bypass|ignore|skip)\s+(?:taint|quarantine|pretooluse|pre-tool|approval\s+gate|hq\s+propose)`)
 )
+
+// checkSecurityDowngradeAndIPI enforces Critic 2: blocks TLS/verification/permission security
+// downgrades and Evolve-IPI external-content obedience directives in added diff lines or DeltaOp content.
+func checkSecurityDowngradeAndIPI(h *RSIHypothesis) (bool, string) {
+	if h == nil {
+		return true, ""
+	}
+	if h.DeltaOp != nil && h.DeltaOp.Op == "deprecate_skill_rule" {
+		return true, ""
+	}
+	var added strings.Builder
+	for _, line := range strings.Split(h.ProposedDiff, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			added.WriteString(line[1:])
+			added.WriteByte('\n')
+		}
+	}
+	if h.DeltaOp != nil && strings.TrimSpace(h.DeltaOp.Content) != "" {
+		added.WriteString(h.DeltaOp.Content)
+		added.WriteByte('\n')
+	}
+	text := added.String()
+	if m := reSecurityDowngrade.FindString(text); m != "" {
+		return false, fmt.Sprintf("Gate 1 Critic-2 violation: security downgrade pattern %q is prohibited in RSI mutations", strings.TrimSpace(m))
+	}
+	if m := reExternalObedience.FindString(text); m != "" {
+		return false, fmt.Sprintf("Gate 1 Critic-2 violation: Evolve-IPI external-content obedience or quarantine-bypass directive %q is prohibited", strings.TrimSpace(m))
+	}
+	return true, ""
+}
 
 // checkDiffAntiGoodhartAST inspects unified diffs and any full Go test source snippets using go/parser & go/ast
 // to reject test deletion, t.Skip/t.SkipNow/t.Skipf injection, or os.Exit(0) short-circuiting.

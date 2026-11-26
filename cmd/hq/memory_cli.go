@@ -11,6 +11,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/hooks"
 	"github.com/zjshen14/agy-hq/internal/kernel"
+	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/webui"
 )
@@ -83,6 +84,12 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			fmt.Println("Near-Duplicate Topics:")
 			for _, nd := range rep.NearDuplicateTopics {
 				fmt.Printf("  ! %s\n", nd)
+			}
+		}
+		if len(rep.SkillPlaybookCollisions) > 0 {
+			fmt.Println("Skill Playbook-Owner Collisions (move operational skill rules to Ring-2 RSI):")
+			for _, sc := range rep.SkillPlaybookCollisions {
+				fmt.Printf("  ! %s\n", sc)
 			}
 		}
 		if len(rep.MissingTTLEventFacts) > 0 {
@@ -390,6 +397,10 @@ func runMemoryCLI(rootDir, vaultDir string, args []string) {
 			activeSet[strings.ToLower(strings.TrimSpace(s))] = true
 		}
 		_ = delegates.SweepOrphanQueues(vaultDir, activeSet)
+		if rsiRep, rErr := rsi.Compact(rootDir, vaultDir, 7*24*time.Hour); rErr == nil {
+			fmt.Printf("Compacted RSI store:   archivedDrafts=%d, archivedCanaries=%d, removedGeneral=%v, observations=%d->%d\n",
+				rsiRep.ArchivedDrafts, rsiRep.ArchivedCanaries, rsiRep.RemovedGeneralFile, rsiRep.ObservationsBefore, rsiRep.ObservationsAfter)
+		}
 		_ = webui.SyncMarkdownConsole(vaultDir)
 		fmt.Printf("Compacted facts.jsonl: %d -> %d canonical lines\n", memRep.FactsBefore, memRep.FactsAfter)
 		fmt.Printf("Lifecycle archival:    progress=%d, journals=%d, briefs=%d\n",

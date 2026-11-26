@@ -663,14 +663,27 @@ func forgetMemoryInner(vaultDir, query, topicSlug, entitySlug string, blockPII, 
 			}
 		}
 
-		// 7. Scrub memory/rsi/observations.jsonl and memory/rsi/hypotheses/*.json
-		rsiObsPath := filepath.Join(vaultDir, "memory", "rsi", "observations.jsonl")
-		if isRegularNonSymlinkFile(rsiObsPath) {
-			if changed, convIDs := scrubJSONLFile(rsiObsPath, qLower, dryRun); changed {
+		// 7. Scrub memory/rsi/observations.jsonl, archive.jsonl, skill_baselines.json, and hypotheses/*.json
+		for _, rsiJSONL := range []string{
+			filepath.Join(vaultDir, "memory", "rsi", "observations.jsonl"),
+			filepath.Join(vaultDir, "memory", "rsi", "archive.jsonl"),
+		} {
+			if isRegularNonSymlinkFile(rsiJSONL) {
+				if changed, convIDs := scrubJSONLFile(rsiJSONL, qLower, dryRun); changed {
+					for _, cid := range convIDs {
+						recordConv(cid)
+					}
+					recordScrubbed(rsiJSONL)
+				}
+			}
+		}
+		rsiBaselinesPath := filepath.Join(vaultDir, "memory", "rsi", "skill_baselines.json")
+		if isRegularNonSymlinkFile(rsiBaselinesPath) {
+			if changed, convIDs := scrubJSONObjectFile(rsiBaselinesPath, qLower, dryRun); changed {
 				for _, cid := range convIDs {
 					recordConv(cid)
 				}
-				recordScrubbed(rsiObsPath)
+				recordScrubbed(rsiBaselinesPath)
 			}
 		}
 		rsiHypDir := filepath.Join(vaultDir, "memory", "rsi", "hypotheses")

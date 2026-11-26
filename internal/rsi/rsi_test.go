@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zjshen14/agy-hq/internal/vault"
 )
 
 func setupTestRootAndVault(t *testing.T) (string, string) {
@@ -25,7 +27,7 @@ func setupTestRootAndVault(t *testing.T) (string, string) {
 		content := "---\nname: " + sk + "\ndescription: Core OS skill for " + sk + "\n---\n\n# " + sk + "\n\nCore operational steps.\n"
 		_ = os.WriteFile(filepath.Join(skDir, "SKILL.md"), []byte(content), 0o644)
 	}
-	for _, sk := range []string{"gchat", "swe-pulse", "thesis-check"} {
+	for _, sk := range []string{"gchat", "swe-pulse", "thesis-check", "ledger-ingest"} {
 		content := "---\nname: " + sk + "\ndescription: Starter skill for " + sk + "\n---\n\n# " + sk + "\n\nUser-space operational steps.\n"
 		tmplDir := filepath.Join(rootDir, "templates", "skills", sk)
 		_ = os.MkdirAll(tmplDir, 0o755)
@@ -54,7 +56,6 @@ func TestMineHypothesizeVerifyProposeApplyAndAblate(t *testing.T) {
 	}
 	_ = os.WriteFile(txPath, []byte(strings.Join(txLines, "\n")+"\n"), 0o644)
 
-	// Write 2 journals referencing this friction so OccurrenceCount >= 2, plus a child worker journal testing Who&When delegation attribution
 	for idx, cid := range []string{"conv-1", "conv-2", "conv-3", "conv-4"} {
 		jBytes, _ := json.Marshal(map[string]interface{}{
 			"timestamp":      "2026-11-09T01:00:00Z",
@@ -99,7 +100,7 @@ func TestMineHypothesizeVerifyProposeApplyAndAblate(t *testing.T) {
 		t.Fatalf("expected at least 2 hypotheses synthesized, got %d", len(hyps))
 	}
 
-	// 5. Run Stage 3: Verify on the first hypothesis
+	// 5. Run Stage 3: Verify on the first hypothesis (gchat -> RequiresLiveSafetyProbe == true)
 	verifiedHyp, err := Verify(rootDir, vaultDir, hyps[0].ID)
 	if err != nil {
 		t.Fatalf("Verify failed: %v", err)
@@ -107,11 +108,26 @@ func TestMineHypothesizeVerifyProposeApplyAndAblate(t *testing.T) {
 	if verifiedHyp.Verification == nil || !verifiedHyp.Verification.AllPassed {
 		t.Fatalf("expected all 4 gates to pass, got: %+v", verifiedHyp.Verification)
 	}
+	if !verifiedHyp.Verification.RequiresLiveSafetyProbe {
+		t.Fatalf("expected gchat target to set RequiresLiveSafetyProbe=true")
+	}
+
+	// 5b. Q5 Gate: Propose must fail BEFORE passing diff-SHA-bound behavioral probe
+	if _, _, pErr := Propose(rootDir, vaultDir, verifiedHyp.ID, "conv-1", "./bin/hq"); pErr == nil || !strings.Contains(pErr.Error(), "behavioral safety probe") {
+		t.Fatalf("expected Propose to require safety probe for gchat, got err=%v", pErr)
+	}
+	pack, err := BuildSafetyProbes(vaultDir, verifiedHyp.ID)
+	if err != nil || len(pack.Cases) != 6 {
+		t.Fatalf("expected 6 safety probe cases, got len=%d err=%v", len(pack.Cases), err)
+	}
+	if _, err := RecordSafetyProbeResult(vaultDir, verifiedHyp.ID, true, "All 6 Evolve-IPI & approval probes passed"); err != nil {
+		t.Fatalf("RecordSafetyProbeResult failed: %v", err)
+	}
 
 	// 6. Run Stage 4: Propose -> Apply
 	prop, _, err := Propose(rootDir, vaultDir, verifiedHyp.ID, "conv-1", "./bin/hq")
 	if err != nil {
-		t.Fatalf("Propose failed: %v", err)
+		t.Fatalf("Propose failed after passing safety probe: %v", err)
 	}
 	if prop.ActionType != "rsi_skill_patch" || prop.Metadata["rsiId"] != verifiedHyp.ID {
 		t.Fatalf("unexpected proposal metadata: %+v", prop)
@@ -162,7 +178,7 @@ func TestGate1TCBAndAntiGoodhartingDefenses(t *testing.T) {
 		t.Fatalf("expected tainted observation to be blocked from mutating Ring 2, got ok=%v reason=%s", ok, reason)
 	}
 
-	// Case B2: Quarantine skills (inbox-triage) and Tier 1 direct mutations of tracked Core OS skills -> REJECT
+	// Case B2: Quarantine skills (inbox-triage), retired general.md, and Tier 1 tracked Core OS skills -> REJECT
 	hQuarantine := &RSIHypothesis{
 		ID:           "rsi-bad-quarantine",
 		Ring:         Ring2SkillTrigger,
@@ -171,6 +187,15 @@ func TestGate1TCBAndAntiGoodhartingDefenses(t *testing.T) {
 	}
 	if ok, reason := CheckTCBAndAntiGoodhart(rootDir, vaultDir, hQuarantine, nil); ok || !strings.Contains(reason, "quarantine") {
 		t.Fatalf("expected quarantine skill overlay to be blocked, got ok=%v reason=%s", ok, reason)
+	}
+	hGeneral := &RSIHypothesis{
+		ID:           "rsi-bad-general",
+		Ring:         Ring2SkillTrigger,
+		TargetFiles:  []string{"local/memory/rsi/rules/general.md"},
+		ProposedDiff: "+rule\n",
+	}
+	if ok, reason := CheckTCBAndAntiGoodhart(rootDir, vaultDir, hGeneral, nil); ok || !strings.Contains(reason, "retired") {
+		t.Fatalf("expected retired general.md overlay to be blocked, got ok=%v reason=%s", ok, reason)
 	}
 	hTier1Core := &RSIHypothesis{
 		ID:           "rsi-bad-tier1-core",
@@ -245,15 +270,14 @@ func TestGate1TCBAndAntiGoodhartingDefenses(t *testing.T) {
 	}
 }
 
-func TestTwoTierRSI_GeneralFallbackOverlayExternalVaultAndMigrate(t *testing.T) {
+func TestTwoTierRSI_RetiredGeneralAdvisoryExternalVaultAndMigrate(t *testing.T) {
 	rootDir, _ := setupTestRootAndVault(t)
-	// Use an external vaultDir completely outside rootDir (~/.gemini/antigravity/hq/vault pattern)
 	extVault := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(extVault, "memory", "journal", "2026-11-15"), 0o755)
 	_ = os.MkdirAll(filepath.Join(extVault, "memory", "rsi", "hypotheses"), 0o755)
 	_ = os.MkdirAll(filepath.Join(extVault, "memory", "rsi", "rules"), 0o755)
 
-	// 1. Unmatched generic session friction must attribute to "general", NEVER "swe-pulse"
+	// 1. Unmatched core `hq status --bad-opt` friction routes to ring1_cli_triage advisory (never creates general.md!)
 	txPath := filepath.Join(t.TempDir(), "tx-general.jsonl")
 	txLines := []string{
 		`{"step_index":0,"type":"USER_INPUT","content":"Organize my weekly schedule notes"}`,
@@ -282,53 +306,26 @@ func TestTwoTierRSI_GeneralFallbackOverlayExternalVaultAndMigrate(t *testing.T) 
 	if err != nil || len(obs) == 0 {
 		t.Fatalf("Mine failed: %v (len=%d)", err, len(obs))
 	}
-	if obs[0].SkillOrPkg != "general" {
-		t.Fatalf("expected generic unmatched friction to attribute to %q, got %q", "general", obs[0].SkillOrPkg)
+	if obs[0].TargetSubstrate != "ring1_cli_triage" {
+		t.Fatalf("expected core hq CLI error to classify as ring1_cli_triage, got %q", obs[0].TargetSubstrate)
+	}
+	if _, _, _, rErr := ResolveTier1Target(extVault, "general"); rErr == nil {
+		t.Fatalf("expected ResolveTier1Target(\"general\") to error now that general.md is retired")
+	}
+	advs := ListAdvisories(rootDir, extVault)
+	if len(advs) == 0 || advs[0].Kind != "ring1_cli_triage" {
+		t.Fatalf("expected ring1_cli_triage advisory for core hq CLI error, got: %+v", advs)
 	}
 
-	// 2. Tier 1 Hypothesize -> Verify -> Propose (rsi_overlay) -> Apply writes external vault overlay, leaving rootDir untouched
+	// 2. MigrateOverlays extracts named Core OS & starter skill rules into Vault overlays while stripping tracked files cleanly.
 	coreBefore, _ := os.ReadFile(filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills", "morning-brief", "SKILL.md"))
-	hyps, err := HypothesizeWithOptions(rootDir, extVault, "", HypothesizeOptions{Force: true})
-	if err != nil || len(hyps) == 0 {
-		t.Fatalf("Hypothesize failed: %v (len=%d)", err, len(hyps))
-	}
-	if hyps[0].TargetFiles[0] != "local/memory/rsi/rules/general.md" {
-		t.Fatalf("expected Tier 1B target local/memory/rsi/rules/general.md, got %v", hyps[0].TargetFiles)
-	}
-	verHyp, err := Verify(rootDir, extVault, hyps[0].ID)
-	if err != nil || verHyp.Verification == nil || !verHyp.Verification.AllPassed {
-		t.Fatalf("Verify external vault overlay failed: %v (%+v)", err, verHyp)
-	}
-	prop, _, err := Propose(rootDir, extVault, verHyp.ID, "cg-1", "./bin/hq")
-	if err != nil {
-		t.Fatalf("Propose overlay failed: %v", err)
-	}
-	if prop.ActionType != "rsi_overlay" {
-		t.Fatalf("expected ActionType=rsi_overlay, got %q", prop.ActionType)
-	}
-	if _, err := Apply(rootDir, extVault, verHyp.ID, verHyp.DiffSHA256[:12]); err != nil {
-		t.Fatalf("Apply external vault overlay failed: %v", err)
-	}
-	overlayBytes, err := os.ReadFile(filepath.Join(extVault, "memory", "rsi", "rules", "general.md"))
-	if err != nil || !strings.Contains(string(overlayBytes), "<!-- rsi:rule id=") {
-		t.Fatalf("expected rule written to external vault overlay, err=%v content=%s", err, string(overlayBytes))
-	}
-	coreAfter, _ := os.ReadFile(filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills", "morning-brief", "SKILL.md"))
-	if string(coreBefore) != string(coreAfter) {
-		t.Fatalf("expected Core OS SKILL.md to remain completely untouched")
-	}
-
-	// 3. MigrateOverlays extracts legacy tracked rules:
-	//    - Core OS skill rule -> <vault>/memory/rsi/rules/morning-brief.md
-	//    - Legacy rsi-rule-swe-pulse-2c42ca -> <vault>/memory/rsi/rules/general.md
-	//    Leaving both tracked SKILL.md files with 0 `<!-- rsi:rule` blocks.
 	legacySkill := filepath.Join(rootDir, ".agents", "plugins", "agy-hq", "skills", "morning-brief", "SKILL.md")
 	legacyWithRule := string(coreBefore) + "\n## Learned Operational Rules (RSI Managed)\n\n<!-- rsi:rule id=\"rsi-rule-legacy-01\" source=\"obs-old\" model_scope=\"all\" added=\"2026-11-09\" helpful=\"2\" harmful=\"0\" -->\n- **[Learned Rule]:** Keep morning weather to one line.\n"
 	_ = os.WriteFile(legacySkill, []byte(legacyWithRule), 0o644)
 
 	sweSkill := filepath.Join(rootDir, "templates", "skills", "swe-pulse", "SKILL.md")
 	sweBefore, _ := os.ReadFile(sweSkill)
-	sweWithRule := string(sweBefore) + "\n## Learned Operational Rules (RSI Managed)\n\n<!-- rsi:rule id=\"rsi-rule-swe-pulse-2c42ca\" source=\"obs-old2\" model_scope=\"all\" added=\"2026-11-09\" helpful=\"1\" harmful=\"0\" -->\n- **[Learned Rule]:** Legacy front desk non-blocking rule.\n"
+	sweWithRule := string(sweBefore) + "\n## Learned Operational Rules (RSI Managed)\n\n<!-- rsi:rule id=\"rsi-rule-swe-01\" source=\"obs-old2\" model_scope=\"all\" added=\"2026-11-09\" helpful=\"1\" harmful=\"0\" -->\n- **[Learned Rule]:** Run git fetch before rebasing a worktree.\n"
 	_ = os.WriteFile(sweSkill, []byte(sweWithRule), 0o644)
 
 	rep, err := MigrateOverlays(rootDir, extVault)
@@ -348,8 +345,236 @@ func TestTwoTierRSI_GeneralFallbackOverlayExternalVaultAndMigrate(t *testing.T) 
 	if !strings.Contains(string(mbAfterMig), "rsi-rule-legacy-01") {
 		t.Fatalf("expected migrated Core OS rule in external vault morning-brief.md, got:\n%s", string(mbAfterMig))
 	}
-	genAfterMig, _ := os.ReadFile(filepath.Join(extVault, "memory", "rsi", "rules", "general.md"))
-	if !strings.Contains(string(genAfterMig), "rsi-rule-swe-pulse-2c42ca") {
-		t.Fatalf("expected migrated legacy catch-all rule in external vault general.md, got:\n%s", string(genAfterMig))
+	if _, err := os.Stat(filepath.Join(extVault, "memory", "rsi", "rules", "general.md")); err == nil {
+		t.Fatalf("expected MigrateOverlays NOT to create retired general.md")
+	}
+}
+
+func TestRSIV2_HumanGradedAnchors100PercentAgreement(t *testing.T) {
+	rootDir, vaultDir := setupTestRootAndVault(t)
+	raw, err := os.ReadFile(filepath.Join("testdata", "anchors.json"))
+	if err != nil {
+		t.Fatalf("read anchors.json: %v", err)
+	}
+	var spec struct {
+		Anchors []struct {
+			ID                 string `json:"id"`
+			Skill              string `json:"skill"`
+			ExpectPass         bool   `json:"expectPass"`
+			ExpectProbe        bool   `json:"expectProbe"`
+			ExpectReasonSubstr string `json:"expectReasonSubstr"`
+			RuleContent        string `json:"ruleContent"`
+		} `json:"anchors"`
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		t.Fatalf("parse anchors.json: %v", err)
+	}
+	if len(spec.Anchors) < 14 {
+		t.Fatalf("expected >= 14 anchors, got %d", len(spec.Anchors))
+	}
+
+	for _, a := range spec.Anchors {
+		t.Run(a.ID, func(t *testing.T) {
+			var relTarget string
+			switch a.Skill {
+			case "general", "inbox-triage", "morning-brief", "gmail":
+				relTarget = "local/memory/rsi/rules/" + a.Skill + ".md"
+			default:
+				relTarget = "local/skills/" + a.Skill + "/SKILL.md"
+			}
+			ruleID := "rsi-anchor-" + strings.ToLower(a.ID)
+			h := &RSIHypothesis{
+				ID:          "rsi-test-" + strings.ToLower(a.ID),
+				Ring:        Ring2SkillTrigger,
+				FaultLayer:  FaultWorkerACIOrSkill,
+				Title:       "Anchor " + a.ID,
+				TargetFiles: []string{relTarget},
+				DeltaOp: &ACEDeltaOp{
+					Op:      "add_skill_rule",
+					RuleID:  ruleID,
+					Section: LearnedRulesHeading,
+					Content: a.RuleContent,
+				},
+				ProposedDiff: "--- a/" + relTarget + "\n+++ b/" + relTarget + "\n+" + strings.ReplaceAll(a.RuleContent, "\n", "\n+") + "\n",
+				Status:       "draft",
+				Tier:         "personal",
+				CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := SaveHypothesis(vaultDir, h); err != nil {
+				t.Fatalf("SaveHypothesis %s: %v", a.ID, err)
+			}
+			ver, err := Verify(rootDir, vaultDir, h.ID)
+			if err != nil {
+				t.Fatalf("Verify %s: %v", a.ID, err)
+			}
+			if ver.Verification.AllPassed != a.ExpectPass {
+				t.Fatalf("anchor %s: got AllPassed=%v, want %v (G1=%q G2=%q G3=%q G4=%q)",
+					a.ID, ver.Verification.AllPassed, a.ExpectPass,
+					ver.Verification.Gate1Detail, ver.Verification.Gate2Detail, ver.Verification.Gate3Detail, ver.Verification.Gate4Detail)
+			}
+			if a.ExpectPass && ver.Verification.RequiresLiveSafetyProbe != a.ExpectProbe {
+				t.Fatalf("anchor %s: got RequiresLiveSafetyProbe=%v, want %v", a.ID, ver.Verification.RequiresLiveSafetyProbe, a.ExpectProbe)
+			}
+			if !a.ExpectPass && a.ExpectReasonSubstr != "" {
+				allDetails := strings.ToLower(ver.Verification.Gate1Detail + " " + ver.Verification.Gate2Detail + " " + ver.Verification.Gate3Detail + " " + ver.Verification.Gate4Detail)
+				if !strings.Contains(allDetails, strings.ToLower(a.ExpectReasonSubstr)) {
+					t.Fatalf("anchor %s: expected failure detail to contain %q, got %q", a.ID, a.ExpectReasonSubstr, allDetails)
+				}
+			}
+		})
+	}
+}
+
+func TestRSIV2_FingerprintNormCausalCanaryGUARDTombstoneAndCompact(t *testing.T) {
+	rootDir, vaultDir := setupTestRootAndVault(t)
+
+	// 1. D12 Fingerprint Normalization collapses timestamps, UUIDs, thread/proposal IDs
+	s1 := "Created At: 2026-11-20T10:00:00Z\nCompleted At: 2026-11-20T10:00:01Z\nhq gchat list --thread=11111111-2222-3333-4444-555555555555 prop-20261120-abcdef12"
+	s2 := "Created At: 2026-11-24T15:30:00Z\nCompleted At: 2026-11-24T15:30:02Z\nhq gchat list --thread=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee prop-20261124-99999999"
+	if NormalizeForFingerprint(s1) != NormalizeForFingerprint(s2) {
+		t.Fatalf("expected D12 normalized fingerprints to match:\n  1: %q\n  2: %q", NormalizeForFingerprint(s1), NormalizeForFingerprint(s2))
+	}
+
+	// 2. RecordCorrection -> HypothesizeFromJSON -> Verify -> StageNightly -> Tombstone -> Ablate exemption
+	ev, err := RecordCorrection(vaultDir, "swe-pulse", "conv-corr-1", "Always run git fetch before rebasing worktrees", "Always run git fetch origin before rebasing local worktrees onto origin/main")
+	if err != nil {
+		t.Fatalf("RecordCorrection: %v", err)
+	}
+	if ev.Origin != "user_correction" || ev.TargetSubstrate != "ring2_skill_or_overlay" {
+		t.Fatalf("unexpected correction event: %+v", ev)
+	}
+	h, err := HypothesizeFromJSON(rootDir, vaultDir, HypothesisInput{
+		ObservationID:    ev.ID,
+		SkillSlug:        "swe-pulse",
+		Title:            "Fetch origin before rebasing worktree",
+		RootCause:        "User correction on stale origin/main rebase",
+		EditRationale:    "Prevents rebasing against stale local ref.",
+		PredictedOutcome: "Eliminates stale rebase conflicts in swe-pulse.",
+		RuleText:         "Always run `git fetch origin` before rebasing a worktree branch onto `origin/main`.",
+		Origin:           "user_correction",
+	})
+	if err != nil {
+		t.Fatalf("HypothesizeFromJSON: %v", err)
+	}
+
+	// StageNightly verifies and proposes low-risk swe-pulse rule and emits Morning Brief card
+	stageRep, err := StageNightly(rootDir, vaultDir, "conv-dream-1", "./bin/hq", 2)
+	if err != nil {
+		t.Fatalf("StageNightly: %v", err)
+	}
+	if len(stageRep.StagedProposalIDs) != 1 || len(stageRep.OutboxCardIDs) != 1 {
+		t.Fatalf("expected 1 staged proposal & 1 Morning Brief outbox card, got: %+v", stageRep)
+	}
+
+	// RecordTombstone blocks future re-synthesis for the same fingerprint
+	if err := RecordTombstone(vaultDir, h.ID, "Not needed in automated workflow"); err != nil {
+		t.Fatalf("RecordTombstone: %v", err)
+	}
+	if _, err := HypothesizeWithOptions(rootDir, vaultDir, ev.ID, HypothesizeOptions{}); err == nil || !strings.Contains(err.Error(), "tombstone") {
+		t.Fatalf("expected tombstone to block re-synthesis, got err=%v", err)
+	}
+
+	// 3. Q6 user_correction exemption from 30-day zero-hit ablation
+	_, absSwe := ResolveSkillFile(rootDir, "swe-pulse", vaultDir)
+	sweRaw, _ := os.ReadFile(absSwe)
+	oldDate := time.Now().UTC().AddDate(0, 0, -45).Format("2006-01-02")
+	withUserRule := string(sweRaw) + "\n" + LearnedRulesHeading + "\n\n" +
+		`<!-- rsi:rule id="rsi-user-keep" source="obs-u1" model_scope="all" added="` + oldDate + `" helpful="0" harmful="0" origin="user_correction" -->` + "\n" +
+		"- **[Learned Rule]:** Keep user-requested rebase checklist intact across sessions.\n\n" +
+		`<!-- rsi:rule id="rsi-auto-stale" source="obs-a1" model_scope="all" added="` + oldDate + `" helpful="0" harmful="0" -->` + "\n" +
+		"- **[Learned Rule]:** Stale auto-mined rule with zero activations over 45 days.\n"
+	_ = os.WriteFile(absSwe, []byte(withUserRule), 0o644)
+
+	ablated, err := Ablate(rootDir, vaultDir, "")
+	if err != nil {
+		t.Fatalf("Ablate: %v", err)
+	}
+	if len(ablated) != 1 || ablated[0].DeltaOp.RuleID != "rsi-auto-stale" {
+		t.Fatalf("expected only rsi-auto-stale ablated and rsi-user-keep exempted, got: %+v", ablated)
+	}
+
+	// 4. D9 causal canary check: ghost canary (missing file) transitions to "archived",
+	//    while regressed canary (harmful >= 2) auto-stages a 1-tap revert hypothesis.
+	_ = SaveArchive(vaultDir, []RSIArchiveRecord{
+		{
+			ID:                 "rsi-ghost-canary",
+			RuleID:             "rsi-ghost-1",
+			TargetFiles:        []string{"local/memory/rsi/rules/nonexistent.md"},
+			SourceFingerprints: []string{"fp-ghost"},
+			Status:             "canary",
+			TargetCanaryRuns:   3,
+		},
+		{
+			ID:                 "rsi-regress-canary",
+			RuleID:             "rsi-auto-stale",
+			TargetFiles:        []string{"local/skills/swe-pulse/SKILL.md"},
+			SourceFingerprints: []string{"fp-regress"},
+			Status:             "canary",
+			HarmfulCount:       1,
+			TargetCanaryRuns:   3,
+		},
+	})
+	if err := updateCanaryRecords(rootDir, vaultDir, map[string]int{"nonexistent": 5}, nil, map[string]bool{"fp-regress": true}); err != nil {
+		t.Fatalf("updateCanaryRecords: %v", err)
+	}
+	archAfter, _ := LoadArchive(vaultDir)
+	for _, r := range archAfter {
+		if r.ID == "rsi-ghost-canary" && (r.Status != "archived" || r.HelpfulCount != 0) {
+			t.Fatalf("expected ghost canary archived with 0 helpful count, got: %+v", r)
+		}
+		if r.ID == "rsi-regress-canary" && r.RevertHypothesisID == "" {
+			t.Fatalf("expected regressed canary (harmful=2) to auto-stage revert hypothesis, got: %+v", r)
+		}
+	}
+
+	// 5. Evaluate held-out split & Compact hygiene
+	_ = os.WriteFile(filepath.Join(vaultDir, "memory", "rsi", "rules", "general.md"), []byte("# retired\n"), 0o600)
+	_ = SaveHypothesis(vaultDir, &RSIHypothesis{
+		ID:        "rsi-stale-draft-1",
+		Status:    "draft",
+		CreatedAt: time.Now().UTC().AddDate(0, 0, -10).Format(time.RFC3339),
+	})
+	compRep, err := Compact(rootDir, vaultDir, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !compRep.RemovedGeneralFile || compRep.ArchivedDrafts < 1 {
+		t.Fatalf("expected Compact to remove retired general.md and archive stale draft, got: %+v", compRep)
+	}
+
+	// Verify Ring-3 single-owner duplicate check blocks Ring-2 rule duplicating an active Ring-3 fact
+	_, _, _ = vault.AddFactWithOptions(vaultDir, vault.AddFactOptions{
+		ID:        "fact-dup-1",
+		Topic:     "swe",
+		Statement: "Always run git fetch origin before rebasing local worktree branches onto main",
+		Verified:  true,
+	})
+	hDup := &RSIHypothesis{
+		ID:          "rsi-dup-ring3",
+		Ring:        Ring2SkillTrigger,
+		TargetFiles: []string{"local/skills/swe-pulse/SKILL.md"},
+		DeltaOp: &ACEDeltaOp{
+			Op:      "add_skill_rule",
+			RuleID:  "rsi-rule-dup-ring3",
+			Section: LearnedRulesHeading,
+			Content: "<!-- rsi:rule id=\"rsi-rule-dup-ring3\" -->\n- Always run git fetch origin before rebasing local worktree branches onto main.",
+		},
+		ProposedDiff: "+- Always run git fetch origin before rebasing local worktree branches onto main.\n",
+		Status:       "draft",
+		Tier:         "personal",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	_ = SaveHypothesis(vaultDir, hDup)
+	verDup, _ := Verify(rootDir, vaultDir, hDup.ID)
+	if verDup.Verification.AllPassed || !strings.Contains(verDup.Verification.Gate2Detail, "Ring-3 fact") {
+		t.Fatalf("expected Critic-1 to reject Ring-2 duplicate of Ring-3 fact, got: %+v", verDup.Verification)
+	}
+
+	evalRep, err := Evaluate(rootDir, vaultDir, 14*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if evalRep.GeneratedAt == "" {
+		t.Fatalf("expected non-empty EvalReport")
 	}
 }

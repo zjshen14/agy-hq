@@ -24,6 +24,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
 	"github.com/zjshen14/agy-hq/internal/routing"
+	"github.com/zjshen14/agy-hq/internal/rsi"
 	"github.com/zjshen14/agy-hq/internal/sandbox"
 	"github.com/zjshen14/agy-hq/internal/vault"
 	"github.com/zjshen14/agy-hq/internal/watcher"
@@ -618,6 +619,35 @@ func RunWithObs(vaultDir string, precomputedObs *obs.DashboardSummary) []CheckRe
 			Name:   chItem.Name,
 			Status: chItem.Status,
 			Detail: chItem.Detail,
+		})
+	}
+
+	// 20. Check RSI v2 Engine Health (RFC-0029)
+	rsiSt := rsi.GetStatus("", vaultDir)
+	var rsiWarns []string
+	if _, err := os.Stat(filepath.Join(vaultDir, "memory", "rsi", "rules", "general.md")); err == nil {
+		rsiWarns = append(rsiWarns, "retired general.md overlay present (run 'hq rsi compact')")
+	}
+	if rsiSt.ActiveSkillRules > rsi.MaxGlobalActiveRules {
+		rsiWarns = append(rsiWarns, fmt.Sprintf("active rules %d > %d cap", rsiSt.ActiveSkillRules, rsi.MaxGlobalActiveRules))
+	}
+	for _, rec := range rsiSt.Archive {
+		if rec.Status == "canary" && rec.HarmfulCount >= 2 {
+			rsiWarns = append(rsiWarns, fmt.Sprintf("canary %s regressed (harmful=%d)", rec.ID, rec.HarmfulCount))
+		}
+	}
+	if len(rsiWarns) > 0 {
+		results = append(results, CheckResult{
+			Name:   "RSI Engine Health",
+			Status: "WARN",
+			Detail: strings.Join(rsiWarns, " · "),
+		})
+	} else {
+		results = append(results, CheckResult{
+			Name:   "RSI Engine Health",
+			Status: "PASS",
+			Detail: fmt.Sprintf("rules=%d/%d · canaries=%d · promoted=%d · tombstones=%d · advisories=%d",
+				rsiSt.ActiveSkillRules, rsi.MaxGlobalActiveRules, rsiSt.ActiveCanaries, rsiSt.PromotedPatches, rsiSt.RejectedTombstone, rsiSt.AdvisoryCount),
 		})
 	}
 

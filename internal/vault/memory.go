@@ -95,6 +95,7 @@ type MemoryStatusReport struct {
 	InvalidTopicHeaders     []string    `json:"invalidTopicHeaders,omitempty"`
 	BrokenTopicLinks        []string    `json:"brokenTopicLinks,omitempty"`
 	DuplicatePlaybookOwners []string    `json:"duplicatePlaybookOwners,omitempty"`
+	SkillPlaybookCollisions []string    `json:"skillPlaybookCollisions,omitempty"`
 	NearDuplicateTopics     []string    `json:"nearDuplicateTopics,omitempty"`
 	ActiveFactCount         int         `json:"activeFactCount"`
 	ExpiredFactCount        int         `json:"expiredFactCount"`
@@ -1349,6 +1350,7 @@ func auditMemoryInternal(vaultDir string, completedTaskSlugs []string, now time.
 	var invalidHeaders []string
 	var brokenLinks []string
 	var dupOwners []string
+	var skillCollisions []string
 	ownerSeen := make(map[string]string)
 	topicsTotalBytes := 0
 
@@ -1365,6 +1367,12 @@ func auditMemoryInternal(vaultDir string, completedTaskSlugs []string, now time.
 				dupOwners = append(dupOwners, fmt.Sprintf("scope %q claimed by both %s and %s", tp.PlaybookOwner, prev, tp.Slug))
 			} else {
 				ownerSeen[tp.PlaybookOwner] = tp.Slug
+			}
+			if strings.HasPrefix(strings.ToLower(tp.PlaybookOwner), "skill:") {
+				slug := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(tp.PlaybookOwner), "skill:"))
+				if IsInstalledSkill(vaultDir, slug) {
+					skillCollisions = append(skillCollisions, fmt.Sprintf("topic %q claims Playbook-Owner %q colliding with installed skill (move operational rules to Ring-2 RSI)", tp.Slug, tp.PlaybookOwner))
+				}
 			}
 		}
 	}
@@ -1444,6 +1452,7 @@ func auditMemoryInternal(vaultDir string, completedTaskSlugs []string, now time.
 		InvalidTopicHeaders:     invalidHeaders,
 		BrokenTopicLinks:        brokenLinks,
 		DuplicatePlaybookOwners: dupOwners,
+		SkillPlaybookCollisions: skillCollisions,
 		NearDuplicateTopics:     nearDups,
 		ActiveFactCount:         len(activeFacts),
 		ExpiredFactCount:        len(expiredFacts),

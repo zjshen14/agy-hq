@@ -676,9 +676,7 @@ func handlePreToolProtectedWrites(w io.Writer, vaultDir string, payload ToolCall
 	protectedStores := []string{
 		filepath.Join(canonVault, "extensions.json"),
 		filepath.Join(canonVault, "memory", "pending"),
-		filepath.Join(canonVault, "memory", "rsi", "hypotheses"),
-		filepath.Join(canonVault, "memory", "rsi", "rules"),
-		filepath.Join(canonVault, "memory", "rsi", "archive.jsonl"),
+		filepath.Join(canonVault, "memory", "rsi"),
 		filepath.Join(canonVault, "memory", "interventions.jsonl"),
 		filepath.Join(canonVault, "memory", "events.json"),
 		filepath.Join(canonVault, "memory", "events_archive.jsonl"),

@@ -57,6 +57,7 @@
 | **CUJ-45** | 0-Token Pulse Look-Ahead (`D1`–`D10`), 3-State Goal Readiness & 3m Outbox Burst Coalescing | `hq goals checklist|park`, `hq pulse precheck`, `hq outbox add|eval` | `TestCUJ45_PulseAnticipationReadinessAndBurstCoalescing` |
 | **CUJ-46** | 1-Tap `DecisionOption` Cards, Ring-0 Taint Safety, Proposal Restage, `hq cancel` & Noisy-Interrupt RSI | `hq outbox act`, `hq approvals expired|restage`, `hq cancel`, `hq rsi mine` | `TestCUJ46_DecisionOptionCardsTaintSafetyAndProposalRestage` |
 | **CUJ-47** | Composable Living Spaces, Locale-Neutral vs. Vault i18n, 0-Token `dataSources` & CSP Sandbox | `hq space create|refresh|sync-goal|export-artifact`, `:4242/living-spaces/<slug>` | `TestCUJ47_ComposableLivingSpacesI18nDataSourcesAndCSPSandbox` |
+| **CUJ-48** | RSI v2 Impact-Weighted Trace Eval, Risk-Tiered Behavioral Probes, Shared Memory/RSI Spine & Safe Nightly Staging | `hq rsi record-correction|context|hypothesize --from-json|probes|record-probe|stage-nightly|eval|compact`, `hq memory dream-plan`, `hq reject`, `hq doctor` | `TestCUJ48_RSIV2ImpactWeightedEvalAndSafeGating` |
 
 ---
 
@@ -395,3 +396,9 @@
 ## CUJ-47: Composable Living Spaces, Locale-Neutral vs. Vault i18n, 0-Token `dataSources` & CSP Sandbox ([RFC-0027](../design/0027-muse-proactive-actions.md))
 1. **Composable Compilation, Goal Sync & Live Data Refresh (`hq space create|refresh|sync-goal|export-artifact`):** Hides the language toggle under the neutral `["en"]` framework default while enabling instant `<script id="hq-i18n">` switching under Vault `["en", "zh"]`, syncs 3-state Goal checklists and `hq_builtin` `workspaces` in `0` LLM tokens, and exports remote-accessible `generative_ui` HTML artifacts (`space_<slug>.html` + `.metadata.json`).
 2. **Strict Loopback Isolation (`:4242/living-spaces/<slug>`):** Renders compiled Spaces inside `<iframe sandbox="allow-scripts">` (omitting `allow-same-origin`) with strict `Content-Security-Policy: default-src 'none'` on `/raw`.
+
+---
+
+## CUJ-48: RSI v2 Impact-Weighted Trace Eval, Risk-Tiered Behavioral Probes, Shared Memory/RSI Spine & Safe Nightly Staging ([RFC-0029](../design/0029-rsi-v2-trace-eval-and-heldout-ratchet.md))
+1. **Shared Memory/RSI Spine & Semantic Synthesis (`hq rsi record-correction`, `hq memory dream-plan`, `hq rsi context`, `hq rsi hypothesize --from-json`):** Records immediate user workflow corrections (`pendingRsiCount >= 1` waking `dream-plan`), flags Ring-3 `Playbook-Owner: skill:<slug>` collisions with installed skills (`skill_playbook_collision`), returns bounded PII-scrubbed evidence packets via `hq rsi context`, and synthesizes rationale-bearing Ring-2 rules strictly targeting named skills (retiring `general.md`).
+2. **Risk-Tiered Safety Gates, 1-Tap Morning Brief Staging, Tombstones & Held-Out Eval (`hq rsi verify|probes|record-probe|stage-nightly|eval|compact`, `hq reject`, `hq doctor`):** Rejects Critic-1 drawbacks and Critic-2 *Evolve-IPI* / security-downgrade rules, holds high-risk external-facing skills until a diff-SHA-bound 6-case behavioral probe passes while staging low-risk rules into 1-tap `RFC-0027` Morning Brief cards (`<= 2/night`), records negative-memory tombstones on `hq reject`, computes deterministic 50/50 Selection vs. Held-Out telemetry via `hq rsi eval`, and cleans up retired `general.md` and stale drafts via `hq rsi compact`.

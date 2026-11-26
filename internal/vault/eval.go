@@ -335,7 +335,9 @@ func countInterventionsSince(vaultDir string, since time.Time) (approved, reject
 		case "approved":
 			approved++
 		case "rejected":
-			rejected++
+			if !rec.Dismissed {
+				rejected++
+			}
 		case "expired":
 			expired++
 		}

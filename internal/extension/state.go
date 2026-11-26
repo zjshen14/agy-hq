@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -322,7 +323,8 @@ func SetChannelBridgePaused(ctx context.Context, vaultDir, bridgeFQID string, pa
 	return updated, err
 }
 
-// NonOverridableCoreSkills lists security-boundary skills that extension packs can never shadow.
+// NonOverridableCoreSkills lists security-boundary skills that extension packs
+// and personal RSI overlays can never shadow or mutate.
 var NonOverridableCoreSkills = map[string]bool{
 	"inbox-triage":              true,
 	"quarantined-digest-reader": true,
@@ -349,15 +351,64 @@ type DispatchResolution struct {
 }
 
 // MaxOverlayRulesPerSkill caps the number of active RSI overlay rules injected for a single skill.
-const MaxOverlayRulesPerSkill = 10
+const MaxOverlayRulesPerSkill = 5
 
-var reExtRSIRuleOpen = regexp.MustCompile(`<!--\s*rsi:rule\s+([^>]+)-->`)
+var (
+	reRSIRuleComment = regexp.MustCompile(`<!--\s*rsi:rule\s+([^>]+)-->`)
+	reRSIRuleKV      = regexp.MustCompile(`(\w+)="([^"]*)"`)
+)
 
-func extractActiveRSIRuleBlocks(content string) []string {
+// ParsedRSIRule represents a parsed `<!-- rsi:rule ... -->` metadata block in a SKILL.md or overlay file.
+type ParsedRSIRule struct {
+	ID         string
+	Source     string
+	ModelScope string
+	Added      string
+	Helpful    int
+	Harmful    int
+	Origin     string
+	SkillFile  string
+}
+
+// ParseRSIRules extracts all `<!-- rsi:rule ... -->` metadata headers from a skill or overlay document.
+func ParseRSIRules(skillFile, content string) []ParsedRSIRule {
+	matches := reRSIRuleComment.FindAllStringSubmatch(content, -1)
+	var out []ParsedRSIRule
+	for _, m := range matches {
+		attrs := m[1]
+		kvs := reRSIRuleKV.FindAllStringSubmatch(attrs, -1)
+		r := ParsedRSIRule{SkillFile: skillFile}
+		for _, kv := range kvs {
+			switch kv[1] {
+			case "id":
+				r.ID = kv[2]
+			case "source":
+				r.Source = kv[2]
+			case "model_scope":
+				r.ModelScope = kv[2]
+			case "added":
+				r.Added = kv[2]
+			case "helpful":
+				r.Helpful, _ = strconv.Atoi(kv[2])
+			case "harmful":
+				r.Harmful, _ = strconv.Atoi(kv[2])
+			case "origin":
+				r.Origin = kv[2]
+			}
+		}
+		if r.ID != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ExtractActiveRSIRuleBlocks extracts all non-disabled `<!-- rsi:rule ... -->` blocks from markdown content.
+func ExtractActiveRSIRuleBlocks(content string) []string {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	var out []string
 	for i := 0; i < len(lines); i++ {
-		m := reExtRSIRuleOpen.FindStringSubmatch(lines[i])
+		m := reRSIRuleComment.FindStringSubmatch(lines[i])
 		if len(m) < 2 {
 			continue
 		}
@@ -397,23 +448,25 @@ func extractActiveRSIRuleBlocks(content string) []string {
 	return out
 }
 
-// LoadGeneralOverlayRules loads up to maxRules active learned personal rules from <vault>/memory/rsi/rules/general.md.
-func LoadGeneralOverlayRules(vaultDir string, maxRules int) []string {
-	if strings.TrimSpace(vaultDir) == "" {
-		return nil
+// ExtractRSIRuleBlock returns the full markdown block for a specific ruleID, if present.
+func ExtractRSIRuleBlock(content, ruleID string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	marker := fmt.Sprintf(`<!-- rsi:rule id=%q`, ruleID)
+	for i := 0; i < len(lines); i++ {
+		if strings.Contains(lines[i], marker) {
+			var block []string
+			block = append(block, lines[i])
+			for j := i + 1; j < len(lines); j++ {
+				trimmed := strings.TrimSpace(lines[j])
+				if trimmed == "" || strings.HasPrefix(trimmed, "<!-- rsi:rule") || strings.HasPrefix(trimmed, "## ") {
+					break
+				}
+				block = append(block, lines[j])
+			}
+			return strings.Join(block, "\n"), true
+		}
 	}
-	if maxRules <= 0 {
-		maxRules = 5
-	}
-	b, err := os.ReadFile(filepath.Join(vaultDir, "memory", "rsi", "rules", "general.md"))
-	if err != nil {
-		return nil
-	}
-	blocks := extractActiveRSIRuleBlocks(string(b))
-	if len(blocks) > maxRules {
-		blocks = blocks[:maxRules]
-	}
-	return blocks
+	return "", false
 }
 
 // ResolveActivePackSkillOverrides resolves all trusted, enabled companion pack skill overrides
@@ -532,14 +585,14 @@ func ResolveSkillDispatch(vaultDir, logicalSkill string) DispatchResolution {
 			res.SkillOrigin = "vault"
 			res.SkillPath = vaultSkillPath
 			res.Trust = "ok"
-			res.ActiveRules += len(extractActiveRSIRuleBlocks(string(b)))
+			res.ActiveRules += len(ExtractActiveRSIRuleBlocks(string(b)))
 		}
 	}
 
 	if strings.TrimSpace(vaultDir) != "" {
 		overlayPath := filepath.Join(vaultDir, "memory", "rsi", "rules", skill+".md")
 		if b, oErr := os.ReadFile(overlayPath); oErr == nil {
-			blocks := extractActiveRSIRuleBlocks(string(b))
+			blocks := ExtractActiveRSIRuleBlocks(string(b))
 			if len(blocks) > MaxOverlayRulesPerSkill {
 				blocks = blocks[:MaxOverlayRulesPerSkill]
 			}
