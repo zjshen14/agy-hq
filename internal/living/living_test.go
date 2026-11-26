@@ -145,3 +145,154 @@ func TestLivingSpaceSingleVsMultiLocaleGoalSyncDataSourcesAndArtifact(t *testing
 		t.Fatalf("expected bilingual lang-switch and zh dictionary in compiled HTML")
 	}
 }
+
+func TestLivingSpaceEditorialThemesInteractiveMapStoryCardsAndSecurity(t *testing.T) {
+	now := time.Date(2026, 11, 25, 18, 0, 0, 0, time.UTC)
+	vaultDir := t.TempDir()
+
+	validDataImg := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8b8AAAAASUVORK5CYII="
+	doc := SpaceDoc{
+		Slug:      "campus-field-guide",
+		Theme:     ThemeHeritage,
+		HeroBadge: MultiText(map[string]string{"en": "INTERACTIVE FIELD GUIDE", "zh": "互动导览"}),
+		Title:     MultiText(map[string]string{"en": "Historic Campus Walk", "zh": "历史园区漫步"}),
+		Subtitle:  Text("Self-guided architectural route with interactive map & spotlights"),
+		Locales:   []string{"en", "zh"},
+		LocaleLabels: map[string]string{
+			"en": "EN",
+			"zh": "中文",
+		},
+		Blocks: []BlockSpec{
+			{
+				ID:    "route-map",
+				Type:  BlockInteractiveMap,
+				Title: MultiText(map[string]string{"en": "Route Map", "zh": "路线图"}),
+				Map: &MapSpec{
+					ViewBox: "0 0 800 360",
+					Zones: []MapZone{
+						{X: 20, Y: 20, W: 340, H: 160, Label: MultiText(map[string]string{"en": "West Wing", "zh": "西翼"}), Tone: "gold"},
+					},
+					Paths: []MapPath{
+						{Points: "80,100 320,120 620,240", Dashed: true, Tone: "gold"},
+						{Points: `10,10" onload="alert(1)`, Tone: "accent"},
+					},
+					Pins: []MapPin{
+						{
+							ID:       "stop-1",
+							Number:   1,
+							X:        80,
+							Y:        100,
+							Title:    MultiText(map[string]string{"en": "Main Archway", "zh": "主拱门"}),
+							Subtitle: Text("1892 Limestone Gate"),
+							Meta:     Text("10 min"),
+							Body:     MultiText(map[string]string{"en": "Start beneath the carved arches.", "zh": "从雕刻拱门开始。"}),
+							Tip:      Text("Best morning light before 10:00."),
+							Tone:     "gold",
+						},
+						{
+							ID:    "stop-2",
+							X:     320,
+							Y:     120,
+							Title: Text("Library Rotunda"),
+							Body:  Text("Look up at the timber dome."),
+						},
+					},
+					Legend: []LocalizedText{Text("Dashed line = walking path")},
+				},
+			},
+			{
+				ID:    "spotlights",
+				Type:  BlockStoryCards,
+				Title: Text("Key Spotlights"),
+				Cards: []StoryCard{
+					{
+						ID:           "card-valid",
+						Eyebrow:      Text("Architecture"),
+						Icon:         "🏛️",
+						Title:        Text("Clock Tower"),
+						Subtitle:     Text("Restored 2021"),
+						Body:         Text("Chimes every quarter hour."),
+						Highlights:   []LocalizedText{Text("360-degree terrace view"), Text("Original brass mechanism")},
+						ExpandLabel:  Text("Historical note"),
+						ExpandBody:   Text("Built with local sandstone quarried 12 miles east."),
+						Meta:         Text("Stop #1"),
+						Badge:        "Must See",
+						Tone:         "accent",
+						ImageDataURI: validDataImg,
+						CopyText:     "Clock Tower Main Gate",
+						CopyLabel:    Text("Copy Landmark"),
+					},
+					{
+						ID:           "card-blocked-img",
+						Title:        Text("Untrusted Image Guard"),
+						Body:         Text("External image URLs must be stripped for strict CSP."),
+						ImageDataURI: "https://evil.example/tracker.png",
+					},
+				},
+			},
+			{
+				ID:    "prep-list",
+				Type:  BlockChecklistLedger,
+				Title: Text("Preparation"),
+				Items: []ChecklistRow{
+					{ID: "chk-1", Title: Text("Download offline transit pass"), Status: "open"},
+					{ID: "chk-2", Title: Text("Reserve audio guide"), Status: "confirmed"},
+				},
+			},
+		},
+	}
+
+	if _, err := Save(vaultDir, doc, now); err != nil {
+		t.Fatalf("Save editorial space: %v", err)
+	}
+	htmlPath, _, err := Build(vaultDir, "campus-field-guide")
+	if err != nil {
+		t.Fatalf("Build editorial space: %v", err)
+	}
+	raw, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read rendered html: %v", err)
+	}
+	s := string(raw)
+
+	for _, want := range []string{
+		`data-theme="heritage"`,
+		`class="hero-badge"`,
+		`INTERACTIVE FIELD GUIDE`,
+		`id="hq-mode-btn"`,
+		`id="hq-space-search"`,
+		`class="toc-strip"`,
+		`class="imap-shell"`,
+		`data-map-pin="0"`,
+		`data-map-detail="1"`,
+		`class="pill imap-next"`,
+		`主拱门`,
+		`class="story-grid"`,
+		`class="story-deep"`,
+		validDataImg,
+		`data-chk-toggle="chk-1"`,
+		`data-chk-sync="1"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("rendered editorial space missing %q", want)
+		}
+	}
+
+	// Verify strict security sanitizers blocked external image URL & SVG attribute injection
+	for _, forbidden := range []string{
+		"https://evil.example/tracker.png",
+		`onload="alert(1)"`,
+	} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("rendered editorial space leaked forbidden sequence %q", forbidden)
+		}
+	}
+
+	// Verify unknown theme falls back cleanly to modern
+	if got := normalizeTheme(`" onclick="alert(1)`); got != ThemeModern {
+		t.Fatalf("normalizeTheme fallback = %q, want %q", got, ThemeModern)
+	}
+	if got := safeViewBox(`0 0 100 100" onload="alert(1)`); got != "0 0 800 400" {
+		t.Fatalf("safeViewBox fallback = %q, want default", got)
+	}
+}

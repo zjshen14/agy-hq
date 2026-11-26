@@ -119,6 +119,7 @@ func runLivingSpaceCLI(vaultDir string, args []string) {
 		slug := fs.String("slug", "", "Living Space slug (lowercase alphanumeric and hyphens)")
 		title := fs.String("title", "", "Space title")
 		subtitle := fs.String("subtitle", "", "Optional subtitle")
+		theme := fs.String("theme", "", "Optional visual theme (modern|editorial|heritage|ocean|forest)")
 		goalSlug := fs.String("goal", "", "Optional linked Goal slug")
 		tz := fs.String("tz", "", "Optional IANA timezone")
 		localesRaw := fs.String("locales", "", "Optional comma-separated locales (defaults to living_spaces.default_locales)")
@@ -146,6 +147,9 @@ func runLivingSpaceCLI(vaultDir string, args []string) {
 		}
 		if strings.TrimSpace(*subtitle) != "" {
 			doc.Subtitle = living.Text(strings.TrimSpace(*subtitle))
+		}
+		if strings.TrimSpace(*theme) != "" {
+			doc.Theme = strings.TrimSpace(*theme)
 		}
 		if strings.TrimSpace(*goalSlug) != "" {
 			doc.GoalSlug = strings.TrimSpace(*goalSlug)

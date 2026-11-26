@@ -13,6 +13,17 @@ const (
 	BlockChecklistLedger   = "checklist_ledger"
 	BlockCalloutNotes      = "callout_notes"
 	BlockMetricBars        = "metric_bars"
+	BlockInteractiveMap    = "interactive_map"
+	BlockStoryCards        = "story_cards"
+)
+
+// Supported Living Space editorial themes.
+const (
+	ThemeModern    = "modern"
+	ThemeEditorial = "editorial"
+	ThemeHeritage  = "heritage"
+	ThemeOcean     = "ocean"
+	ThemeForest    = "forest"
 )
 
 // LocalizedText accepts either a plain JSON string ("Launch") or a locale map ({"en": "Launch", "zh": "发布"}).
@@ -184,10 +195,76 @@ type MetricBarRow struct {
 	Perspectives  []string      `json:"perspectives,omitempty"`
 }
 
+// MapZone renders a labeled rectangular region on an `interactive_map` inline SVG diagram.
+type MapZone struct {
+	X     float64       `json:"x"`
+	Y     float64       `json:"y"`
+	W     float64       `json:"w"`
+	H     float64       `json:"h"`
+	Label LocalizedText `json:"label"`
+	Tone  string        `json:"tone,omitempty"` // neutral | accent | ok | warn | gold
+}
+
+// MapPath renders a route polyline connecting stops on an `interactive_map` inline SVG diagram.
+type MapPath struct {
+	Points string        `json:"points"` // "x1,y1 x2,y2 ..."
+	Dashed bool          `json:"dashed,omitempty"`
+	Tone   string        `json:"tone,omitempty"`
+	Label  LocalizedText `json:"label,omitempty"`
+}
+
+// MapPin renders a tappable numbered stop marker on an `interactive_map` with an inspector card.
+type MapPin struct {
+	ID           string        `json:"id"`
+	Number       int           `json:"number,omitempty"`
+	X            float64       `json:"x"`
+	Y            float64       `json:"y"`
+	Title        LocalizedText `json:"title"`
+	Subtitle     LocalizedText `json:"subtitle,omitempty"`
+	Meta         LocalizedText `json:"meta,omitempty"`
+	Body         LocalizedText `json:"body"`
+	Tip          LocalizedText `json:"tip,omitempty"`
+	Group        string        `json:"group,omitempty"`
+	Perspectives []string      `json:"perspectives,omitempty"`
+	Tone         string        `json:"tone,omitempty"` // accent | ok | warn | danger | gold
+}
+
+// MapSpec defines a pure-SVG, CSP-safe interactive floor plan or route map.
+type MapSpec struct {
+	ViewBox string          `json:"viewBox,omitempty"` // default "0 0 800 400"
+	Zones   []MapZone       `json:"zones,omitempty"`
+	Paths   []MapPath       `json:"paths,omitempty"`
+	Pins    []MapPin        `json:"pins,omitempty"`
+	Legend  []LocalizedText `json:"legend,omitempty"`
+}
+
+// StoryCard renders a rich editorial spotlight card in a `story_cards` block.
+type StoryCard struct {
+	ID           string          `json:"id,omitempty"`
+	Eyebrow      LocalizedText   `json:"eyebrow,omitempty"`
+	Icon         string          `json:"icon,omitempty"`
+	Title        LocalizedText   `json:"title"`
+	Subtitle     LocalizedText   `json:"subtitle,omitempty"`
+	Body         LocalizedText   `json:"body"`
+	Highlights   []LocalizedText `json:"highlights,omitempty"`
+	ExpandLabel  LocalizedText   `json:"expandLabel,omitempty"`
+	ExpandBody   LocalizedText   `json:"expandBody,omitempty"`
+	Meta         LocalizedText   `json:"meta,omitempty"`
+	Badge        string          `json:"badge,omitempty"`
+	Tone         string          `json:"tone,omitempty"` // neutral | accent | ok | warn | danger
+	ImageDataURI string          `json:"imageDataUri,omitempty"`
+	Group        string          `json:"group,omitempty"`
+	Perspectives []string        `json:"perspectives,omitempty"`
+	LinkURL      string          `json:"linkUrl,omitempty"`
+	LinkLabel    LocalizedText   `json:"linkLabel,omitempty"`
+	CopyText     string          `json:"copyText,omitempty"`
+	CopyLabel    LocalizedText   `json:"copyLabel,omitempty"`
+}
+
 // BlockSpec is one composable section in a Living Space.
 type BlockSpec struct {
 	ID           string        `json:"id"`
-	Type         string        `json:"type"` // kpi_strip | timeline_accordion | comparison_table | checklist_ledger | callout_notes | metric_bars
+	Type         string        `json:"type"` // kpi_strip | timeline_accordion | comparison_table | checklist_ledger | callout_notes | metric_bars | interactive_map | story_cards
 	Title        LocalizedText `json:"title,omitempty"`
 	Group        string        `json:"group,omitempty"`
 	DataSourceID string        `json:"dataSourceId,omitempty"`
@@ -211,6 +288,10 @@ type BlockSpec struct {
 	Notes []CalloutNote `json:"notes,omitempty"`
 	// metric_bars fields
 	Bars []MetricBarRow `json:"bars,omitempty"`
+	// interactive_map fields
+	Map *MapSpec `json:"map,omitempty"`
+	// story_cards fields
+	Cards []StoryCard `json:"cards,omitempty"`
 }
 
 // SpaceDoc is the canonical JSON source stored at <vault>/living_spaces/<slug>/space.json.
@@ -219,6 +300,8 @@ type SpaceDoc struct {
 	Slug               string            `json:"slug"`
 	Title              LocalizedText     `json:"title"`
 	Subtitle           LocalizedText     `json:"subtitle,omitempty"`
+	HeroBadge          LocalizedText     `json:"heroBadge,omitempty"`
+	Theme              string            `json:"theme,omitempty"` // modern | editorial | heritage | ocean | forest
 	GoalSlug           string            `json:"goalSlug,omitempty"`
 	Timezone           string            `json:"timezone,omitempty"`
 	Locales            []string          `json:"locales,omitempty"`
