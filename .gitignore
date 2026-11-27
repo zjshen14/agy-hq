@@ -25,3 +25,7 @@ token*.json
 # Teamwork / agent scratch metadata
 /.agents/teamwork/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
