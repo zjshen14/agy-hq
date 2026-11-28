@@ -1,9 +1,9 @@
 # RFC-0031: Live External Monitors, Active Timezone Resolution, Verify-Before-Interrupt Corroboration & Safe External-Channel Boundaries
 
-- **Status:** Proposed (Phase 1 — Awaiting Review)
+- **Status:** Proposed (Rev 1.1 — Locked `/grill-me` Decisions Q1–Q6; Awaiting Phase 2 Approval)
 - **Authors:** `agy-hq` Architecture
 - **Related Research:** [Research 26 — Live Monitors, Timezone Resolution, Corroboration & Family Channel Audit](../research/26_live_monitors_timezone_corroboration_and_family_channels_audit.md)
-- **Builds On:** [RFC-0014](0014-proactive-engine-and-living-context.md), [RFC-0017a](0017a-connector-protocol-and-watcher-engine.md), [RFC-0023](0023-front-desk-channel-bridge.md), [RFC-0026](0026-declarative-scoped-delegates.md), [RFC-0027](0027-muse-proactive-actions.md)
+- **Builds On:** [RFC-0014](0014-proactive-engine-and-living-context.md), [RFC-0017a](0017a-connector-protocol-and-watcher-engine.md), [RFC-0023](0023-front-desk-channel-bridge.md), [RFC-0026](0026-declarative-scoped-delegates.md), [RFC-0027](0027-muse-proactive-actions.md), [RFC-0029](0029-rsi-v2-trace-eval-and-heldout-ratchet.md)
 
 ---
 
@@ -16,8 +16,8 @@
 | # | Problem Today | What RFC-0031 Proposes | LLM Token Cost |
 |---|---|---|---|
 | **1. Home-TZ Blind Spot** | `gmail-inbox-watch`, `morning-brief`, and `quiet_hours` stay pinned to your home timezone (`America/Los_Angeles`). Traveling `+8h` ahead puts watchers to sleep from `06:00–15:00` local daytime. | **Active Timezone Resolver (`ResolveActiveTimezone`)**: Automatically follows your active travel/on-site Goal's `timezone` (or a quick `hq tz set Europe/London --until=...` override) for `tz_mode: active` schedules and `quiet_hours`. Fixed-clock jobs (e.g., US market open) stay pinned via `tz_mode: fixed`. | `0` tokens (pure Go) |
-| **2. No Short-Lived Live Pollers** | `hq daemon` only polls Gmail/GChat and local Vault files. Watching a live train, flight, statuspage outage, or deploy rollout requires burning LLM tokens on fragile chat crons. | **Ephemeral, Goal-Bound Live Monitors (`internal/monitors/`)**: Auto-expiring, 0-token Go pollers (`http_json` stdlib + opt-in SHA-256-pinned `hq-monitor-provider/v1` packs) bound to a Goal/window. Diffs live snapshots against last-delivered baseline, stays **100% silent** when unchanged, alerts only on material deltas, and commits baseline **only after delivery succeeds**. | `0` tokens on unchanged ticks |
-| **3. Unverified Interrupts** | Failure alerts (payment failed, CI broken) fire immediately even when a paid receipt or green build already arrived. Conflicting live feeds can surface stale ETAs. | **Verify-Before-Interrupt Corroboration (`internal/outbox/corroborate.go`)**: Right before delivering an interrupt (Phase B, unlocked), Go runs a bounded 0-token check: (a) **Live Monitors** re-fetch live and resolve multi-source conflicts by preferring the fresher `source_updated_at` timestamp; (b) **Failure Alerts** query the source connector for newer resolution signals (paid receipt / build passed) and downgrade already-resolved false alarms to `silent_ledger`. Late receipts auto-reconcile prior interrupts. | `0` tokens (pure Go) |
+| **2. No Short-Lived Live Pollers** | `hq daemon` only polls Gmail/GChat and local Vault files. Watching a live train, flight, statuspage outage, or deploy rollout requires burning LLM tokens on fragile chat crons. | **Ephemeral, Goal-Bound Live Monitors (`internal/monitors/`)**: Auto-expiring, 0-token Go pollers (`http_json`, `http_text`, `ics_feed`, + opt-in SHA-256-pinned `hq-monitor-provider/v1` packs) bound to a Goal/window. Diffs live snapshots against last-delivered baseline, stays **100% silent** when unchanged, alerts only on material deltas, and commits baseline **only after delivery succeeds**. | `0` tokens on unchanged ticks |
+| **3. Unverified Interrupts** | Failure alerts (payment failed, CI broken) fire immediately even when a paid receipt or green build already arrived. Conflicting live feeds can surface stale ETAs. | **Verify-Before-Interrupt Corroboration (`internal/outbox/corroborate.go`)**: Right before delivering an interrupt (Phase B, unlocked), Go runs a bounded 0-token check: (a) **Live Monitors** re-fetch live and resolve multi-source conflicts by preferring the fresher `source_updated_at` timestamp; (b) **Failure Alerts** auto-infer `CorroborationSpec` in Go (overridable via CLI flags), query the source connector for newer resolution signals (paid receipt / build passed), and downgrade already-resolved false alarms to `silent_ledger`. Late receipts auto-reconcile prior interrupts. | `0` tokens (pure Go) |
 | **4. Off-Channel Family Updates** | Schedule changes texted in WhatsApp / Messenger / iMessage bypass Gmail/GChat — but scraping or routing third-party chats into Front Desk breaks Lethal Trifecta security. | **Strict 3-Layer Channel Boundary**: Keep RFC-0023 strictly 1:1 owner-only. Ingest third-party/family channels safely via: (1) opt-in read-only `hq-connector-protocol/v1` packs (`quarantined_reader`), (2) RFC-0026 scoped family delegates (`caller_groups` + CaMeL `queue_only` nudges), and (3) a zero-infra owner-forward fast-path (`hq space note` / `hq goals update-leg`) + read-only `.ics` calendar monitor. | `0` tokens for intake/ICS |
 
 ### Concrete Before / After Examples (Work & Personal)
@@ -40,7 +40,7 @@ Per `agy-hq`'s Two-Layer Architecture ([ADR-0003](../decisions/0003-two-layer-os
 
 | Layer | Lives In | Contains |
 |---|---|---|
-| **OSS Framework (`agy-hq` Core)** | `internal/kernel/timezone.go`, `internal/monitors/`, `internal/outbox/corroborate.go`, `cmd/hq/monitors_cli.go`, `templates/{config,triggers}.yaml` | Generic `ResolveActiveTimezone()`, `tz_mode: active \| fixed`, pure-Go stdlib `http_json` + `.ics` monitor engine, SSRF IP firewall, `hq-monitor-provider/v1` protocol, `DeltaPolicy` & `source_updated_at` freshness resolver, `Verify-Before-Interrupt` Phase B hook, generic failure/resolution corroboration spec, `hq tz` / `hq monitor` / `hq goals watch` CLIs |
+| **OSS Framework (`agy-hq` Core)** | `internal/kernel/timezone.go`, `internal/monitors/`, `internal/outbox/corroborate.go`, `cmd/hq/monitors_cli.go`, `templates/{config,triggers}.yaml` | Generic `ResolveActiveTimezone()`, `tz_mode: active \| fixed`, pure-Go stdlib `http_json` + `http_text` + `.ics` monitor engine, SSRF IP firewall, `hq-monitor-provider/v1` protocol, `DeltaPolicy` & `source_updated_at` freshness resolver, `Verify-Before-Interrupt` Phase B hook, generic failure/resolution corroboration spec, `hq tz` / `hq monitor` / `hq goals watch` CLIs |
 | **Private User Vault (`<vault>/`)** | `<vault>/config.yaml`, `<vault>/triggers.yaml`, `<vault>/memory/monitors/state.json`, `<vault>/private/delegates/policy.json`, optional local companion packs | Your home timezone & `monitors.allowed_hosts` allowlist, active personal/work Goals & Living Spaces, optional private companion packs (e.g., National Rail / FlightAware monitor provider or WhatsApp/Telegram family connector), and your family `caller_groups` policy |
 
 ---
@@ -139,7 +139,7 @@ type Monitor struct {
     ChecklistItemID     string          `json:"checklistItemId,omitempty"`
     SpaceSlug           string          `json:"spaceSlug,omitempty"`      // Linked Living Space (optional)
     Status              string          `json:"status"`                   // "active" | "paused" | "completed" | "expired"
-    Kind                string          `json:"kind"`                     // "http_json" | "ics_feed" | "pack_provider"
+    Kind                string          `json:"kind"`                     // "http_json" | "http_text" | "ics_feed" | "pack_provider"
     Sources             []SourceSpec    `json:"sources"`                  // 1..3 sources (primary + corroborating)
     IntervalSeconds     int             `json:"intervalSeconds"`          // Min 60s, default 300s
     ActiveFrom          string          `json:"activeFrom,omitempty"`     // RFC3339 (e.g. T-4h)
@@ -186,9 +186,11 @@ type DeltaPolicy struct {
 1. **Built-In `http_json` Kind (`internal/monitors/http_json.go`):**
    - Pure Go `net/http` `GET` request with RFC 6901 JSON-Pointer field mapping (reusing `internal/connector/jsonmap.go` primitives).
    - Works out-of-the-box for `statuspage.io` (`/api/v2/summary.json`), GitHub Deployments/Releases/Actions status endpoints, public transit JSON APIs, weather alert JSON endpoints, and custom internal healthchecks.
-2. **Built-In `ics_feed` Kind (`internal/monitors/ics.go`):**
+2. **Built-In `http_text` Kind (`internal/monitors/http_text.go`):**
+   - Pure Go `net/http` `GET` request over bounded text/HTML (`<= 512 KB`, strips `<script>`/`<style>`/tags into normalized plain text) + linear-time Go RE2 named-group regex extraction (`status`, `eta`, `location`, `summary`, `source_updated_at`). Zero ReDoS risk (Go `regexp` guarantees linear time), enabling public HTML rail/departure boards and simple status pages out-of-the-box with zero custom pack code.
+3. **Built-In `ics_feed` Kind (`internal/monitors/ics.go`):**
    - Tiny pure-Go RFC 5545 `VEVENT` parser (`SUMMARY`, `DTSTART`, `DTEND`, `LOCATION`, `STATUS`, `LAST-MODIFIED`) for read-only shared calendar URLs (zero OAuth needed — covers shared family/team calendars cleanly).
-3. **Pack-Extensible `hq-monitor-provider/v1` (`internal/monitors/provider.go`):**
+4. **Pack-Extensible `hq-monitor-provider/v1` (`internal/monitors/provider.go`):**
    - Companion packs declare `monitor_providers` in `hq-extension.json`, SHA-256-pinned in `<vault>/private/trust.json` via `extension.VerifyTrustedBinary` (identical trust ceremony to RFC-0023/0025/0026).
    - Frozen JSON-over-stdio protocol (`hq-monitor-provider/v1`):
      - Request: `{"protocol":"hq-monitor-provider/v1","verb":"fetch","params":{...},"timeout_ms":8000}`
@@ -209,8 +211,8 @@ When a monitor configures `2..3` sources (e.g., `origin_board` + `destination_bo
 ### 4.5 Ring-0 Security Invariants for Monitors
 
 - **M1 (Taint Creation Lockdown):** `hq monitor add|edit|resume` is hard-blocked in `quarantined_reader` and `scoped_delegate` profiles (`internal/authz` + `PreToolUse`). Tainted sessions can never arm outbound HTTP pollers.
-- **M2 (SSRF & DNS-Rebinding Firewall):** `http_json` and `ics_feed` enforce `https://` only, max `3` redirects, max `512 KB` body, `8s` timeout, and a custom `net.Dialer` `Control`/`DialContext` that validates the resolved IP against loopback, RFC1918 private, link-local/metadata (`169.254.0.0/16`, `fe80::/10`), and ULA (`fc00::/7`) ranges **after DNS resolution** on every hop.
-- **M3 (Explicit Host Allowlist):** `<vault>/config.yaml` declares `monitors.allowed_hosts` (glob patterns like `*.statuspage.io`, `api.github.com`). Empty by default (fail-closed); adding a monitor for an unallowlisted host requires explicit owner confirmation (`--allow-host` in an interactive session or `ask_question`).
+- **M2 (SSRF & DNS-Rebinding Firewall):** `http_json`, `http_text`, and `ics_feed` enforce `https://` only, max `3` redirects, max `512 KB` body, `8s` timeout, and a custom `net.Dialer` `Control`/`DialContext` that validates the resolved IP against loopback, RFC1918 private, link-local/metadata (`169.254.0.0/16`, `fe80::/10`), and ULA (`fc00::/7`) ranges **after DNS resolution** on every hop.
+- **M3 (Asymmetric Host Allowlist — Q3):** Untainted **owner-interactive** sessions (`front_desk` / `interactive_task`) may arm monitors targeting any public `https://` host directly (always protected by M1 taint lockdown + M2 post-DNS SSRF firewall). `<vault>/config.yaml` `monitors.allowed_hosts` (glob patterns like `*.statuspage.io`, `api.github.com`) is an optional strict lockdown list: when populated, all monitors must match it; for **`unattended_auto`** sessions, host allowlisting always fails closed unless the host matches `monitors.allowed_hosts`.
 - **M4 (Bounded Caps & Auto-Expiry):** Hard caps: `MaxActiveMonitors = 25`, `MinIntervalSeconds = 60`, mandatory `ExpiresAt` (default `24h`, ceiling `72h` unless explicitly renewed), auto-transition to `completed` on `TerminalStatuses` or `expired` past `ExpiresAt`, and automatic circuit-breaker pause after `5` consecutive `permanent` errors.
 - **M5 (Output Sanitization & Quiet-Hours Honesty):** All fetched strings pass `outbox.SanitizeAntiCue` and rune caps (`<= 240`). Monitor items are marked `Tainted: true` by default; `Critical: true` quiet-hours breach is permitted **only** if the owner explicitly configured `CriticalStatuses` on that monitor (e.g., `["cancelled", "outage"]`) and the normalized enum matches exact allowlisted status strings — never free-text injection.
 
@@ -267,7 +269,9 @@ Automatically attached to every `TierInterrupt` emitted by `internal/monitors/`:
 
 ### 5.3 Mode B — Connector Failure Corroboration (`verify_mode: "connector_corroborate"`)
 
-Attached to failure/exception interrupts from `inbox-triage` / `watcher` (payment failed, card declined, delivery failed, CI/build failed, booking cancelled) via a compact `CorroborationSpec` on `OutboxItem`:
+Attached to failure/exception interrupts from `inbox-triage` / `watcher` (payment failed, card declined, delivery failed, CI/build failed, booking cancelled) via **automatic Go inference in `outbox.Add()`** (plus optional explicit CLI flag overrides `--corroborate-domain`, `--corroborate-tokens`, `--after`, `--no-corroborate`) into a compact `CorroborationSpec` on `OutboxItem`:
+
+- **Go Auto-Inference (Q5):** When a tainted `inbox-triage` `TierInterrupt` has negative failure polarity (`titlePolarity < 0` or failure cues such as `"payment failed"`, `"declined"`, `"unfinished payment"`, `"build failed"`, `"undeliverable"`) and specifies `(Connector, Account)`, Go automatically populates `CorroborationSpec` by extracting any sender/merchant domain or name token and monetary/numeric ID tokens (e.g., `12.53`, `PR #42`) from `(IncidentKey, Title, Summary)` and defaulting `HoldWindow = "3m"`, `AfterTimestamp = item.CreatedAt` (or explicit `--after` message timestamp when provided). This guarantees reliable corroboration even when lightweight `quick` models omit optional flags.
 
 ```go
 type CorroborationSpec struct {
@@ -327,6 +331,12 @@ To catch urgent plan changes originating outside Gmail/GChat (WhatsApp, Messenge
 - Add `hq goals update-leg <goal-slug> <item-id> [--status=...] [--window-start=...] [--note=...]` and `hq space note <space-slug> --text="..."` so forwarding a family message into Front Desk updates the Goal, refreshes any linked Living Space, and retargets/re-arms linked live monitors in **1 deterministic command**.
 - Add a clean anonymized starter example in `docs/` showing how to configure a family `caller_groups` policy under RFC-0026 without exposing any private Vault memory.
 
+### 6.3 RSI v2 Synergy (`RFC-0029` Integration — Q6)
+
+While Ring-0/Ring-1 primitives (Active TZ, `internal/monitors/`, Phase B `VerifyFunc`) must be built deterministically in Go rather than learned via prompt RSI, **RSI v2** ([RFC-0029](0029-rsi-v2-trace-eval-and-heldout-ratchet.md)) pairs cleanly with RFC-0031 to learn **policy and tuning** over time:
+1. **Noise-to-Corroboration Tuning (`FrictionProactiveNoise`):** Repeated user dismissals on monitor alerts or failure interrupts emit non-destructive tuning advisories (e.g., raising `MinETADeltaMinutes`, extending `HoldWindow`, or adding a `ResolutionCue`).
+2. **Manual Status-Check Compilation (`Stream 2` / `compile_script_or_route`):** When RSI v2 detects recurring multi-step manual status checks in chat across `>= 2` conversations (e.g., repeatedly checking a status page or flight/rail URL), its Morning Brief compilation card recommends promoting the check into a `0`-token `hq monitor`.
+
 ---
 
 ## 7. Engineering Invariants & File Layout
@@ -335,7 +345,7 @@ To catch urgent plan changes originating outside Gmail/GChat (WhatsApp, Messenge
 |---|---|
 | **Zero External Go Dependencies (`H4-A`)** | `go.mod` remains 100% pure Go stdlib (`net/http`, `net`, `time`, `encoding/json`, `crypto/sha256`). |
 | **Strict Lock Hierarchy** | Add `RankMonitors Rank = 31` in `internal/store/store.go` (`RankWatcher(30) < RankMonitors(31) < RankPulse(32)`). Enforce snapshot-then-commit in `internal/monitors/` and Phase B unlocked verification in `internal/outbox/dispatcher.go`. |
-| **Monolith LOC Ceilings (`H5-F`)** | New files only: `internal/kernel/timezone.go`, `internal/monitors/{monitors,http_json,ics,provider,ssrf,diff,monitors_test}.go`, `internal/outbox/corroborate.go`, `cmd/hq/monitors_cli.go`. Touch `kernel.go` / `main.go` by `< 15` lines total (dispatch wiring only). |
+| **Monolith LOC Ceilings (`H5-F`)** | New files only: `internal/kernel/timezone.go`, `internal/monitors/{monitors,http_json,http_text,ics,provider,ssrf,diff,monitors_test}.go`, `internal/outbox/corroborate.go`, `cmd/hq/monitors_cli.go`. Touch `kernel.go` / `main.go` by `< 15` lines total (dispatch wiring only). |
 | **Ring-0 Non-Interference (`NI-1`–`NI-4`)** | `internal/authz` blocks `hq monitor add|edit|resume` in `quarantined_reader` & `scoped_delegate`; SSRF firewall blocks private/metadata IPs post-DNS; `Critical` quiet-hour bypass on monitors requires explicit owner-configured `CriticalStatuses`. |
 | **PII & Vault Hygiene (`P1`–`P6`)** | All tests and docs use synthetic domains (`@example.com`, `127.0.0.1` loopback httptest servers under explicit test hook) and zero real routes/identities. |
 
@@ -346,17 +356,21 @@ To catch urgent plan changes originating outside Gmail/GChat (WhatsApp, Messenge
 - **Phase 2A — Active Timezone Resolution (`CUJ-50`):**
   - `internal/kernel/timezone.go` (`ResolveActiveTimezone`, `hq tz set|clear|status`), `tz_mode: active | fixed` & `CRON_TZ=ACTIVE` in `gatekeeper.go`, `LastLocalDate` + `12h` daily anti-double-fire guard, `InQuietHoursAt` active-TZ wiring in `internal/outbox/`, `templates/triggers.yaml` defaults, and Living Space ↔ Goal TZ linkage.
 - **Phase 2B — Ephemeral, Goal-Bound Live Monitors (`CUJ-51`):**
-  - `store.RankMonitors = 31`, `internal/monitors/` (`http_json`, `ics_feed`, `hq-monitor-provider/v1`, SSRF post-DNS firewall, `monitors.allowed_hosts`, `DeltaPolicy`, `freshness_wins` multi-source conflict resolver, baseline commit-after-delivery), `60s` `monitorTicker` in `cmd/hq/ops_cli.go`, `hq monitor` / `hq goals watch` CLIs, `internal/authz` taint lockdown, and Living Space `hq_builtin: "monitors"` binding.
+  - `store.RankMonitors = 31`, `internal/monitors/` (`http_json`, `http_text`, `ics_feed`, `hq-monitor-provider/v1`, SSRF post-DNS firewall, asymmetric `monitors.allowed_hosts`, `DeltaPolicy`, `freshness_wins` multi-source conflict resolver, baseline commit-after-delivery), `60s` `monitorTicker` in `cmd/hq/ops_cli.go`, `hq monitor` / `hq goals watch` CLIs, `internal/authz` taint lockdown, and Living Space `hq_builtin: "monitors"` binding.
 - **Phase 2C — Verify-Before-Interrupt Corroboration (`CUJ-52`):**
-  - `internal/outbox/corroborate.go` + Phase B `VerifyFunc` hook in `DispatchPendingInterrupts`, Mode A monitor re-verify, Mode B 0-token connector corroboration query (with independent `HoldWindow` + fail-open provenance), `outbox.Add()` late-arrival auto-reconciliation, `inbox-triage` skill corroboration hints, and `hq doctor` advisory for legacy `coalesce_window: "0s"`.
-- **Phase 2D — Zero-Infra Family/External Intake & Docs (`CUJ-53`):**
-  - `hq goals update-leg` + `hq space note` fast-paths, `ics_feed` monitor E2E coverage, RFC-0026 family delegate starter guide, and full `./bin/hq ci pre-push` + `PRD-0003` CUJ index update.
+  - `internal/outbox/corroborate.go` + Phase B `VerifyFunc` hook in `DispatchPendingInterrupts`, Mode A monitor re-verify, Mode B 0-token connector corroboration query (with Go auto-inference in `outbox.Add()`, explicit CLI overrides, independent `HoldWindow`, `silent_ledger` default, & fail-open provenance), `outbox.Add()` late-arrival auto-reconciliation, `inbox-triage` skill corroboration hints, and `hq doctor` / `hq migrate` advisories for legacy `coalesce_window: "0s"` and `CRON_TZ=ACTIVE`.
+- **Phase 2D — Zero-Infra Family/External Intake, RSI Synergy & Docs (`CUJ-53`):**
+  - `hq goals update-leg` + `hq space note` fast-paths, `ics_feed` monitor E2E coverage, RFC-0026 family delegate starter guide, RSI v2 synergy hooks (`FrictionProactiveNoise` → corroboration/threshold tuning advisories & recurring status-check → `hq monitor` compile suggestion), and full `./bin/hq ci pre-push` + `PRD-0003` CUJ index update.
 
 ---
 
-## 9. Open Review Questions
+## 9. Locked `/grill-me` Design Decisions (Q1–Q6)
 
-1. **Default `tz_mode` on `sleep-consolidate`:** Should `sleep-consolidate` follow `tz_mode: active` (runs at `23:30` local wherever you sleep — recommended so overnight consolidation always lands before your `07:30` local Morning Brief) or stay `tz_mode: fixed`?
-2. **Resolved False-Alarm Visibility:** When Mode B corroboration catches an already-resolved payment/CI failure before interrupting, should the default downgraded tier be `silent_ledger` *(Recommended — zero noise)* or `brief_rollup` *(shows a one-line "auto-resolved" note in Morning Brief)*?
-3. **Host Allowlist UX for `http_json` Monitors:** Should `hq monitor add` in an interactive conversation auto-prompt via `ask_question` to append a new HTTPS host to `<vault>/config.yaml` `monitors.allowed_hosts` *(Recommended)*, or require manual config editing first?
-4. **Family Channel Priority for Phase 2D:** Between (a) Zero-Infra Owner Forward + `.ics` calendar monitor *(default in Phase 2D)*, (b) an opt-in Telegram/WhatsApp companion connector pack (private/separate repo), or (c) an RFC-0026 scoped spouse delegate template, which would you like prioritized first after Phases 2A–2C?
+| # | Decision | Locked Choice |
+|---|---|---|
+| **Q1** | Scope & Phasing | Ship all 4 pillars (`2A Active TZ` → `2B Live Monitors` → `2C Verify-Before-Interrupt` → `2D Zero-Infra Family Intake + RSI Synergy`) in one cohesive RFC-0031 build. |
+| **Q2** | Active Timezone Scope | All three user-aligned OS schedules (`gmail-inbox-watch`, `morning-brief`, `sleep-consolidate`) + `quiet_hours` follow Active TZ; fixed-clock jobs (e.g. US market watches) stay `tz_mode: fixed`. |
+| **Q3** | Live Monitor Host Gate | Allow any public `https://` host directly when armed by an untainted owner-interactive session (post-DNS SSRF private-IP firewall & tainted-session hard block always on; `monitors.allowed_hosts` remains optional lockdown & fail-closed for `unattended_auto`). |
+| **Q4** | Built-In Monitor Kinds | Ship `http_json` + `http_text` (RE2 regex on stripped HTML/text) + `ics_feed` + SHA-256-pinned `hq-monitor-provider/v1` companion pack seam. |
+| **Q5** | Mode B Corroboration | Auto-infer `CorroborationSpec` in Go on failure/payment/CI interrupts from `inbox-triage` (with explicit CLI flag overrides) and downgrade confirmed false alarms to `silent_ledger` by default. |
+| **Q6** | Family Channels & RSI | Phase 2D ships Zero-Infra Owner Forward (`hq goals update-leg` / `hq space note`) + `.ics` monitor + RFC-0026 family delegate starter guide + RSI v2 synergy hooks; keep Telegram/WhatsApp connectors as separate opt-in private packs. |
