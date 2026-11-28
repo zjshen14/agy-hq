@@ -177,6 +177,7 @@ func TestWorkspaceSubagentLeaseInForceBeforeFirstPrompt(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", srv.URL)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-subagent-lease")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")

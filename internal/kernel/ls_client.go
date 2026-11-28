@@ -62,6 +62,57 @@ func lsSessionFilePath(vaultDir string) string {
 	return filepath.Join(vaultDir, "private", "runtime", "ls_session.json")
 }
 
+func readRawLSSession(vaultDir string) (lsCredentials, bool) {
+	if strings.TrimSpace(vaultDir) == "" {
+		return lsCredentials{}, false
+	}
+	raw, err := os.ReadFile(lsSessionFilePath(vaultDir))
+	if err != nil {
+		return lsCredentials{}, false
+	}
+	var creds lsCredentials
+	if json.Unmarshal(raw, &creds) != nil {
+		return lsCredentials{}, false
+	}
+	return creds, true
+}
+
+// LSEnvIsolationReason reports why ambient ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN
+// environment variables are isolated from vaultDir, or "" when ambient env LS credentials are permitted.
+//
+// Hermetic or sandboxed vaults (temp vault dir, temp HOME/HQ_HOME_DIR, temp ANTIGRAVITY_APP_DATA_DIR,
+// or an ANTIGRAVITY_APP_DATA_DIR override that disagrees with the vault's persisted ls_session.json)
+// fail closed so temporary/demo scripts can never hijack an inherited host Antigravity IDE Language Server.
+// Set HQ_ALLOW_LIVE_LS_DISCOVERY=1 to explicitly opt in (unless HQ_DISABLE_LS=1 is set).
+func LSEnvIsolationReason(vaultDir string) string {
+	if strings.TrimSpace(os.Getenv("HQ_DISABLE_LS")) == "1" {
+		return "HQ_DISABLE_LS=1"
+	}
+	if strings.TrimSpace(os.Getenv("HQ_ALLOW_LIVE_LS_DISCOVERY")) == "1" {
+		return ""
+	}
+	if hostpaths.IsTempPath(vaultDir) {
+		return "temp_vault_dir"
+	}
+	if envV := strings.TrimSpace(os.Getenv("HQ_VAULT_DIR")); envV != "" && hostpaths.IsTempPath(envV) {
+		return "temp_hq_vault_dir"
+	}
+	if home, err := hostpaths.ResolveHomeDir(); err == nil && hostpaths.IsTempPath(home) {
+		return "temp_home_dir"
+	}
+	if appDataEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_APP_DATA_DIR")); appDataEnv != "" {
+		if hostpaths.IsTempPath(appDataEnv) {
+			return "temp_app_data_dir"
+		}
+		if existing, ok := readRawLSSession(vaultDir); ok && strings.TrimSpace(existing.AppDataDir) != "" {
+			if filepath.Clean(existing.AppDataDir) != filepath.Clean(appDataEnv) {
+				return "app_data_dir_mismatch"
+			}
+		}
+	}
+	return ""
+}
+
 func normalizeLSAddress(addr string) (rawHostPort, baseURL string) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
@@ -135,6 +186,9 @@ func classifyTCPDialError(baseURL string) string {
 // clobbering existing credentials or desktop plugin-CLI coordinates from headless/quarantined runs.
 func RecordLiveLSSession(vaultDir string) error {
 	if strings.TrimSpace(vaultDir) == "" {
+		return nil
+	}
+	if LSEnvIsolationReason(vaultDir) != "" {
 		return nil
 	}
 	p := lsSessionFilePath(vaultDir)
@@ -276,15 +330,17 @@ func RecordLiveLSSession(vaultDir string) error {
 }
 
 func loadReachableLSSession(vaultDir string) (lsCredentials, bool) {
-	if strings.TrimSpace(vaultDir) == "" {
+	if strings.TrimSpace(os.Getenv("HQ_DISABLE_LS")) == "1" {
 		return lsCredentials{}, false
 	}
-	raw, err := os.ReadFile(lsSessionFilePath(vaultDir))
-	if err != nil {
+	creds, ok := readRawLSSession(vaultDir)
+	if !ok {
 		return lsCredentials{}, false
 	}
-	var creds lsCredentials
-	if json.Unmarshal(raw, &creds) != nil {
+	if appDataEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_APP_DATA_DIR")); appDataEnv != "" &&
+		strings.TrimSpace(creds.AppDataDir) != "" &&
+		strings.TrimSpace(os.Getenv("HQ_ALLOW_LIVE_LS_DISCOVERY")) != "1" &&
+		filepath.Clean(creds.AppDataDir) != filepath.Clean(appDataEnv) {
 		return lsCredentials{}, false
 	}
 	if creds.BaseURL == "" && creds.RawAddress != "" {
@@ -314,6 +370,8 @@ func HasReachableLSSession(vaultDir string) bool {
 type LSSessionDiagnostics struct {
 	EnvConfigured       bool   `json:"envConfigured"`
 	EnvReachable        bool   `json:"envReachable"`
+	EnvIsolated         bool   `json:"envIsolated,omitempty"`
+	IsolationReason     string `json:"isolationReason,omitempty"`
 	PersistedExists     bool   `json:"persistedExists"`
 	PersistedReachable  bool   `json:"persistedReachable"`
 	PersistedMatchesEnv bool   `json:"persistedMatchesEnv"`
@@ -327,11 +385,15 @@ type LSSessionDiagnostics struct {
 // and daemon hub files without exposing addresses or CSRF tokens.
 func DiagnoseLSSession(vaultDir string) LSSessionDiagnostics {
 	var diag LSSessionDiagnostics
+	isoReason := LSEnvIsolationReason(vaultDir)
+	diag.EnvIsolated = isoReason != ""
+	diag.IsolationReason = isoReason
+
 	envAddr := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS"))
 	envCSRF := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN"))
 	diag.EnvConfigured = envAddr != "" && envCSRF != ""
 	_, envBase := normalizeLSAddress(envAddr)
-	if envBase != "" {
+	if envBase != "" && !diag.EnvIsolated {
 		diag.EnvReachable = isTCPReachable(envBase)
 	}
 
@@ -358,7 +420,16 @@ func DiagnoseLSSession(vaultDir string) LSSessionDiagnostics {
 					diag.PersistedScheme = u.Scheme
 				}
 				diag.PersistedMatchesEnv = envBase != "" && strings.EqualFold(strings.TrimSpace(creds.BaseURL), strings.TrimSpace(envBase))
+				appDataEnv := strings.TrimSpace(os.Getenv("ANTIGRAVITY_APP_DATA_DIR"))
+				appDataMismatch := appDataEnv != "" &&
+					strings.TrimSpace(creds.AppDataDir) != "" &&
+					strings.TrimSpace(os.Getenv("HQ_ALLOW_LIVE_LS_DISCOVERY")) != "1" &&
+					filepath.Clean(creds.AppDataDir) != filepath.Clean(appDataEnv)
 				switch {
+				case strings.TrimSpace(os.Getenv("HQ_DISABLE_LS")) == "1":
+					diag.PersistedReason = "disabled_by_env"
+				case appDataMismatch:
+					diag.PersistedReason = "app_data_dir_mismatch"
 				case strings.TrimSpace(creds.BaseURL) == "":
 					diag.PersistedReason = "empty_address"
 				case strings.TrimSpace(creds.CSRFToken) == "":
@@ -375,7 +446,7 @@ func DiagnoseLSSession(vaultDir string) LSSessionDiagnostics {
 	}
 
 	switch {
-	case diag.EnvConfigured && diag.EnvReachable:
+	case !diag.EnvIsolated && diag.EnvConfigured && diag.EnvReachable:
 		diag.EffectiveSource = "env"
 	case diag.PersistedReachable:
 		diag.EffectiveSource = "persisted"
@@ -390,27 +461,33 @@ func DiagnoseLSSession(vaultDir string) LSSessionDiagnostics {
 }
 
 func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
-	if addr, csrf := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN")); addr != "" && csrf != "" {
-		rawAddr, baseURL := normalizeLSAddress(addr)
-		if baseURL != "" && isTCPReachable(baseURL) {
-			creds := lsCredentials{
-				RawAddress:  rawAddr,
-				BaseURL:     baseURL,
-				CSRFToken:   csrf,
-				AgentAPIExe: strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")),
-			}
-			if sess, ok := loadReachableLSSession(vaultDir); ok {
-				if creds.AgentAPIExe == "" {
-					creds.AgentAPIExe = sess.AgentAPIExe
+	if strings.TrimSpace(os.Getenv("HQ_DISABLE_LS")) == "1" {
+		return lsCredentials{}, false
+	}
+	isoReason := LSEnvIsolationReason(vaultDir)
+	if isoReason == "" {
+		if addr, csrf := strings.TrimSpace(os.Getenv("ANTIGRAVITY_LS_ADDRESS")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_CSRF_TOKEN")); addr != "" && csrf != "" {
+			rawAddr, baseURL := normalizeLSAddress(addr)
+			if baseURL != "" && isTCPReachable(baseURL) {
+				creds := lsCredentials{
+					RawAddress:  rawAddr,
+					BaseURL:     baseURL,
+					CSRFToken:   csrf,
+					AgentAPIExe: strings.TrimSpace(os.Getenv("ANTIGRAVITY_AGENTAPI_EXE")),
 				}
-				creds.PluginShimDir = sess.PluginShimDir
-				creds.CredentialScope = sess.CredentialScope
-				creds.AppDataDir = sess.AppDataDir
-				creds.GeminiDir = sess.GeminiDir
-				creds.ConfigRelDir = sess.ConfigRelDir
-				creds.ProjectID = sess.ProjectID
+				if sess, ok := loadReachableLSSession(vaultDir); ok {
+					if creds.AgentAPIExe == "" {
+						creds.AgentAPIExe = sess.AgentAPIExe
+					}
+					creds.PluginShimDir = sess.PluginShimDir
+					creds.CredentialScope = sess.CredentialScope
+					creds.AppDataDir = sess.AppDataDir
+					creds.GeminiDir = sess.GeminiDir
+					creds.ConfigRelDir = sess.ConfigRelDir
+					creds.ProjectID = sess.ProjectID
+				}
+				return creds, true
 			}
-			return creds, true
 		}
 	}
 	if creds, ok := loadReachableLSSession(vaultDir); ok {
@@ -421,8 +498,8 @@ func discoverLSCredentials(vaultDir string) (lsCredentials, bool) {
 	if roots.AppDataDir == "" {
 		return lsCredentials{}, false
 	}
-	// In hermetic temp-vault tests without an explicit temp AppDataDir, never probe the live host's ~/.gemini/antigravity/daemon.
-	if hostpaths.IsTempPath(vaultDir) && !hostpaths.IsTempPath(roots.AppDataDir) && os.Getenv("HQ_ALLOW_LIVE_LS_DISCOVERY") != "1" {
+	// In hermetic/sandboxed vaults without an explicit temp AppDataDir, never probe the live host's ~/.gemini/antigravity/daemon.
+	if isoReason != "" && !hostpaths.IsTempPath(roots.AppDataDir) {
 		return lsCredentials{}, false
 	}
 

@@ -721,3 +721,45 @@ func TestWebUIStaleChatCronBadgeAndRemoveAction(t *testing.T) {
 		t.Fatalf("expected only task-9999 remaining in AdHocCrons, got: %+v", fdAfter.AdHocCrons)
 	}
 }
+
+func TestNewHandlerWithOptionsReadOnlyRejectsMutations(t *testing.T) {
+	vaultDir := filepath.Join(t.TempDir(), "local")
+	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir memory: %v", err)
+	}
+
+	h := NewHandlerWithOptions(vaultDir, HandlerOptions{ReadOnly: true})
+
+	// GET /healthz reports readOnly=true
+	recHealth := httptest.NewRecorder()
+	h.ServeHTTP(recHealth, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/healthz", nil))
+	if recHealth.Code != http.StatusOK || !strings.Contains(recHealth.Body.String(), `"readOnly":true`) {
+		t.Fatalf("expected /healthz 200 with readOnly:true, got %d: %s", recHealth.Code, recHealth.Body.String())
+	}
+
+	// GET / and GET /api/state succeed in read-only mode
+	recRoot := httptest.NewRecorder()
+	h.ServeHTTP(recRoot, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/", nil))
+	if recRoot.Code != http.StatusOK {
+		t.Fatalf("expected GET / 200 in read-only mode, got %d", recRoot.Code)
+	}
+	csrf := extractTestCSRFToken(t, recRoot.Body.String())
+
+	recState := httptest.NewRecorder()
+	h.ServeHTTP(recState, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4242/api/state", nil))
+	if recState.Code != http.StatusOK {
+		t.Fatalf("expected GET /api/state 200 in read-only mode, got %d", recState.Code)
+	}
+
+	// All mutating POST endpoints must be rejected with 403 Forbidden even with a valid CSRF token
+	for _, path := range []string{"/api/approve", "/api/reject", "/api/events", "/api/triggers/action", "/api/tasks/complete"} {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4242"+path, strings.NewReader(`{"id":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-HQ-CSRF-Token", csrf)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "read-only mode") {
+			t.Fatalf("expected POST %s to return 403 read-only mode, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}

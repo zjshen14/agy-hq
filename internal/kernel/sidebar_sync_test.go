@@ -615,6 +615,7 @@ func TestSidebarOfflineQueueSupersessionHeartbeatAndTerminalPruning(t *testing.T
 		NextRetryAt:     time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339),
 	}, time.Now().Add(-1*time.Minute))
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", mockLS.srv.URL)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", mockLS.csrfToken)
 	if _, hbErr := RunHeartbeat(vaultDir, false); hbErr != nil {

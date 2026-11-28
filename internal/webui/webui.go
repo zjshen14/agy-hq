@@ -208,8 +208,19 @@ func wantsJSONResponse(r *http.Request) bool {
 		strings.Contains(r.Header.Get("Content-Type"), "application/json")
 }
 
+// HandlerOptions configures optional behavior for NewHandlerWithOptions.
+type HandlerOptions struct {
+	// ReadOnly rejects all mutating HTTP requests (POST/PUT/PATCH/DELETE) with 403 Forbidden.
+	ReadOnly bool
+}
+
 // NewHandler creates the HTTP mux for the HQ Console side pane and API.
 func NewHandler(vaultDir string) http.Handler {
+	return NewHandlerWithOptions(vaultDir, HandlerOptions{})
+}
+
+// NewHandlerWithOptions creates the HTTP mux for the HQ Console side pane and API with explicit HandlerOptions.
+func NewHandlerWithOptions(vaultDir string, opts HandlerOptions) http.Handler {
 	mux := http.NewServeMux()
 	csrfToken := store.RandomHex(16)
 
@@ -219,6 +230,7 @@ func NewHandler(vaultDir string) http.Handler {
 			"version":            version.Version,
 			"commit":             version.EffectiveCommit(),
 			"vaultSchemaVersion": vault.CurrentSchemaVersion,
+			"readOnly":           opts.ReadOnly,
 		})
 	})
 
@@ -562,6 +574,14 @@ func NewHandler(vaultDir string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackHostHeader(r.Host) {
 			http.Error(w, "forbidden: non-loopback Host header rejected (DNS rebinding guard)", http.StatusForbidden)
+			return
+		}
+		if opts.ReadOnly && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if wantsJSONResponse(r) || strings.HasPrefix(r.URL.Path, "/api/") {
+				writeJSONError(w, http.StatusForbidden, "forbidden: HQ Console is running in read-only mode")
+			} else {
+				http.Error(w, "forbidden: HQ Console is running in read-only mode", http.StatusForbidden)
+			}
 			return
 		}
 		mux.ServeHTTP(w, r)

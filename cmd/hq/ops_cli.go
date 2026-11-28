@@ -20,6 +20,7 @@ import (
 	"github.com/zjshen14/agy-hq/internal/delegates"
 	"github.com/zjshen14/agy-hq/internal/events"
 	"github.com/zjshen14/agy-hq/internal/githooks"
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/kernel"
 	"github.com/zjshen14/agy-hq/internal/obs"
 	"github.com/zjshen14/agy-hq/internal/plugin"
@@ -82,11 +83,16 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 	addr := fs.String("addr", defaultAddr, "Listen address for HQ Console HTTP server (loopback only by default)")
 	allowRemote := fs.Bool("allow-remote", false, "Explicitly permit binding HQ Console HTTP server to a non-loopback interface")
 	dryRun := fs.Bool("dry-run", false, "Simulate agentapi spawns in background watcher")
+	noHeartbeat := fs.Bool("no-heartbeat", false, "Disable background heartbeat, timers, gatekeepers, and event dispatch (offline UI rendering)")
+	readOnly := fs.Bool("read-only", false, "Serve HQ Console in read-only mode (implies --no-heartbeat, skips daemon state writes, and rejects mutating HTTP actions)")
 	daemonArgs := args
 	if len(daemonArgs) > 0 && (daemonArgs[0] == "start" || daemonArgs[0] == "run") {
 		daemonArgs = daemonArgs[1:]
 	}
 	_ = fs.Parse(daemonArgs)
+	if *readOnly {
+		*noHeartbeat = true
+	}
 
 	if !*allowRemote && !webui.IsLoopbackAddr(*addr) {
 		fmt.Fprintf(os.Stderr, "hq daemon security error: refusing to bind HTTP console to non-loopback address %q (use 127.0.0.1:<port> or pass --allow-remote)\n", *addr)
@@ -96,117 +102,123 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 		debug.SetMemoryLimit(256 << 20)
 	}
 
-	if err := kernel.RecordDaemonStart(vaultDir, *addr); err != nil {
-		fmt.Fprintf(os.Stderr, "hq daemon error: %v\n", err)
-		os.Exit(1)
+	if !*readOnly {
+		if err := kernel.RecordDaemonStart(vaultDir, *addr); err != nil {
+			fmt.Fprintf(os.Stderr, "hq daemon error: %v\n", err)
+			os.Exit(1)
+		}
+		defer kernel.RecordDaemonStop(vaultDir)
+		_, _ = events.EnsureDaemonToken(vaultDir)
 	}
-	defer kernel.RecordDaemonStop(vaultDir)
-	_, _ = events.EnsureDaemonToken(vaultDir)
-	wakeCh := events.SubscribeWake()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		_ = kernel.RecordDaemonStop(vaultDir)
+		if !*readOnly {
+			_ = kernel.RecordDaemonStop(vaultDir)
+		}
 		os.Exit(0)
 	}()
 
-	// Background event-driven wake channel, 15s fast timer/inbox/outbox tick, 30s gatekeeper tick, & 30m full heartbeat loop
-	go func() {
-		var wsMaintRunning atomic.Bool
-		triggerWorkspaceMaintenance := func(tickNow time.Time) {
-			if *dryRun || !wsMaintRunning.CompareAndSwap(false, true) {
-				return
-			}
-			go func(runAt time.Time) {
-				defer wsMaintRunning.Store(false)
-				ctx, cancel := context.WithTimeout(context.Background(), kernel.DefaultWorkspaceMaintenanceBudget)
-				defer cancel()
-				if wsRep, wsErr := kernel.RunWorkspaceMaintenanceContext(ctx, vaultDir, runAt); wsErr == nil && wsRep.Changed() {
-					_ = webui.SyncMarkdownConsole(vaultDir)
+	if !*noHeartbeat {
+		wakeCh := events.SubscribeWake()
+		// Background event-driven wake channel, 15s fast timer/inbox/outbox tick, 30s gatekeeper tick, & 30m full heartbeat loop
+		go func() {
+			var wsMaintRunning atomic.Bool
+			triggerWorkspaceMaintenance := func(tickNow time.Time) {
+				if *dryRun || !wsMaintRunning.CompareAndSwap(false, true) {
+					return
 				}
-			}(tickNow)
-		}
-		_, _ = kernel.RunHeartbeatWithOptions(vaultDir, time.Now(), *dryRun, kernel.HeartbeatOptions{SkipWorkspaceMaintenance: true})
-		triggerWorkspaceMaintenance(time.Now())
-		_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), *dryRun)
-		_ = webui.SyncMarkdownConsole(vaultDir)
-		_, _, lastFDSize, lastFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
-		fastTicker := time.NewTicker(15 * time.Second)
-		cronTicker := time.NewTicker(30 * time.Second)
-		pulseTicker := time.NewTicker(15 * time.Minute)
-		hbTicker := time.NewTicker(30 * time.Minute)
-		defer fastTicker.Stop()
-		defer cronTicker.Stop()
-		defer pulseTicker.Stop()
-		defer hbTicker.Stop()
-		for {
-			select {
-			case <-wakeCh:
-				now := time.Now()
-				acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-				if dErr != nil {
-					fmt.Fprintf(os.Stderr, "hq daemon wake dispatch error: %v\n", dErr)
-				}
-				outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-				chRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
-				if kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 {
-					_ = webui.SyncMarkdownConsole(vaultDir)
-				}
-			case <-fastTicker.C:
-				now := time.Now()
-				fired, _ := timers.EvaluateDue(vaultDir, now)
-				_ = kernel.EnqueueInboxFiles(vaultDir, now)
-				dlgRep, _ := delegates.PollDue(context.Background(), vaultDir, now, *dryRun)
-				acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-				if dErr != nil {
-					fmt.Fprintf(os.Stderr, "hq daemon fast-tick dispatch error: %v\n", dErr)
-				}
-				outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-				chRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
-				var syncedSidebar int
-				if !*dryRun {
-					if rep, sErr := kernel.DrainSidebarSyncQueue(vaultDir, 2*time.Second); sErr == nil && rep != nil {
-						syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
+				go func(runAt time.Time) {
+					defer wsMaintRunning.Store(false)
+					ctx, cancel := context.WithTimeout(context.Background(), kernel.DefaultWorkspaceMaintenanceBudget)
+					defer cancel()
+					if wsRep, wsErr := kernel.RunWorkspaceMaintenanceContext(ctx, vaultDir, runAt); wsErr == nil && wsRep.Changed() {
+						_ = webui.SyncMarkdownConsole(vaultDir)
 					}
-				}
-				_, _, curFDSize, curFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
-				fdTranscriptChanged := curFDSize != lastFDSize || curFDMod != lastFDMod
-				if fdTranscriptChanged {
-					lastFDSize, lastFDMod = curFDSize, curFDMod
-				}
-				if len(fired) > 0 || dlgRep.ItemsProcessed > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 || fdTranscriptChanged {
-					_ = webui.SyncMarkdownConsole(vaultDir)
-				}
-			case <-cronTicker.C:
-				now := time.Now()
-				gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
-				snapsPublished, _ := delegates.SyncDueSnapshots(context.Background(), vaultDir, now, *dryRun)
-				acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
-				// RFC-0025: non-blocking single-flight probe drain + cadence-gated status refresh (no-op without a ledger).
-				triggerWorkspaceMaintenance(now)
-				if len(gkActs) > 0 || snapsPublished > 0 || kernel.HasMaterialDispatchActions(acts) {
-					_ = webui.SyncMarkdownConsole(vaultDir)
-				}
-			case <-pulseTicker.C:
-				now := time.Now()
-				if pRep, pErr := pulse.RunPrecheck(context.Background(), vaultDir, pulse.PrecheckOptions{Now: now, DryRun: *dryRun}); pErr == nil && pRep.EmittedCount > 0 {
-					_, _ = kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
-					_, _ = channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
-					_ = webui.SyncMarkdownConsole(vaultDir)
-				}
-			case <-hbTicker.C:
-				now := time.Now()
-				_, _ = kernel.RunHeartbeatWithOptions(vaultDir, now, *dryRun, kernel.HeartbeatOptions{SkipWorkspaceMaintenance: true})
-				triggerWorkspaceMaintenance(now)
-				_ = channels.CompactAuditLog(context.Background(), vaultDir)
-				_ = webui.SyncMarkdownConsole(vaultDir)
+				}(tickNow)
 			}
-		}
-	}()
+			_, _ = kernel.RunHeartbeatWithOptions(vaultDir, time.Now(), *dryRun, kernel.HeartbeatOptions{SkipWorkspaceMaintenance: true})
+			triggerWorkspaceMaintenance(time.Now())
+			_, _ = channels.SyncAndFlush(context.Background(), vaultDir, time.Now(), *dryRun)
+			_ = webui.SyncMarkdownConsole(vaultDir)
+			_, _, lastFDSize, lastFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
+			fastTicker := time.NewTicker(15 * time.Second)
+			cronTicker := time.NewTicker(30 * time.Second)
+			pulseTicker := time.NewTicker(15 * time.Minute)
+			hbTicker := time.NewTicker(30 * time.Minute)
+			defer fastTicker.Stop()
+			defer cronTicker.Stop()
+			defer pulseTicker.Stop()
+			defer hbTicker.Stop()
+			for {
+				select {
+				case <-wakeCh:
+					now := time.Now()
+					acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+					if dErr != nil {
+						fmt.Fprintf(os.Stderr, "hq daemon wake dispatch error: %v\n", dErr)
+					}
+					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+					chRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
+					if kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				case <-fastTicker.C:
+					now := time.Now()
+					fired, _ := timers.EvaluateDue(vaultDir, now)
+					_ = kernel.EnqueueInboxFiles(vaultDir, now)
+					dlgRep, _ := delegates.PollDue(context.Background(), vaultDir, now, *dryRun)
+					acts, dErr := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+					if dErr != nil {
+						fmt.Fprintf(os.Stderr, "hq daemon fast-tick dispatch error: %v\n", dErr)
+					}
+					outDelivered, _ := kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+					chRep, _ := channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
+					var syncedSidebar int
+					if !*dryRun {
+						if rep, sErr := kernel.DrainSidebarSyncQueue(vaultDir, 2*time.Second); sErr == nil && rep != nil {
+							syncedSidebar = rep.ArchivedCount + rep.UnarchivedCount
+						}
+					}
+					_, _, curFDSize, curFDMod := obs.FrontDeskTranscriptStamp(vaultDir)
+					fdTranscriptChanged := curFDSize != lastFDSize || curFDMod != lastFDMod
+					if fdTranscriptChanged {
+						lastFDSize, lastFDMod = curFDSize, curFDMod
+					}
+					if len(fired) > 0 || dlgRep.ItemsProcessed > 0 || kernel.HasMaterialDispatchActions(acts) || outDelivered > 0 || chRep.BindsSent > 0 || chRep.NotificationsSent > 0 || syncedSidebar > 0 || fdTranscriptChanged {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				case <-cronTicker.C:
+					now := time.Now()
+					gkActs, _, _ := kernel.EvaluateDaemonGatekeepers(vaultDir, now, false, *dryRun)
+					snapsPublished, _ := delegates.SyncDueSnapshots(context.Background(), vaultDir, now, *dryRun)
+					acts, _ := kernel.DispatchPendingEvents(vaultDir, now, *dryRun)
+					// RFC-0025: non-blocking single-flight probe drain + cadence-gated status refresh (no-op without a ledger).
+					triggerWorkspaceMaintenance(now)
+					if len(gkActs) > 0 || snapsPublished > 0 || kernel.HasMaterialDispatchActions(acts) {
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				case <-pulseTicker.C:
+					now := time.Now()
+					if pRep, pErr := pulse.RunPrecheck(context.Background(), vaultDir, pulse.PrecheckOptions{Now: now, DryRun: *dryRun}); pErr == nil && pRep.EmittedCount > 0 {
+						_, _ = kernel.DispatchOutboxToFrontDesk(vaultDir, now, *dryRun)
+						_, _ = channels.SyncAndFlush(context.Background(), vaultDir, now, *dryRun)
+						_ = webui.SyncMarkdownConsole(vaultDir)
+					}
+				case <-hbTicker.C:
+					now := time.Now()
+					_, _ = kernel.RunHeartbeatWithOptions(vaultDir, now, *dryRun, kernel.HeartbeatOptions{SkipWorkspaceMaintenance: true})
+					triggerWorkspaceMaintenance(now)
+					_ = channels.CompactAuditLog(context.Background(), vaultDir)
+					_ = webui.SyncMarkdownConsole(vaultDir)
+				}
+			}
+		}()
+	}
 
-	handler := webui.NewHandler(vaultDir)
+	handler := webui.NewHandlerWithOptions(vaultDir, webui.HandlerOptions{ReadOnly: *readOnly})
 	newBoundedHTTPServer := func(listen string) *http.Server {
 		return &http.Server{
 			Addr:              listen,
@@ -216,13 +228,20 @@ func runDaemonCLI(rootDir, vaultDir, cmdName string, args []string) {
 			IdleTimeout:       60 * time.Second,
 		}
 	}
-	if *addr != "127.0.0.1:4242" && !strings.HasSuffix(*addr, ":4242") {
+	if !*noHeartbeat && !hostpaths.IsTempPath(vaultDir) && *addr != "127.0.0.1:4242" && !strings.HasSuffix(*addr, ":4242") {
 		go func() {
 			_ = newBoundedHTTPServer("127.0.0.1:4242").ListenAndServe()
 		}()
 	}
 
-	fmt.Printf("Starting agy-hq Console & Daemon on http://%s (Vault: %s)\n", *addr, vaultDir)
+	modeSuffix := ""
+	switch {
+	case *readOnly:
+		modeSuffix = " [read-only, no-heartbeat]"
+	case *noHeartbeat:
+		modeSuffix = " [no-heartbeat]"
+	}
+	fmt.Printf("Starting agy-hq Console & Daemon on http://%s%s (Vault: %s)\n", *addr, modeSuffix, vaultDir)
 	if err := newBoundedHTTPServer(*addr).ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "hq daemon server error: %v\n", err)
 		os.Exit(1)

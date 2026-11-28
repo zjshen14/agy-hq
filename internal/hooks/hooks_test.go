@@ -1718,6 +1718,7 @@ func TestHooksPreventWorkflowAgentAPIAndNestedAutoAdoption(t *testing.T) {
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-hook-test")
 
@@ -1838,6 +1839,7 @@ func TestHandleStopFallsBackToPersistedLSWhenHookEnvUnreachable(t *testing.T) {
 
 	// Persist healthy LS session from an interactive session.
 	liveURL, _ := url.Parse(liveSrv.URL)
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", liveURL.Host)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-live")
 	if err := kernel.RecordLiveLSSession(vaultDir); err != nil {

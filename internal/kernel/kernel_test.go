@@ -278,6 +278,7 @@ func TestResolveModelEnumAndSpawnSubagent(t *testing.T) {
 	defer srv.Close()
 
 	lsAddr := strings.TrimPrefix(srv.URL, "http://")
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", lsAddr)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "test-csrf")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-test-123")
@@ -1200,6 +1201,7 @@ func TestLayer1LSLineageAndCleanNestedTasksLeakFixes(t *testing.T) {
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
 
@@ -1391,6 +1393,7 @@ func TestFrontDeskRotationPreservesLayer1SubagentsAndAvoidsBatchFallback(t *test
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
 
@@ -1443,6 +1446,7 @@ func TestLSSessionReachabilityGuardAndFallback(t *testing.T) {
 	deadSrv.Close()
 
 	// 1. Recording an unreachable LS address into a fresh vault must be a no-op (never persist dead ports).
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", deadAddr)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-dead")
 	if err := RecordLiveLSSession(vaultDir); err != nil {
@@ -1544,6 +1548,7 @@ func TestFetchAllLSLineagePrefersJetboxAndCleanNestedSurvivesGetAllFailure(t *te
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", u.Host)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-jetbox")
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zjshen14/agy-hq/internal/hostpaths"
 	"github.com/zjshen14/agy-hq/internal/routing"
 	"github.com/zjshen14/agy-hq/internal/store"
 )
@@ -96,12 +97,20 @@ func configureSpawnCommandWithTarget(cmd *exec.Cmd, vaultDir, trigger, workDir, 
 	envProj := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PROJECT_ID"))
 	overrideProj := !isManual || inSidecar || (envProj != projectID)
 
+	isoReason := LSEnvIsolationReason(vaultDir)
 	for _, kv := range rawEnv {
 		if strings.HasPrefix(kv, "ANTIGRAVITY_CONVERSATION_ID=") ||
 			strings.HasPrefix(kv, "ANTIGRAVITY_TRAJECTORY_ID=") ||
 			strings.HasPrefix(kv, "ANTIGRAVITY_SOURCE_METADATA=") ||
 			strings.HasPrefix(kv, "ANTIGRAVITY_SIDECAR_WEB_PORT=") ||
 			strings.HasPrefix(kv, "ANTIGRAVITY_SIDECAR_UI_TOKEN=") {
+			continue
+		}
+		if isoReason != "" && (strings.HasPrefix(kv, "ANTIGRAVITY_LS_ADDRESS=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_CSRF_TOKEN=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_AGENTAPI_EXE=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_PLUGIN_SHIM_DIR=") ||
+			strings.HasPrefix(kv, "ANTIGRAVITY_CREDENTIAL_SCOPE=")) {
 			continue
 		}
 		if overrideProj && strings.HasPrefix(kv, "ANTIGRAVITY_PROJECT_ID=") {
@@ -172,10 +181,23 @@ func resolveRoutineFallbackModel(vaultDir string) string {
 	return fallbackModel
 }
 
+func isAgentAPIFallbackAllowed(vaultDir string) bool {
+	agentPath, err := exec.LookPath("agentapi")
+	if err != nil {
+		return false
+	}
+	// In isolated sandbox/temp vaults, never invoke a real host-installed agentapi binary
+	// (only allow hermetic test stubs placed under a temp directory).
+	if LSEnvIsolationReason(vaultDir) != "" && !hostpaths.IsTempPath(agentPath) {
+		return false
+	}
+	return true
+}
+
 func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string, onCascadeCreated func(cascadeID string)) (cascadeID string, usedModel string, fallbackToAgentAPI bool, fallbackReason string, err error) {
 	_, regAvail := ValidateProjectMatchesWorkspace(vaultDir, projectID, workDir)
 	canFallbackSafely := func(requireVerifiedProj bool) bool {
-		if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
+		if !isAgentAPIFallbackAllowed(vaultDir) {
 			return false
 		}
 		if workDir == "" {
@@ -191,6 +213,9 @@ func spawnTaskViaLS(vaultDir, title, prompt, modelID, workDir, projectID string,
 	if !ok {
 		if canFallbackSafely(false) {
 			return "", "", true, "Language Server credentials unavailable", nil
+		}
+		if isoReason := LSEnvIsolationReason(vaultDir); isoReason != "" {
+			return "", "", false, "", fmt.Errorf("spawnTaskViaLS: Language Server discovery isolated in sandboxed vault (%s); set HQ_ALLOW_LIVE_LS_DISCOVERY=1 to opt in", isoReason)
 		}
 		return "", "", false, "", fmt.Errorf("spawnTaskViaLS: Language Server credentials unavailable and no verified projectId for workspace %s (refusing unverified agentapi fallback)", workDir)
 	}
@@ -465,6 +490,9 @@ func SpawnSubagent(vaultDir, parentConvID, role, prompt, modelID, workspaceDir s
 
 	creds, ok := discoverLSCredentials(vaultDir)
 	if !ok {
+		if isoReason := LSEnvIsolationReason(vaultDir); isoReason != "" {
+			return "", fmt.Errorf("SpawnSubagent: Language Server discovery isolated in sandboxed vault (%s); set HQ_ALLOW_LIVE_LS_DISCOVERY=1 to opt in", isoReason)
+		}
 		return "", fmt.Errorf("ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN are required to spawn a live subagent")
 	}
 

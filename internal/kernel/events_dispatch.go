@@ -40,9 +40,11 @@ func DeliverMessageToSession(vaultDir, sessionID, title, text string, dryRun boo
 	if creds, ok := discoverLSCredentials(vaultDir); ok {
 		if sendErr := sendUserCascadeMessage(creds.BaseURL, creds.CSRFToken, sessionID, text, 3*time.Second); sendErr == nil {
 			return fmt.Sprintf("delivered via LanguageServerService (%s)", sessionID), nil
-		} else if _, lpErr := exec.LookPath("agentapi"); lpErr != nil {
+		} else if !isAgentAPIFallbackAllowed(vaultDir) {
 			return "", sendErr
 		}
+	} else if isoReason := LSEnvIsolationReason(vaultDir); isoReason != "" && !isAgentAPIFallbackAllowed(vaultDir) {
+		return "", fmt.Errorf("DeliverMessageToSession: Language Server discovery isolated in sandboxed vault (%s); set HQ_ALLOW_LIVE_LS_DISCOVERY=1 to opt in", isoReason)
 	}
 
 	cmd := exec.Command("agentapi", "send-message", "--title="+title, sessionID, text)

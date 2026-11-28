@@ -236,6 +236,8 @@ func TestLSSessionPersistenceHydrationAndPrecheckEnqueues(t *testing.T) {
 	}
 
 	rawAddr := strings.TrimPrefix(srv.URL, "http://")
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
+	t.Setenv("ANTIGRAVITY_APP_DATA_DIR", t.TempDir())
 	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-fd-ls-test")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-hq-ls-test")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", rawAddr)

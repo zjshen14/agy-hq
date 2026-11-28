@@ -306,6 +306,7 @@ func TestDispatchPendingEventsFastFailsOnStep1ExecutorError(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", strings.TrimPrefix(srv.URL, "http://"))
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-step1")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
@@ -414,6 +415,7 @@ func TestReconcileAutoTasksReleasesLeaseOnStep1ErrorAndIsSafeForRunning(t *testi
 	}))
 	defer srv.Close()
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", strings.TrimPrefix(srv.URL, "http://"))
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-reconcile")
 
@@ -633,6 +635,7 @@ func TestDispatchPendingEventsRetryResetsStaleLastSummary(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", strings.TrimPrefix(srv.URL, "http://"))
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-retry")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")

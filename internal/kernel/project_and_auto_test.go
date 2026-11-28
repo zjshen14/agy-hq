@@ -132,6 +132,7 @@ func TestProjectIDPoisoningRepairAndWorkspaceSafeSpawn(t *testing.T) {
 	}))
 	defer lsFailSrv.Close()
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", strings.TrimPrefix(lsFailSrv.URL, "http://"))
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
 
@@ -505,6 +506,7 @@ func TestSpawnSubagentWorkspaceProjectVerificationAndConcurrentTaskLocking(t *te
 	}))
 	defer lsSrv.Close()
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", lsSrv.URL)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-test")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "proj-parent-1")
@@ -659,6 +661,7 @@ func TestSupersededConversationIDsAccumulationRollbackAndAutoAdoptRefusal(t *tes
 	}))
 	defer srv.Close()
 
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", strings.TrimPrefix(srv.URL, "http://"))
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-superseded")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")

@@ -554,7 +554,7 @@ Commands:
   ci <check-pii|check-harness|scrub-history|pre-commit|pre-push|install-hooks>  CI/CD PII & Harness verification
   heartbeat [--dry-run]               Run 0-token gatekeeper pre-check and inbox router once
   daemon [install|uninstall|status]   Run or manage the HQ Console background daemon service
-  webui [--addr=127.0.0.1:4242]       Start interactive Web UI Console & Antigravity Sidecar
+  webui [--addr=127.0.0.1:4242] [--no-heartbeat] [--read-only]  Start interactive Web UI Console & Antigravity Sidecar
   hook <session-start|pre-tool|stop>  Antigravity hooks.json handlers
   propose --type=... --summary=... --cmd=...  Stage an outbound action for 1-tap approval
   approve <id> [--sha256=<prefix>]    Verify SHA-256 and deterministically execute proposal

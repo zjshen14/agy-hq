@@ -523,15 +523,7 @@ func SyncConversationPermissionPreset(vaultDir, cascadeID string, preset authz.H
 	if cascadeID == "" || preset.ProtoEnum() == "" {
 		return nil
 	}
-	client := NewSidebarSyncClient(SidebarSyncConfig{})
-	if !client.Available() {
-		if creds, ok := discoverLSCredentials(vaultDir); ok {
-			client = NewSidebarSyncClient(SidebarSyncConfig{
-				BaseURL:   creds.BaseURL,
-				CSRFToken: creds.CSRFToken,
-			})
-		}
-	}
+	client := newSidebarSyncClientForVault(vaultDir, SidebarSyncConfig{})
 	if !client.Available() {
 		return nil
 	}
@@ -894,6 +886,20 @@ func newSidebarSyncClientForVault(vaultDir string, cfg SidebarSyncConfig) *Sideb
 			cfg.BaseURL = creds.BaseURL
 			cfg.CSRFToken = creds.CSRFToken
 			return NewSidebarSyncClient(cfg)
+		}
+		if LSEnvIsolationReason(vaultDir) != "" {
+			nowFn := cfg.Now
+			if nowFn == nil {
+				nowFn = time.Now
+			}
+			httpClient := cfg.HTTPClient
+			if httpClient == nil {
+				httpClient = &http.Client{}
+			}
+			return &SidebarSyncClient{
+				httpClient: httpClient,
+				nowFn:      nowFn,
+			}
 		}
 	}
 	client := NewSidebarSyncClient(cfg)

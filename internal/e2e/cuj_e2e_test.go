@@ -3328,6 +3328,7 @@ func TestCUJ_SidebarConversationArchiveSync(t *testing.T) {
 	defer srv.Close()
 
 	lsEnv := []string{
+		"HQ_ALLOW_LIVE_LS_DISCOVERY=1",
 		"ANTIGRAVITY_LS_ADDRESS=" + srv.URL,
 		"ANTIGRAVITY_CSRF_TOKEN=" + csrf,
 	}
@@ -3693,6 +3694,7 @@ func TestCUJ27_AgentFollowUpTimerAcrossRunExit(t *testing.T) {
 
 	convID := "00000000-0000-0000-0000-000000000601"
 	lsEnv := []string{
+		"HQ_ALLOW_LIVE_LS_DISCOVERY=1",
 		"ANTIGRAVITY_CONVERSATION_ID=" + convID,
 		"ANTIGRAVITY_LS_ADDRESS=" + lsSrv.URL,
 		"ANTIGRAVITY_CSRF_TOKEN=test-csrf-601",
@@ -3780,6 +3782,7 @@ func TestCUJ28_DeferredApprovalResumptionArgvScrubAndProgressCheckpoints(t *test
 
 	convID := "00000000-0000-0000-0000-000000000701"
 	lsEnv := []string{
+		"HQ_ALLOW_LIVE_LS_DISCOVERY=1",
 		"ANTIGRAVITY_CONVERSATION_ID=" + convID,
 		"ANTIGRAVITY_LS_ADDRESS=" + lsSrv.URL,
 		"ANTIGRAVITY_CSRF_TOKEN=super-secret-csrf-701",
@@ -6936,6 +6939,7 @@ func TestCUJ40_Layer1TaskBoardIsolationCLI(t *testing.T) {
 	defer lsSrv.Close()
 
 	lsEnv := []string{
+		"HQ_ALLOW_LIVE_LS_DISCOVERY=1",
 		"HQ_BRAIN_DIR=" + brainDir,
 		"ANTIGRAVITY_LS_ADDRESS=" + strings.TrimPrefix(lsSrv.URL, "http://"),
 		"ANTIGRAVITY_CSRF_TOKEN=cuj39-csrf",

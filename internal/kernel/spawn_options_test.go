@@ -63,6 +63,7 @@ func newSpawnOptionsTestVault(t *testing.T, ls *fakeSpawnLS) string {
 	if err := os.MkdirAll(filepath.Join(vaultDir, "memory"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HQ_ALLOW_LIVE_LS_DISCOVERY", "1")
 	t.Setenv("ANTIGRAVITY_LS_ADDRESS", srv.URL)
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "csrf-spawn-options")
 	t.Setenv("ANTIGRAVITY_PROJECT_ID", "")
